@@ -932,7 +932,7 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
                     .to_string(),
             ));
         }
-        let snapshot = control.with_active_worktree_registration(
+        let synchronized_project = control.with_active_worktree_registration(
             registration.registration_id,
             &registration.alias,
             |guard| {
@@ -962,22 +962,22 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
                     Err(error) => return Ok(Err(error.into())),
                 };
                 drop(target);
-                if guard.registration().project_instance_id.is_none() {
-                    if let Err(error) = require_registered_worktree_lifecycle(
-                        control_root,
-                        guard.registration(),
-                        root,
-                    ) {
-                        return Ok(Err(error));
-                    }
-                    guard.bind_project(root, snapshot.project_instance_id())?;
+                if let Err(error) =
+                    require_registered_worktree_lifecycle(control_root, guard.registration(), root)
+                {
+                    return Ok(Err(error));
                 }
-                Ok(Ok(Some(snapshot)))
+                let project = snapshot.project_instance_id();
+                if guard.registration().project_instance_id.is_none() {
+                    guard.bind_project_with_usage_snapshot(root, project, &snapshot)?;
+                } else {
+                    guard.synchronize_usage_snapshot(&snapshot)?;
+                }
+                Ok(Ok(Some(project)))
             },
         )??;
-        if let Some(snapshot) = snapshot {
-            control.synchronize_worktree_usage(&registration.alias, &snapshot)?;
-            registration.project_instance_id = Some(snapshot.project_instance_id());
+        if let Some(project) = synchronized_project {
+            registration.project_instance_id = Some(project);
         }
     }
     before_catalog_validation()?;

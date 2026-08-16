@@ -4083,15 +4083,27 @@ impl ProjectAtlasMcpServer {
                     MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string(),
                 )));
             }
-            if guard.registration().project_instance_id != Some(project) {
-                if let Err(error) = require_registered_worktree_lifecycle(
-                    &control_state.root,
-                    guard.registration(),
-                    &state.root,
-                ) {
-                    return Ok(Err(error));
+            match guard.registration().project_instance_id {
+                Some(bound) if bound == project => {}
+                Some(_) => {
+                    return Ok(Err(CliError::InvalidInput(
+                        MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string(),
+                    )));
                 }
-                guard.bind_project(&state.root, project)?;
+                None => {
+                    let snapshot = match target.export_worktree_usage_snapshot() {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => return Ok(Err(error.into())),
+                    };
+                    if let Err(error) = require_registered_worktree_lifecycle(
+                        &control_state.root,
+                        guard.registration(),
+                        &state.root,
+                    ) {
+                        return Ok(Err(error));
+                    }
+                    guard.bind_project_with_usage_snapshot(&state.root, project, &snapshot)?;
+                }
             }
             Ok(Ok(target))
         })?
@@ -4609,6 +4621,15 @@ impl ProjectAtlasMcpServer {
             if let Err(error) = post_publication() {
                 return Ok(Err(error));
             }
+            let target =
+                match open_atlas_store_read_only_for_project(&activation.database, &state.root) {
+                    Ok(target) => target,
+                    Err(error) => return Ok(Err(error)),
+                };
+            let snapshot = match target.export_worktree_usage_snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Ok(Err(error.into())),
+            };
             if let Err(error) = require_registered_worktree_lifecycle(
                 &self.control_state.root,
                 guard.registration(),
@@ -4616,7 +4637,11 @@ impl ProjectAtlasMcpServer {
             ) {
                 return Ok(Err(error));
             }
-            guard.bind_project(&state.root, activation.target_project_instance_id)?;
+            guard.bind_project_with_usage_snapshot(
+                &state.root,
+                activation.target_project_instance_id,
+                &snapshot,
+            )?;
             Ok(Ok(activation))
         })?
     }
@@ -12674,7 +12699,45 @@ mod tests {
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("legacy-init target identity is missing"))?;
         drop(legacy_target);
-        synchronize_registered_worktree_usage(&control_db, &primary, None)?;
+        let legacy_state = server.state_for_target(None, Some("legacy-init".to_string()))?;
+        let legacy_selection = legacy_state
+            .worktree
+            .as_ref()
+            .ok_or_else(|| io::Error::other("legacy-init selection is missing"))?;
+        let corrupt = rusqlite::Connection::open(&target_b_db)?;
+        corrupt.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+        corrupt.execute("UPDATE usage_global_aggregates SET calls = -1", [])?;
+        drop(corrupt);
+        let rejected_bind = ProjectAtlasMcpServer::open_registered_worktree_mut_store(
+            &legacy_state,
+            &server.control_state,
+            legacy_selection,
+        );
+        let control_after_rejected_bind =
+            open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            rejected_bind
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("telemetry integer overflow"))
+                && control_after_rejected_bind
+                    .worktree_registration(&WorktreeAlias::parse("legacy-init")?)?
+                    .project_instance_id
+                    .is_none()
+                && control_after_rejected_bind
+                    .registered_worktree_token_overview(&WorktreeAlias::parse("legacy-init")?)?
+                    .calls
+                    == 0,
+            "failed deferred snapshot synchronization committed its project binding or aggregate",
+        )?;
+        drop(control_after_rejected_bind);
+        let repaired = rusqlite::Connection::open(&target_b_db)?;
+        repaired.execute("UPDATE usage_global_aggregates SET calls = 1", [])?;
+        drop(repaired);
+        drop(ProjectAtlasMcpServer::open_registered_worktree_mut_store(
+            &legacy_state,
+            &server.control_state,
+            legacy_selection,
+        )?);
         let control_after_legacy_init =
             open_atlas_store_read_only_for_project(&control_db, &primary)?;
         require(
@@ -12682,14 +12745,14 @@ mod tests {
                 .worktree_registration(&WorktreeAlias::parse("legacy-init")?)?
                 .project_instance_id
                 == Some(legacy_project),
-            "aggregate synchronization did not bind the independently initialized alias",
+            "first alias mutation did not bind the independently initialized alias",
         )?;
         require(
             control_after_legacy_init
                 .registered_worktree_token_overview(&WorktreeAlias::parse("legacy-init")?)?
                 .calls
                 == 1,
-            "aggregate synchronization omitted independently initialized worktree usage",
+            "first alias mutation omitted independently initialized worktree usage",
         )?;
         drop(control_after_legacy_init);
         let preserved_legacy_state = worktree_b.join(".projectatlas-legacy-init");

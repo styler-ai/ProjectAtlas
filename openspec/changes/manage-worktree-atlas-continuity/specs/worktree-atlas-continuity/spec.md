@@ -113,6 +113,11 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 - **WHEN** first binding or hydration activation races an applied `atlas_reset_index` for the same unbound registered alias
 - **THEN** both operations reload the exact active registration under the control catalog writer transaction, bind-wins refuses deletion, and reset-wins leaves the target absent and registration unbound without permitting a late binder to recreate or claim an empty database
 
+#### Scenario: Deferred first binding imports existing telemetry atomically
+
+- **WHEN** an unbound registered alias acquires a valid local atlas through legacy exact-path initialization, hydration activation, or aggregate synchronization
+- **THEN** ProjectAtlas exports that atlas's exact aggregate snapshot, revalidates the Git lifecycle, and commits the project binding plus initial snapshot in one control transaction; any export, validation, capacity, or synchronization failure leaves the alias unbound and the prior control aggregate unchanged
+
 #### Scenario: Lifecycle replacement during applied reset preserves replacement files
 
 - **WHEN** Git replaces an unbound registered worktree lifecycle after reset validates it but before the fixed database, WAL, SHM, journal, and optional generated MCP-config inventory is removed

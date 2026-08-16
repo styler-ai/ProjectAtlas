@@ -167,6 +167,54 @@ impl ActiveWorktreeRegistrationGuard<'_> {
         Ok(bound)
     }
 
+    /// Bind this project and accept its initial usage snapshot atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths, conflicting project or telemetry
+    /// identity, malformed or excessive snapshot state, or any `SQLite` failure.
+    pub fn bind_project_with_usage_snapshot(
+        &mut self,
+        root: &Path,
+        project_instance_id: ProjectInstanceId,
+        snapshot: &WorktreeUsageSnapshot,
+    ) -> DbResult<(WorktreeRegistration, WorktreeUsageSyncState)> {
+        let root = normalized_absolute_path("root", root)?;
+        let bound = bind_registration_project(
+            self.connection,
+            &self.registration,
+            &root,
+            project_instance_id,
+        )?;
+        let synchronized = telemetry::synchronize_worktree_usage_snapshot(
+            self.connection,
+            bound.registration_id,
+            snapshot,
+        )?;
+        let bound = load_by_id(self.connection, bound.registration_id)?;
+        self.registration = bound.clone();
+        Ok((bound, synchronized))
+    }
+
+    /// Accept one usage snapshot for this already-bound active registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing or mismatched project identity, malformed
+    /// or excessive snapshot state, or any `SQLite` failure.
+    pub fn synchronize_usage_snapshot(
+        &mut self,
+        snapshot: &WorktreeUsageSnapshot,
+    ) -> DbResult<WorktreeUsageSyncState> {
+        let synchronized = telemetry::synchronize_worktree_usage_snapshot(
+            self.connection,
+            self.registration.registration_id,
+            snapshot,
+        )?;
+        self.registration = load_by_id(self.connection, self.registration.registration_id)?;
+        Ok(synchronized)
+    }
+
     /// Retire this active registration without importing another local snapshot.
     ///
     /// # Errors
@@ -196,19 +244,9 @@ impl ActiveWorktreeRegistrationGuard<'_> {
         snapshot: &WorktreeUsageSnapshot,
         retired_at_epoch: u64,
     ) -> DbResult<(WorktreeRegistration, WorktreeUsageSyncState)> {
-        let root = normalized_absolute_path("root", root)?;
         let retired_at_epoch = epoch_to_sqlite(retired_at_epoch)?;
-        let bound = bind_registration_project(
-            self.connection,
-            &self.registration,
-            &root,
-            project_instance_id,
-        )?;
-        let synchronized = telemetry::synchronize_worktree_usage_snapshot(
-            self.connection,
-            bound.registration_id,
-            snapshot,
-        )?;
+        let (bound, synchronized) =
+            self.bind_project_with_usage_snapshot(root, project_instance_id, snapshot)?;
         let retired = retire_registration(self.connection, &bound, retired_at_epoch)?;
         self.registration = retired.clone();
         Ok((retired, synchronized))
@@ -1653,6 +1691,79 @@ mod tests {
                 && synchronization == WorktreeUsageSyncState::Synchronized
                 && control.repository_token_overview()?.calls == 1,
             "successful initial registration exposed incomplete aggregate state",
+        )
+    }
+
+    #[test]
+    fn deferred_binding_and_initial_usage_snapshot_commit_atomically() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let local_root = temp.path().join("local");
+        let common = temp.path().join("common.git");
+        let admin = common.join("worktrees/local");
+        for path in [&control_root, &local_root, &admin] {
+            fs::create_dir_all(path)?;
+        }
+        let control =
+            AtlasStore::open_for_project(&control_root.join("projectatlas.db"), &control_root)?;
+        let local = AtlasStore::open_for_project(&local_root.join("projectatlas.db"), &local_root)?;
+        local.record_usage(&projectatlas_core::telemetry::usage_from_estimates(
+            "deferred-binding",
+            "atlas_overview",
+            None,
+            None,
+            100,
+            20,
+        ))?;
+        let snapshot = local.export_worktree_usage_snapshot()?;
+        let project = snapshot.project_instance_id();
+        let mismatched_project = if project == identity(7)? {
+            identity(8)?
+        } else {
+            identity(7)?
+        };
+        let alias = WorktreeAlias::parse("local")?;
+        let registration = control.register_worktree(
+            &alias,
+            &common,
+            &admin,
+            &administrative_identity(1),
+            &local_root,
+            None,
+            1,
+        )?;
+
+        let rejected = control.with_active_worktree_registration(
+            registration.registration_id,
+            &alias,
+            |guard| {
+                guard.bind_project_with_usage_snapshot(&local_root, mismatched_project, &snapshot)
+            },
+        );
+        require(
+            matches!(
+                rejected,
+                Err(DbError::WorktreeTelemetryProjectMismatch { .. })
+            ) && control
+                .worktree_registration(&alias)?
+                .project_instance_id
+                .is_none()
+                && control.repository_token_overview()?.calls == 0,
+            "failed deferred synchronization committed a project binding or aggregate",
+        )?;
+
+        let (bound, synchronization) = control.with_active_worktree_registration(
+            registration.registration_id,
+            &alias,
+            |guard| guard.bind_project_with_usage_snapshot(&local_root, project, &snapshot),
+        )?;
+        require(
+            bound.project_instance_id == Some(project)
+                && bound.accepted_telemetry_revision == snapshot.revision()
+                && synchronization == WorktreeUsageSyncState::Synchronized
+                && control.repository_token_overview()?.calls == 1,
+            "successful deferred binding exposed incomplete aggregate state",
         )
     }
 
