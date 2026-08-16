@@ -220,7 +220,8 @@ impl PreparedWorktreeHydrationCandidate {
     /// # Errors
     ///
     /// Returns an error on cancellation, a publication collision, or an I/O failure. Failure
-    /// preserves an existing destination and removes the unpublished candidate.
+    /// preserves an existing destination. A directory-sync failure leaves the newly published
+    /// database intact but prevents callers from binding it.
     pub fn activate(mut self, control: &IndexWorkControl) -> DbResult<WorktreeHydrationActivation> {
         control.check(IndexWorkStage::Publication)?;
 
@@ -240,6 +241,8 @@ impl PreparedWorktreeHydrationCandidate {
                     }
                 }
             })?;
+        #[cfg(unix)]
+        sync_activation_directory(&self.destination_database)?;
 
         Ok(WorktreeHydrationActivation {
             database: self.destination_database.clone(),
@@ -249,6 +252,22 @@ impl PreparedWorktreeHydrationCandidate {
             reconciled_generation: self.reconciled_generation,
         })
     }
+}
+
+/// Make a newly published directory entry durable before external binding commits.
+#[cfg(unix)]
+fn sync_activation_directory(destination_database: &Path) -> DbResult<()> {
+    let parent = destination_database
+        .parent()
+        .ok_or(DbError::WorktreeHydrationInvalid {
+            reason: "hydration destination database has no parent",
+        })?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| DbError::WorktreeHydrationIo {
+            path: parent.to_path_buf(),
+            source,
+        })
 }
 
 impl Drop for WorktreeHydrationCandidate {

@@ -648,6 +648,12 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             }
             continue;
         }
+        if in_extensions && key.eq_ignore_ascii_case("objectformat") {
+            if !matches!(value.as_str(), "sha1" | "sha256") {
+                has_unsupported_repository_extension = true;
+            }
+            continue;
+        }
         if in_extensions {
             has_unsupported_repository_extension = true;
             continue;
@@ -1674,6 +1680,29 @@ mod tests {
         run_git(&primary, ["add", "."])?;
         run_git(&primary, ["commit", "-m", "fixture"])?;
 
+        let sha256 = temp.path().join("sha256 checkout");
+        run_command(
+            Command::new("git")
+                .args(["init", "--object-format=sha256"])
+                .arg(&sha256),
+        )?;
+        let sha256_root = Command::new("git")
+            .current_dir(&sha256)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        require(
+            sha256_root.status.success()
+                && Path::new(String::from_utf8(sha256_root.stdout)?.trim()).canonicalize()?
+                    == sha256.canonicalize()?,
+            "Git fixture did not accept the SHA-256 repository",
+        )?;
+        let sha256_structure = require_git(discover_repository_structure(&sha256)?)?;
+        require_worktree_selection(
+            &sha256_structure,
+            &sha256.canonicalize()?,
+            GitWorktreeRole::Primary,
+        )?;
+
         let config_path = primary.join(".git").join("config");
         let config = fs::read(&config_path)?;
         fs::remove_file(&config_path)?;
@@ -2150,27 +2179,31 @@ mod tests {
         )?;
         fs::write(&bare_config_path, &bare_config)?;
 
-        fs::write(
-            &bare_config_path,
-            "[core]\n repositoryFormatVersion = 1\n bare = false\n[extensions]\n madeup = true\n",
-        )?;
-        let unsupported_extension = Command::new("git")
-            .arg("--git-dir")
-            .arg(&bare_dot_git)
-            .args(["rev-parse", "--is-bare-repository"])
-            .output()?;
-        require(
-            !unsupported_extension.status.success(),
-            "Git fixture accepted an unknown format-1 repository extension",
-        )?;
-        let unsupported_extension = require_git(discover_repository_structure(&bare_dot_git)?)?;
-        require(
-            unsupported_extension.selection
-                == GitRepositorySelection::CommonManager {
-                    source_selection: GitManagerSourceSelection::None,
-                },
-            "unknown format-1 repository extension invented the manager parent as source",
-        )?;
+        for unsupported_extension in ["madeup = true", "objectformat = sha512"] {
+            fs::write(
+                &bare_config_path,
+                format!(
+                    "[core]\n repositoryFormatVersion = 1\n bare = false\n[extensions]\n {unsupported_extension}\n"
+                ),
+            )?;
+            let rejected_extension = Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare_dot_git)
+                .args(["rev-parse", "--is-bare-repository"])
+                .output()?;
+            require(
+                !rejected_extension.status.success(),
+                "Git fixture accepted an unsupported format-1 repository extension",
+            )?;
+            let rejected_extension = require_git(discover_repository_structure(&bare_dot_git)?)?;
+            require(
+                rejected_extension.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    },
+                "unsupported format-1 extension invented the manager parent as source",
+            )?;
+        }
         fs::write(&bare_config_path, &bare_config)?;
 
         run_command(
