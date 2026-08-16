@@ -798,7 +798,7 @@ impl AggregateCounters {
         })
     }
 
-    /// Return whether every lifetime component preserves an accepted lower bound.
+    /// Return whether every aggregate component preserves an accepted lower bound.
     fn contains(self, accepted: Self) -> bool {
         [
             (self.calls, accepted.calls),
@@ -1700,6 +1700,35 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
         let total = incoming_lifetime.entry(dimension.clone()).or_default();
         *total = total.checked_add(row.counters)?;
     }
+    let retained_trend_seconds = policy
+        .retained_trend_days
+        .checked_mul(SECONDS_PER_DAY as u64)
+        .ok_or(DbError::TelemetryIntegerOverflow {
+            field: "retained_trend_seconds",
+        })?;
+    let retained_daily_cutoff = epoch_cutoff(
+        now_epoch_seconds()?,
+        retained_trend_seconds,
+        "retained_trend_seconds",
+    )?;
+    let mut incoming_daily = BTreeMap::<(i64, DimensionValues), AggregateCounters>::new();
+    for row in snapshot
+        .rows
+        .iter()
+        .filter(|row| row.day_epoch >= retained_daily_cutoff)
+    {
+        let dimension =
+            snapshot
+                .dimensions
+                .get(&row.dimension_id)
+                .ok_or(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot daily dimension is missing",
+                })?;
+        let total = incoming_daily
+            .entry((row.day_epoch, dimension.clone()))
+            .or_default();
+        *total = total.checked_add(row.counters)?;
+    }
     let accepted_lifetime = {
         let mut statement = connection.prepare_cached(
             "SELECT d.token_savings_bucket, d.provider, d.model, d.tokenizer_backend,
@@ -1731,6 +1760,45 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
     }) {
         return Err(DbError::WorktreeRegistrationRow {
             reason: "aggregate snapshot reduces accepted lifetime totals",
+        });
+    }
+    let accepted_daily = {
+        let mut statement = connection.prepare_cached(
+            "SELECT a.day_epoch,
+                    d.token_savings_bucket, d.provider, d.model, d.tokenizer_backend,
+                    d.accuracy, d.baseline_kind, d.confidence, d.accounting_layer,
+                    d.estimate_method, d.denominator_kind, d.dedupe_scope, d.overflow,
+                    a.calls, a.estimated_without, a.estimated_with, a.observed_without,
+                    a.observed_with, a.modeled_without, a.modeled_with,
+                    a.deduped_modeled_without, a.deduped_modeled_with,
+                    a.repeated_baselines, a.observed_file_read_replacements,
+                    a.modeled_file_reads_avoided
+             FROM worktree_usage_aggregates AS a
+             JOIN usage_bucket_dimensions AS d USING(dimension_id)
+             WHERE a.registration_id = ?1 AND a.source_kind = ?2
+               AND a.day_epoch >= ?3
+             ORDER BY a.day_epoch, a.dimension_id",
+        )?;
+        let mut rows = statement.query(params![
+            registration_id,
+            WORKTREE_USAGE_SYNCHRONIZED,
+            retained_daily_cutoff
+        ])?;
+        let mut totals = BTreeMap::<(i64, DimensionValues), AggregateCounters>::new();
+        while let Some(row) = rows.next()? {
+            let key = (row.get(0)?, read_dimension(row, 1)?);
+            let total = totals.entry(key).or_default();
+            *total = total.checked_add(read_counters_offset(row, 13)?)?;
+        }
+        totals
+    };
+    if accepted_daily.iter().any(|(key, accepted)| {
+        !incoming_daily
+            .get(key)
+            .is_some_and(|incoming| incoming.contains(*accepted))
+    }) {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "aggregate snapshot reduces accepted retained daily totals",
         });
     }
     let incoming_daily_rows = snapshot
@@ -7371,6 +7439,71 @@ mod tests {
             "second exact worktree total",
         )?;
 
+        let first_lifetime = first
+            .rows
+            .iter()
+            .find(|row| row.day_epoch == -1)
+            .cloned()
+            .ok_or_else(|| io::Error::other("first lifetime row missing"))?;
+        let first_daily = first
+            .rows
+            .iter()
+            .find(|row| row.day_epoch >= 0 && row.dimension_id == first_lifetime.dimension_id)
+            .cloned()
+            .ok_or_else(|| io::Error::other("first daily row missing"))?;
+        let mut daily_rollback = second.clone();
+        daily_rollback.revision = 3;
+        let newer_lifetime = daily_rollback
+            .rows
+            .iter_mut()
+            .find(|row| row.day_epoch == -1 && row.dimension_id == first_lifetime.dimension_id)
+            .ok_or_else(|| io::Error::other("newer lifetime row missing"))?;
+        newer_lifetime.counters = newer_lifetime
+            .counters
+            .checked_add(first_lifetime.counters)?;
+        let rolled_back_daily = daily_rollback
+            .rows
+            .iter_mut()
+            .find(|row| {
+                row.day_epoch == first_daily.day_epoch
+                    && row.dimension_id == first_daily.dimension_id
+            })
+            .ok_or_else(|| io::Error::other("newer daily row missing"))?;
+        rolled_back_daily.counters = first_daily.counters;
+        daily_rollback.logical_bytes = validate_worktree_usage_snapshot(
+            &daily_rollback.dimensions,
+            &daily_rollback.rows,
+            TelemetryRetentionPolicy::default().validate()?,
+        )?;
+        require(
+            matches!(
+                control.synchronize_worktree_usage(&alias, &daily_rollback),
+                Err(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot reduces accepted retained daily totals"
+                })
+            ),
+            "newer revision from a recent backup reduced an accepted daily bucket",
+        )?;
+        require_eq(
+            &control
+                .worktree_registration(&alias)?
+                .accepted_telemetry_revision,
+            &2,
+            "revision after restored daily snapshot",
+        )?;
+        let retained_daily_calls = control.connection.query_row(
+            "SELECT calls FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0
+             ORDER BY day_epoch, dimension_id LIMIT 1",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &retained_daily_calls,
+            &2,
+            "daily bucket after restored daily snapshot",
+        )?;
+
         let mut restored = first;
         restored.revision = 3;
         let source_dimension = restored
@@ -7431,7 +7564,7 @@ mod tests {
             "total after restored older snapshot",
         )?;
 
-        let mut invalid = second;
+        let mut invalid = second.clone();
         invalid.revision = 3;
         invalid
             .rows
@@ -7467,6 +7600,32 @@ mod tests {
             ),
             "mismatched project snapshot was not rejected",
         )?;
+        let aged_rows = control.connection.execute(
+            "UPDATE worktree_usage_aggregates SET day_epoch = 0
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+        )?;
+        require_eq(&aged_rows, &1, "daily rows prepared for expiry")?;
+        let mut expired = second;
+        expired.revision = 3;
+        expired.rows.retain(|row| row.day_epoch == -1);
+        expired.logical_bytes = validate_worktree_usage_snapshot(
+            &expired.dimensions,
+            &expired.rows,
+            TelemetryRetentionPolicy::default().validate()?,
+        )?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &expired)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "expired daily bucket synchronization",
+        )?;
+        let expired_rows = control.connection.query_row(
+            "SELECT COUNT(*) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch = 0",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&expired_rows, &0, "expired synchronized daily rows")?;
         let contending_local = store_at(&worktree_root)?;
         let local_reader = AtlasStore::open_read_only_for_project(
             &worktree_root.join(".projectatlas").join("projectatlas.db"),
@@ -7782,6 +7941,16 @@ mod tests {
                     "SELECT calls FROM usage_global_aggregates
                  WHERE project_instance_id = X'01010101010101010101010101010101'
                    AND dimension_id = 1",
+                )?,
+                "PRIMARY KEY",
+            );
+            assert_plan_uses(
+                &query_plan(
+                    &database.connection,
+                    "SELECT day_epoch, dimension_id FROM worktree_usage_aggregates
+                 WHERE registration_id = 1 AND source_kind = 'synchronized'
+                   AND day_epoch >= 0
+                 ORDER BY day_epoch, dimension_id",
                 )?,
                 "PRIMARY KEY",
             );

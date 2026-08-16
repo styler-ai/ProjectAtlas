@@ -50,7 +50,12 @@ ProjectAtlas SHALL import pre-existing or independently recorded worktree teleme
 #### Scenario: Newer snapshot replaces one origin atomically
 
 - **WHEN** a worktree presents a strictly newer aggregate revision
-- **THEN** the control atlas replaces only that origin's prior lifetime/daily snapshot and revision atomically, after all keys/counts/dimensions pass validation
+- **THEN** the control atlas replaces only that origin's prior lifetime/daily snapshot and revision atomically, after all keys/counts/dimensions pass validation and every accepted lifetime dimension plus retained day/dimension counter remains a lower bound
+
+#### Scenario: Expired trend buckets may leave the snapshot
+
+- **WHEN** an accepted daily bucket is older than the configured trend-retention cutoff and a newer valid source snapshot no longer contains it
+- **THEN** synchronization may remove that expired bucket while preserving every still-retained daily lower bound
 
 #### Scenario: Stale or repeated snapshot is idempotent
 

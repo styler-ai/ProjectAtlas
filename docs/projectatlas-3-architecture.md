@@ -2688,8 +2688,11 @@ sequenceDiagram
 Hydration excludes every telemetry event, usage instance, aggregate, tombstone,
 and synchronization row so copied main history cannot be counted again.
 Synchronization transfers no raw source event, per-session query, or path;
-repeated/stale revisions are no-ops and invalid/overflowing snapshots roll back
-to the last-valid aggregate. Removal holds one short local SQLite writer-exclusion
+repeated/stale revisions are no-ops, and a newer revision must preserve every
+accepted lifetime dimension plus every daily day/dimension still inside the
+trend-retention window. A recent backup rollback or invalid/overflowing snapshot
+preserves the last-valid aggregate, while expired daily buckets may disappear.
+Removal holds one short local SQLite writer-exclusion
 scope while the control atlas atomically synchronizes and retires the origin, so
 a local usage commit cannot land in an export-to-retirement gap. Retired origins
 continue contributing to repository totals. An exact worktree report remains

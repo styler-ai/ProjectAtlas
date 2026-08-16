@@ -188,7 +188,7 @@ flowchart TB
     Target --> Exact[Exact worktree report]
 ```
 
-Alias-routed MCP events commit once in control under the stable registration origin and are not mirrored into the target. Independent worktree events remain local; one deferred SQLite read transaction exports revision, referenced dimensions, and bounded lifetime/daily rows from the same snapshot before aggregate reads or unregister synchronize them. Repeated or stale synchronization is a no-op, a concurrent later commit appears in the next revision, validation failure preserves the last-valid snapshot, and raw per-session queries or paths never move to control.
+Alias-routed MCP events commit once in control under the stable registration origin and are not mirrored into the target. Independent worktree events remain local; one deferred SQLite read transaction exports revision, referenced dimensions, and bounded lifetime/daily rows from the same snapshot before aggregate reads or unregister synchronize them. A newer snapshot must preserve the accepted componentwise lower bound for every lifetime dimension and every retained day/dimension; only buckets older than the trend-retention cutoff may disappear. Repeated or stale synchronization is a no-op, a concurrent later commit appears in the next revision, validation failure preserves the last-valid snapshot, and raw per-session queries or paths never move to control.
 
 `projectatlas token` and `projectatlas token --view tui` from the control checkout combine native main, routed, and synchronized active/retired origins. The TUI layout and metric definitions do not change. An exact worktree token call stays scoped to that target's local detail and never presents sibling detail as local.
 
