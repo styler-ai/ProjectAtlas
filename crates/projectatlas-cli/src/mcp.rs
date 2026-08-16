@@ -17,12 +17,12 @@ use crate::runtime::{
     canonical_source_project_root, classified_navigation_capabilities,
     classified_ranked_file_nodes_with_reasons, config_root_mismatch_error,
     default_mcp_project_root, estimated_source_tokens_for_indexed_files,
-    estimated_source_tokens_for_paths, index_init_required, index_work_control, init_config_path,
-    init_next_steps, lint_database_if_present, next_step_report_payload,
-    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
-    purpose_curation_page, purpose_curator_handoff, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    estimated_source_tokens_for_paths, federated_worktree_error, index_init_required,
+    index_work_control, init_config_path, init_next_steps, lint_database_if_present,
+    next_step_report_payload, next_step_report_with_selection, normalized_folder_filter,
+    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    open_federated_atlas_stores_for_project, purpose_curation_page, purpose_curator_handoff,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     reconcile_hydrated_index_controlled, record_directory_walk_usage_estimate,
     record_usage_estimate, record_usage_text, render_classified_ranked_file_rows,
     render_classified_symbol_rows, render_health_page, render_purpose_curation_page,
@@ -3866,7 +3866,10 @@ impl ProjectAtlasMcpServer {
                 &state.root,
                 state.config_path.as_deref(),
                 &control,
-                |store, stamp| query(store, stamp, &control),
+                |store, stamp| {
+                    Self::require_captured_worktree_identity(state.worktree.as_ref(), store)?;
+                    query(store, stamp, &control)
+                },
             )
             .map_err(|error| Self::with_target_error_context(error, state));
         if bridge
@@ -3877,6 +3880,49 @@ impl ProjectAtlasMcpServer {
         }
         drop(bridge);
         result
+    }
+
+    /// Revalidate one alias selection against the exact opened read snapshot.
+    fn require_captured_worktree_identity(
+        selection: Option<&McpWorktreeSelection>,
+        store: &AtlasStore,
+    ) -> Result<(), CliError> {
+        let Some(expected) = selection.and_then(|selection| selection.project_instance_id) else {
+            return Ok(());
+        };
+        if store.project_instance_id()? != Some(expected) {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Admit only federation snapshots that retain their captured alias identities.
+    fn require_federated_worktree_identities(
+        stores: Vec<FederatedStore>,
+        selections: &[McpWorktreeSelection],
+    ) -> Result<Vec<FederatedStore>, CliError> {
+        if stores.len() != selections.len() {
+            for store in stores {
+                drop(store.finish());
+            }
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_FEDERATED_ALIAS_MISSING.to_string(),
+            ));
+        }
+        for (store, selection) in stores.iter().zip(selections) {
+            if let Err(error) =
+                Self::require_captured_worktree_identity(Some(selection), store.store())
+            {
+                let error = federated_worktree_error(error, &selection.alias);
+                for store in stores {
+                    drop(store.finish());
+                }
+                return Err(error);
+            }
+        }
+        Ok(stores)
     }
 
     /// Run one rendered MCP query with request cancellation bridged into index work.
@@ -6026,32 +6072,32 @@ impl ProjectAtlasMcpServer {
         Ok(state)
     }
 
-    /// Resolve an ordered alias federation into exact initialized roots and labels.
+    /// Resolve an ordered alias federation into exact initialized roots and identities.
     fn federated_worktree_roots(
         &self,
         worktrees: &[String],
-    ) -> Result<(Vec<PathBuf>, Vec<String>), CliError> {
+    ) -> Result<(Vec<PathBuf>, Vec<McpWorktreeSelection>), CliError> {
         validate_federated_root_count(worktrees.len()).map_err(CliError::Service)?;
         let mut roots = Vec::with_capacity(worktrees.len());
-        let mut labels = Vec::with_capacity(worktrees.len());
+        let mut selections = Vec::with_capacity(worktrees.len());
         for worktree in worktrees {
             let state = self.state_for_target(None, Some(worktree.clone()))?;
-            let label = state
-                .worktree
-                .as_ref()
-                .map(|selection| selection.alias.clone())
-                .ok_or_else(|| {
-                    CliError::InvalidInput(MCP_ERROR_FEDERATED_ALIAS_MISSING.to_string())
-                })?;
-            if labels.contains(&label) || roots.contains(&state.root) {
+            let selection = state.worktree.ok_or_else(|| {
+                CliError::InvalidInput(MCP_ERROR_FEDERATED_ALIAS_MISSING.to_string())
+            })?;
+            if selections
+                .iter()
+                .any(|captured: &McpWorktreeSelection| captured.alias == selection.alias)
+                || roots.contains(&state.root)
+            {
                 return Err(CliError::Service(ServiceError::InvalidInput(
                     MCP_ERROR_FEDERATED_TARGET_DUPLICATE.to_string(),
                 )));
             }
-            labels.push(label);
+            selections.push(selection);
             roots.push(state.root);
         }
-        Ok((roots, labels))
+        Ok((roots, selections))
     }
 
     /// Resolve one mutually exclusive target under the selected config-validation timing.
@@ -8809,9 +8855,9 @@ impl ProjectAtlasMcpServer {
                 let bridge = context
                     .map(|context| McpRequestCancellationBridge::start(context, &control))
                     .transpose()?;
-                let (roots, worktree_labels) = if let Some(worktrees) = federated_worktrees {
-                    let (roots, labels) = self.federated_worktree_roots(worktrees)?;
-                    (roots, Some(labels))
+                let (roots, worktree_selections) = if let Some(worktrees) = federated_worktrees {
+                    let (roots, selections) = self.federated_worktree_roots(worktrees)?;
+                    (roots, Some(selections))
                 } else {
                     (
                         params
@@ -8824,6 +8870,12 @@ impl ProjectAtlasMcpServer {
                         None,
                     )
                 };
+                let worktree_labels = worktree_selections.as_ref().map(|selections| {
+                    selections
+                        .iter()
+                        .map(|selection| selection.alias.clone())
+                        .collect::<Vec<_>>()
+                });
                 let stores = open_federated_atlas_stores_for_project(
                     &state.db_path,
                     &state.root,
@@ -8832,6 +8884,11 @@ impl ProjectAtlasMcpServer {
                     worktree_labels.as_deref(),
                     &control,
                 )?;
+                let stores = if let Some(selections) = worktree_selections.as_deref() {
+                    Self::require_federated_worktree_identities(stores, selections)?
+                } else {
+                    stores
+                };
                 let result = Self::detailed_symbol_relations_response(
                     &state,
                     routed_project,
@@ -11651,6 +11708,11 @@ mod tests {
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("hydrated target identity is missing"))?;
         drop(target_store);
+        let captured_alias_state = server.state_for_target(None, Some("issue-430".to_string()))?;
+        let captured_federated_aliases = ["main".to_string(), "issue-430".to_string()];
+        let (captured_federated_roots, captured_federated_selections) =
+            server.federated_worktree_roots(&captured_federated_aliases)?;
+        let captured_main_state = server.state_for_target(None, Some("main".to_string()))?;
         let control_after_init = open_atlas_store_read_only_for_project(&control_db, &primary)?;
         require(
             control_after_init
@@ -11670,7 +11732,18 @@ mod tests {
         let preserved_target_state = worktree_a.join(".projectatlas-registered");
         fs::rename(&target_state, &preserved_target_state)?;
         fs::create_dir(&target_state)?;
-        let replacement_store = AtlasStore::open_for_project(&target_db, &worktree_a)?;
+        init_project_with_config(&worktree_a, captured_alias_state.config_path.as_deref())?;
+        let mut replacement_store = AtlasStore::open_for_project(&target_db, &worktree_a)?;
+        let replacement_plan = ScanRuntimePlan::for_path(
+            captured_alias_state.config_path.as_deref(),
+            &worktree_a,
+            None,
+        )?;
+        run_scan_pipeline(
+            &mut replacement_store,
+            &replacement_plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+        )?;
         let replacement_project = replacement_store
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("replacement target identity is missing"))?;
@@ -11679,6 +11752,42 @@ mod tests {
             "replacement atlas reused the registered project identity",
         )?;
         drop(replacement_store);
+        let captured_read = server.with_fresh_store(&captured_alias_state, |_store, _stamp| Ok(()));
+        require(
+            captured_read.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "alias read snapshot did not revalidate its captured project identity",
+        )?;
+        let captured_federated_labels = captured_federated_selections
+            .iter()
+            .map(|selection| selection.alias.clone())
+            .collect::<Vec<_>>();
+        let federated_control =
+            index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
+        let captured_federated_stores = open_federated_atlas_stores_for_project(
+            &captured_main_state.db_path,
+            &captured_main_state.root,
+            captured_main_state.config_path.as_deref(),
+            &captured_federated_roots,
+            Some(&captured_federated_labels),
+            &federated_control,
+        )?;
+        let captured_federation = ProjectAtlasMcpServer::require_federated_worktree_identities(
+            captured_federated_stores,
+            &captured_federated_selections,
+        );
+        require(
+            captured_federation.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+                    && error.to_string().contains("issue-430")
+            }),
+            "federated snapshots did not retain their captured alias identities",
+        )?;
         let replacement_error = server.state_for_target(None, Some("issue-430".to_string()));
         require(
             replacement_error.as_ref().is_err_and(|error| {
@@ -12387,6 +12496,14 @@ mod tests {
         )?;
 
         fs::remove_file(&target_db)?;
+        require(
+            matches!(
+                synchronize_registered_worktree_usage(&control_db, &primary),
+                Err(CliError::InvalidInput(message))
+                    if message.contains("aggregate token totals cannot be synchronized")
+            ),
+            "aggregate synchronization reported stale success for a bound missing atlas",
+        )?;
         fs::create_dir(&target_db)?;
         require(
             synchronize_registered_worktree_usage(&control_db, &primary).is_err(),

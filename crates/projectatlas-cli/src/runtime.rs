@@ -847,7 +847,15 @@ pub(crate) fn synchronize_registered_worktree_usage(
         let database = root.join(".projectatlas").join("projectatlas.db");
         match fs::symlink_metadata(&database) {
             Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if registration.project_instance_id.is_some() {
+                    return Err(CliError::InvalidInput(format!(
+                        "registered worktree '{}': its bound local atlas is missing, so aggregate token totals cannot be synchronized",
+                        registration.alias
+                    )));
+                }
+                continue;
+            }
             Err(error) => return Err(error.into()),
         }
         let target = open_atlas_store_read_only_for_project(&database, root)?;
@@ -867,7 +875,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
 }
 
 /// Attach the exact alias to every typed or generic federated participant failure.
-fn federated_worktree_error(mut error: CliError, worktree: &str) -> CliError {
+pub(crate) fn federated_worktree_error(mut error: CliError, worktree: &str) -> CliError {
     match &mut error {
         CliError::InitRequired(report) => report.worktree = Some(worktree.to_string()),
         CliError::RefreshRequired(report) => report.worktree = Some(worktree.to_string()),
