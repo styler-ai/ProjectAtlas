@@ -693,6 +693,8 @@ const MCP_ERROR_WORKTREE_IDENTITY_CONFLICT: &str =
     "local atlas identity conflicts with its active registration";
 /// Recovery guidance when an initialized registration loses its exact atlas.
 const MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING: &str = "registered worktree atlas is missing; restore it before retrying or retiring the alias so final token totals can be synchronized";
+/// Resetting a bound atlas would strand its control-catalog identity.
+const MCP_ERROR_BOUND_WORKTREE_RESET_UNSUPPORTED: &str = "bound worktree atlas cannot be reset in place; retire the alias to synchronize final totals, then register and initialize it again";
 /// A reused administrative path cannot inherit an earlier registration.
 const MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED: &str =
     "registered worktree administrative lifecycle changed; unregister and register it again";
@@ -9405,10 +9407,22 @@ impl ProjectAtlasMcpServer {
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_target(params.project_path, params.worktree)?;
+            let apply = params.apply.unwrap_or(false);
+            let dry_run = params.dry_run.unwrap_or(false);
+            if apply
+                && !dry_run
+                && state.worktree.as_ref().is_some_and(|selection| {
+                    selection.registration_id.is_some() && selection.project_instance_id.is_some()
+                })
+            {
+                return Err(CliError::InvalidInput(
+                    MCP_ERROR_BOUND_WORKTREE_RESET_UNSUPPORTED.to_string(),
+                ));
+            }
             let report = reset_index_files(
                 &state.db_path,
-                params.apply.unwrap_or(false),
-                params.dry_run.unwrap_or(false),
+                apply,
+                dry_run,
                 params.include_mcp_config.unwrap_or(false),
             )?;
             Self::encode_named_payload(MCP_PAYLOAD_RESET_INDEX, &report)
@@ -11808,6 +11822,22 @@ mod tests {
             "successful alias init did not bind the exact target atlas identity",
         )?;
         drop(control_after_init);
+        let target_before_reset = fs::read(&target_db)?;
+        let bound_reset = server.atlas_reset_index(Parameters(AtlasResetIndexParams {
+            project_path: None,
+            worktree: Some("issue-430".to_string()),
+            apply: Some(true),
+            dry_run: Some(false),
+            include_mcp_config: Some(true),
+        }));
+        require(
+            bound_reset.contains(MCP_ERROR_BOUND_WORKTREE_RESET_UNSUPPORTED),
+            "applied reset did not reject a bound worktree alias",
+        )?;
+        require(
+            fs::read(&target_db)? == target_before_reset,
+            "rejected bound worktree reset changed its database",
+        )?;
         let control_state = primary.join(PROJECTATLAS_DIR_NAME);
         let preserved_control_state = primary.join(".projectatlas-captured-main");
         fs::rename(&control_state, &preserved_control_state)?;
