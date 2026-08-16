@@ -70,18 +70,18 @@ use runtime::{
     default_cli_project_root, default_mcp_project_root, defaultable_cli_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     index_work_control, init_config_path, init_path_status, lint_database_if_present,
-    next_step_report_payload, next_step_report_with_selection, normalized_folder_filter,
-    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
-    open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
-    purpose_curation_page, ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
-    render_classified_ranked_file_rows, render_classified_symbol_rows, render_coverage_report,
-    render_health_page, render_purpose_curation_page, render_purpose_review_report,
-    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
-    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    load_synchronized_repository_token_report, next_step_report_payload,
+    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
+    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
+    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
+    record_usage_text, render_classified_ranked_file_rows, render_classified_symbol_rows,
+    render_coverage_report, render_health_page, render_purpose_curation_page,
+    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
+    run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
     run_symbol_build_pipeline_controlled, run_watch_loop, standalone_index_work_control,
-    strip_legacy_purpose, synchronize_registered_worktree_usage, validate_purpose_review_admission,
-    validated_indexed_file_key, watcher_status_report,
+    strip_legacy_purpose, validate_purpose_review_admission, validated_indexed_file_key,
+    watcher_status_report,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -2778,10 +2778,19 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             benchmark_results,
             theme,
         } => {
-            if session.is_none() {
-                synchronize_registered_worktree_usage(&cli.db, &cli.project_root()?, None)?;
-            }
             let store = open_index_for_current_read(cli)?;
+            let load_report = |request: TokenReportRequest<'_>| {
+                if session.is_none() {
+                    load_synchronized_repository_token_report(
+                        &cli.db,
+                        &cli.project_root()?,
+                        None,
+                        request,
+                    )
+                } else {
+                    load_token_report(&store, request).map_err(CliError::from)
+                }
+            };
             if let Some(window) = trend {
                 if tokenizer.is_some() {
                     return Err(CliError::InvalidInput(
@@ -2803,7 +2812,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         window: (*window).into(),
                     },
                 );
-                let report = match load_token_report(&store, request)? {
+                let report = match load_report(request)? {
                     TokenReport::Trends(report) => report,
                     TokenReport::Overview(_) => {
                         return Err(CliError::InvalidInput(
@@ -2832,7 +2841,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         benchmark_results: benchmark_results.as_deref(),
                     },
                 );
-                let mut overview = match load_token_report(&store, request)? {
+                let mut overview = match load_report(request)? {
                     TokenReport::Overview(overview) => overview,
                     TokenReport::Trends(_) => {
                         return Err(CliError::InvalidInput(

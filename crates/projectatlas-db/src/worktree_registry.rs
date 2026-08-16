@@ -528,16 +528,32 @@ impl AtlasStore {
         Ok(registrations)
     }
 
-    /// Snapshot active registration identities under control-writer exclusion.
+    /// Run one short operation when active catalog identities still match.
     ///
     /// # Errors
     ///
-    /// Returns an error for malformed persisted rows, a changed database
-    /// binding, or any `SQLite` transaction failure.
-    pub fn active_worktree_registrations_with_writer_exclusion(
+    /// Returns `None` when the active row count, order, aliases, or project
+    /// bindings changed. Returns an error for malformed persisted rows, a
+    /// changed database binding, an operation failure, or any `SQLite`
+    /// transaction failure.
+    pub fn with_matching_active_worktree_catalog<T>(
         &self,
-    ) -> DbResult<Vec<WorktreeRegistration>> {
-        self.with_validated_write(|_| self.worktree_registrations(false))
+        expected: &[WorktreeRegistration],
+        operation: impl FnOnce() -> DbResult<T>,
+    ) -> DbResult<Option<T>> {
+        self.with_validated_write(|_| {
+            let current = self.worktree_registrations(false)?;
+            if current.len() != expected.len()
+                || current.iter().zip(expected).any(|(current, expected)| {
+                    current.registration_id != expected.registration_id
+                        || current.alias != expected.alias
+                        || current.project_instance_id != expected.project_instance_id
+                })
+            {
+                return Ok(None);
+            }
+            operation().map(Some)
+        })
     }
 
     /// Run one short operation while an exact active registration owns control-writer exclusion.

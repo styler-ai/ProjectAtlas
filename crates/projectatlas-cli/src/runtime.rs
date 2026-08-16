@@ -64,7 +64,7 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, ClassifiedSymbol, DatabasePublicationContractState, DatabasePublicationReport,
-    DatabaseSchemaCompatibility, DatabaseSettingsReport, FileContentClassification,
+    DatabaseSchemaCompatibility, DatabaseSettingsReport, DbResult, FileContentClassification,
     HealthFindingsPage, HealthQuery, HealthScope, IndexPublication, IndexPublicationGuard,
     IndexPublicationState, IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
     MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
@@ -83,7 +83,9 @@ use projectatlas_fs::{
 use projectatlas_service::{
     ClassifiedRankedNode, CoverageDiscoveryReport, FederatedInputWork, FederatedStore,
     FilePathMatcher, MAX_FEDERATED_DATABASE_BYTES, MAX_FEDERATED_INPUT_BYTES, NextStepReport,
+    TokenReport, TokenReportRequest,
     build_next_report_with_selection as build_next_report_with_selection_service,
+    load_agent_efficiency_comparison,
     load_classified_ranked_file_nodes_with_reasons as load_classified_ranked_file_nodes_with_reasons_service,
     load_ranked_file_nodes_with_reasons, load_ranked_folder_nodes_with_reasons,
     validate_federated_root_count,
@@ -777,27 +779,86 @@ pub(crate) fn open_federated_atlas_stores_for_project(
     Ok(stores)
 }
 
-/// Synchronize active registrations, refusing stale success for unavailable bound worktrees.
-pub(crate) fn synchronize_registered_worktree_usage(
+/// Synchronize active registrations and read the aggregate before catalog writers resume.
+fn with_synchronized_registered_worktree_usage<T>(
     control_db: &Path,
     control_root: &Path,
     expected_control_project: Option<ProjectInstanceId>,
-) -> Result<(), CliError> {
+    read: impl FnOnce(&AtlasStore) -> DbResult<T>,
+) -> Result<T, CliError> {
     synchronize_registered_worktree_usage_with_catalog_validation(
         control_db,
         control_root,
         expected_control_project,
         || Ok(()),
+        read,
+    )
+}
+
+/// Load one combined repository report while active worktree membership is stable.
+pub(crate) fn load_synchronized_repository_token_report(
+    control_db: &Path,
+    control_root: &Path,
+    expected_control_project: Option<ProjectInstanceId>,
+    request: TokenReportRequest<'_>,
+) -> Result<TokenReport, CliError> {
+    let (benchmark_results, trend_window) = match request {
+        TokenReportRequest::RepositoryOverview { benchmark_results } => (benchmark_results, None),
+        TokenReportRequest::RepositoryTrends { window } => (None, Some(window)),
+        TokenReportRequest::Overview { .. } | TokenReportRequest::Trends { .. } => {
+            return Err(CliError::InvalidInput(
+                "synchronized token reports require repository scope".to_string(),
+            ));
+        }
+    };
+    let mut report = with_synchronized_registered_worktree_usage(
+        control_db,
+        control_root,
+        expected_control_project,
+        |control| match trend_window {
+            None => Ok(TokenReport::Overview(Box::new(
+                control.repository_token_overview()?,
+            ))),
+            Some(window) => Ok(TokenReport::Trends(
+                control.repository_token_trends(window)?,
+            )),
+        },
+    )?;
+    if let (Some(benchmark_results), TokenReport::Overview(overview)) =
+        (benchmark_results, &mut report)
+    {
+        let control = open_atlas_store_read_only_for_project(control_db, control_root)?;
+        overview.set_agent_efficiency(load_agent_efficiency_comparison(
+            &control,
+            Some(benchmark_results),
+        )?);
+    }
+    Ok(report)
+}
+
+/// Synchronize active registrations without a following repository aggregate read.
+#[cfg(test)]
+pub(crate) fn synchronize_registered_worktree_usage(
+    control_db: &Path,
+    control_root: &Path,
+    expected_control_project: Option<ProjectInstanceId>,
+) -> Result<(), CliError> {
+    with_synchronized_registered_worktree_usage(
+        control_db,
+        control_root,
+        expected_control_project,
+        |_| Ok(()),
     )
 }
 
 /// Synchronize active registrations with one injectable final catalog boundary.
-fn synchronize_registered_worktree_usage_with_catalog_validation(
+fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
     control_db: &Path,
     control_root: &Path,
     expected_control_project: Option<ProjectInstanceId>,
     before_catalog_validation: impl FnOnce() -> Result<(), CliError>,
-) -> Result<(), CliError> {
+    read: impl FnOnce(&AtlasStore) -> DbResult<T>,
+) -> Result<T, CliError> {
     let control_reader = open_atlas_store_read_only_for_project(control_db, control_root)?;
     let control_project =
         require_synchronization_control_identity(&control_reader, expected_control_project)?;
@@ -807,16 +868,14 @@ fn synchronize_registered_worktree_usage_with_catalog_validation(
         before_catalog_validation()?;
         let control = open_atlas_store_for_project(control_db, control_root)?;
         require_synchronization_control_identity(&control, Some(control_project))?;
-        if control
-            .active_worktree_registrations_with_writer_exclusion()?
-            .is_empty()
+        return match control.with_matching_active_worktree_catalog(&registrations, || read(&control))?
         {
-            return Ok(());
-        }
-        return Err(CliError::InvalidInput(
-            "registered worktree catalog changed during aggregate synchronization; retry the token report"
-                .to_string(),
-        ));
+            Some(value) => Ok(value),
+            None => Err(CliError::InvalidInput(
+                    "registered worktree catalog changed during aggregate synchronization; retry the token report"
+                        .to_string(),
+                )),
+        };
     }
     let repository = match projectatlas_fs::worktree::discover_repository_structure(control_root)? {
         RepositoryStructure::Git(repository) => repository,
@@ -922,23 +981,13 @@ fn synchronize_registered_worktree_usage_with_catalog_validation(
         }
     }
     before_catalog_validation()?;
-    let current = control.active_worktree_registrations_with_writer_exclusion()?;
-    if current.len() != registrations.len()
-        || current
-            .iter()
-            .zip(&registrations)
-            .any(|(current, captured)| {
-                current.registration_id != captured.registration_id
-                    || current.alias != captured.alias
-                    || current.project_instance_id != captured.project_instance_id
-            })
-    {
-        return Err(CliError::InvalidInput(
-            "registered worktree catalog changed during aggregate synchronization; retry the token report"
-                .to_string(),
-        ));
+    match control.with_matching_active_worktree_catalog(&registrations, || read(&control))? {
+        Some(value) => Ok(value),
+        None => Err(CliError::InvalidInput(
+                "registered worktree catalog changed during aggregate synchronization; retry the token report"
+                    .to_string(),
+            )),
     }
-    Ok(())
 }
 
 /// Resolve one registration only while its exact Git lifecycle remains active.
@@ -8572,6 +8621,55 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_repository_read_holds_catalog_writer_exclusion() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("control");
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("control database has no parent"))?,
+        )?;
+        let control = AtlasStore::open_for_project(&database, &root)?;
+        let control_project = control
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let writer_blocked = std::cell::Cell::new(false);
+
+        let overview = synchronize_registered_worktree_usage_with_catalog_validation(
+            &database,
+            &root,
+            Some(control_project),
+            || Ok(()),
+            |reader| {
+                let contender = rusqlite::Connection::open(&database).map_err(DbError::from)?;
+                contender
+                    .busy_timeout(Duration::ZERO)
+                    .map_err(DbError::from)?;
+                match contender.execute_batch("BEGIN IMMEDIATE") {
+                    Err(rusqlite::Error::SqliteFailure(code, _))
+                        if matches!(
+                            code.code,
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        ) =>
+                    {
+                        writer_blocked.set(true);
+                    }
+                    Ok(()) => contender.execute_batch("ROLLBACK").map_err(DbError::from)?,
+                    Err(error) => return Err(DbError::from(error)),
+                }
+                reader.repository_token_overview()
+            },
+        )?;
+        require_eq(
+            &writer_blocked.get(),
+            &true,
+            "repository aggregate read writer exclusion",
+        )?;
+        require_eq(&overview.calls, &0, "empty synchronized repository report")
+    }
+
+    #[test]
     fn synchronization_rejects_a_registration_committed_after_catalog_capture()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -8610,6 +8708,7 @@ mod tests {
                 )?;
                 Ok(())
             },
+            |_| Ok(()),
         );
         require_eq(
             &result.as_ref().is_err_and(|error| {
@@ -8805,6 +8904,7 @@ mod tests {
                 )?;
                 Ok(())
             },
+            |_| Ok(()),
         );
         require_eq(
             &concurrent_binding.as_ref().is_err_and(|error| {

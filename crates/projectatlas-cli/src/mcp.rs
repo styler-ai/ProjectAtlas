@@ -19,25 +19,24 @@ use crate::runtime::{
     config_root_mismatch_error, default_mcp_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     federated_worktree_error, index_init_required, index_work_control, init_config_path,
-    init_next_steps, lint_database_if_present, next_step_report_payload,
-    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
-    purpose_curation_page, purpose_curator_handoff, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    init_next_steps, lint_database_if_present, load_synchronized_repository_token_report,
+    next_step_report_payload, next_step_report_with_selection, normalized_folder_filter,
+    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    open_federated_atlas_stores_for_project, purpose_curation_page, purpose_curator_handoff,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     reconcile_hydrated_index_controlled, record_directory_walk_usage_estimate,
     record_usage_estimate, record_usage_text, render_classified_ranked_file_rows,
     render_classified_symbol_rows, render_health_page, render_purpose_curation_page,
     render_purpose_review_report, require_registered_worktree_lifecycle, reset_index_files,
     reset_index_files_with_revalidation, review_purposes, run_init_bootstrap,
     run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
-    run_symbol_build_pipeline_controlled, strip_legacy_purpose,
-    synchronize_registered_worktree_usage, telemetry_disabled, validate_purpose_review_admission,
-    validated_indexed_file_key, watcher_status_report,
+    run_symbol_build_pipeline_controlled, strip_legacy_purpose, telemetry_disabled,
+    validate_purpose_review_admission, validated_indexed_file_key, watcher_status_report,
 };
 #[cfg(test)]
 use crate::runtime::{
     PURPOSE_CURATOR_RECOMMENDED_REASONING, db_sidecar_path, mcp_config_path_for_db,
-    run_scan_pipeline,
+    run_scan_pipeline, synchronize_registered_worktree_usage,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -7973,6 +7972,7 @@ impl ProjectAtlasMcpServer {
             })();
             let (local, blocker) = match local {
                 Ok(local) => (local, None),
+                Err(error) if project_instance_id.is_some() => return Err(error),
                 Err(error) => (
                     None,
                     Some(format!(
@@ -9529,17 +9529,22 @@ impl ProjectAtlasMcpServer {
             let repository_scope = params.session.is_none()
                 && state.root == self.control_state.root
                 && state.db_path == self.control_state.db_path;
-            if repository_scope {
-                synchronize_registered_worktree_usage(
-                    &state.db_path,
-                    &state.root,
-                    state
-                        .worktree
-                        .as_ref()
-                        .and_then(|selection| selection.control_project_instance_id),
-                )?;
-            }
-            let store = Self::open_read_store(&state)?;
+            let load_report = |request: TokenReportRequest<'_>| {
+                if repository_scope {
+                    load_synchronized_repository_token_report(
+                        &state.db_path,
+                        &state.root,
+                        state
+                            .worktree
+                            .as_ref()
+                            .and_then(|selection| selection.control_project_instance_id),
+                        request,
+                    )
+                } else {
+                    let store = Self::open_read_store(&state)?;
+                    load_token_report(&store, request).map_err(CliError::from)
+                }
+            };
             let include_chart = params.include_chart.unwrap_or(false);
             let chart_theme = Self::parse_token_chart_theme(params.theme.as_deref())?;
             if let Some(window) = params.trend_window.as_deref() {
@@ -9561,7 +9566,7 @@ impl ProjectAtlasMcpServer {
                         window,
                     }
                 };
-                let report = match load_token_report(&store, request)? {
+                let report = match load_report(request)? {
                     TokenReport::Trends(report) => report,
                     TokenReport::Overview(_) => {
                         return Err(CliError::InvalidInput(
@@ -9599,7 +9604,7 @@ impl ProjectAtlasMcpServer {
                     benchmark_results: params.benchmark_results.as_deref().map(Path::new),
                 }
             };
-            let overview = match load_token_report(&store, request)? {
+            let overview = match load_report(request)? {
                 TokenReport::Overview(overview) => overview,
                 TokenReport::Trends(_) => {
                     return Err(CliError::InvalidInput(
@@ -12536,27 +12541,54 @@ mod tests {
             "worktree B fixture did not invalidate an aggregate row",
         )?;
         drop(corrupt);
-        let identity_only = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+        let rejected_snapshot = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_b.clone(),
             alias: Some("snapshot-blocked".to_string()),
         }));
         require(
-            identity_only.contains("status: registered")
-                && identity_only.contains("registration committed without local telemetry import"),
+            rejected_snapshot.contains("telemetry integer overflow")
+                && !rejected_snapshot.contains("status: registered"),
             &format!(
-                "worktree registration did not preserve the identity-only fallback: {identity_only}"
+                "worktree registration survived a failed local usage snapshot: {rejected_snapshot}"
             ),
         )?;
-        let control_after_identity_only =
+        let control_after_rejection =
             open_atlas_store_read_only_for_project(&control_db, &primary)?;
         require(
-            control_after_identity_only
+            matches!(
+                control_after_rejection
+                    .worktree_registration(&WorktreeAlias::parse("snapshot-blocked")?),
+                Err(DbError::WorktreeRegistrationNotFound { .. })
+            ),
+            "telemetry export failure committed a partial worktree registration",
+        )?;
+        drop(control_after_rejection);
+        let repaired = rusqlite::Connection::open(&target_b_db)?;
+        repaired.execute("UPDATE usage_global_aggregates SET calls = 1", [])?;
+        drop(repaired);
+        let registered_snapshot = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: selector_b.clone(),
+            alias: Some("snapshot-blocked".to_string()),
+        }));
+        require(
+            registered_snapshot.contains("status: registered"),
+            &format!(
+                "repaired local usage snapshot did not register atomically: {registered_snapshot}"
+            ),
+        )?;
+        let control_after_snapshot = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            control_after_snapshot
                 .worktree_registration(&WorktreeAlias::parse("snapshot-blocked")?)?
                 .project_instance_id
-                == Some(target_b_project),
-            "telemetry export failure discarded the readable worktree project identity",
+                == Some(target_b_project)
+                && control_after_snapshot
+                    .registered_worktree_token_overview(&WorktreeAlias::parse("snapshot-blocked")?)?
+                    .calls
+                    == 1,
+            "successful registration did not bind identity and import telemetry atomically",
         )?;
-        drop(control_after_identity_only);
+        drop(control_after_snapshot);
         let target_b_state = worktree_b.join(PROJECTATLAS_DIR_NAME);
         let preserved_target_b_state = worktree_b.join(".projectatlas-snapshot-blocked");
         fs::rename(&target_b_state, &preserved_target_b_state)?;
@@ -12575,17 +12607,17 @@ mod tests {
                     .to_string()
                     .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
             }),
-            "identity-only registration routed to a replacement atlas",
+            "snapshot-backed registration routed to a replacement atlas",
         )?;
         fs::remove_dir_all(&target_b_state)?;
-        let refused_identity_only =
+        let refused_snapshot =
             server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
                 worktree: "snapshot-blocked".to_string(),
             }));
         require(
-            refused_identity_only.contains(MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING),
+            refused_snapshot.contains(MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING),
             &format!(
-                "bound registration retired without its required final snapshot: {refused_identity_only}"
+                "bound registration retired without its required final snapshot: {refused_snapshot}"
             ),
         )?;
         let control_after_refusal = open_atlas_store_read_only_for_project(&control_db, &primary)?;
@@ -12598,17 +12630,14 @@ mod tests {
         )?;
         drop(control_after_refusal);
         fs::rename(&preserved_target_b_state, &target_b_state)?;
-        let repaired = rusqlite::Connection::open(&target_b_db)?;
-        repaired.execute("UPDATE usage_global_aggregates SET calls = 1", [])?;
-        drop(repaired);
-        let retired_identity_only =
+        let retired_snapshot =
             server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
                 worktree: "snapshot-blocked".to_string(),
             }));
         require(
-            retired_identity_only.contains("status: retired"),
+            retired_snapshot.contains("status: retired"),
             &format!(
-                "restored bound atlas did not permit final-sync retirement: {retired_identity_only}"
+                "restored bound atlas did not permit final-sync retirement: {retired_snapshot}"
             ),
         )?;
         fs::remove_dir_all(&target_b_state)?;
