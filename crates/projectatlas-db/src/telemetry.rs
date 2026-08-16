@@ -797,6 +797,35 @@ impl AggregateCounters {
             modeled_file_reads_avoided: add!(modeled_file_reads_avoided),
         })
     }
+
+    /// Return whether every lifetime component preserves an accepted lower bound.
+    fn contains(self, accepted: Self) -> bool {
+        [
+            (self.calls, accepted.calls),
+            (self.estimated_without, accepted.estimated_without),
+            (self.estimated_with, accepted.estimated_with),
+            (self.observed_without, accepted.observed_without),
+            (self.observed_with, accepted.observed_with),
+            (self.modeled_without, accepted.modeled_without),
+            (self.modeled_with, accepted.modeled_with),
+            (
+                self.deduped_modeled_without,
+                accepted.deduped_modeled_without,
+            ),
+            (self.deduped_modeled_with, accepted.deduped_modeled_with),
+            (self.repeated_baselines, accepted.repeated_baselines),
+            (
+                self.observed_file_read_replacements,
+                accepted.observed_file_read_replacements,
+            ),
+            (
+                self.modeled_file_reads_avoided,
+                accepted.modeled_file_reads_avoided,
+            ),
+        ]
+        .into_iter()
+        .all(|(incoming, accepted)| incoming >= accepted)
+    }
 }
 
 /// Seed telemetry state after fresh-schema creation.
@@ -1657,6 +1686,34 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
     if logical_bytes != snapshot.logical_bytes {
         return Err(DbError::WorktreeRegistrationRow {
             reason: "aggregate snapshot logical-byte contract changed",
+        });
+    }
+    let incoming_lifetime = snapshot
+        .rows
+        .iter()
+        .filter(|row| row.day_epoch == -1)
+        .try_fold(AggregateCounters::default(), |total, row| {
+            total.checked_add(row.counters)
+        })?;
+    let accepted_lifetime = {
+        let mut statement = connection.prepare_cached(
+            "SELECT calls, estimated_without, estimated_with, observed_without,
+                    observed_with, modeled_without, modeled_with,
+                    deduped_modeled_without, deduped_modeled_with, repeated_baselines,
+                    observed_file_read_replacements, modeled_file_reads_avoided
+             FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch = -1",
+        )?;
+        let mut rows = statement.query(params![registration_id, WORKTREE_USAGE_SYNCHRONIZED])?;
+        let mut total = AggregateCounters::default();
+        while let Some(row) = rows.next()? {
+            total = total.checked_add(read_counters_offset(row, 0)?)?;
+        }
+        total
+    };
+    if !incoming_lifetime.contains(accepted_lifetime) {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "aggregate snapshot reduces accepted lifetime totals",
         });
     }
     let incoming_daily_rows = snapshot
@@ -7295,6 +7352,30 @@ mod tests {
             &control.registered_worktree_token_overview(&alias)?.calls,
             &3,
             "second exact worktree total",
+        )?;
+
+        let mut restored = first;
+        restored.revision = 3;
+        require(
+            matches!(
+                control.synchronize_worktree_usage(&alias, &restored),
+                Err(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot reduces accepted lifetime totals"
+                })
+            ),
+            "newer revision from an older backup reduced accepted lifetime totals",
+        )?;
+        require_eq(
+            &control
+                .worktree_registration(&alias)?
+                .accepted_telemetry_revision,
+            &2,
+            "revision after restored older snapshot",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &3,
+            "total after restored older snapshot",
         )?;
 
         let mut invalid = second;

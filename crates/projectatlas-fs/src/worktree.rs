@@ -222,7 +222,7 @@ pub fn discover_repository_structure_controlled(
                         let selection_kind = if selected.role == GitWorktreeRole::Primary
                             && paths_equal(&selected.git_control_path, &selected.common_directory)
                             && (selected.common_directory_bare_setting == Some(true)
-                                || !selected.common_directory_source_root_inference_safe)
+                                || !selected.source_root_selected_exactly)
                         {
                             GitRepositorySelectionKind::Manager
                         } else {
@@ -257,6 +257,7 @@ pub fn discover_repository_structure_controlled(
                         common_directory_bare_setting: common_directory.bare_setting,
                         common_directory_source_root_inference_safe: common_directory
                             .source_root_inference_safe,
+                        source_root_selected_exactly: false,
                         role: GitWorktreeRole::Primary,
                     },
                     GitRepositorySelectionKind::Manager,
@@ -289,6 +290,8 @@ struct SelectedWorktree {
     common_directory_bare_setting: Option<bool>,
     /// Whether local config permits inferring source beside the common directory.
     common_directory_source_root_inference_safe: bool,
+    /// Whether the selected root agrees with the effective local source configuration.
+    source_root_selected_exactly: bool,
     /// Structural worktree role.
     role: GitWorktreeRole,
 }
@@ -379,6 +382,15 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
     let metadata = structural_metadata(&git_control_path)?;
     if metadata.is_dir() {
         let common_directory = inspect_common_directory(&git_control_path)?;
+        let source_root_selected_exactly = common_directory.bare_setting != Some(true)
+            && (common_directory.source_root_inference_safe
+                || validate_pointer_source_configuration(
+                    &root,
+                    &common_directory.path,
+                    &common_directory.path,
+                    false,
+                )
+                .is_ok());
         return Ok(SelectedWorktree {
             root,
             git_control_path: common_directory.path.clone(),
@@ -387,6 +399,7 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
             common_directory_bare_setting: common_directory.bare_setting,
             common_directory_source_root_inference_safe: common_directory
                 .source_root_inference_safe,
+            source_root_selected_exactly,
             role: GitWorktreeRole::Primary,
         });
     }
@@ -433,6 +446,7 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
                 common_directory_bare_setting: common_directory.bare_setting,
                 common_directory_source_root_inference_safe: common_directory
                     .source_root_inference_safe,
+                source_root_selected_exactly: true,
                 role: GitWorktreeRole::Linked,
             })
         }
@@ -452,6 +466,7 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
                 common_directory_bare_setting: common_directory.bare_setting,
                 common_directory_source_root_inference_safe: common_directory
                     .source_root_inference_safe,
+                source_root_selected_exactly: true,
                 role: GitWorktreeRole::Primary,
             })
         }
@@ -1691,6 +1706,29 @@ mod tests {
                 "core.worktree inferred the common-directory parent as source",
             )?;
         }
+        run_git(&primary, ["config", "--unset", "core.worktree"])?;
+
+        run_git(&primary, ["config", "core.worktree", ".."])?;
+        let matching_worktree = Command::new("git")
+            .arg("-C")
+            .arg(&primary)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        require(
+            matching_worktree.status.success()
+                && paths_equal(
+                    &PathBuf::from(String::from_utf8(matching_worktree.stdout)?.trim())
+                        .canonicalize()?,
+                    &primary.canonicalize()?,
+                ),
+            "Git fixture did not resolve relative core.worktree back to its checkout",
+        )?;
+        let matching = require_git(discover_repository_structure(&primary)?)?;
+        require_worktree_selection(
+            &matching,
+            &primary.canonicalize()?,
+            GitWorktreeRole::Primary,
+        )?;
         run_git(&primary, ["config", "--unset", "core.worktree"])?;
 
         run_git(&primary, ["config", "extensions.worktreeConfig", "true"])?;
