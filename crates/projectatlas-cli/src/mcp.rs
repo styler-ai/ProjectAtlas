@@ -3776,7 +3776,9 @@ impl ProjectAtlasMcpServer {
                 state,
             ));
         }
-        open_atlas_store_read_only_for_project(&state.db_path, &state.root)
+        let store = open_atlas_store_read_only_for_project(&state.db_path, &state.root)?;
+        Self::require_captured_worktree_identity(state.worktree.as_ref(), &store)?;
+        Ok(store)
     }
 
     /// Require registered worktree aliases to be initialized outside `atlas_init`.
@@ -9133,7 +9135,14 @@ impl ProjectAtlasMcpServer {
                 && state.root == self.control_state.root
                 && state.db_path == self.control_state.db_path;
             if repository_scope {
-                synchronize_registered_worktree_usage(&state.db_path, &state.root)?;
+                synchronize_registered_worktree_usage(
+                    &state.db_path,
+                    &state.root,
+                    state
+                        .worktree
+                        .as_ref()
+                        .and_then(|selection| selection.project_instance_id),
+                )?;
             }
             let store = Self::open_read_store(&state)?;
             let include_chart = params.include_chart.unwrap_or(false);
@@ -11560,7 +11569,7 @@ mod tests {
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("legacy-init target identity is missing"))?;
         drop(legacy_target);
-        synchronize_registered_worktree_usage(&control_db, &primary)?;
+        synchronize_registered_worktree_usage(&control_db, &primary, None)?;
         let control_after_legacy_init =
             open_atlas_store_read_only_for_project(&control_db, &primary)?;
         require(
@@ -11817,6 +11826,28 @@ mod tests {
             "replacement control atlas reused the captured main identity",
         )?;
         drop(replacement_control);
+        require(
+            matches!(
+                synchronize_registered_worktree_usage(
+                    &captured_main_state.db_path,
+                    &captured_main_state.root,
+                    Some(control_project),
+                ),
+                Err(CliError::InvalidInput(message))
+                    if message.contains("control atlas identity changed")
+            ),
+            "main token synchronization did not revalidate its captured project identity",
+        )?;
+        let captured_main_direct_read =
+            ProjectAtlasMcpServer::open_read_store(&captured_main_state);
+        require(
+            captured_main_direct_read.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "main direct token read did not revalidate its captured project identity",
+        )?;
         let captured_main_read =
             server.with_fresh_store(&captured_main_state, |_store, _stamp| Ok(()));
         require(
@@ -12422,7 +12453,7 @@ mod tests {
             1,
         )?;
         drop(control);
-        synchronize_registered_worktree_usage(&control_db, &primary)?;
+        synchronize_registered_worktree_usage(&control_db, &primary, None)?;
         let control = AtlasStore::open_for_project(&control_db, &primary)?;
         require(
             control.registered_worktree_token_overview(&alias)?.calls == 1,
@@ -12437,6 +12468,14 @@ mod tests {
                 .current_dir(&primary)
                 .args(["worktree", "remove", "--force"])
                 .arg(&worktree),
+        )?;
+        require(
+            matches!(
+                synchronize_registered_worktree_usage(&control_db, &primary, None),
+                Err(CliError::InvalidInput(message))
+                    if message.contains("aggregate token totals cannot be synchronized")
+            ),
+            "externally removed bound worktree reported stale aggregate success",
         )?;
         run_fixture_command(
             StdCommand::new("git")
@@ -12477,7 +12516,14 @@ mod tests {
             "replacement Git worktree reused the prior lifecycle identity",
         )?;
 
-        synchronize_registered_worktree_usage(&control_db, &primary)?;
+        require(
+            matches!(
+                synchronize_registered_worktree_usage(&control_db, &primary, None),
+                Err(CliError::InvalidInput(message))
+                    if message.contains("aggregate token totals cannot be synchronized")
+            ),
+            "replacement lifecycle reported stale aggregate success",
+        )?;
         let control = open_atlas_store_read_only_for_project(&control_db, &primary)?;
         require(
             control.registered_worktree_token_overview(&alias)?.calls == 1,
@@ -12585,7 +12631,7 @@ mod tests {
 
         require(
             matches!(
-                synchronize_registered_worktree_usage(&control_db, &primary),
+                synchronize_registered_worktree_usage(&control_db, &primary, None),
                 Err(CliError::Db(
                     DbError::WorktreeTelemetryProjectMismatch { .. }
                 ))
@@ -12598,7 +12644,7 @@ mod tests {
         fs::rename(&git_directory, &unavailable_git_directory)?;
         require(
             matches!(
-                synchronize_registered_worktree_usage(&control_db, &primary),
+                synchronize_registered_worktree_usage(&control_db, &primary, None),
                 Err(CliError::InvalidInput(message))
                     if message.contains("requires Git control evidence")
             ),
@@ -12612,7 +12658,7 @@ mod tests {
         fs::create_dir(&control_head)?;
         require(
             matches!(
-                synchronize_registered_worktree_usage(&control_db, &primary),
+                synchronize_registered_worktree_usage(&control_db, &primary, None),
                 Err(CliError::InvalidInput(message))
                     if message.contains("invalid Git evidence")
             ),
@@ -12627,7 +12673,7 @@ mod tests {
         drop(corrupt);
         require(
             matches!(
-                synchronize_registered_worktree_usage(&control_db, &primary),
+                synchronize_registered_worktree_usage(&control_db, &primary, None),
                 Err(CliError::Db(DbError::TelemetryIntegerOverflow {
                     field: "usage_aggregate_revisions.revision"
                 }))
@@ -12638,7 +12684,7 @@ mod tests {
         fs::remove_file(&target_db)?;
         require(
             matches!(
-                synchronize_registered_worktree_usage(&control_db, &primary),
+                synchronize_registered_worktree_usage(&control_db, &primary, None),
                 Err(CliError::InvalidInput(message))
                     if message.contains("aggregate token totals cannot be synchronized")
             ),
@@ -12646,7 +12692,7 @@ mod tests {
         )?;
         fs::create_dir(&target_db)?;
         require(
-            synchronize_registered_worktree_usage(&control_db, &primary).is_err(),
+            synchronize_registered_worktree_usage(&control_db, &primary, None).is_err(),
             "aggregate synchronization hid the existing local atlas open failure",
         )
     }

@@ -29,7 +29,7 @@ use projectatlas_cli::optional_parser_lifecycle::{
     OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH, OptionalParserPackLifecycle,
     OptionalParserPackLifecycleReport, OptionalParserPackProjectSelection,
 };
-use projectatlas_core::graph::{ExtendedRelationKind, GraphRelationKind};
+use projectatlas_core::graph::{ExtendedRelationKind, GraphRelationKind, ProjectInstanceId};
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
@@ -777,12 +777,14 @@ pub(crate) fn open_federated_atlas_stores_for_project(
     Ok(stores)
 }
 
-/// Synchronize every structurally available registered worktree's local aggregate snapshot.
+/// Synchronize active registrations, refusing stale success for unavailable bound worktrees.
 pub(crate) fn synchronize_registered_worktree_usage(
     control_db: &Path,
     control_root: &Path,
+    expected_control_project: Option<ProjectInstanceId>,
 ) -> Result<(), CliError> {
     let control_reader = open_atlas_store_read_only_for_project(control_db, control_root)?;
+    require_synchronization_control_identity(&control_reader, expected_control_project)?;
     let registrations = control_reader.worktree_registrations(false)?;
     drop(control_reader);
     if registrations.is_empty() {
@@ -815,27 +817,41 @@ pub(crate) fn synchronize_registered_worktree_usage(
         ));
     }
     let control = open_atlas_store_for_project(control_db, control_root)?;
+    require_synchronization_control_identity(&control, expected_control_project)?;
     let common = normalize_native_path_display(&repository.common_directory);
     for registration in registrations {
+        let synchronization_incomplete = || {
+            CliError::InvalidInput(format!(
+                "registered worktree '{}': its bound local atlas is unavailable, so aggregate token totals cannot be synchronized",
+                registration.alias
+            ))
+        };
         if registration.git_common_directory != common {
+            if registration.project_instance_id.is_some() {
+                return Err(synchronization_incomplete());
+            }
             continue;
         }
-        let Some(entry) = repository.worktrees.iter().find(|entry| {
-            entry.administrative_directory.to_str().is_some()
-                && normalize_native_path_display(&entry.administrative_directory)
-                    == registration.git_administrative_directory
-        }) else {
-            continue;
-        };
-        let Ok(administrative_identity) =
-            git_administrative_identity(&entry.administrative_directory)
-        else {
-            continue;
-        };
-        if administrative_identity != registration.git_administrative_identity {
-            continue;
-        }
-        let GitWorktreeState::Active { root, .. } = &entry.state else {
+        let root = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                entry.administrative_directory.to_str().is_some()
+                    && normalize_native_path_display(&entry.administrative_directory)
+                        == registration.git_administrative_directory
+            })
+            .filter(|entry| {
+                git_administrative_identity(&entry.administrative_directory)
+                    .is_ok_and(|identity| identity == registration.git_administrative_identity)
+            })
+            .and_then(|entry| match &entry.state {
+                GitWorktreeState::Active { root, .. } => Some(root),
+                GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
+            });
+        let Some(root) = root else {
+            if registration.project_instance_id.is_some() {
+                return Err(synchronization_incomplete());
+            }
             continue;
         };
         if root.to_str().is_none() {
@@ -849,10 +865,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if registration.project_instance_id.is_some() {
-                    return Err(CliError::InvalidInput(format!(
-                        "registered worktree '{}': its bound local atlas is missing, so aggregate token totals cannot be synchronized",
-                        registration.alias
-                    )));
+                    return Err(synchronization_incomplete());
                 }
                 continue;
             }
@@ -870,6 +883,19 @@ pub(crate) fn synchronize_registered_worktree_usage(
             )?;
         }
         control.synchronize_worktree_usage(&registration.alias, &snapshot)?;
+    }
+    Ok(())
+}
+
+/// Keep synchronization on the control atlas captured by an alias-routed request.
+fn require_synchronization_control_identity(
+    control: &AtlasStore,
+    expected: Option<ProjectInstanceId>,
+) -> Result<(), CliError> {
+    if expected.is_some() && control.project_instance_id()? != expected {
+        return Err(CliError::InvalidInput(
+            "control atlas identity changed before registered worktree synchronization".to_string(),
+        ));
     }
     Ok(())
 }

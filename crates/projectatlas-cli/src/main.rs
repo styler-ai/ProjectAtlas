@@ -2779,7 +2779,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             theme,
         } => {
             if session.is_none() {
-                synchronize_registered_worktree_usage(&cli.db, &cli.project_root()?)?;
+                synchronize_registered_worktree_usage(&cli.db, &cli.project_root()?, None)?;
             }
             let store = open_index_for_current_read(cli)?;
             if let Some(window) = trend {
