@@ -305,7 +305,7 @@ struct InspectedCommonDirectory {
 }
 
 /// Bounded local Git config facts needed for read-only source selection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct GitLocalConfigPolicy {
     /// Explicit local `core.bare` setting, when present and include-free.
     bare_setting: Option<bool>,
@@ -313,6 +313,10 @@ struct GitLocalConfigPolicy {
     source_root_inference_safe: bool,
     /// Whether Git reads per-worktree values from `config.worktree`.
     worktree_config_enabled: bool,
+    /// Configured `core.worktree` value, resolved only by an exact pointer owner.
+    worktree_setting: Option<PathBuf>,
+    /// Whether the bounded source-selection subset was parsed without uncertainty.
+    source_selection_policy_complete: bool,
 }
 
 /// Internal selection branch used while constructing the common inventory.
@@ -415,9 +419,11 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
                 &git_control_path,
                 &common_directory.path,
             )?;
-            validate_linked_source_configuration(
+            validate_pointer_source_configuration(
+                &root,
                 &common_directory.path,
                 &administrative_directory,
+                true,
             )?;
             Ok(SelectedWorktree {
                 root,
@@ -432,6 +438,12 @@ fn inspect_worktree(root: &Path) -> Result<SelectedWorktree, GitStructureIssue> 
         }
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
             let common_directory = inspect_common_directory(&administrative_directory)?;
+            validate_pointer_source_configuration(
+                &root,
+                &common_directory.path,
+                &administrative_directory,
+                false,
+            )?;
             Ok(SelectedWorktree {
                 root,
                 git_control_path: canonicalize_issue(&git_control_path, &git_control_path)?,
@@ -470,6 +482,8 @@ fn inspect_common_directory(path: &Path) -> Result<InspectedCommonDirectory, Git
             bare_setting: None,
             source_root_inference_safe: true,
             worktree_config_enabled: false,
+            worktree_setting: None,
+            source_selection_policy_complete: true,
         },
         Err(source) => {
             return Err(issue(
@@ -552,6 +566,8 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             bare_setting: None,
             source_root_inference_safe: false,
             worktree_config_enabled: false,
+            worktree_setting: None,
+            source_selection_policy_complete: false,
         });
     }
     let mut in_core = false;
@@ -560,6 +576,8 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     let mut bare_setting = None;
     let mut source_root_inference_safe = true;
     let mut worktree_config_enabled = false;
+    let mut worktree_setting = None;
+    let mut source_selection_policy_complete = true;
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -591,38 +609,60 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             .trim()
             .trim_matches('"');
         if in_extensions && key.eq_ignore_ascii_case("worktreeconfig") {
-            worktree_config_enabled = !matches!(
-                value.to_ascii_lowercase().as_str(),
-                "" | "false" | "no" | "off" | "0"
-            );
+            if let Some(enabled) = parse_git_boolean(value) {
+                worktree_config_enabled = enabled;
+            } else {
+                source_root_inference_safe = false;
+                worktree_config_enabled = false;
+                source_selection_policy_complete = false;
+            }
             continue;
         }
         if !in_core {
             continue;
         }
         if key.eq_ignore_ascii_case("worktree") {
+            worktree_setting = (!value.is_empty()).then(|| PathBuf::from(value));
             source_root_inference_safe = false;
+            source_selection_policy_complete &= worktree_setting.is_some();
             continue;
         }
         if !key.eq_ignore_ascii_case("bare") {
             continue;
         }
-        bare_setting = Some(!matches!(
-            value.to_ascii_lowercase().as_str(),
-            "" | "false" | "no" | "off" | "0"
-        ));
+        if let Some(bare) = parse_git_boolean(value) {
+            bare_setting = Some(bare);
+        } else {
+            bare_setting = None;
+            source_root_inference_safe = false;
+            source_selection_policy_complete = false;
+        }
     }
+    source_selection_policy_complete &= !has_include;
     Ok(GitLocalConfigPolicy {
         bare_setting: (!has_include).then_some(bare_setting).flatten(),
         source_root_inference_safe: source_root_inference_safe && !has_include,
         worktree_config_enabled,
+        worktree_setting,
+        source_selection_policy_complete,
     })
 }
 
-/// Reject linked-checkout configuration that can select source outside its pointer owner.
-fn validate_linked_source_configuration(
+/// Parse the bounded Git boolean forms that can affect source selection.
+fn parse_git_boolean(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "" | "false" | "no" | "off" | "0" => Some(false),
+        "true" | "yes" | "on" | "1" => Some(true),
+        _ => None,
+    }
+}
+
+/// Reject pointer-owned configuration that selects source outside its owner.
+fn validate_pointer_source_configuration(
+    root: &Path,
     common_directory: &Path,
     administrative_directory: &Path,
+    common_manager_may_be_bare: bool,
 ) -> Result<(), GitStructureIssue> {
     let common_config = common_directory.join("config");
     let common_policy = match fs::symlink_metadata(&common_config) {
@@ -637,12 +677,13 @@ fn validate_linked_source_configuration(
             ));
         }
     };
-    if !common_policy.source_root_inference_safe {
-        return Err(issue(
-            common_config,
-            GitStructureIssueKind::UnsupportedSourceConfiguration,
-        ));
-    }
+    validate_pointer_config_policy(
+        &common_config,
+        administrative_directory,
+        root,
+        &common_policy,
+        common_manager_may_be_bare,
+    )?;
     if !common_policy.worktree_config_enabled {
         return Ok(());
     }
@@ -660,11 +701,41 @@ fn validate_linked_source_configuration(
             ));
         }
     };
-    if worktree_policy.source_root_inference_safe && worktree_policy.bare_setting != Some(true) {
+    validate_pointer_config_policy(
+        &worktree_config,
+        administrative_directory,
+        root,
+        &worktree_policy,
+        false,
+    )
+}
+
+/// Require one bounded config policy to preserve an exact pointer owner.
+fn validate_pointer_config_policy(
+    config_path: &Path,
+    administrative_directory: &Path,
+    root: &Path,
+    policy: &GitLocalConfigPolicy,
+    bare_allowed: bool,
+) -> Result<(), GitStructureIssue> {
+    if !policy.source_selection_policy_complete
+        || !bare_allowed && policy.bare_setting == Some(true)
+    {
+        return Err(issue(
+            config_path.to_path_buf(),
+            GitStructureIssueKind::UnsupportedSourceConfiguration,
+        ));
+    }
+    let Some(setting) = &policy.worktree_setting else {
+        return Ok(());
+    };
+    let configured_root =
+        resolve_existing_directory(config_path, administrative_directory, setting)?;
+    if paths_equal(&configured_root, root) {
         Ok(())
     } else {
         Err(issue(
-            worktree_config,
+            config_path.to_path_buf(),
             GitStructureIssueKind::UnsupportedSourceConfiguration,
         ))
     }
@@ -1611,6 +1682,24 @@ mod tests {
             &submodule.canonicalize()?,
             GitWorktreeRole::Primary,
         )?;
+        let submodule_administrative_directory =
+            active_entry_for_root(&submodule_structure, &submodule.canonicalize()?)?
+                .administrative_directory
+                .clone();
+        let submodule_config_path = submodule_administrative_directory.join("config");
+        let submodule_config = fs::read(&submodule_config_path)?;
+        run_command(
+            Command::new("git")
+                .current_dir(&submodule)
+                .args(["config", "core.worktree"])
+                .arg(&configured_worktree),
+        )?;
+        require_invalid_kind(
+            discover_repository_structure(&submodule)?,
+            |kind| matches!(kind, GitStructureIssueKind::UnsupportedSourceConfiguration),
+            "primary pointer core.worktree was admitted as pointer-owned source",
+        )?;
+        fs::write(&submodule_config_path, submodule_config)?;
         run_git(&primary, ["add", ".gitmodules", "vendor/submodule"])?;
         run_git(&primary, ["commit", "-m", "submodule checkout fixture"])?;
 
@@ -1870,6 +1959,34 @@ mod tests {
                     source_selection: GitManagerSourceSelection::None,
                 },
             "empty extensions.worktreeConfig enabled config.worktree and invented a source",
+        )?;
+        fs::remove_file(bare_dot_git.join("config.worktree"))?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        fs::write(
+            &bare_config_path,
+            "[core]\n bare = true\n[extensions]\n worktreeConfig = maybe\n",
+        )?;
+        fs::write(
+            bare_dot_git.join("config.worktree"),
+            "[core]\n bare = false\n",
+        )?;
+        let invalid_worktree_config = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "extensions.worktreeConfig"])
+            .output()?;
+        require(
+            !invalid_worktree_config.status.success(),
+            "Git fixture accepted an invalid extensions.worktreeConfig boolean",
+        )?;
+        let invalid_worktree_config = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            invalid_worktree_config.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
+            "invalid extensions.worktreeConfig enabled config.worktree and invented a source",
         )?;
         fs::remove_file(bare_dot_git.join("config.worktree"))?;
         fs::write(&bare_config_path, &bare_config)?;
