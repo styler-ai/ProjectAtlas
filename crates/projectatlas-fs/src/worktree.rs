@@ -583,6 +583,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     let mut worktree_setting = None;
     let mut source_selection_policy_complete = true;
     let mut repository_format_version = 0_u64;
+    let mut has_object_format_extension = false;
     let mut has_unsupported_repository_extension = false;
     for raw_line in text.lines() {
         let mut line = trim_git_config_whitespace(raw_line);
@@ -649,6 +650,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             continue;
         }
         if in_extensions && key.eq_ignore_ascii_case("objectformat") {
+            has_object_format_extension = true;
             if !matches!(value.as_str(), "sha1" | "sha256") {
                 has_unsupported_repository_extension = true;
             }
@@ -692,7 +694,9 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             source_selection_policy_complete = false;
         }
     }
-    if repository_format_version == 1 && has_unsupported_repository_extension {
+    if (repository_format_version == 1 && has_unsupported_repository_extension)
+        || (repository_format_version != 1 && has_object_format_extension)
+    {
         source_root_inference_safe = false;
         source_selection_policy_complete = false;
     }
@@ -2179,11 +2183,15 @@ mod tests {
         )?;
         fs::write(&bare_config_path, &bare_config)?;
 
-        for unsupported_extension in ["madeup = true", "objectformat = sha512"] {
+        for (repository_format_version, unsupported_extension) in [
+            (1, "madeup = true"),
+            (1, "objectformat = sha512"),
+            (0, "objectformat = sha256"),
+        ] {
             fs::write(
                 &bare_config_path,
                 format!(
-                    "[core]\n repositoryFormatVersion = 1\n bare = false\n[extensions]\n {unsupported_extension}\n"
+                    "[core]\n repositoryFormatVersion = {repository_format_version}\n bare = false\n[extensions]\n {unsupported_extension}\n"
                 ),
             )?;
             let rejected_extension = Command::new("git")
@@ -2193,7 +2201,7 @@ mod tests {
                 .output()?;
             require(
                 !rejected_extension.status.success(),
-                "Git fixture accepted an unsupported format-1 repository extension",
+                "Git fixture accepted a repository extension outside its supported format",
             )?;
             let rejected_extension = require_git(discover_repository_structure(&bare_dot_git)?)?;
             require(
@@ -2201,7 +2209,7 @@ mod tests {
                     == GitRepositorySelection::CommonManager {
                         source_selection: GitManagerSourceSelection::None,
                     },
-                "unsupported format-1 extension invented the manager parent as source",
+                "repository extension outside its supported format invented the manager parent as source",
             )?;
         }
         fs::write(&bare_config_path, &bare_config)?;
