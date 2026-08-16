@@ -671,8 +671,8 @@ const MCP_WORKTREE_PROJECT_PATH_CONFLICT: &str =
     "worktree and project_path are mutually exclusive; choose one target selector";
 /// Reserved alias for the immutable MCP control authority.
 const MCP_MAIN_WORKTREE_ALIAS: &str = "main";
-/// Maximum structural worktree rows emitted in one MCP response.
-const MCP_WORKTREE_LIST_MAX_ROWS: usize = MAX_GIT_WORKTREE_REGISTRATIONS + 1;
+/// Maximum combined structural and unmatched registered rows in one MCP response.
+const MCP_WORKTREE_LIST_MAX_ROWS: usize = (MAX_GIT_WORKTREE_REGISTRATIONS * 2) + 1;
 /// Stable prefix for structural worktree candidates returned to agents.
 const MCP_WORKTREE_SELECTOR_PREFIX: &str = "wt-";
 /// Hex characters retained from the administrative-path digest.
@@ -10949,9 +10949,10 @@ mod tests {
         }));
         require(
             active.contains("total_worktrees: 1026")
-                && active.contains("truncated: true")
-                && active.contains("retired-at-capacity"),
-            "full structural inventory starved the active missing registration",
+                && active.contains("truncated: false")
+                && active.contains("retired-at-capacity")
+                && active.contains("missing-1023"),
+            "combined capacity starved a structural or active missing registration",
         )?;
 
         let store = AtlasStore::open_for_project(&database, &primary)?;

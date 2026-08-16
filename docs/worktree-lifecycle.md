@@ -43,7 +43,7 @@ atlas_watch_once(worktree: "issue-430")
 atlas_file_summary(worktree: "issue-430", file: "src/lib.rs", compact: true)
 ```
 
-`atlas_worktree_list` joins the complete admitted structural inventory (the primary plus at most 1,024 linked registrations) to the bounded control catalog and returns stable selectors. If Git externally removes a registered worktree, the active alias remains visible with its last validated root, retained telemetry revision, and typed missing state—even at the response ceiling—so the agent can pass that alias to `atlas_worktree_remove`. `atlas_worktree_add` accepts one structural selector or one uniquely matching human selector; ambiguity returns bounded candidates instead of guessing. Registration does not create the target atlas. `atlas_init(worktree=...)` is the explicit operation that initializes an absent registered target.
+`atlas_worktree_list` joins the complete admitted structural inventory (the primary plus at most 1,024 linked registrations) to at most 1,024 unmatched active control registrations, for at most 2,049 combined rows. If Git externally removes a registered worktree, the active alias remains visible with its last validated root, retained telemetry revision, and typed missing state—even when the structural inventory is full—so the agent can pass that alias to `atlas_worktree_remove`. `atlas_worktree_add` accepts one structural selector or one uniquely matching human selector; ambiguity returns bounded candidates instead of guessing. Registration does not create the target atlas. `atlas_init(worktree=...)` is the explicit operation that initializes an absent registered target.
 
 All normal root-scoped MCP tools use one mutually exclusive selection boundary:
 
