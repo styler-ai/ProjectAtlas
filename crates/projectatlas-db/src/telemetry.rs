@@ -1688,30 +1688,47 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
             reason: "aggregate snapshot logical-byte contract changed",
         });
     }
-    let incoming_lifetime = snapshot
-        .rows
-        .iter()
-        .filter(|row| row.day_epoch == -1)
-        .try_fold(AggregateCounters::default(), |total, row| {
-            total.checked_add(row.counters)
-        })?;
+    let mut incoming_lifetime = BTreeMap::<DimensionValues, AggregateCounters>::new();
+    for row in snapshot.rows.iter().filter(|row| row.day_epoch == -1) {
+        let dimension =
+            snapshot
+                .dimensions
+                .get(&row.dimension_id)
+                .ok_or(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot lifetime dimension is missing",
+                })?;
+        let total = incoming_lifetime.entry(dimension.clone()).or_default();
+        *total = total.checked_add(row.counters)?;
+    }
     let accepted_lifetime = {
         let mut statement = connection.prepare_cached(
-            "SELECT calls, estimated_without, estimated_with, observed_without,
-                    observed_with, modeled_without, modeled_with,
+            "SELECT d.token_savings_bucket, d.provider, d.model, d.tokenizer_backend,
+                    d.accuracy, d.baseline_kind, d.confidence, d.accounting_layer,
+                    d.estimate_method, d.denominator_kind, d.dedupe_scope, d.overflow,
+                    a.calls, a.estimated_without, a.estimated_with, a.observed_without,
+                    a.observed_with, a.modeled_without, a.modeled_with,
                     deduped_modeled_without, deduped_modeled_with, repeated_baselines,
                     observed_file_read_replacements, modeled_file_reads_avoided
-             FROM worktree_usage_aggregates
-             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch = -1",
+             FROM worktree_usage_aggregates AS a
+                  INDEXED BY idx_worktree_usage_aggregates_day_registration
+             JOIN usage_bucket_dimensions AS d USING(dimension_id)
+             WHERE a.registration_id = ?1 AND a.source_kind = ?2 AND a.day_epoch = -1
+             ORDER BY a.dimension_id",
         )?;
         let mut rows = statement.query(params![registration_id, WORKTREE_USAGE_SYNCHRONIZED])?;
-        let mut total = AggregateCounters::default();
+        let mut totals = BTreeMap::<DimensionValues, AggregateCounters>::new();
         while let Some(row) = rows.next()? {
-            total = total.checked_add(read_counters_offset(row, 0)?)?;
+            let dimension = read_dimension(row, 0)?;
+            let total = totals.entry(dimension).or_default();
+            *total = total.checked_add(read_counters_offset(row, 12)?)?;
         }
-        total
+        totals
     };
-    if !incoming_lifetime.contains(accepted_lifetime) {
+    if accepted_lifetime.iter().any(|(dimension, accepted)| {
+        !incoming_lifetime
+            .get(dimension)
+            .is_some_and(|incoming| incoming.contains(*accepted))
+    }) {
         return Err(DbError::WorktreeRegistrationRow {
             reason: "aggregate snapshot reduces accepted lifetime totals",
         });
@@ -7356,6 +7373,42 @@ mod tests {
 
         let mut restored = first;
         restored.revision = 3;
+        let source_dimension = restored
+            .dimensions
+            .values()
+            .next()
+            .cloned()
+            .ok_or_else(|| io::Error::other("restored source dimension missing"))?;
+        let compensating_counters = second
+            .rows
+            .iter()
+            .filter(|row| row.day_epoch == -1)
+            .try_fold(AggregateCounters::default(), |total, row| {
+                total.checked_add(row.counters)
+            })?;
+        let compensating_dimension_id = restored
+            .dimensions
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or_default()
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("restored dimension identifier overflow"))?;
+        let mut compensating_dimension = source_dimension;
+        compensating_dimension.model.push_str("-other");
+        restored
+            .dimensions
+            .insert(compensating_dimension_id, compensating_dimension);
+        restored.rows.push(WorktreeUsageSnapshotRow {
+            day_epoch: -1,
+            dimension_id: compensating_dimension_id,
+            counters: compensating_counters,
+        });
+        restored.logical_bytes = validate_worktree_usage_snapshot(
+            &restored.dimensions,
+            &restored.rows,
+            TelemetryRetentionPolicy::default().validate()?,
+        )?;
         require(
             matches!(
                 control.synchronize_worktree_usage(&alias, &restored),

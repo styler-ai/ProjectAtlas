@@ -614,13 +614,27 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             in_extensions = !has_subsection && section_name.eq_ignore_ascii_case("extensions");
             continue;
         }
-        if !in_core && !in_extensions {
-            continue;
-        }
         let (key, raw_value) = line
             .split_once('=')
             .map_or((line, "true"), |(key, value)| (key, value));
         let key = key.trim();
+        let mut key_bytes = key.bytes();
+        if !key_bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+            || !key_bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Ok(GitLocalConfigPolicy {
+                bare_setting: None,
+                source_root_inference_safe: false,
+                worktree_config_enabled: false,
+                worktree_setting: None,
+                source_selection_policy_complete: false,
+            });
+        }
+        if !in_core && !in_extensions {
+            continue;
+        }
         if in_extensions && key.eq_ignore_ascii_case("worktreeconfig") {
             let Some(value) = git_config_value(raw_value) else {
                 source_root_inference_safe = false;
@@ -2179,6 +2193,7 @@ mod tests {
         for malformed_config in [
             "[core\n bare = false\n",
             "[core] trailing garbage\n bare = false\n",
+            "[core]\n bare = true\n bad line\n bare = false\n",
         ] {
             fs::write(&bare_config_path, malformed_config)?;
             let malformed_bare = Command::new("git")
@@ -2188,7 +2203,7 @@ mod tests {
                 .output()?;
             require(
                 !malformed_bare.status.success(),
-                "Git fixture accepted a malformed section header",
+                "Git fixture accepted malformed local config",
             )?;
             let malformed_bare = require_git(discover_repository_structure(&bare_dot_git)?)?;
             require(
@@ -2196,7 +2211,7 @@ mod tests {
                     == GitRepositorySelection::CommonManager {
                         source_selection: GitManagerSourceSelection::None,
                     },
-                "malformed section header invented the manager parent as source",
+                "malformed local config invented the manager parent as source",
             )?;
         }
         fs::write(&bare_config_path, &bare_config)?;
