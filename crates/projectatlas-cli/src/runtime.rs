@@ -783,13 +783,40 @@ pub(crate) fn synchronize_registered_worktree_usage(
     control_root: &Path,
     expected_control_project: Option<ProjectInstanceId>,
 ) -> Result<(), CliError> {
+    synchronize_registered_worktree_usage_with_catalog_validation(
+        control_db,
+        control_root,
+        expected_control_project,
+        || Ok(()),
+    )
+}
+
+/// Synchronize active registrations with one injectable final catalog boundary.
+fn synchronize_registered_worktree_usage_with_catalog_validation(
+    control_db: &Path,
+    control_root: &Path,
+    expected_control_project: Option<ProjectInstanceId>,
+    before_catalog_validation: impl FnOnce() -> Result<(), CliError>,
+) -> Result<(), CliError> {
     let control_reader = open_atlas_store_read_only_for_project(control_db, control_root)?;
     let control_project =
         require_synchronization_control_identity(&control_reader, expected_control_project)?;
     let registrations = control_reader.worktree_registrations(false)?;
     drop(control_reader);
     if registrations.is_empty() {
-        return Ok(());
+        before_catalog_validation()?;
+        let control = open_atlas_store_for_project(control_db, control_root)?;
+        require_synchronization_control_identity(&control, Some(control_project))?;
+        if control
+            .active_worktree_registrations_with_writer_exclusion()?
+            .is_empty()
+        {
+            return Ok(());
+        }
+        return Err(CliError::InvalidInput(
+            "registered worktree catalog changed during aggregate synchronization; retry the token report"
+                .to_string(),
+        ));
     }
     let repository = match projectatlas_fs::worktree::discover_repository_structure(control_root)? {
         RepositoryStructure::Git(repository) => repository,
@@ -820,7 +847,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
     let control = open_atlas_store_for_project(control_db, control_root)?;
     require_synchronization_control_identity(&control, Some(control_project))?;
     let common = normalize_native_path_display(&repository.common_directory);
-    for registration in registrations {
+    for registration in &registrations {
         let synchronization_incomplete = || {
             CliError::InvalidInput(format!(
                 "registered worktree '{}': its bound local atlas is unavailable, so aggregate token totals cannot be synchronized",
@@ -833,7 +860,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
             }
             continue;
         }
-        let root = registered_worktree_root(&repository, &registration);
+        let root = registered_worktree_root(&repository, registration);
         let Some(root) = root else {
             if registration.project_instance_id.is_some() {
                 return Err(synchronization_incomplete());
@@ -892,6 +919,22 @@ pub(crate) fn synchronize_registered_worktree_usage(
         if let Some(snapshot) = snapshot {
             control.synchronize_worktree_usage(&registration.alias, &snapshot)?;
         }
+    }
+    before_catalog_validation()?;
+    let current = control.active_worktree_registrations_with_writer_exclusion()?;
+    if current.len() != registrations.len()
+        || current
+            .iter()
+            .zip(&registrations)
+            .any(|(current, captured)| {
+                current.registration_id != captured.registration_id
+                    || current.alias != captured.alias
+            })
+    {
+        return Err(CliError::InvalidInput(
+            "registered worktree catalog changed during aggregate synchronization; retry the token report"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -8478,7 +8521,7 @@ mod tests {
         DocumentTargetUnresolvedReason, ExtendedRelationKind, GraphRelationKind,
         RelationResolution, RepositoryNodePath,
     };
-    use projectatlas_db::{RepositoryGraphRelationQuery, WorktreeAlias};
+    use projectatlas_db::{DbError, RepositoryGraphRelationQuery, WorktreeAlias};
     use std::error::Error;
     use std::fmt::Debug;
     use std::process::Command as StdCommand;
@@ -8523,6 +8566,62 @@ mod tests {
                 .is_err_and(|error| error.to_string().contains("control atlas identity changed")),
             &true,
             "replacement control identity rejection",
+        )
+    }
+
+    #[test]
+    fn synchronization_rejects_a_registration_committed_after_catalog_capture()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("control");
+        let database = root.join(".projectatlas/projectatlas.db");
+        let common = temp.path().join("common.git");
+        let admin = common.join("worktrees/added");
+        let target = temp.path().join("added");
+        for path in [&root, &admin, &target] {
+            fs::create_dir_all(path)?;
+        }
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("control database has no parent"))?,
+        )?;
+        let control = AtlasStore::open_for_project(&database, &root)?;
+        let control_project = control
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let alias = WorktreeAlias::parse("added")?;
+
+        let result = synchronize_registered_worktree_usage_with_catalog_validation(
+            &database,
+            &root,
+            Some(control_project),
+            || {
+                control.register_worktree(
+                    &alias,
+                    &common,
+                    &admin,
+                    &"01".repeat(32),
+                    &target,
+                    None,
+                    1,
+                )?;
+                Ok(())
+            },
+        );
+        require_eq(
+            &result.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains("catalog changed during aggregate synchronization")
+            }),
+            &true,
+            "concurrent registration catalog rejection",
+        )?;
+        require_eq(
+            &control.worktree_registration(&alias)?.registration_id,
+            &1,
+            "concurrently committed registration",
         )
     }
 

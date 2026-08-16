@@ -7987,26 +7987,49 @@ impl ProjectAtlasMcpServer {
             })?;
             Self::revalidate_local_worktree_atlas_identity(root, project_instance_id)?;
             let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
-            let registration = control.register_worktree(
-                &alias,
-                &repository.common_directory,
-                &entry.administrative_directory,
-                &administrative_identity,
-                root,
-                project_instance_id,
-                Self::current_epoch_seconds()?,
-            )?;
-            let telemetry_sync = local.as_ref().and_then(|local| {
-                match control.synchronize_worktree_usage(&alias, &local.snapshot) {
-                    Ok(state) => Some(state),
+            let created_at_epoch = Self::current_epoch_seconds()?;
+            let (registration, telemetry_sync) = if let Some(local) = local.as_ref() {
+                match control.register_worktree_with_usage_snapshot(
+                    &alias,
+                    &repository.common_directory,
+                    &entry.administrative_directory,
+                    &administrative_identity,
+                    root,
+                    local.project_instance_id,
+                    &local.snapshot,
+                    created_at_epoch,
+                ) {
+                    Ok((registration, state)) => (registration, Some(state)),
                     Err(error) => {
+                        let registration = control.register_worktree(
+                            &alias,
+                            &repository.common_directory,
+                            &entry.administrative_directory,
+                            &administrative_identity,
+                            root,
+                            project_instance_id,
+                            created_at_epoch,
+                        )?;
                         blocker = Some(format!(
                             "registration committed; local telemetry remains pending: {error}"
                         ));
-                        None
+                        (registration, None)
                     }
                 }
-            });
+            } else {
+                (
+                    control.register_worktree(
+                        &alias,
+                        &repository.common_directory,
+                        &entry.administrative_directory,
+                        &administrative_identity,
+                        root,
+                        project_instance_id,
+                        created_at_epoch,
+                    )?,
+                    None,
+                )
+            };
             Self::encode_named_payload(
                 MCP_PAYLOAD_WORKTREE,
                 &McpWorktreeMutationReport {
@@ -10221,7 +10244,7 @@ mod tests {
         };
         Ok(RegisteredWorktreeRaceFixture {
             _temp: temp,
-            primary,
+            primary: control_root.clone(),
             control_root,
             linked,
             control_db,

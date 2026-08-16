@@ -406,6 +406,46 @@ impl AtlasStore {
         })
     }
 
+    /// Register one initialized worktree and import its captured usage atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns any registration or snapshot synchronization error without making
+    /// the registration visible.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_worktree_with_usage_snapshot(
+        &self,
+        alias: &WorktreeAlias,
+        git_common_directory: &Path,
+        git_administrative_directory: &Path,
+        git_administrative_identity: &str,
+        root: &Path,
+        project_instance_id: ProjectInstanceId,
+        snapshot: &WorktreeUsageSnapshot,
+        created_at_epoch: u64,
+    ) -> DbResult<(WorktreeRegistration, WorktreeUsageSyncState)> {
+        self.with_validated_write(|transaction| {
+            let registration = self.register_worktree(
+                alias,
+                git_common_directory,
+                git_administrative_directory,
+                git_administrative_identity,
+                root,
+                Some(project_instance_id),
+                created_at_epoch,
+            )?;
+            let synchronization = telemetry::synchronize_worktree_usage_snapshot(
+                transaction,
+                registration.registration_id,
+                snapshot,
+            )?;
+            Ok((
+                load_by_id(transaction, registration.registration_id)?,
+                synchronization,
+            ))
+        })
+    }
+
     /// Refresh the canonical root of one captured active registration.
     ///
     /// # Errors
@@ -486,6 +526,18 @@ impl AtlasStore {
             });
         }
         Ok(registrations)
+    }
+
+    /// Snapshot active registration identities under control-writer exclusion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed persisted rows, a changed database
+    /// binding, or any `SQLite` transaction failure.
+    pub fn active_worktree_registrations_with_writer_exclusion(
+        &self,
+    ) -> DbResult<Vec<WorktreeRegistration>> {
+        self.with_validated_write(|_| self.worktree_registrations(false))
     }
 
     /// Run one short operation while an exact active registration owns control-writer exclusion.
@@ -1513,6 +1565,79 @@ mod tests {
             "active registration after failed final synchronization",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn registration_and_initial_usage_snapshot_commit_atomically() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let local_root = temp.path().join("local");
+        let common = temp.path().join("common.git");
+        let admin = common.join("worktrees/local");
+        for path in [&control_root, &local_root, &admin] {
+            fs::create_dir_all(path)?;
+        }
+        let control =
+            AtlasStore::open_for_project(&control_root.join("projectatlas.db"), &control_root)?;
+        let local = AtlasStore::open_for_project(&local_root.join("projectatlas.db"), &local_root)?;
+        local.record_usage(&projectatlas_core::telemetry::usage_from_estimates(
+            "atomic-registration",
+            "atlas_overview",
+            None,
+            None,
+            100,
+            20,
+        ))?;
+        let snapshot = local.export_worktree_usage_snapshot()?;
+        let project = snapshot.project_instance_id();
+        let mismatched_project = if project == identity(7)? {
+            identity(8)?
+        } else {
+            identity(7)?
+        };
+        let alias = WorktreeAlias::parse("local")?;
+
+        require(
+            matches!(
+                control.register_worktree_with_usage_snapshot(
+                    &alias,
+                    &common,
+                    &admin,
+                    &administrative_identity(1),
+                    &local_root,
+                    mismatched_project,
+                    &snapshot,
+                    1,
+                ),
+                Err(DbError::WorktreeTelemetryProjectMismatch { .. })
+            ),
+            "failed initial snapshot synchronization made a registration visible",
+        )?;
+        require(
+            matches!(
+                control.worktree_registration(&alias),
+                Err(DbError::WorktreeRegistrationNotFound { .. })
+            ) && control.repository_token_overview()?.calls == 0,
+            "failed initial snapshot synchronization changed registration or aggregate state",
+        )?;
+
+        let (registration, synchronization) = control.register_worktree_with_usage_snapshot(
+            &alias,
+            &common,
+            &admin,
+            &administrative_identity(1),
+            &local_root,
+            project,
+            &snapshot,
+            1,
+        )?;
+        require(
+            registration.project_instance_id == Some(project)
+                && registration.accepted_telemetry_revision == snapshot.revision()
+                && synchronization == WorktreeUsageSyncState::Synchronized
+                && control.repository_token_overview()?.calls == 1,
+            "successful initial registration exposed incomplete aggregate state",
+        )
     }
 
     #[test]
