@@ -1521,7 +1521,7 @@ struct McpWorktreeSelection {
     alias: String,
     /// Durable registration identity; absent only for reserved `main`.
     registration_id: Option<i64>,
-    /// Project identity already bound in the control catalog, when present.
+    /// Project identity captured for the selected alias target, when present.
     project_instance_id: Option<ProjectInstanceId>,
 }
 
@@ -3995,6 +3995,18 @@ impl ProjectAtlasMcpServer {
         control_state: &McpProjectState,
     ) -> Result<AtlasStore, CliError> {
         let store = open_atlas_store_for_project(&state.db_path, &state.root)?;
+        if let Some(expected) = state
+            .worktree
+            .as_ref()
+            .and_then(|selection| selection.project_instance_id)
+        {
+            let observed = store.captured_project_binding()?.project_instance_id;
+            if observed != expected {
+                return Err(CliError::InvalidInput(
+                    MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string(),
+                ));
+            }
+        }
         let Some(selection) = state
             .worktree
             .as_ref()
@@ -6123,10 +6135,15 @@ impl ProjectAtlasMcpServer {
         }
         if alias == MCP_MAIN_WORKTREE_ALIAS {
             let mut state = self.control_state.clone();
+            let project_instance_id = if state.db_path.is_file() {
+                Self::open_read_store(&state)?.project_instance_id()?
+            } else {
+                None
+            };
             state.worktree = Some(McpWorktreeSelection {
                 alias,
                 registration_id: None,
-                project_instance_id: None,
+                project_instance_id,
             });
             return Ok(state);
         }
@@ -11748,6 +11765,17 @@ mod tests {
             server.federated_worktree_roots(&captured_federated_aliases)?;
         let captured_main_state = server.state_for_target(None, Some("main".to_string()))?;
         let control_after_init = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        let control_project = control_after_init
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("control project identity is missing"))?;
+        require(
+            captured_main_state
+                .worktree
+                .as_ref()
+                .and_then(|selection| selection.project_instance_id)
+                == Some(control_project),
+            "main alias did not capture the current control atlas identity",
+        )?;
         require(
             control_after_init
                 .load_node_by_path("src/branch.rs")?
@@ -11762,6 +11790,75 @@ mod tests {
             "successful alias init did not bind the exact target atlas identity",
         )?;
         drop(control_after_init);
+        let control_state = primary.join(PROJECTATLAS_DIR_NAME);
+        let preserved_control_state = primary.join(".projectatlas-captured-main");
+        fs::rename(&control_state, &preserved_control_state)?;
+        fs::create_dir(&control_state)?;
+        init_project_with_config(&primary, captured_main_state.config_path.as_deref())?;
+        let mut replacement_control = AtlasStore::open_for_project(&control_db, &primary)?;
+        let replacement_control_plan =
+            ScanRuntimePlan::for_path(captured_main_state.config_path.as_deref(), &primary, None)?;
+        run_scan_pipeline(
+            &mut replacement_control,
+            &replacement_control_plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+        )?;
+        require(
+            replacement_control.project_instance_id()? != Some(control_project),
+            "replacement control atlas reused the captured main identity",
+        )?;
+        drop(replacement_control);
+        let captured_main_read =
+            server.with_fresh_store(&captured_main_state, |_store, _stamp| Ok(()));
+        require(
+            captured_main_read.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "main read snapshot did not revalidate its captured project identity",
+        )?;
+        let captured_main_write = ProjectAtlasMcpServer::open_existing_mut_store(
+            &captured_main_state,
+            &server.control_state,
+        );
+        require(
+            captured_main_write.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "main mutation did not revalidate its captured project identity",
+        )?;
+        let captured_federated_labels = captured_federated_selections
+            .iter()
+            .map(|selection| selection.alias.clone())
+            .collect::<Vec<_>>();
+        let federated_control =
+            index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
+        let captured_federated_stores = open_federated_atlas_stores_for_project(
+            &captured_main_state.db_path,
+            &captured_main_state.root,
+            captured_main_state.config_path.as_deref(),
+            &captured_federated_roots,
+            Some(&captured_federated_labels),
+            &federated_control,
+        )?;
+        let captured_main_federation = ProjectAtlasMcpServer::require_federated_worktree_identities(
+            captured_federated_stores,
+            &captured_federated_selections,
+        );
+        require(
+            captured_main_federation.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+                    && error.to_string().contains(MCP_MAIN_WORKTREE_ALIAS)
+            }),
+            "federation did not revalidate the captured main identity",
+        )?;
+        fs::remove_dir_all(&control_state)?;
+        fs::rename(&preserved_control_state, &control_state)?;
         let target_state = worktree_a.join(PROJECTATLAS_DIR_NAME);
         let preserved_target_state = worktree_a.join(".projectatlas-registered");
         fs::rename(&target_state, &preserved_target_state)?;
