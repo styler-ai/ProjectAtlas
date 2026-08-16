@@ -573,6 +573,7 @@ fn has_git_control_markers(path: &Path) -> FsResult<bool> {
 /// Continued values fail closed because this bounded reader does not interpret full Git syntax.
 fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructureIssue> {
     let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let mut in_core = false;
     let mut in_extensions = false;
     let mut has_include = false;
@@ -1691,6 +1692,26 @@ mod tests {
         )?;
         fs::write(&config_path, &config)?;
 
+        let mut bom_config = b"\xef\xbb\xbf".to_vec();
+        bom_config.extend_from_slice(&config);
+        fs::write(&config_path, &bom_config)?;
+        let bom_bare = Command::new("git")
+            .arg("--git-dir")
+            .arg(primary.join(".git"))
+            .args(["config", "--bool", "core.bare"])
+            .output()?;
+        require(
+            bom_bare.status.success() && String::from_utf8(bom_bare.stdout)?.trim() == "false",
+            "Git fixture did not accept a UTF-8 BOM in local config",
+        )?;
+        let bom_checkout = require_git(discover_repository_structure(&primary.join("src"))?)?;
+        require_worktree_selection(
+            &bom_checkout,
+            &primary.canonicalize()?,
+            GitWorktreeRole::Primary,
+        )?;
+        fs::write(&config_path, &config)?;
+
         run_git(&primary, ["config", "core.bare", ""])?;
         let effective_bare = Command::new("git")
             .arg("--git-dir")
@@ -2660,9 +2681,12 @@ mod tests {
                     == r"../../owner\root",
             "Git fixture did not decode the unquoted backslash escape",
         )?;
-        require_invalid_kind(
-            discover_repository_structure(&pointer_owner)?,
-            |kind| matches!(kind, GitStructureIssueKind::UnsupportedSourceConfiguration),
+        let escaped_pointer = require_git(discover_repository_structure(&pointer_owner)?)?;
+        require(
+            escaped_pointer.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::None,
+                },
             "unquoted backslash escape admitted a pointer owner Git did not select",
         )?;
         Ok(())
