@@ -7640,6 +7640,7 @@ mod tests {
                     });
                 }
                 control.retire_worktree_with_usage_snapshot(
+                    registration.registration_id,
                     &alias,
                     &worktree_root,
                     snapshot.project_instance_id(),

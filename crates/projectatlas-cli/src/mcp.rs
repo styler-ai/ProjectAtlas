@@ -7654,6 +7654,7 @@ impl ProjectAtlasMcpServer {
                         let (retired, synchronized) = local
                             .with_exclusive_worktree_usage_snapshot(|snapshot| {
                                 control.retire_worktree_with_usage_snapshot(
+                                    registration.registration_id,
                                     &alias,
                                     root,
                                     project_instance_id,
@@ -7668,7 +7669,11 @@ impl ProjectAtlasMcpServer {
                             MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING.to_string(),
                         ));
                     } else {
-                        control.retire_worktree(&alias, retired_at_epoch)?
+                        control.retire_worktree(
+                            registration.registration_id,
+                            &alias,
+                            retired_at_epoch,
+                        )?
                     };
                     (root.clone(), retired)
                 }
@@ -7685,7 +7690,11 @@ impl ProjectAtlasMcpServer {
                         .get_or_insert_with(|| MCP_WORKTREE_MISSING_RETENTION_REASON.to_string());
                     (
                         PathBuf::from(&registration.last_root),
-                        control.retire_worktree(&alias, retired_at_epoch)?,
+                        control.retire_worktree(
+                            registration.registration_id,
+                            &alias,
+                            retired_at_epoch,
+                        )?,
                     )
                 }
             };
@@ -11108,7 +11117,7 @@ mod tests {
         )?;
         let store = AtlasStore::open_for_project(&database, &primary)?;
         let retired_alias = WorktreeAlias::parse("retired-at-capacity")?;
-        store.register_worktree(
+        let retired_registration = store.register_worktree(
             &retired_alias,
             &git_directory,
             &structural_registrations.join("retired"),
@@ -11133,7 +11142,7 @@ mod tests {
         )?;
 
         let store = AtlasStore::open_for_project(&database, &primary)?;
-        store.retire_worktree(&retired_alias, 2)?;
+        store.retire_worktree(retired_registration.registration_id, &retired_alias, 2)?;
         drop(store);
 
         let listed = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {

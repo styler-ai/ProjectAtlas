@@ -494,20 +494,22 @@ impl AtlasStore {
     ///
     /// # Errors
     ///
-    /// Returns an error for an absent alias, invalid time, malformed state, or
-    /// transactional `SQLite` failure.
+    /// Returns an error when the captured registration is no longer active under
+    /// the same alias, the time or stored state is invalid, or `SQLite` fails.
     pub fn retire_worktree(
         &self,
+        registration_id: i64,
         alias: &WorktreeAlias,
         retired_at_epoch: u64,
     ) -> DbResult<WorktreeRegistration> {
         let retired_at_epoch = epoch_to_sqlite(retired_at_epoch)?;
         self.with_validated_write(|transaction| {
-            let existing = load_active_by_alias(transaction, alias.as_str())?.ok_or_else(|| {
-                DbError::WorktreeRegistrationNotFound {
+            let existing = load_by_id(transaction, registration_id)?;
+            if existing.state != WorktreeRegistrationState::Active || existing.alias != *alias {
+                return Err(DbError::WorktreeRegistrationNotFound {
                     alias: alias.to_string(),
-                }
-            })?;
+                });
+            }
             retire_registration(transaction, &existing, retired_at_epoch)
         })
     }
@@ -521,6 +523,7 @@ impl AtlasStore {
     /// failure. Binding, synchronization, and retirement roll back together.
     pub fn retire_worktree_with_usage_snapshot(
         &self,
+        registration_id: i64,
         alias: &WorktreeAlias,
         root: &Path,
         project_instance_id: ProjectInstanceId,
@@ -530,11 +533,12 @@ impl AtlasStore {
         let root = normalized_absolute_path("root", root)?;
         let retired_at_epoch = epoch_to_sqlite(retired_at_epoch)?;
         self.with_validated_write(|transaction| {
-            let existing = load_active_by_alias(transaction, alias.as_str())?.ok_or_else(|| {
-                DbError::WorktreeRegistrationNotFound {
+            let existing = load_by_id(transaction, registration_id)?;
+            if existing.state != WorktreeRegistrationState::Active || existing.alias != *alias {
+                return Err(DbError::WorktreeRegistrationNotFound {
                     alias: alias.to_string(),
-                }
-            })?;
+                });
+            }
             let bound =
                 bind_registration_project(transaction, &existing, &root, project_instance_id)?;
             let synchronized = telemetry::synchronize_worktree_usage_snapshot(
@@ -602,12 +606,21 @@ fn retire_registration(
             reason: "retirement time precedes creation time",
         });
     }
-    connection.execute(
+    let updated = connection.execute(
         "UPDATE worktree_registrations
          SET state = 'retired', retired_at_epoch = ?1
-         WHERE registration_id = ?2",
-        params![retired_at_epoch, registration.registration_id],
+         WHERE registration_id = ?2 AND alias = ?3 AND state = 'active'",
+        params![
+            retired_at_epoch,
+            registration.registration_id,
+            registration.alias.as_str()
+        ],
     )?;
+    if updated != 1 {
+        return Err(DbError::WorktreeRegistrationNotFound {
+            alias: registration.alias.to_string(),
+        });
+    }
     load_by_id(connection, registration.registration_id)
 }
 
@@ -1017,7 +1030,7 @@ mod tests {
             "active alias conflict was not rejected",
         )?;
 
-        let retired = store.retire_worktree(&alias, 20)?;
+        let retired = store.retire_worktree(first.registration_id, &alias, 20)?;
         require_eq(
             &retired.state,
             &WorktreeRegistrationState::Retired,
@@ -1064,6 +1077,13 @@ mod tests {
                 Err(DbError::WorktreeRegistrationNotFound { .. })
             ),
             "stale bind targeted a replacement registration after alias reuse",
+        )?;
+        require(
+            matches!(
+                store.retire_worktree(first.registration_id, &alias, 22),
+                Err(DbError::WorktreeRegistrationNotFound { .. })
+            ),
+            "stale retirement targeted a replacement registration after alias reuse",
         )?;
         let replacement = store.worktree_registration(&alias)?;
         require(
@@ -1139,6 +1159,7 @@ mod tests {
         require(
             matches!(
                 control.retire_worktree_with_usage_snapshot(
+                    before.registration_id,
                     &alias,
                     &moved_root,
                     target_project,
@@ -1165,7 +1186,7 @@ mod tests {
         fs::create_dir_all(&control)?;
         let store = AtlasStore::open_for_project(&control.join("projectatlas.db"), &control)?;
         let original = WorktreeAlias::parse("original")?;
-        store.register_worktree(
+        let original_registration = store.register_worktree(
             &original,
             &common,
             &common.join("worktrees/original"),
@@ -1174,7 +1195,7 @@ mod tests {
             Some(identity(1)?),
             1,
         )?;
-        store.retire_worktree(&original, 2)?;
+        store.retire_worktree(original_registration.registration_id, &original, 2)?;
 
         let unbound = WorktreeAlias::parse("unbound")?;
         let unbound_registration = store.register_worktree(
