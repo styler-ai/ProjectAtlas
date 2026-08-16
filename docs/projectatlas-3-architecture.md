@@ -883,7 +883,7 @@ are added.
 | `purpose review` preview/apply | `atlas_purpose_review` | Admit at most 200 rows, 4 KiB per path, 64 KiB per other string field, and 512 KiB of aggregate request strings before project/database selection; CLI file input is metadata-preflighted and `limit + 1` read under a 2 MiB ceiling. Then read each requested indexed node and preview or apply agent-reviewed purpose rows in the same database. | Preview uses a fresh read snapshot. Conditional apply keeps one SQLite transaction. Explicit correction remains item-oriented for semantic row outcomes, but every admitted row plus the exact supported JSON-with-newline and TOON report is preflighted before the first write, so a later oversized stored value or output cannot partially apply an earlier item. Purpose writes do not advance graph generation. | Retained report strings and each exact supported encoding are capped at 4 MiB. CLI and MCP propagate count, field, and aggregate admission failures without mutation; small JSON, TOON, UTF-8, preview, explicit-apply, and conditional-apply compatibility remains current. No telemetry. |
 | `health resolve` | `atlas_health_resolve` | Validate one currently active deterministic finding and write one authored `health_resolutions` row in the same database. | The resolution write is item-atomic and does not mutate derived graph rows or advance generation. | One item, no telemetry. Resolution lookup and later health pages remain subject to the bounded-read contract above. |
 | `root set` with bind/move/detach | `atlas_root_set` | Validate destination identity, mutate project/root identity in the same database, and regenerate project-local MCP config files. Detach assigns an independent identity to a copied destination database without merging authorities. | One explicit root-transition transaction owns identity changes and rollback. A copied worktree database becomes the authority only for that different selected source tree. | Bounded metadata operation, no telemetry, no cross-project graph write. |
-| `reset-index` | `atlas_reset_index` | Preview or explicitly delete the selected database and owned WAL/SHM/journal sidecars, plus optional generated MCP config. | File lifecycle, not a SQLite transaction. It removes the one selected project index; it never creates a replacement or second authority implicitly. | Explicit apply only, fixed owned target inventory, no telemetry. |
+| `reset-index` | `atlas_reset_index` | Preview or explicitly delete the selected database and owned WAL/SHM/journal sidecars, plus optional generated MCP config. | Applied reset for a registered alias holds the control catalog's active-registration `BEGIN IMMEDIATE`, reloads the exact row as still unbound, revalidates the current Git lifecycle, stages only the fixed owned inventory in a unique target-local recovery directory, and revalidates before deleting only staged paths. A changed lifecycle restores staged entries without clobbering replacement files or retains an explicit recovery directory if restoration cannot complete. Every production binder uses the same guard, so bind-wins refuses reset and reset-wins cannot be recreated or bound by a late caller. | Explicit apply only, five fixed target paths, no telemetry; staging uses same-filesystem no-clobber moves and never scans recursively. |
 
 #### Diagnostics, administration, and non-database routes
 
@@ -2691,13 +2691,16 @@ sequenceDiagram
     Runtime->>Control: Capture control identity and registrations read-only
     Runtime->>Structure: Resolve exact registered lifecycles
     Structure-->>Runtime: Active roots or typed missing and invalid state
-    Runtime->>Control: Reopen writer and require captured control identity
-    Control-->>Runtime: Same identity or typed failure before target read
+    Runtime->>Control: BEGIN IMMEDIATE, require captured control identity, and reload active origin
+    Control-->>Runtime: Transaction-owned guard or typed failure before target read
+    Runtime->>Structure: Revalidate the registered lifecycle under the guard
+    Structure-->>Runtime: Same lifecycle or typed failure
     Runtime->>Target: Read revision, dimensions, and rows in one SQLite snapshot
     Target-->>Runtime: Newer revision or unchanged revision
     Runtime->>Structure: Revalidate an unbound origin immediately before binding
     Structure-->>Runtime: Same lifecycle or typed failure before catalog write
-    Runtime->>Control: Bind if needed and atomically synchronize the origin
+    Runtime->>Control: Bind if needed and COMMIT the active-registration guard
+    Runtime->>Control: Atomically synchronize the origin snapshot
     Control->>Report: Native main plus routed plus active and retired snapshots
     Report-->>Caller: Combined existing report or unchanged TUI layout
 ```
@@ -2713,13 +2716,18 @@ prunes expired synchronized daily rows across active and retired origins inside
 the same write transaction; any later failure rolls that reclamation back with
 the attempted update. The read-only catalog snapshot also captures the control
 project identity, which the later writer must retain. An origin without a bound
-project identity revalidates its exact Git administrative lifecycle after the
-local snapshot and immediately before the first bind, so neither control-atlas
-replacement nor worktree replacement can import an aggregate into stale
-authority.
-Removal holds one short local SQLite writer-exclusion
-scope while the control atlas atomically synchronizes and retires the origin, so
-a local usage commit cannot land in an export-to-retirement gap. Retired origins
+project identity acquires the control active-registration guard, revalidates its
+exact Git administrative lifecycle before and after the local snapshot, and
+binds before releasing writer exclusion, so neither control-atlas replacement,
+worktree replacement, nor a concurrent applied reset can import an aggregate
+into stale authority. Snapshot synchronization then owns its existing separate
+atomic origin-replacement transaction.
+Removal uses the same control-first lock order, then holds one short local SQLite
+writer-exclusion scope while the transaction-owned guard atomically binds,
+synchronizes, and retires the origin. A local usage commit cannot land in an
+export-to-retirement gap. Any local open, identity, or export error is followed
+by a fresh lifecycle check; a replacement is retired without binding, importing,
+or modifying its atlas. Retired origins
 continue contributing to repository totals. An exact worktree report remains
 local and never presents sibling detail as its own.
 

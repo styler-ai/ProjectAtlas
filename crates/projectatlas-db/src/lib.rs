@@ -26,7 +26,9 @@ pub use diagnostics::{
     DatabaseSettingsReport, SqliteCompileOptionsIdentity, SqliteRuntimeReport,
     database_settings_report,
 };
-pub use hydration::{WorktreeHydrationActivation, WorktreeHydrationCandidate};
+pub use hydration::{
+    PreparedWorktreeHydrationCandidate, WorktreeHydrationActivation, WorktreeHydrationCandidate,
+};
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
     MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryAffectedSourceFootprint, RepositoryCoverageQuery,
@@ -45,8 +47,8 @@ pub use telemetry::{
     WorktreeUsageSyncState,
 };
 pub use worktree_registry::{
-    MAIN_WORKTREE_ALIAS, MAX_WORKTREE_ALIAS_BYTES, WorktreeAlias, WorktreeRegistration,
-    WorktreeRegistrationState,
+    ActiveWorktreeRegistrationGuard, MAIN_WORKTREE_ALIAS, MAX_WORKTREE_ALIAS_BYTES, WorktreeAlias,
+    WorktreeRegistration, WorktreeRegistrationState,
 };
 
 use blake3::Hasher;

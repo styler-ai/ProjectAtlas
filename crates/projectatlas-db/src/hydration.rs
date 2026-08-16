@@ -113,13 +113,16 @@ impl WorktreeHydrationCandidate {
         Ok(())
     }
 
-    /// Verify post-backup reconciliation, checkpoint WAL, and publish without replacement.
+    /// Verify post-backup reconciliation, checkpoint WAL, and prepare for publication.
     ///
     /// # Errors
     ///
-    /// Returns an error while the candidate is incomplete, busy, canceled, corrupt, or when
-    /// another process created the destination first. Failure leaves the destination untouched.
-    pub fn activate(mut self, control: &IndexWorkControl) -> DbResult<WorktreeHydrationActivation> {
+    /// Returns an error while the candidate is incomplete, busy, canceled, or corrupt. Failure
+    /// leaves the destination untouched and removes the unpublished candidate.
+    pub fn prepare_activation(
+        mut self,
+        control: &IndexWorkControl,
+    ) -> DbResult<PreparedWorktreeHydrationCandidate> {
         control.check(IndexWorkStage::Publication)?;
         let candidate_path = self.path()?.to_path_buf();
         let store = AtlasStore::open_for_project(&candidate_path, &self.target_root)?;
@@ -170,6 +173,60 @@ impl WorktreeHydrationCandidate {
         let path = self.path.take().ok_or(DbError::WorktreeHydrationInvalid {
             reason: "hydration candidate path was already consumed",
         })?;
+        Ok(PreparedWorktreeHydrationCandidate {
+            path: Some(path),
+            destination_database: self.destination_database.clone(),
+            source_project_instance_id: self.source_project_instance_id,
+            target_project_instance_id: self.target_project_instance_id,
+            baseline_generation: self.baseline_generation,
+            reconciled_generation: found_generation,
+        })
+    }
+
+    /// Verify and publish this candidate without replacing an existing destination.
+    ///
+    /// This compatibility convenience performs both phases. Lifecycle-sensitive callers should
+    /// call [`Self::prepare_activation`] before acquiring external writer exclusion, then publish
+    /// the returned [`PreparedWorktreeHydrationCandidate`] inside that short critical section.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error while preparation fails or another process creates the destination first.
+    pub fn activate(self, control: &IndexWorkControl) -> DbResult<WorktreeHydrationActivation> {
+        self.prepare_activation(control)?.activate(control)
+    }
+}
+
+/// Fully verified target-local hydration candidate awaiting only no-clobber publication.
+#[derive(Debug)]
+pub struct PreparedWorktreeHydrationCandidate {
+    /// Auto-cleaned unpublished database path.
+    path: Option<TempPath>,
+    /// Exact no-clobber publication path.
+    destination_database: PathBuf,
+    /// Source atlas identity retained only for diagnostics.
+    source_project_instance_id: ProjectInstanceId,
+    /// New target atlas identity.
+    target_project_instance_id: ProjectInstanceId,
+    /// Rebound baseline generation.
+    baseline_generation: IndexGeneration,
+    /// Complete reconciled generation verified before writer exclusion.
+    reconciled_generation: IndexGeneration,
+}
+
+impl PreparedWorktreeHydrationCandidate {
+    /// Publish the already verified candidate without replacing an existing destination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on cancellation, a publication collision, or an I/O failure. Failure
+    /// preserves an existing destination and removes the unpublished candidate.
+    pub fn activate(mut self, control: &IndexWorkControl) -> DbResult<WorktreeHydrationActivation> {
+        control.check(IndexWorkStage::Publication)?;
+
+        let path = self.path.take().ok_or(DbError::WorktreeHydrationInvalid {
+            reason: "hydration candidate path was already consumed",
+        })?;
         path.persist_noclobber(&self.destination_database)
             .map_err(|error| {
                 if error.error.kind() == std::io::ErrorKind::AlreadyExists {
@@ -189,12 +246,20 @@ impl WorktreeHydrationCandidate {
             source_project_instance_id: self.source_project_instance_id,
             target_project_instance_id: self.target_project_instance_id,
             baseline_generation: self.baseline_generation,
-            reconciled_generation: found_generation,
+            reconciled_generation: self.reconciled_generation,
         })
     }
 }
 
 impl Drop for WorktreeHydrationCandidate {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.as_deref() {
+            remove_candidate_sidecars_best_effort(path);
+        }
+    }
+}
+
+impl Drop for PreparedWorktreeHydrationCandidate {
     fn drop(&mut self) {
         if let Some(path) = self.path.as_deref() {
             remove_candidate_sidecars_best_effort(path);
@@ -667,7 +732,12 @@ mod tests {
             publication.replace_repository_graph(target_identity, &[], &[], &[], &[])?;
             publication.complete()?;
         }
-        let activation = candidate.activate(&control)?;
+        let prepared = candidate.prepare_activation(&control)?;
+        require(
+            candidate_path.exists() && !destination_database.exists(),
+            "activation preparation published the candidate early",
+        )?;
+        let activation = prepared.activate(&control)?;
         require(
             normalize_native_path_display(&activation.database)
                 == normalize_native_path_display(&destination_database)
@@ -690,6 +760,7 @@ mod tests {
         let raced_candidate = raced.path()?.to_path_buf();
         raced.accept_verified_source_state(&control)?;
         fs::write(&raced_database, b"competing initializer")?;
+        let raced = raced.prepare_activation(&control)?;
         require(
             matches!(
                 raced.activate(&control),

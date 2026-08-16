@@ -846,30 +846,52 @@ pub(crate) fn synchronize_registered_worktree_usage(
                     .to_string(),
             ));
         }
-        let database = root.join(".projectatlas").join("projectatlas.db");
-        match fs::symlink_metadata(&database) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if registration.project_instance_id.is_some() {
-                    return Err(synchronization_incomplete());
+        let snapshot = control.with_active_worktree_registration(
+            registration.registration_id,
+            &registration.alias,
+            |guard| {
+                if let Err(error) =
+                    require_registered_worktree_lifecycle(control_root, guard.registration(), root)
+                {
+                    return Ok(Err(error));
                 }
-                continue;
-            }
-            Err(error) => return Err(error.into()),
+                let database = root.join(".projectatlas").join("projectatlas.db");
+                match fs::symlink_metadata(&database) {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        return Ok(if guard.registration().project_instance_id.is_some() {
+                            Err(synchronization_incomplete())
+                        } else {
+                            Ok(None)
+                        });
+                    }
+                    Err(error) => return Ok(Err(error.into())),
+                }
+                let target = match open_atlas_store_read_only_for_project(&database, root) {
+                    Ok(target) => target,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let snapshot = match target.export_worktree_usage_snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => return Ok(Err(error.into())),
+                };
+                drop(target);
+                if guard.registration().project_instance_id.is_none() {
+                    if let Err(error) = require_registered_worktree_lifecycle(
+                        control_root,
+                        guard.registration(),
+                        root,
+                    ) {
+                        return Ok(Err(error));
+                    }
+                    guard.bind_project(root, snapshot.project_instance_id())?;
+                }
+                Ok(Ok(Some(snapshot)))
+            },
+        )??;
+        if let Some(snapshot) = snapshot {
+            control.synchronize_worktree_usage(&registration.alias, &snapshot)?;
         }
-        let target = open_atlas_store_read_only_for_project(&database, root)?;
-        let snapshot = target.export_worktree_usage_snapshot()?;
-        drop(target);
-        if registration.project_instance_id.is_none() {
-            require_registered_worktree_lifecycle(control_root, &registration, root)?;
-            control.bind_worktree_project(
-                registration.registration_id,
-                &registration.alias,
-                root,
-                snapshot.project_instance_id(),
-            )?;
-        }
-        control.synchronize_worktree_usage(&registration.alias, &snapshot)?;
     }
     Ok(())
 }
@@ -903,8 +925,8 @@ fn registered_worktree_root<'a>(
         })
 }
 
-/// Rediscover one unbound registration immediately before its first catalog write.
-fn require_registered_worktree_lifecycle(
+/// Rediscover one registration immediately before a lifecycle-sensitive catalog write.
+pub(crate) fn require_registered_worktree_lifecycle(
     control_root: &Path,
     registration: &WorktreeRegistration,
     expected_root: &Path,
@@ -5192,18 +5214,7 @@ pub(crate) fn reset_index_files(
     dry_run: bool,
     include_mcp_config: bool,
 ) -> Result<ResetIndexReport, CliError> {
-    let absolute_db = absolute_path(db)?;
-    let mut targets = vec![
-        absolute_db.clone(),
-        db_sidecar_path(&absolute_db, "wal"),
-        db_sidecar_path(&absolute_db, "shm"),
-        db_sidecar_path(&absolute_db, "journal"),
-    ];
-    if include_mcp_config {
-        targets.push(mcp_config_path_for_db(&absolute_db));
-    }
-    targets.sort();
-    targets.dedup();
+    let targets = reset_index_targets(db, include_mcp_config)?;
     let files = targets
         .iter()
         .map(|path| path_status(path))
@@ -5227,6 +5238,132 @@ pub(crate) fn reset_index_files(
         files,
         removed,
     })
+}
+
+/// Remove registered reset targets only after staging and lifecycle revalidation.
+pub(crate) fn reset_index_files_with_revalidation(
+    db: &Path,
+    include_mcp_config: bool,
+    mut revalidate: impl FnMut() -> Result<(), CliError>,
+) -> Result<ResetIndexReport, CliError> {
+    let targets = reset_index_targets(db, include_mcp_config)?;
+    let files = targets
+        .iter()
+        .map(|path| path_status(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !targets.iter().any(|target| target.is_file()) {
+        revalidate()?;
+        return Ok(ResetIndexReport {
+            applied: true,
+            dry_run: false,
+            files,
+            removed: 0,
+        });
+    }
+
+    let absolute_db = absolute_path(db)?;
+    let parent = absolute_db.parent().ok_or_else(|| {
+        CliError::InvalidInput("reset database path has no parent directory".to_string())
+    })?;
+    let recovery = tempfile::Builder::new()
+        .prefix("reset-recovery-")
+        .tempdir_in(parent)
+        .map_err(|source| CliError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?
+        .keep();
+    let mut staged = Vec::with_capacity(targets.len());
+    for (index, target) in targets.iter().enumerate() {
+        if !target.is_file() {
+            continue;
+        }
+        let recovery_file = recovery.join(format!("{index:02}.reset"));
+        if let Err(source) = move_reset_file_noclobber(target, &recovery_file) {
+            let operation = revalidate().err().unwrap_or_else(|| CliError::Io {
+                path: target.clone(),
+                source,
+            });
+            return Err(restore_staged_reset_files(&recovery, &staged, operation));
+        }
+        staged.push((target.clone(), recovery_file));
+    }
+
+    if let Err(error) = revalidate() {
+        return Err(restore_staged_reset_files(&recovery, &staged, error));
+    }
+
+    let removed = staged.len();
+    for (_, recovery_file) in &staged {
+        if let Err(source) = fs::remove_file(recovery_file) {
+            return Err(CliError::Io {
+                path: recovery,
+                source,
+            });
+        }
+    }
+    fs::remove_dir(&recovery).map_err(|source| CliError::Io {
+        path: recovery,
+        source,
+    })?;
+    Ok(ResetIndexReport {
+        applied: true,
+        dry_run: false,
+        files,
+        removed,
+    })
+}
+
+/// Return the fixed file inventory owned by one index reset.
+fn reset_index_targets(db: &Path, include_mcp_config: bool) -> Result<Vec<PathBuf>, CliError> {
+    let absolute_db = absolute_path(db)?;
+    let mut targets = vec![
+        absolute_db.clone(),
+        db_sidecar_path(&absolute_db, "wal"),
+        db_sidecar_path(&absolute_db, "shm"),
+        db_sidecar_path(&absolute_db, "journal"),
+    ];
+    if include_mcp_config {
+        targets.push(mcp_config_path_for_db(&absolute_db));
+    }
+    targets.sort();
+    targets.dedup();
+    Ok(targets)
+}
+
+/// Move one existing reset target without overwriting another path.
+fn move_reset_file_noclobber(source: &Path, destination: &Path) -> io::Result<()> {
+    let temporary = tempfile::TempPath::try_from_path(source)?;
+    match temporary.persist_noclobber(destination) {
+        Ok(()) => Ok(()),
+        Err(mut error) => {
+            error.path.disable_cleanup(true);
+            Err(error.error)
+        }
+    }
+}
+
+/// Restore staged reset files without overwriting a replacement lifecycle.
+fn restore_staged_reset_files(
+    recovery: &Path,
+    staged: &[(PathBuf, PathBuf)],
+    operation: CliError,
+) -> CliError {
+    for (target, recovery_file) in staged.iter().rev() {
+        if let Err(source) = move_reset_file_noclobber(recovery_file, target) {
+            let kind = source.kind();
+            return CliError::Io {
+                path: recovery.to_path_buf(),
+                source: io::Error::new(
+                    kind,
+                    format!("{operation}; reset recovery restore failed: {source}"),
+                ),
+            };
+        }
+    }
+    // Preserve the owning failure; only an empty recovery directory can remain here.
+    drop(fs::remove_dir(recovery));
+    operation
 }
 
 /// Resolve the config path that should travel with generated MCP configs.

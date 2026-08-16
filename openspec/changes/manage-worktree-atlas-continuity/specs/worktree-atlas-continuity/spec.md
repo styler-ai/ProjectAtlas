@@ -108,6 +108,16 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 - **WHEN** the same structurally valid worktree root contains a database recreated through the legacy exact-path route with a different project identity
 - **THEN** alias routing rejects the replacement database until the stale registration is retired and the replacement is registered explicitly
 
+#### Scenario: Binding and applied reset have one cross-process winner
+
+- **WHEN** first binding or hydration activation races an applied `atlas_reset_index` for the same unbound registered alias
+- **THEN** both operations reload the exact active registration under the control catalog writer transaction, bind-wins refuses deletion, and reset-wins leaves the target absent and registration unbound without permitting a late binder to recreate or claim an empty database
+
+#### Scenario: Lifecycle replacement during applied reset preserves replacement files
+
+- **WHEN** Git replaces an unbound registered worktree lifecycle after reset validates it but before the fixed database, WAL, SHM, journal, and optional generated MCP-config inventory is removed
+- **THEN** ProjectAtlas stages only those paths in a unique target-local recovery directory, revalidates the lifecycle, restores staged entries without clobbering replacement paths or reports retained recoverable state, returns a typed lifecycle blocker, and leaves the registration unbound
+
 #### Scenario: Remove unregisters ProjectAtlas only
 
 - **WHEN** writer-excluded final local telemetry synchronization succeeds and an agent calls `atlas_worktree_remove` with an active alias
@@ -117,6 +127,11 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 
 - **WHEN** ProjectAtlas cannot establish a last-valid aggregate snapshot for an otherwise available registered worktree
 - **THEN** remove returns a typed synchronization failure and keeps the active registration unchanged
+
+#### Scenario: Lifecycle replacement during remove never imports the replacement
+
+- **WHEN** Git replaces the registered administrative lifecycle after remove is admitted but before final snapshot publication
+- **THEN** ProjectAtlas revalidates under the control-first registration guard, reclassifies any intervening local open, identity, or snapshot error against current Git lifecycle, never binds, imports, or modifies replacement state, retires only the stale registration with its last accepted aggregate and a typed blocker, and leaves the replacement project identity available for explicit registration
 
 #### Scenario: Exported telemetry revision and aggregates share one read snapshot
 
@@ -200,6 +215,11 @@ ProjectAtlas SHALL prefer a safe local hydration from the selected control atlas
 
 - **WHEN** backup, disk, cancellation, reconciliation, integrity, identity, publication, or atomic activation fails
 - **THEN** ProjectAtlas removes only the unpublished candidate, preserves an existing target database or the clean uninitialized state, and returns typed recovery guidance
+
+#### Scenario: Lifecycle replacement during hydration publication never binds the replacement
+
+- **WHEN** Git replaces the registered administrative lifecycle after hydration reconciliation but before first binding, including after no-clobber persistence
+- **THEN** ProjectAtlas finalizes integrity, checkpoint, and fsync work while the candidate remains disposable, reloads the exact registration under control writer exclusion, revalidates common-directory, administrative-lifecycle, and root identity immediately before persistence and again before binding, never binds or imports replacement state, and leaves the stale registration unbound with typed recovery; an unpublished candidate is discarded, while a path detected as changed only after persistence is not deleted because it may now be replacement-owned
 
 ### Requirement: Graph and purpose writes remain exact while federation is explicit
 

@@ -126,6 +126,95 @@ pub struct WorktreeRegistration {
     pub retired_at_epoch: Option<u64>,
 }
 
+/// Transaction-owned capability for one exact active worktree registration.
+///
+/// Construction is restricted to [`AtlasStore::with_active_worktree_registration`]
+/// so lifecycle-sensitive callers can validate external state and publish one
+/// bind or retirement under the same control-catalog writer exclusion.
+pub struct ActiveWorktreeRegistrationGuard<'transaction> {
+    /// Connection currently owned by the outer validated write transaction.
+    connection: &'transaction Connection,
+    /// Exact active row reloaded after writer exclusion was acquired.
+    registration: WorktreeRegistration,
+}
+
+impl ActiveWorktreeRegistrationGuard<'_> {
+    /// Borrow the exact active row reloaded by the transaction.
+    #[must_use]
+    pub const fn registration(&self) -> &WorktreeRegistration {
+        &self.registration
+    }
+
+    /// Bind the exact initialized project inside this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths, conflicting project identity,
+    /// malformed persisted state, or any `SQLite` failure.
+    pub fn bind_project(
+        &mut self,
+        root: &Path,
+        project_instance_id: ProjectInstanceId,
+    ) -> DbResult<WorktreeRegistration> {
+        let root = normalized_absolute_path("root", root)?;
+        let bound = bind_registration_project(
+            self.connection,
+            &self.registration,
+            &root,
+            project_instance_id,
+        )?;
+        self.registration = bound.clone();
+        Ok(bound)
+    }
+
+    /// Retire this active registration without importing another local snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid time, malformed persisted state, or any
+    /// `SQLite` failure.
+    pub fn retire(&mut self, retired_at_epoch: u64) -> DbResult<WorktreeRegistration> {
+        let retired = retire_registration(
+            self.connection,
+            &self.registration,
+            epoch_to_sqlite(retired_at_epoch)?,
+        )?;
+        self.registration = retired.clone();
+        Ok(retired)
+    }
+
+    /// Bind, synchronize one writer-excluded local snapshot, and retire atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths or times, a mismatched project or
+    /// telemetry identity, malformed persisted state, or any `SQLite` failure.
+    pub fn retire_with_usage_snapshot(
+        &mut self,
+        root: &Path,
+        project_instance_id: ProjectInstanceId,
+        snapshot: &WorktreeUsageSnapshot,
+        retired_at_epoch: u64,
+    ) -> DbResult<(WorktreeRegistration, WorktreeUsageSyncState)> {
+        let root = normalized_absolute_path("root", root)?;
+        let retired_at_epoch = epoch_to_sqlite(retired_at_epoch)?;
+        let bound = bind_registration_project(
+            self.connection,
+            &self.registration,
+            &root,
+            project_instance_id,
+        )?;
+        let synchronized = telemetry::synchronize_worktree_usage_snapshot(
+            self.connection,
+            bound.registration_id,
+            snapshot,
+        )?;
+        let retired = retire_registration(self.connection, &bound, retired_at_epoch)?;
+        self.registration = retired.clone();
+        Ok((retired, synchronized))
+    }
+}
+
 /// Raw row retained until all typed conversions succeed.
 struct PersistedWorktreeRegistration {
     /// Stable row identity.
@@ -399,6 +488,70 @@ impl AtlasStore {
         Ok(registrations)
     }
 
+    /// Run one short operation while an exact active registration owns control-writer exclusion.
+    ///
+    /// Callers that coordinate another local atlas must acquire this scope first,
+    /// then open or lock the local atlas, and finally publish through this guard
+    /// before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the captured registration is no longer active under
+    /// the same alias, the control database binding changed, the callback fails,
+    /// or `SQLite` cannot commit or roll back the transaction.
+    pub fn with_active_worktree_registration<T>(
+        &self,
+        registration_id: i64,
+        alias: &WorktreeAlias,
+        operation: impl FnOnce(&mut ActiveWorktreeRegistrationGuard<'_>) -> DbResult<T>,
+    ) -> DbResult<T> {
+        self.with_validated_write(|transaction| {
+            let registration = load_by_id(transaction, registration_id)?;
+            if registration.state != WorktreeRegistrationState::Active
+                || registration.alias != *alias
+            {
+                return Err(DbError::WorktreeRegistrationNotFound {
+                    alias: alias.to_string(),
+                });
+            }
+            operation(&mut ActiveWorktreeRegistrationGuard {
+                connection: transaction,
+                registration,
+            })
+        })
+    }
+
+    /// Run one external reset operation while an exact registration remains unbound.
+    ///
+    /// The callback must not mutate the control catalog. Its nested result keeps
+    /// caller-owned filesystem errors typed while the outer result owns `SQLite`
+    /// validation and transaction failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the captured registration is no longer active under
+    /// the same alias, became bound, the control binding changed, or `SQLite`
+    /// cannot complete the writer-exclusion transaction.
+    pub fn with_unbound_worktree_registration<T, E>(
+        &self,
+        registration_id: i64,
+        alias: &WorktreeAlias,
+        operation: impl FnOnce(&WorktreeRegistration) -> Result<T, E>,
+    ) -> DbResult<Result<T, E>> {
+        self.with_active_worktree_registration(registration_id, alias, |guard| {
+            if guard.registration().project_instance_id.is_some() {
+                return Err(DbError::WorktreeRegistrationConflict {
+                    field: "project_instance_id",
+                    value: guard
+                        .registration()
+                        .project_instance_id
+                        .map_or_else(String::new, |value| value.to_string()),
+                });
+            }
+            Ok(operation(guard.registration()))
+        })
+    }
+
     /// Export this exact atlas's bounded local aggregate snapshot.
     ///
     /// # Errors
@@ -475,15 +628,8 @@ impl AtlasStore {
         root: &Path,
         project_instance_id: ProjectInstanceId,
     ) -> DbResult<WorktreeRegistration> {
-        let root = normalized_absolute_path("root", root)?;
-        self.with_validated_write(|transaction| {
-            let existing = load_by_id(transaction, registration_id)?;
-            if existing.state != WorktreeRegistrationState::Active || existing.alias != *alias {
-                return Err(DbError::WorktreeRegistrationNotFound {
-                    alias: alias.to_string(),
-                });
-            }
-            bind_registration_project(transaction, &existing, &root, project_instance_id)
+        self.with_active_worktree_registration(registration_id, alias, |guard| {
+            guard.bind_project(root, project_instance_id)
         })
     }
 
@@ -530,24 +676,8 @@ impl AtlasStore {
         snapshot: &WorktreeUsageSnapshot,
         retired_at_epoch: u64,
     ) -> DbResult<(WorktreeRegistration, WorktreeUsageSyncState)> {
-        let root = normalized_absolute_path("root", root)?;
-        let retired_at_epoch = epoch_to_sqlite(retired_at_epoch)?;
-        self.with_validated_write(|transaction| {
-            let existing = load_by_id(transaction, registration_id)?;
-            if existing.state != WorktreeRegistrationState::Active || existing.alias != *alias {
-                return Err(DbError::WorktreeRegistrationNotFound {
-                    alias: alias.to_string(),
-                });
-            }
-            let bound =
-                bind_registration_project(transaction, &existing, &root, project_instance_id)?;
-            let synchronized = telemetry::synchronize_worktree_usage_snapshot(
-                transaction,
-                bound.registration_id,
-                snapshot,
-            )?;
-            let retired = retire_registration(transaction, &bound, retired_at_epoch)?;
-            Ok((retired, synchronized))
+        self.with_active_worktree_registration(registration_id, alias, |guard| {
+            guard.retire_with_usage_snapshot(root, project_instance_id, snapshot, retired_at_epoch)
         })
     }
 }
@@ -864,6 +994,7 @@ mod tests {
     use std::io;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+    use std::time::Duration;
 
     /// Return a test error instead of panicking inside a fallible test.
     fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
@@ -872,6 +1003,18 @@ mod tests {
         } else {
             Err(io::Error::other(message).into())
         }
+    }
+
+    /// Return whether an independent writer reached `SQLite`'s held writer lock.
+    fn sqlite_writer_busy(error: &DbError) -> bool {
+        matches!(
+            error,
+            DbError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
     }
 
     /// Compare test values without panicking inside a fallible test.
@@ -1115,6 +1258,200 @@ mod tests {
             "active-only list returned retired history",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn active_registration_guard_rolls_back_nested_binding_and_rechecks_unbound_state()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let common = temp.path().join("common.git");
+        let admin = common.join("worktrees/guarded");
+        let root = temp.path().join("guarded");
+        for path in [&control_root, &admin, &root] {
+            fs::create_dir_all(path)?;
+        }
+        let store =
+            AtlasStore::open_for_project(&control_root.join("projectatlas.db"), &control_root)?;
+        let alias = WorktreeAlias::parse("guarded")?;
+        let project = identity(1)?;
+        let registration = store.register_worktree(
+            &alias,
+            &common,
+            &admin,
+            &administrative_identity(1),
+            &root,
+            None,
+            1,
+        )?;
+
+        let rejected = store.with_active_worktree_registration(
+            registration.registration_id,
+            &alias,
+            |guard| {
+                guard.bind_project(&root, project)?;
+                Err::<(), _>(DbError::WorktreeRegistrationConflict {
+                    field: "test_operation",
+                    value: "rollback".to_string(),
+                })
+            },
+        );
+        require(
+            matches!(
+                rejected,
+                Err(DbError::WorktreeRegistrationConflict {
+                    field: "test_operation",
+                    ..
+                })
+            ),
+            "guarded callback failure was not returned",
+        )?;
+        require(
+            store
+                .worktree_registration(&alias)?
+                .project_instance_id
+                .is_none(),
+            "failed guarded callback committed its nested binding",
+        )?;
+
+        store.with_active_worktree_registration(registration.registration_id, &alias, |guard| {
+            guard.bind_project(&root, project).map(|_| ())
+        })?;
+        let reset_callback_ran = std::cell::Cell::new(false);
+        require(
+            matches!(
+                store.with_unbound_worktree_registration(
+                    registration.registration_id,
+                    &alias,
+                    |_registration| {
+                        reset_callback_ran.set(true);
+                        Ok::<(), io::Error>(())
+                    }
+                ),
+                Err(DbError::WorktreeRegistrationConflict {
+                    field: "project_instance_id",
+                    ..
+                })
+            ) && !reset_callback_ran.get(),
+            "bound registration entered the guarded reset callback",
+        )
+    }
+
+    #[test]
+    fn active_registration_guard_serializes_bind_and_reset_across_connections()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let common = temp.path().join("common.git");
+        let first_root = temp.path().join("first");
+        let second_root = temp.path().join("second");
+        for path in [&control_root, &first_root, &second_root] {
+            fs::create_dir_all(path)?;
+        }
+        let database = control_root.join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &control_root)?;
+        let contender = AtlasStore::open_for_project(&database, &control_root)?;
+        contender.connection.busy_timeout(Duration::ZERO)?;
+        let bind_wins = WorktreeAlias::parse("bind-wins")?;
+        let bind_registration = store.register_worktree(
+            &bind_wins,
+            &common,
+            &common.join("worktrees/bind-wins"),
+            &administrative_identity(1),
+            &first_root,
+            None,
+            1,
+        )?;
+        let bind_project = identity(1)?;
+        store.with_active_worktree_registration(
+            bind_registration.registration_id,
+            &bind_wins,
+            |guard| {
+                let blocked = contender.with_unbound_worktree_registration(
+                    bind_registration.registration_id,
+                    &bind_wins,
+                    |_registration| Ok::<(), io::Error>(()),
+                );
+                if !blocked.as_ref().is_err_and(sqlite_writer_busy) {
+                    return Err(DbError::WorktreeRegistrationRow {
+                        reason: "reset contender did not reach the held SQLite writer lock",
+                    });
+                }
+                guard.bind_project(&first_root, bind_project).map(|_| ())
+            },
+        )?;
+        let reset_callback_ran = std::cell::Cell::new(false);
+        require(
+            matches!(
+                contender.with_unbound_worktree_registration(
+                    bind_registration.registration_id,
+                    &bind_wins,
+                    |_registration| {
+                        reset_callback_ran.set(true);
+                        Ok::<(), io::Error>(())
+                    },
+                ),
+                Err(DbError::WorktreeRegistrationConflict {
+                    field: "project_instance_id",
+                    ..
+                })
+            ) && !reset_callback_ran.get(),
+            "reset did not reload the binding committed by the winning writer",
+        )?;
+
+        let reset_wins = WorktreeAlias::parse("reset-wins")?;
+        let reset_registration = store.register_worktree(
+            &reset_wins,
+            &common,
+            &common.join("worktrees/reset-wins"),
+            &administrative_identity(2),
+            &second_root,
+            None,
+            2,
+        )?;
+        let reset_project = identity(2)?;
+        let target_database = second_root.join("projectatlas.db");
+        fs::write(&target_database, b"captured atlas")?;
+        store.with_unbound_worktree_registration(
+            reset_registration.registration_id,
+            &reset_wins,
+            |_registration| {
+                let blocked = contender.with_active_worktree_registration(
+                    reset_registration.registration_id,
+                    &reset_wins,
+                    |guard| guard.bind_project(&second_root, reset_project).map(|_| ()),
+                );
+                if !blocked.as_ref().is_err_and(sqlite_writer_busy) {
+                    return Err(io::Error::other(
+                        "bind contender did not reach the held SQLite writer lock",
+                    ));
+                }
+                fs::remove_file(&target_database)
+            },
+        )??;
+        let late_bind_result = contender.with_active_worktree_registration(
+            reset_registration.registration_id,
+            &reset_wins,
+            |guard| {
+                if !target_database.is_file() {
+                    return Ok(Err("target atlas is missing"));
+                }
+                guard.bind_project(&second_root, reset_project)?;
+                Ok(Ok(()))
+            },
+        )?;
+        require(
+            matches!(late_bind_result, Err("target atlas is missing")),
+            "late bind did not recheck the reset target after writer exclusion",
+        )?;
+        require(
+            store
+                .worktree_registration(&reset_wins)?
+                .project_instance_id
+                .is_none()
+                && !target_database.exists(),
+            "reset-wins interleaving bound or recreated the deleted target atlas",
+        )
     }
 
     #[test]

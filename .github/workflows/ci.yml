@@ -151,6 +151,15 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
 
+      - name: Worktree lifecycle race regressions
+        timeout-minutes: 10
+        run: |
+          cargo test --locked -p projectatlas-db active_registration_guard -- --nocapture
+          cargo test --locked -p projectatlas-cli registered_init_rejects_replaced_git_lifecycle_before_or_during_activation_and_binding -- --nocapture
+          cargo test --locked -p projectatlas-cli final_retirement_does_not_import_replacement_lifecycle_telemetry -- --nocapture
+          cargo test --locked -p projectatlas-cli retirement_reclassifies_identity_and_snapshot_failures_after_lifecycle_replacement -- --nocapture
+          cargo test --locked -p projectatlas-cli registered_reset_and_binding_linearize_without_recreating_a_reset_winner -- --nocapture
+
       - name: Plugin installer E2E
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e

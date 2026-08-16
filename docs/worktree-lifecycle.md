@@ -8,17 +8,42 @@ Every checkout still owns an ignored, independently writable `.projectatlas/proj
 
 ```mermaid
 flowchart LR
-    Agent[Agent remains in control checkout] -->|MCP call plus alias| MCP[One ProjectAtlas MCP process]
-    MCP --> Resolver[Immutable per-request alias resolver]
-    MCP --> Catalog[Worktree list, add, and remove]
-    Catalog --> Discovery[Bounded structural Git discovery]
-    Discovery --> GitMeta[Existing reciprocal Git metadata]
-    Catalog --> ControlDB[(Control atlas and registration catalog)]
-    Resolver -->|main| ControlDB
-    Resolver -->|issue-430| TargetDB[(Independent worktree atlas)]
+    subgraph Entry[Callers]
+        direction TB
+        Agent[Agent remains in control checkout]
+        Human[Human token command in control checkout]
+    end
+    subgraph Control[Selected control authority]
+        direction TB
+        MCP[One ProjectAtlas MCP process]
+        Catalog[Worktree list, add, and remove]
+        Resolver[Immutable per-request alias resolver]
+        Guard[Control-first active-registration guard]
+        TokenTUI[Existing token TUI layout]
+        ControlDB[(Control atlas and registration catalog)]
+        MCP --> Catalog
+        MCP --> Resolver
+        MCP --> Guard
+        Catalog --> ControlDB
+        Resolver -->|main| ControlDB
+        Guard -->|reload and publish| ControlDB
+        TokenTUI --> ControlDB
+    end
+    subgraph Exact[External Git trust and exact target]
+        direction TB
+        Discovery[Bounded structural Git discovery] --> GitMeta[Existing reciprocal Git metadata]
+        TargetDB[(Independent worktree atlas)]
+        ResetRecovery[Target-local reset recovery]
+    end
+    Agent -->|MCP call plus alias| MCP
+    Human --> TokenTUI
+    Catalog --> Discovery
+    Guard -->|revalidate lifecycle| Discovery
+    Resolver -->|issue-430| TargetDB
+    Guard -->|open, publish, or snapshot| TargetDB
+    Guard -->|stage fixed reset inventory| ResetRecovery
+    ResetRecovery -. lifecycle changed: restore without clobber .-> TargetDB
     ControlDB -. reusable baseline only .-> TargetDB
-    Human[Human token command in control checkout] --> TokenTUI[Existing token TUI layout]
-    TokenTUI --> ControlDB
 ```
 
 Ownership remains inside the existing crates:
@@ -56,6 +81,8 @@ All normal root-scoped MCP tools use one mutually exclusive selection boundary:
 
 Each admitted request captures its canonical root, database path, project identity, registration identity, control database, and alias before background or query work begins. An initialized alias also rechecks that the current database project identity still matches the registration, so recreating a database at the same valid root cannot inherit the old telemetry origin. A moved-root refresh is conditional on that captured registration still being active, so a concurrent remove cannot be undone by alias reactivation. Interleaved requests therefore do not depend on current directory or mutable session selection.
 
+Every production first bind, hydration activation, applied alias reset, and retirement shares one cross-process publication boundary. ProjectAtlas acquires the control catalog's existing `BEGIN IMMEDIATE`, reloads the exact active registration, revalidates the current Git lifecycle, then opens or locks the exact target before the transaction-owned catalog mutation and commit. An applied unbound reset stages only the fixed database, WAL, SHM, journal, and optional generated MCP-config inventory in a unique target-local recovery directory, revalidates Git, and deletes only the staged paths when the lifecycle still matches. A changed lifecycle restores staged paths without clobbering replacement files or retains the explicit recovery directory if restoration cannot complete. If binding wins, reset reloads a bound row and refuses deletion. If reset wins, a later binder observes the missing target and does not create or bind a replacement database. The fixed order—control catalog before target/local atlas—also prevents an inverse-lock deadlock.
+
 If Git moves a checkout, its unchanged administrative directory preserves the alias. Add revalidates the selected common directory, administrative directory, role, root, and lifecycle identity immediately before the catalog write. When the initial selection captured an existing local atlas, add also reopens it at that boundary and requires the same project identity before binding the alias or importing its snapshot. If Git deletes and later recreates a worktree while reusing the same administrative path, the lifecycle identity changes: add and routing fail closed until the stale alias is removed and the new checkout is registered. Unix requires device, inode, creation time, and lossless UTF-8 identity paths; Windows requires creation time plus retained-handle volume and 128-bit file identity. A filesystem or path that cannot provide the complete evidence fails alias registration and routing; it never falls back to a lossy path, reusable timestamp, or inode. A manager with `core.worktree`, an enabled `config.worktree` override, or unresolved config includes likewise requires exact source selection instead of guessing its parent. Removing the stale ProjectAtlas registration still leaves Git, source, and either checkout's `.projectatlas` state untouched.
 
 ```mermaid
@@ -90,6 +117,8 @@ sequenceDiagram
     actor Agent
     participant MCP as Control MCP process
     participant Control as Control atlas
+    participant Registry as Control registration guard
+    participant Structure as Bounded Git structure
     participant Candidate as Private target candidate
     participant Target as Target atlas path
 
@@ -103,18 +132,34 @@ sequenceDiagram
         alt Control source is unsuitable or incomplete
             MCP->>Target: Ordinary full init and exact target scan
             Target-->>MCP: Complete target generation
-            MCP-->>Agent: Visible fallback result
+            MCP->>Registry: BEGIN IMMEDIATE and reload exact active alias
+            Registry->>Structure: Revalidate common, admin lifecycle, and root
+            Structure-->>Registry: Same lifecycle or typed failure
+            Registry->>Target: Require existing exact target identity
+            Registry->>Registry: Bind target identity and COMMIT
+            MCP-->>Agent: Visible fallback result or typed failure
         else Control source is safe
             Control->>Candidate: SQLite backup reusable state
             Candidate->>Candidate: Clear telemetry and transient state, assign target identity
             MCP->>Candidate: Reconcile exact target branch and dirty bytes
-            Candidate->>Candidate: Verify identity, integrity, freshness, and publication
-            alt Candidate is valid and destination remains absent
+            Candidate->>Candidate: Checkpoint, verify integrity/freshness, fsync, and remove sidecars
+            MCP->>Registry: BEGIN IMMEDIATE and reload exact active alias
+            Registry->>Structure: Revalidate common, admin lifecycle, and root
+            Structure-->>Registry: Same lifecycle or typed failure
+            alt Candidate is valid, lifecycle matches, and destination remains absent
                 Candidate->>Target: Atomic no-clobber activation
-                Target-->>MCP: Complete target generation
-                MCP-->>Agent: Hydrated result
-            else Cancellation, race, I/O, or validation failure
+                Registry->>Structure: Revalidate lifecycle after activation
+                alt Lifecycle still exact
+                    Registry->>Registry: Bind activated target identity and COMMIT
+                    Target-->>MCP: Complete bound target generation
+                    MCP-->>Agent: Hydrated result
+                else Lifecycle changed after activation
+                    Registry->>Registry: ROLLBACK without binding
+                    MCP-->>Agent: Typed recovery and do not delete replacement-owned path
+                end
+            else Cancellation, lifecycle/reset race, I/O, or validation failure
                 Candidate->>Candidate: Discard unpublished candidate
+                Registry->>Registry: ROLLBACK without binding
                 MCP-->>Agent: Typed failure with prior destination preserved
             end
         end
@@ -196,7 +241,7 @@ Alias-routed MCP events commit once in control under the stable registration ori
 
 ## Removal, failures, and recovery
 
-`atlas_worktree_remove(worktree: "issue-430")` final-syncs an available local aggregate and retires only the ProjectAtlas registration. One short local SQLite writer-exclusion scope covers exact snapshot export plus the control atlas's atomic synchronize-and-retire transaction; a concurrent local usage commit therefore lands before the retained snapshot or only after retirement. It does not delete or alter the Git worktree, branch, source, `.projectatlas` folder, or SQLite database. Retained totals continue to contribute to the control report. A later registration with the same text alias receives a distinct origin identity and cannot merge histories.
+`atlas_worktree_remove(worktree: "issue-430")` final-syncs an available local aggregate and retires only the ProjectAtlas registration. It first holds the control active-registration transaction, revalidates the Git lifecycle, then acquires local SQLite writer exclusion and revalidates again immediately before the atomic bind/synchronize/retire mutation. A concurrent local usage commit therefore lands before the retained snapshot or only after retirement. If a local open, identity read, or snapshot export fails, ProjectAtlas checks lifecycle again: an unchanged lifecycle retains the real database error and active alias, while a replacement retires the stale row with a typed lifecycle blocker and only its last accepted aggregate. Replacement state is never bound, imported, or modified. ProjectAtlas does not delete or alter the Git worktree, branch, source, `.projectatlas` folder, or SQLite database. Retained totals continue to contribute to the control report. A later registration with the same text alias receives a distinct origin identity and cannot merge histories.
 
 ```mermaid
 stateDiagram-v2
@@ -205,13 +250,14 @@ stateDiagram-v2
     Ambiguous --> Discovered: choose returned stable selector
     Discovered --> Registered: atlas_worktree_add
     Registered --> InitRequired: target DB absent
-    InitRequired --> Active: hydration or ordinary init succeeds
-    InitRequired --> Registered: typed init failure
+    InitRequired --> Active: guarded hydration or ordinary init binds
+    InitRequired --> Registered: typed init failure or reset wins
     Active --> RefreshRequired: saved bytes outpace publication
     RefreshRequired --> Active: watch once or scan publishes
-    Active --> Retired: final sync and atlas_worktree_remove
+    Active --> Retired: control-first final sync and atlas_worktree_remove
     Active --> Missing: external Git or filesystem deletion
     Missing --> Retired: preserve last-valid aggregate
+    Registered --> Retired: replaced lifecycle and never import replacement
     Retired --> [*]
 ```
 
@@ -223,6 +269,7 @@ Recovery remains explicit:
 - invalid, unsafe, unrelated, or reciprocal-mismatched Git metadata fails closed.
 - a bare/common manager with zero or several active worktrees returns `worktree_required`; select an exact checkout as control.
 - an incompatible or corrupt database is never reset, downgraded, substituted, or silently rebuilt.
+- a registered reset that observes a changed Git lifecycle restores staged files without clobbering replacement state; an incomplete restore reports the retained target-local recovery directory.
 - a missing target retains its last accepted telemetry aggregate but ProjectAtlas cannot fabricate unsynchronized bytes that were externally deleted.
 
 The future distributed/versioned released-main atlas tracked by issue #456 is intentionally separate. v0.4.5-rc1 coordinates only local registrations and local databases visible to one explicitly selected control process.
