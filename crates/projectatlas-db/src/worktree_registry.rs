@@ -608,6 +608,12 @@ fn invalid_alias<T>(value: &str, reason: &'static str) -> DbResult<T> {
 
 /// Normalize one caller-validated absolute path into bounded metadata text.
 fn normalized_absolute_path(field: &'static str, path: &Path) -> DbResult<String> {
+    if path.to_str().is_none() {
+        return Err(DbError::InvalidWorktreeRegistrationPath {
+            field,
+            path: path.to_string_lossy().into_owned(),
+        });
+    }
     let normalized = normalize_metadata_path(path);
     if !path.is_absolute() || normalized.len() > MAX_WORKTREE_REGISTRATION_PATH_BYTES {
         return Err(DbError::InvalidWorktreeRegistrationPath {
@@ -830,6 +836,8 @@ mod tests {
     use std::fmt::Debug;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
 
     /// Return a test error instead of panicking inside a fallible test.
     fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
@@ -873,6 +881,66 @@ mod tests {
         let alias = WorktreeAlias::parse("issue-430.fix")?;
         require_eq(&alias.as_str(), &"issue-430.fix", "valid alias")?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_rejects_non_utf8_identity_paths_before_writing() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control = temp.path().join("control");
+        let common = temp.path().join("common.git");
+        let administrative = common.join("worktrees").join("linked");
+        let root = temp.path().join("linked");
+        fs::create_dir_all(&control)?;
+        let store = AtlasStore::open_for_project(&control.join("projectatlas.db"), &control)?;
+        let invalid = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"invalid-\xff".to_vec()));
+        let alias = WorktreeAlias::parse("non-utf8")?;
+
+        for (field, common_path, administrative_path, root_path) in [
+            (
+                "git_common_directory",
+                invalid.as_path(),
+                administrative.as_path(),
+                root.as_path(),
+            ),
+            (
+                "git_administrative_directory",
+                common.as_path(),
+                invalid.as_path(),
+                root.as_path(),
+            ),
+            (
+                "root",
+                common.as_path(),
+                administrative.as_path(),
+                invalid.as_path(),
+            ),
+        ] {
+            require(
+                matches!(
+                    store.register_worktree(
+                        &alias,
+                        common_path,
+                        administrative_path,
+                        &administrative_identity(1),
+                        root_path,
+                        None,
+                        1,
+                    ),
+                    Err(DbError::InvalidWorktreeRegistrationPath {
+                        field: rejected,
+                        ..
+                    }) if rejected == field
+                ),
+                "non-UTF-8 registration identity was accepted",
+            )?;
+        }
+        require(
+            store.worktree_registrations(true)?.is_empty(),
+            "rejected non-UTF-8 identity wrote a registration row",
+        )
     }
 
     #[test]

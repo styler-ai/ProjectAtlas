@@ -83,6 +83,11 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 - **WHEN** the platform cannot provide non-reusable lifecycle evidence for the selected Git administrative directory, including creation time plus the platform's stable file-object identity
 - **THEN** ProjectAtlas rejects alias registration and routing rather than falling back to a reusable path, device, or inode identity
 
+#### Scenario: Non-UTF-8 identity paths are structural status only
+
+- **WHEN** Git reports a worktree whose common-directory, administrative-directory, or source-root path cannot be represented losslessly as UTF-8 for SQLite metadata and MCP JSON
+- **THEN** ProjectAtlas may report the Git row with a typed blocker but returns no registrable selector or root, does not join it to a text identity, and creates no alias registration
+
 #### Scenario: Git-authorized move preserves registration
 
 - **WHEN** Git moves a registered worktree while retaining its validated administrative identity

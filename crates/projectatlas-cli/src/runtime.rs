@@ -808,6 +808,12 @@ pub(crate) fn synchronize_registered_worktree_usage(
             )));
         }
     };
+    if repository.common_directory.to_str().is_none() {
+        return Err(CliError::InvalidInput(
+            "registered worktree synchronization requires UTF-8 Git common-directory identity"
+                .to_string(),
+        ));
+    }
     let control = open_atlas_store_for_project(control_db, control_root)?;
     let common = normalize_native_path_display(&repository.common_directory);
     for registration in registrations {
@@ -815,8 +821,9 @@ pub(crate) fn synchronize_registered_worktree_usage(
             continue;
         }
         let Some(entry) = repository.worktrees.iter().find(|entry| {
-            normalize_native_path_display(&entry.administrative_directory)
-                == registration.git_administrative_directory
+            entry.administrative_directory.to_str().is_some()
+                && normalize_native_path_display(&entry.administrative_directory)
+                    == registration.git_administrative_directory
         }) else {
             continue;
         };
@@ -831,6 +838,12 @@ pub(crate) fn synchronize_registered_worktree_usage(
         let GitWorktreeState::Active { root, .. } = &entry.state else {
             continue;
         };
+        if root.to_str().is_none() {
+            return Err(CliError::InvalidInput(
+                "registered worktree synchronization requires UTF-8 source-root identity"
+                    .to_string(),
+            ));
+        }
         let database = root.join(".projectatlas").join("projectatlas.db");
         match fs::symlink_metadata(&database) {
             Ok(_) => {}

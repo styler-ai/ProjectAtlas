@@ -685,9 +685,9 @@ const MCP_HYDRATION_NO_SCAN_REASON: &str =
 /// Worktree aliases require one structurally verified Git control repository.
 const MCP_ERROR_WORKTREE_CONTROL_REPOSITORY_REQUIRED: &str =
     "worktree aliases require a structurally valid Git control repository";
-/// Default aliases cannot be derived from non-UTF-8 directory names.
-const MCP_ERROR_WORKTREE_ALIAS_NON_UTF8: &str =
-    "selected worktree has no UTF-8 directory name; provide alias explicitly";
+/// `SQLite` metadata and MCP JSON require lossless UTF-8 worktree identity paths.
+const MCP_ERROR_WORKTREE_PATH_NON_UTF8: &str =
+    "ProjectAtlas worktree registration requires UTF-8 common, administrative, and source paths";
 /// Active registrations must agree with their local atlas identity.
 const MCP_ERROR_WORKTREE_IDENTITY_CONFLICT: &str =
     "local atlas identity conflicts with its active registration";
@@ -1842,8 +1842,8 @@ struct McpWorktreeListReport {
 /// One structurally discovered Git worktree joined to `ProjectAtlas` state.
 #[derive(Debug, Serialize)]
 struct McpWorktreeRow {
-    /// Stable selector derived from the Git administrative identity.
-    selector: String,
+    /// Stable selector when the structural row is representable and registrable.
+    selector: Option<String>,
     /// Reserved `main` or active registered alias when present.
     alias: Option<String>,
     /// Structural primary/linked role.
@@ -4445,6 +4445,9 @@ impl ProjectAtlasMcpServer {
         else {
             return Ok(());
         };
+        if !Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry) {
+            return Ok(());
+        }
         let administrative_directory =
             normalize_native_path_display(&entry.administrative_directory);
         let administrative_identity = git_administrative_identity(&entry.administrative_directory)?;
@@ -5663,6 +5666,16 @@ impl ProjectAtlasMcpServer {
         }
     }
 
+    /// Return whether `SQLite` text and MCP JSON can preserve this identity exactly.
+    fn worktree_registration_paths_are_utf8(
+        common_directory: &Path,
+        entry: &GitWorktreeEntry,
+    ) -> bool {
+        common_directory.to_str().is_some()
+            && entry.administrative_directory.to_str().is_some()
+            && Self::active_worktree_root(entry).is_none_or(|root| root.to_str().is_some())
+    }
+
     /// Return whether one short selector identifies this structural candidate.
     fn worktree_candidate_matches(entry: &GitWorktreeEntry, selector: &str) -> bool {
         if Self::worktree_candidate_selector(entry) == selector {
@@ -5688,6 +5701,9 @@ impl ProjectAtlasMcpServer {
         repository
             .worktrees
             .iter()
+            .filter(|entry| {
+                Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry)
+            })
             .filter(|entry| {
                 Self::active_worktree_root(entry)
                     .is_some_and(|root| root != self.control_state.root)
@@ -5732,7 +5748,13 @@ impl ProjectAtlasMcpServer {
     }
 
     /// Build one concise add-candidate row from active structural evidence.
-    fn worktree_candidate(entry: &GitWorktreeEntry) -> Option<McpWorktreeCandidate> {
+    fn worktree_candidate(
+        common_directory: &Path,
+        entry: &GitWorktreeEntry,
+    ) -> Option<McpWorktreeCandidate> {
+        if !Self::worktree_registration_paths_are_utf8(common_directory, entry) {
+            return None;
+        }
         Some(McpWorktreeCandidate {
             selector: Self::worktree_candidate_selector(entry),
             root: normalize_native_path_display(Self::active_worktree_root(entry)?),
@@ -5745,7 +5767,7 @@ impl ProjectAtlasMcpServer {
         let name = root
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
-            .ok_or_else(|| CliError::InvalidInput(MCP_ERROR_WORKTREE_ALIAS_NON_UTF8.to_string()))?;
+            .ok_or_else(|| CliError::InvalidInput(MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string()))?;
         WorktreeAlias::parse(&name.to_ascii_lowercase()).map_err(|source| {
             CliError::InvalidInput(format!(
                 "selected worktree directory cannot be used as an alias; provide alias explicitly: {source}"
@@ -5811,15 +5833,22 @@ impl ProjectAtlasMcpServer {
     /// Join one structural worktree entry to registry, atlas, and telemetry state.
     fn worktree_list_row(
         &self,
+        common_directory: &Path,
         entry: &GitWorktreeEntry,
         registrations: &[WorktreeRegistration],
     ) -> McpWorktreeRow {
         let administrative_directory =
             normalize_native_path_display(&entry.administrative_directory);
-        let registration = registrations.iter().find(|registration| {
-            registration.state == WorktreeRegistrationState::Active
-                && registration.git_administrative_directory == administrative_directory
-        });
+        let registration_paths_are_utf8 =
+            Self::worktree_registration_paths_are_utf8(common_directory, entry);
+        let registration = registration_paths_are_utf8
+            .then(|| {
+                registrations.iter().find(|registration| {
+                    registration.state == WorktreeRegistrationState::Active
+                        && registration.git_administrative_directory == administrative_directory
+                })
+            })
+            .flatten();
         let administrative_identity = git_administrative_identity(&entry.administrative_directory);
         let lifecycle_matches = registration.is_none_or(|registration| {
             administrative_identity
@@ -5844,12 +5873,16 @@ impl ProjectAtlasMcpServer {
         let mut telemetry_state = McpWorktreeTelemetryState::Unavailable;
         let mut local_telemetry_revision = None;
         let mut project_instance_id = None;
-        let mut blocker = (!lifecycle_matches)
-            .then(|| MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string())
-            .or_else(|| administrative_identity.err().map(|error| error.to_string()));
+        let mut blocker = if registration_paths_are_utf8 {
+            (!lifecycle_matches)
+                .then(|| MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string())
+                .or_else(|| administrative_identity.err().map(|error| error.to_string()))
+        } else {
+            Some(MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string())
+        };
         let git_state = match &entry.state {
             GitWorktreeState::Active { root, .. } => {
-                if lifecycle_matches {
+                if registration_paths_are_utf8 && lifecycle_matches {
                     match Self::local_worktree_atlas(root) {
                         Ok(Some(local)) => {
                             let identity_matches = registration
@@ -5913,13 +5946,15 @@ impl ProjectAtlasMcpServer {
             }
         };
         McpWorktreeRow {
-            selector: Self::worktree_candidate_selector(entry),
+            selector: registration_paths_are_utf8.then(|| Self::worktree_candidate_selector(entry)),
             alias,
             role: entry.role.into(),
             git_state,
             registration: registration_state,
             administrative_directory,
-            root: root.map(normalize_native_path_display),
+            root: root
+                .filter(|_| registration_paths_are_utf8)
+                .map(normalize_native_path_display),
             atlas_state,
             telemetry_state,
             accepted_telemetry_revision: registration
@@ -5933,9 +5968,9 @@ impl ProjectAtlasMcpServer {
     /// Preserve one active alias when Git no longer reports its worktree registration.
     fn missing_registered_worktree_row(registration: &WorktreeRegistration) -> McpWorktreeRow {
         McpWorktreeRow {
-            selector: Self::worktree_candidate_selector_from_identity(
+            selector: Some(Self::worktree_candidate_selector_from_identity(
                 &registration.git_administrative_directory,
-            ),
+            )),
             alias: Some(registration.alias.to_string()),
             role: McpGitWorktreeRole::Linked,
             git_state: McpGitWorktreeState::Missing,
@@ -6049,6 +6084,11 @@ impl ProjectAtlasMcpServer {
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         let registration = control.worktree_registration(alias)?;
         let repository = self.control_git_repository()?;
+        if repository.common_directory.to_str().is_none() {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string(),
+            ));
+        }
         if normalize_native_path_display(&repository.common_directory)
             != registration.git_common_directory
         {
@@ -6061,8 +6101,9 @@ impl ProjectAtlasMcpServer {
             .worktrees
             .iter()
             .find(|entry| {
-                normalize_native_path_display(&entry.administrative_directory)
-                    == registration.git_administrative_directory
+                Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry)
+                    && normalize_native_path_display(&entry.administrative_directory)
+                        == registration.git_administrative_directory
             })
             .ok_or_else(|| {
                 CliError::InvalidInput(format!(
@@ -7289,12 +7330,17 @@ impl ProjectAtlasMcpServer {
             let structural_identities = repository
                 .worktrees
                 .iter()
+                .filter(|entry| {
+                    Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry)
+                })
                 .map(|entry| normalize_native_path_display(&entry.administrative_directory))
                 .collect::<HashSet<_>>();
             let (mut worktrees, unregistered): (Vec<_>, Vec<_>) = repository
                 .worktrees
                 .iter()
-                .map(|entry| self.worktree_list_row(entry, &registrations))
+                .map(|entry| {
+                    self.worktree_list_row(&repository.common_directory, entry, &registrations)
+                })
                 .partition(|row| {
                     !matches!(row.registration, McpWorktreeRegistrationState::Unregistered)
                 });
@@ -7370,13 +7416,17 @@ impl ProjectAtlasMcpServer {
                             Self::active_worktree_root(entry)
                                 .is_some_and(|root| root != self.control_state.root)
                         })
-                        .filter_map(Self::worktree_candidate)
+                        .filter_map(|entry| {
+                            Self::worktree_candidate(&repository.common_directory, entry)
+                        })
                         .take(MCP_WORKTREE_LIST_MAX_ROWS)
                         .collect()
                 } else {
                     candidates
                         .into_iter()
-                        .filter_map(Self::worktree_candidate)
+                        .filter_map(|entry| {
+                            Self::worktree_candidate(&repository.common_directory, entry)
+                        })
                         .take(MCP_WORKTREE_LIST_MAX_ROWS)
                         .collect()
                 };
@@ -7497,8 +7547,9 @@ impl ProjectAtlasMcpServer {
             let registration = control.worktree_registration(&alias)?;
             let mut blocker = None;
             let entry = repository.worktrees.iter().find(|entry| {
-                normalize_native_path_display(&entry.administrative_directory)
-                    == registration.git_administrative_directory
+                Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry)
+                    && normalize_native_path_display(&entry.administrative_directory)
+                        == registration.git_administrative_directory
             });
             let entry = match entry {
                 Some(entry) => match git_administrative_identity(&entry.administrative_directory) {
@@ -9522,6 +9573,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
     use std::process::Command as StdCommand;
     use std::time::{Duration, Instant};
 
@@ -10998,6 +11051,118 @@ mod tests {
         require(
             listed.contains("total_worktrees: 1025") && listed.contains("retired-at-capacity"),
             "full structural inventory starved the requested retired registration",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_worktree_identities_are_blocked_before_join_or_selection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let common_directory = control_root.join(".git");
+        fs::create_dir_all(&common_directory)?;
+        let database = control_root.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("control database has no parent"))?,
+        )?;
+        let store = AtlasStore::open_for_project(&database, &control_root)?;
+        let server =
+            ProjectAtlasMcpServer::new(database, None, "non-utf8-worktrees".to_string(), false);
+        let mut entries = Vec::new();
+
+        for (index, terminal_byte) in [0xff, 0xfe].into_iter().enumerate() {
+            let name = std::ffi::OsString::from_vec(vec![b'w', b't', b'-', terminal_byte]);
+            let administrative_directory = common_directory.join("worktrees").join(&name);
+            let root = temp.path().join(name);
+            fs::create_dir_all(&administrative_directory)?;
+            fs::create_dir_all(&root)?;
+            let entry = GitWorktreeEntry {
+                role: GitWorktreeRole::Linked,
+                administrative_directory: administrative_directory.clone(),
+                state: GitWorktreeState::Active {
+                    git_control_path: root.join(".git"),
+                    root: root.clone(),
+                },
+            };
+            let shadow = WorktreeRegistration {
+                registration_id: i64::try_from(index + 1)?,
+                alias: WorktreeAlias::parse(&format!("shadow-{index}"))?,
+                state: WorktreeRegistrationState::Active,
+                git_common_directory: normalize_native_path_display(&common_directory),
+                git_administrative_directory: normalize_native_path_display(
+                    &administrative_directory,
+                ),
+                git_administrative_identity: "ab".repeat(32),
+                last_root: normalize_native_path_display(&root),
+                project_instance_id: None,
+                accepted_telemetry_revision: 0,
+                created_at_epoch: 1,
+                retired_at_epoch: None,
+            };
+            let row = server.worktree_list_row(&common_directory, &entry, &[shadow]);
+            require(
+                row.selector.is_none()
+                    && row.alias.is_none()
+                    && matches!(row.registration, McpWorktreeRegistrationState::Unregistered)
+                    && matches!(row.atlas_state, McpWorktreeAtlasState::Invalid)
+                    && row.root.is_none()
+                    && row.blocker.as_deref() == Some(MCP_ERROR_WORKTREE_PATH_NON_UTF8),
+                "non-UTF-8 structural row was advertised or joined as registrable",
+            )?;
+            entries.push(entry);
+        }
+
+        let first_selector = ProjectAtlasMcpServer::worktree_candidate_selector(&entries[0]);
+        require(
+            first_selector == ProjectAtlasMcpServer::worktree_candidate_selector(&entries[1]),
+            "regression fixture did not reproduce the lossy selector collision",
+        )?;
+        let repository = GitRepositoryStructure {
+            common_directory,
+            selection: projectatlas_fs::worktree::GitRepositorySelection::CommonManager {
+                source_selection: projectatlas_fs::worktree::GitManagerSourceSelection::Ambiguous {
+                    worktree_count: entries.len(),
+                },
+            },
+            worktrees: entries,
+        };
+        require(
+            server
+                .matching_worktree_candidates(&repository, &first_selector)
+                .is_empty()
+                && repository.worktrees.iter().all(|entry| {
+                    ProjectAtlasMcpServer::worktree_candidate(&repository.common_directory, entry)
+                        .is_none()
+                }),
+            "non-UTF-8 structural identity remained selectable for registration",
+        )?;
+        require(
+            store.worktree_registrations(true)?.is_empty(),
+            "non-UTF-8 structural identity reached the registration store",
+        )?;
+
+        let non_utf8_common = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"common-\xff".to_vec()));
+        let utf8_entry = GitWorktreeEntry {
+            role: GitWorktreeRole::Linked,
+            administrative_directory: common_directory.join("worktrees").join("utf8"),
+            state: GitWorktreeState::Active {
+                git_control_path: temp.path().join("utf8").join(".git"),
+                root: temp.path().join("utf8"),
+            },
+        };
+        let row = server.worktree_list_row(&non_utf8_common, &utf8_entry, &[]);
+        require(
+            row.selector.is_none()
+                && row.root.is_none()
+                && row.blocker.as_deref() == Some(MCP_ERROR_WORKTREE_PATH_NON_UTF8)
+                && ProjectAtlasMcpServer::worktree_candidate(&non_utf8_common, &utf8_entry)
+                    .is_none(),
+            "non-UTF-8 common-directory identity remained registrable",
         )
     }
 
