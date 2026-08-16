@@ -461,25 +461,28 @@ impl AtlasStore {
         })
     }
 
-    /// Bind an initialized worktree identity and its latest validated root.
+    /// Bind an initialized worktree identity to one captured active registration.
     ///
     /// # Errors
     ///
-    /// Returns an error for an absent alias, conflicting active project
-    /// identity, invalid path, malformed state, or transactional `SQLite` failure.
+    /// Returns an error when the captured registration is no longer active under
+    /// the same alias, its project identity conflicts, the path is invalid, stored
+    /// state is malformed, or `SQLite` fails.
     pub fn bind_worktree_project(
         &self,
+        registration_id: i64,
         alias: &WorktreeAlias,
         root: &Path,
         project_instance_id: ProjectInstanceId,
     ) -> DbResult<WorktreeRegistration> {
         let root = normalized_absolute_path("root", root)?;
         self.with_validated_write(|transaction| {
-            let existing = load_active_by_alias(transaction, alias.as_str())?.ok_or_else(|| {
-                DbError::WorktreeRegistrationNotFound {
+            let existing = load_by_id(transaction, registration_id)?;
+            if existing.state != WorktreeRegistrationState::Active || existing.alias != *alias {
+                return Err(DbError::WorktreeRegistrationNotFound {
                     alias: alias.to_string(),
-                }
-            })?;
+                });
+            }
             bind_registration_project(transaction, &existing, &root, project_instance_id)
         })
     }
@@ -569,12 +572,22 @@ fn bind_registration_project(
             value: project_instance_id.to_string(),
         });
     }
-    connection.execute(
+    let updated = connection.execute(
         "UPDATE worktree_registrations
          SET last_root = ?1, project_instance_id = ?2
-         WHERE registration_id = ?3",
-        params![root, project_bytes.as_slice(), registration.registration_id],
+         WHERE registration_id = ?3 AND alias = ?4 AND state = 'active'",
+        params![
+            root,
+            project_bytes.as_slice(),
+            registration.registration_id,
+            registration.alias.as_str()
+        ],
     )?;
+    if updated != 1 {
+        return Err(DbError::WorktreeRegistrationNotFound {
+            alias: registration.alias.to_string(),
+        });
+    }
     load_by_id(connection, registration.registration_id)
 }
 
@@ -1033,12 +1046,30 @@ mod tests {
             &first_admin,
             &administrative_identity(2),
             &second_root,
-            Some(identity(2)?),
+            None,
             21,
         )?;
         require(
             replacement.registration_id != first.registration_id,
             "replacement reused unrelated retired history",
+        )?;
+        require(
+            matches!(
+                store.bind_worktree_project(
+                    first.registration_id,
+                    &alias,
+                    &first_root,
+                    identity(1)?
+                ),
+                Err(DbError::WorktreeRegistrationNotFound { .. })
+            ),
+            "stale bind targeted a replacement registration after alias reuse",
+        )?;
+        let replacement = store.worktree_registration(&alias)?;
+        require(
+            replacement.project_instance_id.is_none()
+                && replacement.last_root == normalized_absolute_path("root", &second_root)?,
+            "stale bind changed the replacement registration",
         )?;
         let all = store.worktree_registrations(true)?;
         require_eq(&all.len(), &2, "retained registration count")?;
@@ -1146,7 +1177,7 @@ mod tests {
         store.retire_worktree(&original, 2)?;
 
         let unbound = WorktreeAlias::parse("unbound")?;
-        store.register_worktree(
+        let unbound_registration = store.register_worktree(
             &unbound,
             &common,
             &common.join("worktrees/unbound"),
@@ -1157,7 +1188,12 @@ mod tests {
         )?;
         for result in [
             store
-                .bind_worktree_project(&unbound, &temp.path().join("unbound"), identity(1)?)
+                .bind_worktree_project(
+                    unbound_registration.registration_id,
+                    &unbound,
+                    &temp.path().join("unbound"),
+                    identity(1)?,
+                )
                 .map(|_| ()),
             store
                 .register_worktree(

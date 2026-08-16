@@ -3963,6 +3963,11 @@ impl ProjectAtlasMcpServer {
         }
         let control = open_atlas_store_for_project(&control_state.db_path, &control_state.root)?;
         control.bind_worktree_project(
+            selection
+                .registration_id
+                .ok_or_else(|| DbError::WorktreeRegistrationNotFound {
+                    alias: selection.alias.clone(),
+                })?,
             &WorktreeAlias::parse(&selection.alias)?,
             &state.root,
             project,
@@ -4426,7 +4431,16 @@ impl ProjectAtlasMcpServer {
             .project_instance_id()?
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
-        control.bind_worktree_project(&alias, &state.root, project)?;
+        control.bind_worktree_project(
+            selection
+                .registration_id
+                .ok_or_else(|| DbError::WorktreeRegistrationNotFound {
+                    alias: selection.alias.clone(),
+                })?,
+            &alias,
+            &state.root,
+            project,
+        )?;
         Ok(())
     }
 

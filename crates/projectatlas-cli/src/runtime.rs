@@ -855,6 +855,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
         drop(target);
         if registration.project_instance_id.is_none() {
             control.bind_worktree_project(
+                registration.registration_id,
                 &registration.alias,
                 root,
                 snapshot.project_instance_id(),
