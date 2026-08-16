@@ -68,7 +68,7 @@ use projectatlas_db::{
     HealthFindingsPage, HealthQuery, HealthScope, IndexPublication, IndexPublicationGuard,
     IndexPublicationState, IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
     MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
-    TelemetryRetentionState, WorktreeRegistration, database_settings_report,
+    TelemetryRetentionState, WorktreeRegistration, WorktreeUsageSnapshot, database_settings_report,
     read_project_root_read_only, validate_database_location,
 };
 use projectatlas_fs::worktree::{
@@ -790,6 +790,7 @@ fn with_synchronized_registered_worktree_usage<T>(
         control_db,
         control_root,
         expected_control_project,
+        |_, _| Ok(()),
         || Ok(()),
         read,
     )
@@ -856,6 +857,7 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
     control_db: &Path,
     control_root: &Path,
     expected_control_project: Option<ProjectInstanceId>,
+    mut before_snapshot_revalidation: impl FnMut(&WorktreeRegistration, &Path) -> Result<(), CliError>,
     before_catalog_validation: impl FnOnce() -> Result<(), CliError>,
     read: impl FnOnce(&AtlasStore) -> DbResult<T>,
 ) -> Result<T, CliError> {
@@ -962,8 +964,16 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
                     Err(error) => return Ok(Err(error.into())),
                 };
                 drop(target);
+                if let Err(error) = before_snapshot_revalidation(guard.registration(), root) {
+                    return Ok(Err(error));
+                }
                 if let Err(error) =
                     require_registered_worktree_lifecycle(control_root, guard.registration(), root)
+                {
+                    return Ok(Err(error));
+                }
+                if let Err(error) =
+                    require_current_worktree_usage_snapshot(&database, root, &snapshot)
                 {
                     return Ok(Err(error));
                 }
@@ -988,6 +998,22 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
                     .to_string(),
             )),
     }
+}
+
+/// Require the atlas currently published at this path to match a captured snapshot exactly.
+pub(crate) fn require_current_worktree_usage_snapshot(
+    database: &Path,
+    root: &Path,
+    expected: &WorktreeUsageSnapshot,
+) -> Result<(), CliError> {
+    let current = open_atlas_store_read_only_for_project(database, root)?;
+    if current.export_worktree_usage_snapshot()? != *expected {
+        return Err(CliError::InvalidInput(
+            "worktree atlas changed after its usage snapshot was captured; retry the operation"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve one registration only while its exact Git lifecycle remains active.
@@ -8640,6 +8666,7 @@ mod tests {
             &database,
             &root,
             Some(control_project),
+            |_, _| Ok(()),
             || Ok(()),
             |reader| {
                 let contender = rusqlite::Connection::open(&database).map_err(DbError::from)?;
@@ -8696,6 +8723,7 @@ mod tests {
             &database,
             &root,
             Some(control_project),
+            |_, _| Ok(()),
             || {
                 control.register_worktree(
                     &alias,
@@ -8811,6 +8839,59 @@ mod tests {
         let snapshot = target.export_worktree_usage_snapshot()?;
         drop(target);
 
+        let preserved_target = root.join(".projectatlas-snapshot-race");
+        let replacement_project = std::cell::Cell::new(None);
+        let replaced_database = synchronize_registered_worktree_usage_with_catalog_validation(
+            &control_database,
+            &primary,
+            control.project_instance_id()?,
+            |captured, captured_root| {
+                require_eq(
+                    &captured.registration_id,
+                    &registration.registration_id,
+                    "snapshot-race registration",
+                )
+                .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+                if captured_root != root.as_path() {
+                    return Err(CliError::InvalidInput(
+                        "snapshot-race root changed".to_string(),
+                    ));
+                }
+                fs::rename(root.join(".projectatlas"), &preserved_target)?;
+                fs::create_dir(root.join(".projectatlas"))?;
+                let replacement = AtlasStore::open_for_project(&target_database, &root)?;
+                replacement_project.set(replacement.project_instance_id()?);
+                Ok(())
+            },
+            || Ok(()),
+            |_| Ok(()),
+        );
+        require_eq(
+            &replaced_database.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains("atlas changed after its usage snapshot was captured")
+            }),
+            &true,
+            "same-lifecycle database replacement rejection",
+        )?;
+        require_eq(
+            &(replacement_project.get().is_some()
+                && replacement_project.get() != Some(snapshot.project_instance_id())),
+            &true,
+            "snapshot-race replacement identity",
+        )?;
+        let stored = control.worktree_registration(&alias)?;
+        require_eq(
+            &(stored.project_instance_id.is_none()
+                && stored.accepted_telemetry_revision == 0
+                && control.registered_worktree_token_overview(&alias)?.calls == 0),
+            &true,
+            "database replacement rollback state",
+        )?;
+        fs::remove_dir_all(root.join(".projectatlas"))?;
+        fs::rename(&preserved_target, root.join(".projectatlas"))?;
+
         run_git_fixture(
             StdCommand::new("git")
                 .current_dir(&primary)
@@ -8894,6 +8975,7 @@ mod tests {
             &control_database,
             &primary,
             control.project_instance_id()?,
+            |_, _| Ok(()),
             || {
                 fs::rename(&preserved_target, root.join(".projectatlas"))?;
                 control.bind_worktree_project(

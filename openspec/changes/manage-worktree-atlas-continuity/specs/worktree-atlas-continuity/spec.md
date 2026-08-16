@@ -116,7 +116,7 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 #### Scenario: Deferred first binding imports existing telemetry atomically
 
 - **WHEN** an unbound registered alias acquires a valid local atlas through legacy exact-path initialization, hydration activation, or aggregate synchronization
-- **THEN** ProjectAtlas exports that atlas's exact aggregate snapshot, revalidates the Git lifecycle, and commits the project binding plus initial snapshot in one control transaction; any export, validation, capacity, or synchronization failure leaves the alias unbound and the prior control aggregate unchanged
+- **THEN** ProjectAtlas exports that atlas's exact aggregate snapshot, revalidates the Git lifecycle, reopens the database currently published at the target path and requires the same exact snapshot, and commits the project binding plus initial snapshot in one control transaction; any replacement, export, validation, capacity, or synchronization failure leaves the alias unbound and the prior control aggregate unchanged
 
 #### Scenario: Lifecycle replacement during applied reset preserves replacement files
 

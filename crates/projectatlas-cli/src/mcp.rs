@@ -27,11 +27,12 @@ use crate::runtime::{
     reconcile_hydrated_index_controlled, record_directory_walk_usage_estimate,
     record_usage_estimate, record_usage_text, render_classified_ranked_file_rows,
     render_classified_symbol_rows, render_health_page, render_purpose_curation_page,
-    render_purpose_review_report, require_registered_worktree_lifecycle, reset_index_files,
-    reset_index_files_with_revalidation, review_purposes, run_init_bootstrap,
-    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
-    run_symbol_build_pipeline_controlled, strip_legacy_purpose, telemetry_disabled,
-    validate_purpose_review_admission, validated_indexed_file_key, watcher_status_report,
+    render_purpose_review_report, require_current_worktree_usage_snapshot,
+    require_registered_worktree_lifecycle, reset_index_files, reset_index_files_with_revalidation,
+    review_purposes, run_init_bootstrap, run_scan_pipeline_controlled,
+    run_single_watch_refresh_controlled, run_symbol_build_pipeline_controlled,
+    strip_legacy_purpose, telemetry_disabled, validate_purpose_review_admission,
+    validated_indexed_file_key, watcher_status_report,
 };
 #[cfg(test)]
 use crate::runtime::{
@@ -4102,6 +4103,13 @@ impl ProjectAtlasMcpServer {
                     ) {
                         return Ok(Err(error));
                     }
+                    if let Err(error) = require_current_worktree_usage_snapshot(
+                        &state.db_path,
+                        &state.root,
+                        &snapshot,
+                    ) {
+                        return Ok(Err(error));
+                    }
                     guard.bind_project_with_usage_snapshot(&state.root, project, &snapshot)?;
                 }
             }
@@ -4634,6 +4642,13 @@ impl ProjectAtlasMcpServer {
                 &self.control_state.root,
                 guard.registration(),
                 &state.root,
+            ) {
+                return Ok(Err(error));
+            }
+            if let Err(error) = require_current_worktree_usage_snapshot(
+                &activation.database,
+                &state.root,
+                &snapshot,
             ) {
                 return Ok(Err(error));
             }
@@ -8011,6 +8026,9 @@ impl ProjectAtlasMcpServer {
                 CliError::InvalidInput(MCP_ERROR_WORKTREE_NO_LONGER_ACTIVE.to_string())
             })?;
             Self::revalidate_local_worktree_atlas_identity(root, project_instance_id)?;
+            if let Some(local) = local.as_ref() {
+                require_current_worktree_usage_snapshot(&db_path, root, &local.snapshot)?;
+            }
             let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
             let created_at_epoch = Self::current_epoch_seconds()?;
             let (registration, telemetry_sync) = if let Some(local) = local.as_ref() {
