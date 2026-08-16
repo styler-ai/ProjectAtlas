@@ -691,6 +691,9 @@ const MCP_ERROR_WORKTREE_PATH_NON_UTF8: &str =
 /// Active registrations must agree with their local atlas identity.
 const MCP_ERROR_WORKTREE_IDENTITY_CONFLICT: &str =
     "local atlas identity conflicts with its active registration";
+/// Deferred alias work must retain the exact control catalog that owns its registration ID.
+const MCP_ERROR_WORKTREE_CONTROL_IDENTITY_CONFLICT: &str =
+    "control atlas identity changed after worktree alias selection";
 /// Recovery guidance when an initialized registration loses its exact atlas.
 const MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING: &str = "registered worktree atlas is missing; restore it before retrying or retiring the alias so final token totals can be synchronized";
 /// Resetting a bound atlas would strand its control-catalog identity.
@@ -1525,6 +1528,8 @@ struct McpWorktreeSelection {
     registration_id: Option<i64>,
     /// Project identity captured for the selected alias target, when present.
     project_instance_id: Option<ProjectInstanceId>,
+    /// Control-atlas identity that owns the captured registration ID.
+    control_project_instance_id: Option<ProjectInstanceId>,
 }
 
 /// Outcome of evaluating the control atlas as an init hydration source.
@@ -3901,6 +3906,23 @@ impl ProjectAtlasMcpServer {
         Ok(())
     }
 
+    /// Revalidate the control catalog that owns one captured alias registration.
+    fn require_captured_control_identity(
+        selection: Option<&McpWorktreeSelection>,
+        control: &AtlasStore,
+    ) -> Result<(), CliError> {
+        let Some(expected) = selection.and_then(|selection| selection.control_project_instance_id)
+        else {
+            return Ok(());
+        };
+        if control.project_instance_id()? != Some(expected) {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_WORKTREE_CONTROL_IDENTITY_CONFLICT.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Admit only federation snapshots that retain their captured alias identities.
     fn require_federated_worktree_identities(
         stores: Vec<FederatedStore>,
@@ -4023,6 +4045,7 @@ impl ProjectAtlasMcpServer {
             return Ok(store);
         }
         let control = open_atlas_store_for_project(&control_state.db_path, &control_state.root)?;
+        Self::require_captured_control_identity(Some(selection), &control)?;
         control.bind_worktree_project(
             selection
                 .registration_id
@@ -4131,11 +4154,14 @@ impl ProjectAtlasMcpServer {
         if binding.project_instance_id != stamp.project_instance_id {
             return;
         }
-        if let Some(registration_id) = state
+        if let Some(selection) = state
             .worktree
             .as_ref()
-            .and_then(|selection| selection.registration_id)
+            .filter(|selection| selection.registration_id.is_some())
         {
+            let Some(registration_id) = selection.registration_id else {
+                return;
+            };
             let event = match &intent.baseline {
                 McpUsageBaseline::Estimate(baseline_tokens) => usage_from_estimates_with_context(
                     &self.session,
@@ -4173,6 +4199,9 @@ impl ProjectAtlasMcpServer {
             let Ok(control) = Self::open_read_store(&self.control_state) else {
                 return;
             };
+            if Self::require_captured_control_identity(Some(selection), &control).is_err() {
+                return;
+            }
             if control.finish_index_read_snapshot().is_ok() {
                 self.record_usage_for_origin(
                     &self.control_state,
@@ -4427,6 +4456,7 @@ impl ProjectAtlasMcpServer {
             }
             Err(error) => return Err(error),
         };
+        Self::require_captured_control_identity(state.worktree.as_ref(), &source)?;
         let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
         let control = index_work_control(&symbol_options);
         let mut candidate =
@@ -4492,6 +4522,7 @@ impl ProjectAtlasMcpServer {
             .project_instance_id()?
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
+        Self::require_captured_control_identity(Some(selection), &control)?;
         control.bind_worktree_project(
             selection
                 .registration_id
@@ -4527,6 +4558,7 @@ impl ProjectAtlasMcpServer {
             normalize_native_path_display(&entry.administrative_directory);
         let administrative_identity = git_administrative_identity(&entry.administrative_directory)?;
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
+        let control_project_instance_id = control.captured_project_binding()?.project_instance_id;
         let Some(registration) =
             control
                 .worktree_registrations(false)?
@@ -4543,6 +4575,7 @@ impl ProjectAtlasMcpServer {
                 alias: registration.alias.to_string(),
                 registration_id: Some(registration.registration_id),
                 project_instance_id: registration.project_instance_id,
+                control_project_instance_id: Some(control_project_instance_id),
             },
             state,
         )
@@ -6148,6 +6181,7 @@ impl ProjectAtlasMcpServer {
                 alias,
                 registration_id: None,
                 project_instance_id,
+                control_project_instance_id: project_instance_id,
             });
             return Ok(state);
         }
@@ -6162,6 +6196,7 @@ impl ProjectAtlasMcpServer {
         validation: McpConfigValidation,
     ) -> Result<McpProjectState, CliError> {
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
+        let control_project_instance_id = control.captured_project_binding()?.project_instance_id;
         let registration = control.worktree_registration(alias)?;
         let repository = self.control_git_repository()?;
         if repository.common_directory.to_str().is_none() {
@@ -6241,6 +6276,7 @@ impl ProjectAtlasMcpServer {
             alias: alias.to_string(),
             registration_id: Some(registration.registration_id),
             project_instance_id: registration.project_instance_id,
+            control_project_instance_id: Some(control_project_instance_id),
         });
         Ok(state)
     }
@@ -9143,7 +9179,7 @@ impl ProjectAtlasMcpServer {
                     state
                         .worktree
                         .as_ref()
-                        .and_then(|selection| selection.project_instance_id),
+                        .and_then(|selection| selection.control_project_instance_id),
                 )?;
             }
             let store = Self::open_read_store(&state)?;
@@ -11809,6 +11845,18 @@ mod tests {
             "main alias did not capture the current control atlas identity",
         )?;
         require(
+            [&captured_main_state, &captured_alias_state]
+                .iter()
+                .all(|state| {
+                    state
+                        .worktree
+                        .as_ref()
+                        .and_then(|selection| selection.control_project_instance_id)
+                        == Some(control_project)
+                }),
+            "alias selection did not capture its control atlas identity",
+        )?;
+        require(
             control_after_init
                 .load_node_by_path("src/branch.rs")?
                 .is_none(),
@@ -11854,6 +11902,80 @@ mod tests {
         require(
             replacement_control.project_instance_id()? != Some(control_project),
             "replacement control atlas reused the captured main identity",
+        )?;
+        let captured_registration_id = captured_alias_state
+            .worktree
+            .as_ref()
+            .and_then(|selection| selection.registration_id)
+            .ok_or_else(|| io::Error::other("captured alias registration identity is missing"))?;
+        let common = primary.join(".git");
+        let mut replacement_alias = None;
+        for index in 1..=captured_registration_id {
+            let alias = WorktreeAlias::parse(&format!("replacement-{index}"))?;
+            let registration = replacement_control.register_worktree(
+                &alias,
+                &common,
+                &common
+                    .join("worktrees")
+                    .join(format!("replacement-{index}")),
+                &format!("{index:064x}"),
+                &temp.path().join(format!("replacement-worktree-{index}")),
+                Some(ProjectInstanceId::from_bytes([u8::try_from(index)?; 16])?),
+                u64::try_from(index)?,
+            )?;
+            require(
+                registration.registration_id == index,
+                "replacement control did not reuse the expected registration identity",
+            )?;
+            if index == captured_registration_id {
+                replacement_alias = Some(alias);
+            }
+        }
+        let replacement_alias = replacement_alias
+            .ok_or_else(|| io::Error::other("replacement alias was not created"))?;
+        let replacement_calls_before = replacement_control
+            .registered_worktree_token_overview(&replacement_alias)?
+            .calls;
+        require(
+            ProjectAtlasMcpServer::require_captured_control_identity(
+                captured_alias_state.worktree.as_ref(),
+                &replacement_control,
+            )
+            .as_ref()
+            .is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_CONTROL_IDENTITY_CONFLICT)
+            }),
+            "captured alias accepted a replacement control atlas",
+        )?;
+        drop(replacement_control);
+        let accepted = server.with_fresh_string_and_usage_for_request(
+            &captured_alias_state,
+            None,
+            |_store, _stamp| {
+                Ok((
+                    "accepted result".to_string(),
+                    Some(McpUsageIntent::estimate(
+                        MCP_EVENT_ATLAS_OVERVIEW,
+                        None,
+                        None,
+                        1,
+                    )),
+                ))
+            },
+        )?;
+        require(
+            accepted == "accepted result",
+            "accepted target read was lost",
+        )?;
+        let replacement_control = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        require(
+            replacement_control
+                .registered_worktree_token_overview(&replacement_alias)?
+                .calls
+                == replacement_calls_before,
+            "deferred telemetry was attributed through a replacement control catalog",
         )?;
         drop(replacement_control);
         require(
