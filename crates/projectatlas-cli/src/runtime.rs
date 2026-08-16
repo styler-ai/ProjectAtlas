@@ -72,8 +72,8 @@ use projectatlas_db::{
     read_project_root_read_only, validate_database_location,
 };
 use projectatlas_fs::worktree::{
-    GitManagerSourceSelection, GitRepositorySelection, GitRepositoryStructure, GitWorktreeState,
-    RepositoryStructure, git_administrative_identity,
+    GitManagerSourceSelection, GitRepositorySelection, GitWorktreeState, RepositoryStructure,
+    git_administrative_identity, git_worktree_lifecycle_matches,
 };
 use projectatlas_fs::{
     FsError, RootScanPolicy, ScanLimits, ScanOptions, gitignore_excludes_path,
@@ -908,6 +908,17 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
     let control = open_atlas_store_for_project(control_db, control_root)?;
     require_synchronization_control_identity(&control, Some(control_project))?;
     let common = normalize_native_path_display(&repository.common_directory);
+    let active_roots = repository
+        .worktrees
+        .iter()
+        .filter_map(|entry| match &entry.state {
+            GitWorktreeState::Active { root, .. } => Some((
+                normalize_native_path_display(&entry.administrative_directory),
+                root.as_path(),
+            )),
+            GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
+        })
+        .collect::<HashMap<_, _>>();
     for registration in &mut registrations {
         let synchronization_incomplete = || {
             CliError::InvalidInput(format!(
@@ -921,7 +932,13 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
             }
             continue;
         }
-        let root = registered_worktree_root(&repository, registration);
+        let root = active_roots
+            .get(&registration.git_administrative_directory)
+            .copied()
+            .filter(|_| {
+                git_administrative_identity(Path::new(&registration.git_administrative_directory))
+                    .is_ok_and(|identity| identity == registration.git_administrative_identity)
+            });
         let Some(root) = root else {
             if registration.project_instance_id.is_some() {
                 return Err(synchronization_incomplete());
@@ -939,7 +956,7 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
             &registration.alias,
             |guard| {
                 if let Err(error) =
-                    require_registered_worktree_lifecycle(control_root, guard.registration(), root)
+                    require_registered_worktree_lifecycle(guard.registration(), root)
                 {
                     return Ok(Err(error));
                 }
@@ -968,7 +985,7 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
                     return Ok(Err(error));
                 }
                 if let Err(error) =
-                    require_registered_worktree_lifecycle(control_root, guard.registration(), root)
+                    require_registered_worktree_lifecycle(guard.registration(), root)
                 {
                     return Ok(Err(error));
                 }
@@ -1016,38 +1033,8 @@ pub(crate) fn require_current_worktree_usage_snapshot(
     Ok(())
 }
 
-/// Resolve one registration only while its exact Git lifecycle remains active.
-fn registered_worktree_root<'a>(
-    repository: &'a GitRepositoryStructure,
-    registration: &WorktreeRegistration,
-) -> Option<&'a Path> {
-    if repository.common_directory.to_str().is_none()
-        || normalize_native_path_display(&repository.common_directory)
-            != registration.git_common_directory
-    {
-        return None;
-    }
-    repository
-        .worktrees
-        .iter()
-        .find(|entry| {
-            entry.administrative_directory.to_str().is_some()
-                && normalize_native_path_display(&entry.administrative_directory)
-                    == registration.git_administrative_directory
-        })
-        .filter(|entry| {
-            git_administrative_identity(&entry.administrative_directory)
-                .is_ok_and(|identity| identity == registration.git_administrative_identity)
-        })
-        .and_then(|entry| match &entry.state {
-            GitWorktreeState::Active { root, .. } => Some(root.as_path()),
-            GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
-        })
-}
-
 /// Rediscover one registration immediately before a lifecycle-sensitive catalog write.
 pub(crate) fn require_registered_worktree_lifecycle(
-    control_root: &Path,
     registration: &WorktreeRegistration,
     expected_root: &Path,
 ) -> Result<(), CliError> {
@@ -1057,11 +1044,12 @@ pub(crate) fn require_registered_worktree_lifecycle(
             registration.alias
         ))
     };
-    let repository = projectatlas_fs::worktree::discover_repository_structure(control_root)?;
-    let RepositoryStructure::Git(repository) = repository else {
-        return Err(lifecycle_changed());
-    };
-    if registered_worktree_root(&repository, registration) != Some(expected_root) {
+    if !git_worktree_lifecycle_matches(
+        expected_root,
+        Path::new(&registration.git_common_directory),
+        Path::new(&registration.git_administrative_directory),
+        &registration.git_administrative_identity,
+    )? {
         return Err(lifecycle_changed());
     }
     Ok(())
@@ -8823,7 +8811,7 @@ mod tests {
             None,
             1,
         )?;
-        require_registered_worktree_lifecycle(&primary, &registration, &root)?;
+        require_registered_worktree_lifecycle(&registration, &root)?;
 
         let target_database = root.join(".projectatlas/projectatlas.db");
         fs::create_dir_all(root.join(".projectatlas"))?;
@@ -8916,7 +8904,7 @@ mod tests {
         )?;
         drop(replacement);
 
-        let rejected = require_registered_worktree_lifecycle(&primary, &registration, &root);
+        let rejected = require_registered_worktree_lifecycle(&registration, &root);
         require_eq(
             &rejected.as_ref().is_err_and(|error| {
                 error

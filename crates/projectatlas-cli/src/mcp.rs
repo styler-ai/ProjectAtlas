@@ -4055,11 +4055,9 @@ impl ProjectAtlasMcpServer {
         let control = open_atlas_store_for_project(&control_state.db_path, &control_state.root)?;
         Self::require_captured_control_identity(Some(selection), &control)?;
         control.with_active_worktree_registration(registration_id, &alias, |guard| {
-            if let Err(error) = require_registered_worktree_lifecycle(
-                &control_state.root,
-                guard.registration(),
-                &state.root,
-            ) {
+            if let Err(error) =
+                require_registered_worktree_lifecycle(guard.registration(), &state.root)
+            {
                 return Ok(Err(error));
             }
             if !state.db_path.is_file() {
@@ -4096,11 +4094,9 @@ impl ProjectAtlasMcpServer {
                         Ok(snapshot) => snapshot,
                         Err(error) => return Ok(Err(error.into())),
                     };
-                    if let Err(error) = require_registered_worktree_lifecycle(
-                        &control_state.root,
-                        guard.registration(),
-                        &state.root,
-                    ) {
+                    if let Err(error) =
+                        require_registered_worktree_lifecycle(guard.registration(), &state.root)
+                    {
                         return Ok(Err(error));
                     }
                     if let Err(error) = require_current_worktree_usage_snapshot(
@@ -4618,11 +4614,9 @@ impl ProjectAtlasMcpServer {
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         Self::require_captured_control_identity(Some(selection), &control)?;
         control.with_active_worktree_registration(registration_id, &alias, |guard| {
-            if let Err(error) = require_registered_worktree_lifecycle(
-                &self.control_state.root,
-                guard.registration(),
-                &state.root,
-            ) {
+            if let Err(error) =
+                require_registered_worktree_lifecycle(guard.registration(), &state.root)
+            {
                 return Ok(Err(error));
             }
             let activation = candidate.activate(work_control)?;
@@ -4638,11 +4632,9 @@ impl ProjectAtlasMcpServer {
                 Ok(snapshot) => snapshot,
                 Err(error) => return Ok(Err(error.into())),
             };
-            if let Err(error) = require_registered_worktree_lifecycle(
-                &self.control_state.root,
-                guard.registration(),
-                &state.root,
-            ) {
+            if let Err(error) =
+                require_registered_worktree_lifecycle(guard.registration(), &state.root)
+            {
                 return Ok(Err(error));
             }
             if let Err(error) = require_current_worktree_usage_snapshot(
@@ -6101,7 +6093,6 @@ impl ProjectAtlasMcpServer {
 
     /// Finalize one retirement under control-first writer exclusion.
     fn retire_registered_worktree(
-        &self,
         control: &AtlasStore,
         registration: &WorktreeRegistration,
         root: Option<&Path>,
@@ -6115,7 +6106,7 @@ impl ProjectAtlasMcpServer {
         ),
         CliError,
     > {
-        self.retire_registered_worktree_with_pre_open(
+        Self::retire_registered_worktree_with_pre_open(
             control,
             registration,
             root,
@@ -6127,7 +6118,6 @@ impl ProjectAtlasMcpServer {
 
     /// Finalize retirement with one deterministic seam before the local atlas is opened.
     fn retire_registered_worktree_with_pre_open<F>(
-        &self,
         control: &AtlasStore,
         registration: &WorktreeRegistration,
         root: Option<&Path>,
@@ -6153,13 +6143,7 @@ impl ProjectAtlasMcpServer {
                     let retired = guard.retire(retired_at_epoch)?;
                     return Ok(Ok((retired, None, initial_blocker)));
                 };
-                if require_registered_worktree_lifecycle(
-                    &self.control_state.root,
-                    guard.registration(),
-                    root,
-                )
-                .is_err()
-                {
+                if require_registered_worktree_lifecycle(guard.registration(), root).is_err() {
                     return Self::retire_changed_worktree_lifecycle(guard, retired_at_epoch)
                         .map(Ok);
                 }
@@ -6169,7 +6153,7 @@ impl ProjectAtlasMcpServer {
                 let local = match Self::open_local_worktree_atlas(root) {
                     Ok(local) => local,
                     Err(error) => {
-                        return self.classify_retirement_failure(
+                        return Self::classify_retirement_failure(
                             guard,
                             root,
                             retired_at_epoch,
@@ -6178,13 +6162,7 @@ impl ProjectAtlasMcpServer {
                     }
                 };
                 let Some(local) = local else {
-                    if require_registered_worktree_lifecycle(
-                        &self.control_state.root,
-                        guard.registration(),
-                        root,
-                    )
-                    .is_err()
-                    {
+                    if require_registered_worktree_lifecycle(guard.registration(), root).is_err() {
                         return Self::retire_changed_worktree_lifecycle(guard, retired_at_epoch)
                             .map(Ok);
                     }
@@ -6201,7 +6179,7 @@ impl ProjectAtlasMcpServer {
                     match Self::local_worktree_project_instance_id(&local, &db_path) {
                         Ok(project_instance_id) => project_instance_id,
                         Err(error) => {
-                            return self.classify_retirement_failure(
+                            return Self::classify_retirement_failure(
                                 guard,
                                 root,
                                 retired_at_epoch,
@@ -6210,13 +6188,7 @@ impl ProjectAtlasMcpServer {
                         }
                     };
                 let finalization = match local.with_exclusive_worktree_usage_snapshot(|snapshot| {
-                    if require_registered_worktree_lifecycle(
-                        &self.control_state.root,
-                        guard.registration(),
-                        root,
-                    )
-                    .is_err()
-                    {
+                    if require_registered_worktree_lifecycle(guard.registration(), root).is_err() {
                         return Ok(None);
                     }
                     guard
@@ -6230,7 +6202,7 @@ impl ProjectAtlasMcpServer {
                 }) {
                     Ok(finalization) => finalization,
                     Err(error) => {
-                        return self.classify_retirement_failure(
+                        return Self::classify_retirement_failure(
                             guard,
                             root,
                             retired_at_epoch,
@@ -6248,7 +6220,6 @@ impl ProjectAtlasMcpServer {
 
     /// Preserve an unchanged database error or retire a replaced Git lifecycle.
     fn classify_retirement_failure(
-        &self,
         guard: &mut ActiveWorktreeRegistrationGuard<'_>,
         root: &Path,
         retired_at_epoch: u64,
@@ -6264,13 +6235,7 @@ impl ProjectAtlasMcpServer {
         >,
         DbError,
     > {
-        if require_registered_worktree_lifecycle(
-            &self.control_state.root,
-            guard.registration(),
-            root,
-        )
-        .is_err()
-        {
+        if require_registered_worktree_lifecycle(guard.registration(), root).is_err() {
             Self::retire_changed_worktree_lifecycle(guard, retired_at_epoch).map(Ok)
         } else {
             Ok(Err(error))
@@ -6333,18 +6298,10 @@ impl ProjectAtlasMcpServer {
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         Self::require_captured_control_identity(Some(selection), &control)?;
         match control.with_unbound_worktree_registration(registration_id, &alias, |registration| {
-            require_registered_worktree_lifecycle(
-                &self.control_state.root,
-                registration,
-                &state.root,
-            )?;
+            require_registered_worktree_lifecycle(registration, &state.root)?;
             post_validation()?;
             reset_index_files_with_revalidation(&state.db_path, include_mcp_config, || {
-                require_registered_worktree_lifecycle(
-                    &self.control_state.root,
-                    registration,
-                    &state.root,
-                )
+                require_registered_worktree_lifecycle(registration, &state.root)
             })
         }) {
             Ok(result) => result,
@@ -8131,7 +8088,7 @@ impl ProjectAtlasMcpServer {
                     (PathBuf::from(&registration.last_root), None)
                 }
             };
-            let (retired, telemetry_sync, final_blocker) = self.retire_registered_worktree(
+            let (retired, telemetry_sync, final_blocker) = Self::retire_registered_worktree(
                 &control,
                 &registration,
                 active_root,
@@ -12123,7 +12080,7 @@ mod tests {
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
         drop(replacement);
         let control = open_atlas_store_for_project(&fixture.control_db, &fixture.control_root)?;
-        let (retired, synchronized, blocker) = fixture.server.retire_registered_worktree(
+        let (retired, synchronized, blocker) = ProjectAtlasMcpServer::retire_registered_worktree(
             &control,
             &fixture.registration,
             Some(&fixture.state.root),
@@ -12159,7 +12116,7 @@ mod tests {
         let control = open_atlas_store_for_project(&open_race.control_db, &open_race.primary)?;
         let sentinel = b"replacement atlas must remain untouched";
         let (retired, synchronized, blocker) =
-            open_race.server.retire_registered_worktree_with_pre_open(
+            ProjectAtlasMcpServer::retire_registered_worktree_with_pre_open(
                 &control,
                 &open_race.registration,
                 Some(&open_race.state.root),
@@ -12226,7 +12183,7 @@ mod tests {
                 fixture.registration.registration_id,
                 &fixture.alias,
                 |guard| {
-                    fixture.server.classify_retirement_failure(
+                    ProjectAtlasMcpServer::classify_retirement_failure(
                         guard,
                         &fixture.state.root,
                         2,

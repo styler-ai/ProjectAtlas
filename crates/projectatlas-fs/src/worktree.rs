@@ -1315,6 +1315,41 @@ pub fn git_administrative_identity(path: &Path) -> FsResult<String> {
     Ok(identity.finalize().to_hex().to_string())
 }
 
+/// Check one exact worktree lifecycle without enumerating sibling registrations.
+///
+/// # Errors
+///
+/// Returns an error when the selected administrative directory cannot provide
+/// stable filesystem identity evidence.
+pub fn git_worktree_lifecycle_matches(
+    root: &Path,
+    common_directory: &Path,
+    administrative_directory: &Path,
+    administrative_identity: &str,
+) -> FsResult<bool> {
+    let Ok(common_directory) = canonicalize_issue(common_directory, common_directory) else {
+        return Ok(false);
+    };
+    let Ok(administrative_directory) =
+        canonicalize_issue(administrative_directory, administrative_directory)
+    else {
+        return Ok(false);
+    };
+    let Ok(selected) = inspect_worktree(root) else {
+        return Ok(false);
+    };
+    if !selected.source_root_selected_exactly
+        || !paths_equal(&selected.common_directory, &common_directory)
+        || !paths_equal(
+            &selected.administrative_directory,
+            &administrative_directory,
+        )
+    {
+        return Ok(false);
+    }
+    Ok(git_administrative_identity(&selected.administrative_directory)? == administrative_identity)
+}
+
 /// Require a non-reusable filesystem creation timestamp for lifecycle identity.
 #[cfg(not(windows))]
 fn required_creation_nanos(
@@ -1745,6 +1780,34 @@ mod tests {
             &sha256_structure,
             &sha256.canonicalize()?,
             GitWorktreeRole::Primary,
+        )?;
+
+        let reftable = temp.path().join("reftable checkout");
+        run_command(
+            Command::new("git")
+                .args(["init", "--ref-format=reftable"])
+                .arg(&reftable),
+        )?;
+        let reftable_root = Command::new("git")
+            .current_dir(&reftable)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        require(
+            reftable_root.status.success()
+                && Path::new(String::from_utf8(reftable_root.stdout)?.trim()).canonicalize()?
+                    == reftable.canonicalize()?,
+            "Git fixture did not accept the reftable repository",
+        )?;
+        let reftable_structure = require_git(discover_repository_structure(&reftable)?)?;
+        require_worktree_selection(
+            &reftable_structure,
+            &reftable.canonicalize()?,
+            GitWorktreeRole::Primary,
+        )?;
+        let reftable_manager = require_git(discover_repository_structure(&reftable.join(".git"))?)?;
+        require(
+            reftable_manager.common_directory == reftable.join(".git").canonicalize()?,
+            "reftable manager discovery did not retain its common directory",
         )?;
 
         let config_path = primary.join(".git").join("config");
@@ -2775,6 +2838,26 @@ mod tests {
     }
 
     #[test]
+    fn exact_worktree_lifecycle_check_does_not_inventory_sibling_registrations()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("exact checkout");
+        write_structural_primary(&root)?;
+        let common = root.join(".git").canonicalize()?;
+        let identity = git_administrative_identity(&common)?;
+        let registrations = common.join("worktrees");
+        fs::create_dir(&registrations)?;
+        for index in 0..=projectatlas_core::MAX_GIT_WORKTREE_REGISTRATIONS {
+            fs::create_dir(registrations.join(format!("unrelated-{index:04}")))?;
+        }
+
+        require(
+            git_worktree_lifecycle_matches(&root, &common, &common, &identity)?,
+            "exact lifecycle validation enumerated unrelated worktree registrations",
+        )
+    }
+
+    #[test]
     fn git_config_values_accept_mixed_quotes_without_weakening_syntax_checks() {
         for (raw, expected) in [
             (r#" foo"bar baz"qux "#, "foobar bazqux"),
@@ -2804,6 +2887,7 @@ mod tests {
             (0, "partialClone = origin", true),
             (0, "preciousObjects = true", true),
             (1, "refStorage = files", true),
+            (1, "refStorage = reftable", true),
             (1, "relativeWorktrees = true", true),
             (1, "submodulePathConfig = true", true),
             (0, "worktreeConfig = true", true),
