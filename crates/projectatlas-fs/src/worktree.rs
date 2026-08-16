@@ -5,6 +5,7 @@ use super::{
     check_registered_worktree,
 };
 use projectatlas_core::{IndexCancellation, IndexWorkControl, IndexWorkStage};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -582,9 +583,8 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     let mut worktree_config_enabled = false;
     let mut worktree_setting = None;
     let mut source_selection_policy_complete = true;
-    let mut repository_format_version = 0_u64;
-    let mut has_object_format_extension = false;
-    let mut has_unsupported_repository_extension = false;
+    let mut repository_format_version = Some(0_u64);
+    let mut repository_extensions = BTreeMap::new();
     for raw_line in text.lines() {
         let mut line = trim_git_config_whitespace(raw_line);
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -639,37 +639,15 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         if !in_core && !in_extensions {
             continue;
         }
-        if in_extensions && key.eq_ignore_ascii_case("worktreeconfig") {
-            if let Some(enabled) = parse_git_boolean(&value) {
-                worktree_config_enabled = enabled;
-            } else {
-                source_root_inference_safe = false;
-                worktree_config_enabled = false;
-                source_selection_policy_complete = false;
-            }
-            continue;
-        }
-        if in_extensions && key.eq_ignore_ascii_case("objectformat") {
-            has_object_format_extension = true;
-            if !matches!(value.as_str(), "sha1" | "sha256") {
-                has_unsupported_repository_extension = true;
-            }
-            continue;
-        }
         if in_extensions {
-            has_unsupported_repository_extension = true;
+            repository_extensions.insert(key.to_ascii_lowercase(), value);
             continue;
         }
         if !in_core {
             continue;
         }
         if key.eq_ignore_ascii_case("repositoryformatversion") {
-            if let Ok(version @ 0..=1) = value.parse::<u64>() {
-                repository_format_version = version;
-            } else {
-                source_root_inference_safe = false;
-                source_selection_policy_complete = false;
-            }
+            repository_format_version = value.parse::<u64>().ok().filter(|version| *version <= 1);
             continue;
         }
         if key.eq_ignore_ascii_case("worktree") {
@@ -694,8 +672,70 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             source_selection_policy_complete = false;
         }
     }
+    let repository_format_version = if let Some(version) = repository_format_version {
+        version
+    } else {
+        source_root_inference_safe = false;
+        source_selection_policy_complete = false;
+        0
+    };
+    let mut has_format_one_extension = false;
+    let mut has_unsupported_repository_extension = false;
+    let mut object_format = None;
+    let mut compatibility_object_format = None;
+    for (key, value) in repository_extensions {
+        match key.as_str() {
+            "worktreeconfig" => {
+                if let Some(enabled) = parse_git_boolean(&value) {
+                    worktree_config_enabled = enabled;
+                } else {
+                    source_root_inference_safe = false;
+                    worktree_config_enabled = false;
+                    source_selection_policy_complete = false;
+                }
+            }
+            "noop" | "partialclone" => {}
+            "preciousobjects" => {
+                if parse_git_boolean(&value).is_none() {
+                    source_root_inference_safe = false;
+                    source_selection_policy_complete = false;
+                }
+            }
+            "compatobjectformat" => {
+                has_format_one_extension = true;
+                has_unsupported_repository_extension |=
+                    !matches!(value.as_str(), "sha1" | "sha256");
+                compatibility_object_format = Some(value);
+            }
+            "noop-v1" => has_format_one_extension = true,
+            "objectformat" => {
+                has_format_one_extension = true;
+                has_unsupported_repository_extension |=
+                    !matches!(value.as_str(), "sha1" | "sha256");
+                object_format = Some(value);
+            }
+            "refstorage" => {
+                has_format_one_extension = true;
+                let format = value
+                    .split_once("://")
+                    .map_or(value.as_str(), |(format, _)| format);
+                has_unsupported_repository_extension |= !matches!(format, "files" | "reftable");
+            }
+            "relativeworktrees" | "submodulepathconfig" => {
+                has_format_one_extension = true;
+                has_unsupported_repository_extension |= parse_git_boolean(&value).is_none();
+            }
+            _ => has_unsupported_repository_extension = true,
+        }
+    }
+    if compatibility_object_format
+        .as_deref()
+        .is_some_and(|compatibility| compatibility == object_format.as_deref().unwrap_or("sha1"))
+    {
+        has_unsupported_repository_extension = true;
+    }
     if (repository_format_version == 1 && has_unsupported_repository_extension)
-        || (repository_format_version != 1 && has_object_format_extension)
+        || (repository_format_version != 1 && has_format_one_extension)
     {
         source_root_inference_safe = false;
         source_selection_policy_complete = false;
@@ -2183,6 +2223,34 @@ mod tests {
         )?;
         fs::write(&bare_config_path, &bare_config)?;
 
+        for supported_config in [
+            "[core]\n repositoryFormatVersion = 1\n bare = false\n[extensions]\n preciousObjects = true\n",
+            "[core]\n repositoryFormatVersion = 1\n bare = false\n[extensions]\n partialClone = origin\n",
+            "[core]\n repositoryFormatVersion = 99\n repositoryFormatVersion = 0\n bare = false\n",
+        ] {
+            fs::write(&bare_config_path, supported_config)?;
+            let accepted_config = Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare_dot_git)
+                .args(["rev-parse", "--is-bare-repository"])
+                .output()?;
+            require(
+                accepted_config.status.success(),
+                "Git fixture rejected a supported effective repository format",
+            )?;
+            let accepted_config = require_git(discover_repository_structure(&bare_dot_git)?)?;
+            require(
+                accepted_config.selection
+                    == GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::Unambiguous {
+                            root: dot_git_container.canonicalize()?,
+                        },
+                    },
+                "supported effective repository format hid the exact manager source",
+            )?;
+        }
+        fs::write(&bare_config_path, &bare_config)?;
+
         for (repository_format_version, unsupported_extension) in [
             (1, "madeup = true"),
             (1, "objectformat = sha512"),
@@ -2722,6 +2790,53 @@ mod tests {
         for malformed in [r#"foo"unterminated"#, r#"foo"invalid\q"bar"#, "trailing\\"] {
             assert_eq!(git_config_value(malformed), None);
         }
+    }
+
+    #[test]
+    fn git_repository_extension_policy_covers_defined_keys() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let config = temp.path().join("config");
+        for (repository_format_version, extension, accepted) in [
+            (1, "compatObjectFormat = sha256", true),
+            (0, "noop = true", true),
+            (1, "noop-v1 = true", true),
+            (1, "objectFormat = sha256", true),
+            (0, "partialClone = origin", true),
+            (0, "preciousObjects = true", true),
+            (1, "refStorage = files", true),
+            (1, "relativeWorktrees = true", true),
+            (1, "submodulePathConfig = true", true),
+            (0, "worktreeConfig = true", true),
+            (1, "compatObjectFormat = sha1", false),
+            (0, "partialClone =", true),
+            (0, "preciousObjects = invalid", false),
+            (1, "refStorage = unknown", false),
+            (1, "relativeWorktrees = invalid", false),
+            (1, "submodulePathConfig = invalid", false),
+            (0, "worktreeConfig = invalid", false),
+        ] {
+            fs::write(
+                &config,
+                format!(
+                    "[core]\n repositoryFormatVersion = {repository_format_version}\n[extensions]\n {extension}\n"
+                ),
+            )?;
+            let policy = match local_config_policy(&config) {
+                Ok(policy) => policy,
+                Err(issue) => {
+                    return Err(io::Error::other(format!(
+                        "defined repository extension config was unreadable: {issue:?}"
+                    ))
+                    .into());
+                }
+            };
+            require(
+                policy.source_root_inference_safe == accepted
+                    && policy.source_selection_policy_complete == accepted,
+                &format!("repository extension policy disagreed for: {extension}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
