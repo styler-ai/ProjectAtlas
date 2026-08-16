@@ -7971,7 +7971,7 @@ impl ProjectAtlasMcpServer {
                     snapshot,
                 }))
             })();
-            let (local, mut blocker) = match local {
+            let (local, blocker) = match local {
                 Ok(local) => (local, None),
                 Err(error) => (
                     None,
@@ -8000,21 +8000,7 @@ impl ProjectAtlasMcpServer {
                     created_at_epoch,
                 ) {
                     Ok((registration, state)) => (registration, Some(state)),
-                    Err(error) => {
-                        let registration = control.register_worktree(
-                            &alias,
-                            &repository.common_directory,
-                            &entry.administrative_directory,
-                            &administrative_identity,
-                            root,
-                            project_instance_id,
-                            created_at_epoch,
-                        )?;
-                        blocker = Some(format!(
-                            "registration committed; local telemetry remains pending: {error}"
-                        ));
-                        (registration, None)
-                    }
+                    Err(error) => return Err(error.into()),
                 }
             } else {
                 (
