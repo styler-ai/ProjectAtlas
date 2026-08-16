@@ -598,17 +598,17 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         if !in_core && !in_extensions {
             continue;
         }
-        let (key, value) = line
+        let (key, raw_value) = line
             .split_once('=')
             .map_or((line, "true"), |(key, value)| (key, value));
         let key = key.trim();
-        let value = value
-            .split(['#', ';'])
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .trim_matches('"');
         if in_extensions && key.eq_ignore_ascii_case("worktreeconfig") {
+            let Some(value) = git_config_value(raw_value) else {
+                source_root_inference_safe = false;
+                worktree_config_enabled = false;
+                source_selection_policy_complete = false;
+                continue;
+            };
             if let Some(enabled) = parse_git_boolean(value) {
                 worktree_config_enabled = enabled;
             } else {
@@ -622,6 +622,12 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             continue;
         }
         if key.eq_ignore_ascii_case("worktree") {
+            let Some(value) = git_config_value(raw_value) else {
+                source_root_inference_safe = false;
+                worktree_setting = None;
+                source_selection_policy_complete = false;
+                continue;
+            };
             worktree_setting = (!value.is_empty()).then(|| PathBuf::from(value));
             source_root_inference_safe = false;
             source_selection_policy_complete &= worktree_setting.is_some();
@@ -630,6 +636,12 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         if !key.eq_ignore_ascii_case("bare") {
             continue;
         }
+        let Some(value) = git_config_value(raw_value) else {
+            bare_setting = None;
+            source_root_inference_safe = false;
+            source_selection_policy_complete = false;
+            continue;
+        };
         if let Some(bare) = parse_git_boolean(value) {
             bare_setting = Some(bare);
         } else {
@@ -648,12 +660,38 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
     })
 }
 
+/// Remove only unquoted Git comments and unwrap one simple quoted value.
+fn git_config_value(raw_value: &str) -> Option<&str> {
+    let mut quoted = false;
+    let mut value_end = raw_value.len();
+    for (index, character) in raw_value.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            '\\' if quoted => return None,
+            '#' | ';' if !quoted => {
+                value_end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if quoted {
+        return None;
+    }
+    let value = raw_value[..value_end].trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value);
+    (!value.contains('"')).then_some(value)
+}
+
 /// Parse the bounded Git boolean forms that can affect source selection.
 fn parse_git_boolean(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {
         "" | "false" | "no" | "off" | "0" => Some(false),
         "true" | "yes" | "on" | "1" => Some(true),
-        _ => None,
+        _ => value.parse::<i64>().ok().map(|value| value != 0),
     }
 }
 
@@ -1688,11 +1726,26 @@ mod tests {
                 .clone();
         let submodule_config_path = submodule_administrative_directory.join("config");
         let submodule_config = fs::read(&submodule_config_path)?;
+        let quoted_pointer_worktree = submodule.with_file_name("submodule#external;worktree");
+        fs::create_dir(&quoted_pointer_worktree)?;
         run_command(
             Command::new("git")
                 .current_dir(&submodule)
                 .args(["config", "core.worktree"])
-                .arg(&configured_worktree),
+                .arg(&quoted_pointer_worktree),
+        )?;
+        let effective_pointer_worktree = Command::new("git")
+            .current_dir(&submodule)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        require(
+            effective_pointer_worktree.status.success()
+                && paths_equal(
+                    &PathBuf::from(String::from_utf8(effective_pointer_worktree.stdout)?.trim())
+                        .canonicalize()?,
+                    &quoted_pointer_worktree.canonicalize()?,
+                ),
+            "Git fixture did not preserve the quoted core.worktree comment marker",
         )?;
         require_invalid_kind(
             discover_repository_structure(&submodule)?,
@@ -1959,6 +2012,37 @@ mod tests {
                     source_selection: GitManagerSourceSelection::None,
                 },
             "empty extensions.worktreeConfig enabled config.worktree and invented a source",
+        )?;
+        fs::remove_file(bare_dot_git.join("config.worktree"))?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        fs::write(
+            &bare_config_path,
+            "[core]\n bare = true\n[extensions]\n worktreeConfig = 2\n",
+        )?;
+        fs::write(
+            bare_dot_git.join("config.worktree"),
+            "[core]\n bare = false\n",
+        )?;
+        let numeric_worktree_config = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--bool", "extensions.worktreeConfig"])
+            .output()?;
+        require(
+            numeric_worktree_config.status.success()
+                && String::from_utf8(numeric_worktree_config.stdout)?.trim() == "true",
+            "Git fixture did not accept a nonzero decimal worktreeConfig boolean",
+        )?;
+        let numeric_worktree_config = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            numeric_worktree_config.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::Unambiguous {
+                        root: dot_git_container.canonicalize()?,
+                    },
+                },
+            "nonzero decimal worktreeConfig hid the exact configured source",
         )?;
         fs::remove_file(bare_dot_git.join("config.worktree"))?;
         fs::write(&bare_config_path, &bare_config)?;
