@@ -1688,18 +1688,6 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
             reason: "aggregate snapshot logical-byte contract changed",
         });
     }
-    let mut incoming_lifetime = BTreeMap::<DimensionValues, AggregateCounters>::new();
-    for row in snapshot.rows.iter().filter(|row| row.day_epoch == -1) {
-        let dimension =
-            snapshot
-                .dimensions
-                .get(&row.dimension_id)
-                .ok_or(DbError::WorktreeRegistrationRow {
-                    reason: "aggregate snapshot lifetime dimension is missing",
-                })?;
-        let total = incoming_lifetime.entry(dimension.clone()).or_default();
-        *total = total.checked_add(row.counters)?;
-    }
     let retained_trend_seconds = policy
         .retained_trend_days
         .checked_mul(SECONDS_PER_DAY as u64)
@@ -1716,51 +1704,48 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
          WHERE day_epoch >= 0 AND day_epoch < ?1 AND source_kind = ?2",
         params![retained_daily_cutoff, WORKTREE_USAGE_SYNCHRONIZED],
     )?;
-    let mut incoming_daily = BTreeMap::<(i64, DimensionValues), AggregateCounters>::new();
+    let mut target_dimensions = BTreeMap::new();
+    for (source_id, dimension) in &snapshot.dimensions {
+        target_dimensions.insert(*source_id, ensure_dimension(connection, dimension, policy)?);
+    }
+    let mut incoming = BTreeMap::<(i64, i64), AggregateCounters>::new();
     for row in snapshot
         .rows
         .iter()
-        .filter(|row| row.day_epoch >= retained_daily_cutoff)
+        .filter(|row| row.day_epoch == -1 || row.day_epoch >= retained_daily_cutoff)
     {
-        let dimension =
-            snapshot
-                .dimensions
+        let dimension_id =
+            *target_dimensions
                 .get(&row.dimension_id)
                 .ok_or(DbError::WorktreeRegistrationRow {
-                    reason: "aggregate snapshot daily dimension is missing",
+                    reason: "aggregate snapshot dimension mapping is incomplete",
                 })?;
-        let total = incoming_daily
-            .entry((row.day_epoch, dimension.clone()))
-            .or_default();
+        let total = incoming.entry((row.day_epoch, dimension_id)).or_default();
         *total = total.checked_add(row.counters)?;
     }
     let accepted_lifetime = {
         let mut statement = connection.prepare_cached(
-            "SELECT d.token_savings_bucket, d.provider, d.model, d.tokenizer_backend,
-                    d.accuracy, d.baseline_kind, d.confidence, d.accounting_layer,
-                    d.estimate_method, d.denominator_kind, d.dedupe_scope, d.overflow,
+            "SELECT a.dimension_id,
                     a.calls, a.estimated_without, a.estimated_with, a.observed_without,
                     a.observed_with, a.modeled_without, a.modeled_with,
-                    deduped_modeled_without, deduped_modeled_with, repeated_baselines,
-                    observed_file_read_replacements, modeled_file_reads_avoided
+                    a.deduped_modeled_without, a.deduped_modeled_with, a.repeated_baselines,
+                    a.observed_file_read_replacements, a.modeled_file_reads_avoided
              FROM worktree_usage_aggregates AS a
-                  INDEXED BY idx_worktree_usage_aggregates_day_registration
-             JOIN usage_bucket_dimensions AS d USING(dimension_id)
+                   INDEXED BY idx_worktree_usage_aggregates_day_registration
              WHERE a.registration_id = ?1 AND a.source_kind = ?2 AND a.day_epoch = -1
              ORDER BY a.dimension_id",
         )?;
         let mut rows = statement.query(params![registration_id, WORKTREE_USAGE_SYNCHRONIZED])?;
-        let mut totals = BTreeMap::<DimensionValues, AggregateCounters>::new();
+        let mut totals = BTreeMap::<i64, AggregateCounters>::new();
         while let Some(row) = rows.next()? {
-            let dimension = read_dimension(row, 0)?;
-            let total = totals.entry(dimension).or_default();
-            *total = total.checked_add(read_counters_offset(row, 12)?)?;
+            let total = totals.entry(row.get(0)?).or_default();
+            *total = total.checked_add(read_counters_offset(row, 1)?)?;
         }
         totals
     };
-    if accepted_lifetime.iter().any(|(dimension, accepted)| {
-        !incoming_lifetime
-            .get(dimension)
+    if accepted_lifetime.iter().any(|(dimension_id, accepted)| {
+        !incoming
+            .get(&(-1, *dimension_id))
             .is_some_and(|incoming| incoming.contains(*accepted))
     }) {
         return Err(DbError::WorktreeRegistrationRow {
@@ -1769,17 +1754,13 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
     }
     let accepted_daily = {
         let mut statement = connection.prepare_cached(
-            "SELECT a.day_epoch,
-                    d.token_savings_bucket, d.provider, d.model, d.tokenizer_backend,
-                    d.accuracy, d.baseline_kind, d.confidence, d.accounting_layer,
-                    d.estimate_method, d.denominator_kind, d.dedupe_scope, d.overflow,
+            "SELECT a.day_epoch, a.dimension_id,
                     a.calls, a.estimated_without, a.estimated_with, a.observed_without,
                     a.observed_with, a.modeled_without, a.modeled_with,
                     a.deduped_modeled_without, a.deduped_modeled_with,
                     a.repeated_baselines, a.observed_file_read_replacements,
                     a.modeled_file_reads_avoided
              FROM worktree_usage_aggregates AS a
-             JOIN usage_bucket_dimensions AS d USING(dimension_id)
              WHERE a.registration_id = ?1 AND a.source_kind = ?2
                AND a.day_epoch >= ?3
              ORDER BY a.day_epoch, a.dimension_id",
@@ -1789,16 +1770,16 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
             WORKTREE_USAGE_SYNCHRONIZED,
             retained_daily_cutoff
         ])?;
-        let mut totals = BTreeMap::<(i64, DimensionValues), AggregateCounters>::new();
+        let mut totals = BTreeMap::<(i64, i64), AggregateCounters>::new();
         while let Some(row) = rows.next()? {
-            let key = (row.get(0)?, read_dimension(row, 1)?);
+            let key = (row.get(0)?, row.get(1)?);
             let total = totals.entry(key).or_default();
-            *total = total.checked_add(read_counters_offset(row, 13)?)?;
+            *total = total.checked_add(read_counters_offset(row, 2)?)?;
         }
         totals
     };
     if accepted_daily.iter().any(|(key, accepted)| {
-        !incoming_daily
+        !incoming
             .get(key)
             .is_some_and(|incoming| incoming.contains(*accepted))
     }) {
@@ -1806,10 +1787,9 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
             reason: "aggregate snapshot reduces accepted retained daily totals",
         });
     }
-    let incoming_daily_rows = snapshot
-        .rows
-        .iter()
-        .filter(|row| row.day_epoch >= retained_daily_cutoff)
+    let incoming_daily_rows = incoming
+        .keys()
+        .filter(|(day_epoch, _dimension_id)| *day_epoch >= 0)
         .count();
     let other_daily_rows = connection.query_row(
         "SELECT COUNT(*) FROM worktree_usage_aggregates
@@ -1830,10 +1810,6 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
             observed: projected_daily_rows,
         });
     }
-    let mut target_dimensions = BTreeMap::new();
-    for (source_id, dimension) in &snapshot.dimensions {
-        target_dimensions.insert(*source_id, ensure_dimension(connection, dimension, policy)?);
-    }
     connection.execute(
         "DELETE FROM worktree_usage_aggregates
          WHERE registration_id = ?1 AND source_kind = ?2",
@@ -1848,23 +1824,13 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
             observed_file_read_replacements, modeled_file_reads_avoided
          ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
     )?;
-    for row in snapshot
-        .rows
-        .iter()
-        .filter(|row| row.day_epoch == -1 || row.day_epoch >= retained_daily_cutoff)
-    {
-        let dimension_id =
-            target_dimensions
-                .get(&row.dimension_id)
-                .ok_or(DbError::WorktreeRegistrationRow {
-                    reason: "aggregate snapshot dimension mapping is incomplete",
-                })?;
+    for ((day_epoch, dimension_id), counters) in incoming {
         insert.execute(worktree_aggregate_params!(
             registration_id,
             WORKTREE_USAGE_SYNCHRONIZED,
-            row.day_epoch,
+            day_epoch,
             dimension_id,
-            row.counters
+            counters
         ))?;
     }
     let revision =
@@ -7320,6 +7286,88 @@ mod tests {
             result.is_ok(),
             "production page-reuse test failed: {result:?}"
         );
+    }
+
+    #[test]
+    fn synchronization_coalesces_dimensions_that_share_an_overflow_bucket()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let worktree_root = temp.path().join("worktree");
+        let common = temp.path().join("common.git");
+        let administrative = common.join("worktrees/overflow");
+        for path in [&control_root, &worktree_root, &administrative] {
+            fs::create_dir_all(path)?;
+        }
+        let control = store_at(&control_root)?;
+        let worktree = store_at(&worktree_root)?;
+        let project = worktree
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let alias = WorktreeAlias::parse("overflow")?;
+        let registration = control.register_worktree(
+            &alias,
+            &common,
+            &administrative,
+            &"66".repeat(32),
+            &worktree_root,
+            Some(project),
+            10,
+        )?;
+        let policy = TelemetryRetentionPolicy::default().validate()?;
+        for index in 0..policy.max_dimensions {
+            if retention_counter(&control.connection, RetentionCounter::DimensionRows)?
+                >= policy.max_dimensions
+            {
+                break;
+            }
+            let mut dimension = DimensionValues::from_event(&event("control", 1, 0));
+            dimension.model = format!("control-{index}");
+            ensure_dimension(&control.connection, &dimension, policy)?;
+        }
+        require_eq(
+            &retention_counter(&control.connection, RetentionCounter::DimensionRows)?,
+            &policy.max_dimensions,
+            "full control dimension capacity",
+        )?;
+
+        let first = event("local", 100, 20);
+        let mut second = event("local", 80, 20);
+        second.provider = "other-provider".to_string();
+        second.baseline_identity = "source:src/other.rs".to_string();
+        second.baseline_fingerprint = "source:src/other.rs:v1".to_string();
+        for usage in [&first, &second] {
+            worktree.record_usage(usage)?;
+        }
+        require_eq(
+            &control
+                .synchronize_worktree_usage(&alias, &worktree.export_worktree_usage_snapshot()?)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "first overflow synchronization",
+        )?;
+        for usage in [&first, &second] {
+            worktree.record_usage(usage)?;
+        }
+        require_eq(
+            &control
+                .synchronize_worktree_usage(&alias, &worktree.export_worktree_usage_snapshot()?)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "monotonic overflow synchronization",
+        )?;
+        require_eq(
+            &control.registered_worktree_token_overview(&alias)?.calls,
+            &4,
+            "coalesced overflow lifetime calls",
+        )?;
+        let rows = control.connection.query_row(
+            "SELECT SUM(day_epoch = -1), SUM(day_epoch >= 0)
+             FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        require_eq(&rows, &(1, 1), "coalesced overflow aggregate rows")?;
+        Ok(())
     }
 
     #[test]
