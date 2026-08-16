@@ -801,7 +801,7 @@ fn synchronize_registered_worktree_usage_with_catalog_validation(
     let control_reader = open_atlas_store_read_only_for_project(control_db, control_root)?;
     let control_project =
         require_synchronization_control_identity(&control_reader, expected_control_project)?;
-    let registrations = control_reader.worktree_registrations(false)?;
+    let mut registrations = control_reader.worktree_registrations(false)?;
     drop(control_reader);
     if registrations.is_empty() {
         before_catalog_validation()?;
@@ -847,7 +847,7 @@ fn synchronize_registered_worktree_usage_with_catalog_validation(
     let control = open_atlas_store_for_project(control_db, control_root)?;
     require_synchronization_control_identity(&control, Some(control_project))?;
     let common = normalize_native_path_display(&repository.common_directory);
-    for registration in &registrations {
+    for registration in &mut registrations {
         let synchronization_incomplete = || {
             CliError::InvalidInput(format!(
                 "registered worktree '{}': its bound local atlas is unavailable, so aggregate token totals cannot be synchronized",
@@ -918,6 +918,7 @@ fn synchronize_registered_worktree_usage_with_catalog_validation(
         )??;
         if let Some(snapshot) = snapshot {
             control.synchronize_worktree_usage(&registration.alias, &snapshot)?;
+            registration.project_instance_id = Some(snapshot.project_instance_id());
         }
     }
     before_catalog_validation()?;
@@ -929,6 +930,7 @@ fn synchronize_registered_worktree_usage_with_catalog_validation(
             .any(|(current, captured)| {
                 current.registration_id != captured.registration_id
                     || current.alias != captured.alias
+                    || current.project_instance_id != captured.project_instance_id
             })
     {
         return Err(CliError::InvalidInput(
@@ -8724,8 +8726,11 @@ mod tests {
         )?;
         fs::create_dir_all(root.join(".projectatlas"))?;
         let replacement = AtlasStore::open_for_project(&target_database, &root)?;
+        let replacement_project = replacement
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
         require_eq(
-            &(replacement.project_instance_id()? != Some(snapshot.project_instance_id())),
+            &(replacement_project != snapshot.project_instance_id()),
             &true,
             "replacement worktree atlas identity",
         )?;
@@ -8756,6 +8761,66 @@ mod tests {
             &control.registered_worktree_token_overview(&alias)?.calls,
             &0,
             "failed revalidation token totals",
+        )?;
+
+        control.retire_worktree(registration.registration_id, &alias, 2)?;
+        let RepositoryStructure::Git(replacement_repository) =
+            projectatlas_fs::worktree::discover_repository_structure(&primary)?
+        else {
+            return Err(io::Error::other("replacement Git fixture was not discovered").into());
+        };
+        let replacement_entry = replacement_repository
+            .worktrees
+            .iter()
+            .find(|entry| match &entry.state {
+                GitWorktreeState::Active {
+                    root: candidate, ..
+                } => candidate == &root,
+                GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => false,
+            })
+            .ok_or_else(|| io::Error::other("replacement worktree was not discovered"))?;
+        let replacement_alias = WorktreeAlias::parse("replacement")?;
+        let replacement_registration = control.register_worktree(
+            &replacement_alias,
+            &replacement_repository.common_directory,
+            &replacement_entry.administrative_directory,
+            &git_administrative_identity(&replacement_entry.administrative_directory)?,
+            &root,
+            None,
+            3,
+        )?;
+        let preserved_target = root.join(".projectatlas-concurrent-binding");
+        fs::rename(root.join(".projectatlas"), &preserved_target)?;
+        let concurrent_binding = synchronize_registered_worktree_usage_with_catalog_validation(
+            &control_database,
+            &primary,
+            control.project_instance_id()?,
+            || {
+                fs::rename(&preserved_target, root.join(".projectatlas"))?;
+                control.bind_worktree_project(
+                    replacement_registration.registration_id,
+                    &replacement_alias,
+                    &root,
+                    replacement_project,
+                )?;
+                Ok(())
+            },
+        );
+        require_eq(
+            &concurrent_binding.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains("catalog changed during aggregate synchronization")
+            }),
+            &true,
+            "concurrent unbound-to-bound catalog rejection",
+        )?;
+        require_eq(
+            &control
+                .worktree_registration(&replacement_alias)?
+                .project_instance_id,
+            &Some(replacement_project),
+            "concurrently committed project binding",
         )
     }
 
