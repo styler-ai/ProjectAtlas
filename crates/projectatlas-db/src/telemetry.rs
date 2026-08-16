@@ -1711,6 +1711,11 @@ pub(crate) fn synchronize_worktree_usage_snapshot(
         retained_trend_seconds,
         "retained_trend_seconds",
     )?;
+    connection.execute(
+        "DELETE FROM worktree_usage_aggregates
+         WHERE day_epoch >= 0 AND day_epoch < ?1 AND source_kind = ?2",
+        params![retained_daily_cutoff, WORKTREE_USAGE_SYNCHRONIZED],
+    )?;
     let mut incoming_daily = BTreeMap::<(i64, DimensionValues), AggregateCounters>::new();
     for row in snapshot
         .rows
@@ -7838,6 +7843,185 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )?;
         require_eq(&synchronized_daily, &2, "retained synchronized daily rows")?;
+        Ok(())
+    }
+
+    #[test]
+    fn synchronization_prunes_expired_daily_rows_from_retired_origins() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let retired_root = temp.path().join("retired");
+        let current_root = temp.path().join("current");
+        let common = temp.path().join("common.git");
+        let retired_administrative = common.join("worktrees/retired");
+        let current_administrative = common.join("worktrees/current");
+        for path in [
+            &control_root,
+            &retired_root,
+            &current_root,
+            &retired_administrative,
+            &current_administrative,
+        ] {
+            fs::create_dir_all(path)?;
+        }
+        let control = store_at(&control_root)?;
+        let retired = store_at(&retired_root)?;
+        let retired_project = retired
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let retired_alias = WorktreeAlias::parse("retired")?;
+        let retired_registration = control.register_worktree(
+            &retired_alias,
+            &common,
+            &retired_administrative,
+            &"33".repeat(32),
+            &retired_root,
+            Some(retired_project),
+            10,
+        )?;
+        retired.record_usage(&event("retired", 100, 20))?;
+        let accepted = retired.export_worktree_usage_snapshot()?;
+        require_eq(
+            &control.synchronize_worktree_usage(&retired_alias, &accepted)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "initial retired-origin synchronization",
+        )?;
+
+        control.connection.execute(
+            "DELETE FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![
+                retired_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED
+            ],
+        )?;
+        let policy = TelemetryRetentionPolicy::default().validate()?;
+        let max_daily_rows = to_i64("max_daily_rows", policy.max_daily_rows)?;
+        let seeded = control.connection.execute(
+            "WITH RECURSIVE expired_days(day_epoch) AS (
+                 VALUES(0)
+                 UNION ALL
+                 SELECT day_epoch + 1 FROM expired_days WHERE day_epoch + 1 < ?3
+             )
+             INSERT INTO worktree_usage_aggregates(
+                 registration_id, source_kind, day_epoch, dimension_id,
+                 calls, estimated_without, estimated_with, observed_without,
+                 observed_with, modeled_without, modeled_with,
+                 deduped_modeled_without, deduped_modeled_with, repeated_baselines,
+                 observed_file_read_replacements, modeled_file_reads_avoided
+             )
+             SELECT aggregate.registration_id, aggregate.source_kind,
+                    expired_days.day_epoch, aggregate.dimension_id,
+                    aggregate.calls, aggregate.estimated_without, aggregate.estimated_with,
+                    aggregate.observed_without, aggregate.observed_with,
+                    aggregate.modeled_without, aggregate.modeled_with,
+                    aggregate.deduped_modeled_without, aggregate.deduped_modeled_with,
+                    aggregate.repeated_baselines, aggregate.observed_file_read_replacements,
+                    aggregate.modeled_file_reads_avoided
+             FROM worktree_usage_aggregates AS aggregate
+             CROSS JOIN expired_days
+             WHERE aggregate.registration_id = ?1 AND aggregate.source_kind = ?2
+               AND aggregate.day_epoch = -1",
+            params![
+                retired_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED,
+                max_daily_rows
+            ],
+        )?;
+        require_eq(&seeded, &policy.max_daily_rows, "seeded expired daily rows")?;
+
+        let mut reduced = accepted;
+        reduced.revision = reduced.revision.saturating_add(1);
+        let lifetime = reduced
+            .rows
+            .iter_mut()
+            .find(|row| row.day_epoch == -1)
+            .ok_or_else(|| io::Error::other("retired lifetime row missing"))?;
+        lifetime.counters.calls = 0;
+        reduced.logical_bytes =
+            validate_worktree_usage_snapshot(&reduced.dimensions, &reduced.rows, policy)?;
+        require(
+            matches!(
+                control.synchronize_worktree_usage(&retired_alias, &reduced),
+                Err(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot reduces accepted lifetime totals"
+                })
+            ),
+            "failed synchronization committed expired-row pruning",
+        )?;
+        let after_rollback = control.connection.query_row(
+            "SELECT COUNT(*) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![
+                retired_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &after_rollback,
+            &max_daily_rows,
+            "expired rows after failed synchronization",
+        )?;
+        control.retire_worktree(retired_registration.registration_id, &retired_alias, 20)?;
+
+        let current = store_at(&current_root)?;
+        let current_project = current
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let current_alias = WorktreeAlias::parse("current")?;
+        let current_registration = control.register_worktree(
+            &current_alias,
+            &common,
+            &current_administrative,
+            &"44".repeat(32),
+            &current_root,
+            Some(current_project),
+            30,
+        )?;
+        current.record_usage(&event("current", 90, 20))?;
+        require_eq(
+            &control.synchronize_worktree_usage(
+                &current_alias,
+                &current.export_worktree_usage_snapshot()?,
+            )?,
+            &WorktreeUsageSyncState::Synchronized,
+            "current-origin synchronization after global pruning",
+        )?;
+
+        let retired_daily = control.connection.query_row(
+            "SELECT COUNT(*) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![
+                retired_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&retired_daily, &0, "retired expired daily rows")?;
+        let lifetime_calls = control.connection.query_row(
+            "SELECT SUM(calls) FROM worktree_usage_aggregates
+             WHERE source_kind = ?1 AND day_epoch = -1",
+            [WORKTREE_USAGE_SYNCHRONIZED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&lifetime_calls, &2, "synchronized lifetime truth")?;
+        let current_daily_calls = control.connection.query_row(
+            "SELECT SUM(calls) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![
+                current_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&current_daily_calls, &1, "retained current daily truth")?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &2,
+            "repository lifetime truth",
+        )?;
         Ok(())
     }
 

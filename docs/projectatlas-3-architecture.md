@@ -1808,7 +1808,7 @@ summary, relation, and slice routes expose the smallest trustworthy next step.
 ```mermaid
 flowchart TB
     Agent[Agent in explicitly selected control checkout] -->|worktree alias per call| Resolver[Immutable MCP target resolver]
-    Git[Bounded reciprocal Git metadata] --> Revalidate[Selection plus prewrite root and lifecycle revalidation]
+    Git[Bounded reciprocal Git metadata] --> Revalidate[Selection plus prewrite root, lifecycle, and local atlas identity revalidation]
     Revalidate --> Registry[Worktree list and lifecycle-bound registration]
     Resolver -->|active-row CAS for a moved root| Registry
     Registry --> Control
@@ -1848,11 +1848,14 @@ sibling generations.
 
 Registration also captures an opaque identity for the current Git
 administrative-directory filesystem object. Add revalidates the selected root
-and lifecycle immediately before the catalog transaction, and moved-root
-resolution conditionally updates only the captured active registration, so a
-concurrent removal cannot reactivate its alias. Git-authorized checkout moves
-keep that object and its alias; deleting and recreating the directory at the
-same path fails closed so a replacement checkout cannot inherit the earlier alias.
+and lifecycle immediately before the catalog transaction. When the initial
+selection captured an existing local atlas, add also reopens it at that boundary
+and requires the same project identity before binding the alias or importing its
+snapshot. Moved-root resolution conditionally updates only the captured active
+registration, so a concurrent removal cannot reactivate its alias. Git-authorized
+checkout moves keep that object and its alias; deleting and recreating the
+directory at the same path fails closed so a replacement checkout cannot inherit
+the earlier alias.
 Unix requires device, inode, and creation time; Windows requires creation time
 plus retained-handle volume and 128-bit file identity. Filesystems without the
 complete non-reusable evidence reject alias registration and routing instead of
@@ -2697,7 +2700,10 @@ Synchronization transfers no raw source event, per-session query, or path;
 repeated/stale revisions are no-ops, and a newer revision must preserve every
 accepted lifetime dimension plus every daily day/dimension still inside the
 trend-retention window. A recent backup rollback or invalid/overflowing snapshot
-preserves the last-valid aggregate, while expired daily buckets may disappear.
+preserves the last-valid aggregate. Before capacity admission, synchronization
+prunes expired synchronized daily rows across active and retired origins inside
+the same write transaction; any later failure rolls that reclamation back with
+the attempted update.
 Removal holds one short local SQLite writer-exclusion
 scope while the control atlas atomically synchronizes and retires the origin, so
 a local usage commit cannot land in an export-to-retirement gap. Retired origins

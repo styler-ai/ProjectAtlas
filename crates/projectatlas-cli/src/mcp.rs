@@ -5938,6 +5938,28 @@ impl ProjectAtlasMcpServer {
         }))
     }
 
+    /// Reopen an identity-bound local atlas before its registration is committed.
+    fn revalidate_local_worktree_atlas_identity(
+        root: &Path,
+        expected: Option<ProjectInstanceId>,
+    ) -> Result<(), CliError> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        let db_path = Self::projectatlas_db_path(root);
+        let Some(store) = Self::open_local_worktree_atlas(root)? else {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string(),
+            ));
+        };
+        if Self::local_worktree_project_instance_id(&store, &db_path)? != expected {
+            return Err(CliError::InvalidInput(
+                MCP_ERROR_WORKTREE_IDENTITY_CONFLICT.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Join one structural worktree entry to registry, atlas, and telemetry state.
     fn worktree_list_row(
         &self,
@@ -7607,6 +7629,7 @@ impl ProjectAtlasMcpServer {
             let root = Self::active_worktree_root(&entry).ok_or_else(|| {
                 CliError::InvalidInput(MCP_ERROR_WORKTREE_NO_LONGER_ACTIVE.to_string())
             })?;
+            Self::revalidate_local_worktree_atlas_identity(root, project_instance_id)?;
             let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
             let registration = control.register_worktree(
                 &alias,
@@ -11323,6 +11346,65 @@ mod tests {
                     .is_none(),
             "non-UTF-8 common-directory identity remained registrable",
         )
+    }
+
+    #[test]
+    fn worktree_registration_revalidates_captured_local_atlas_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("worktree");
+        fs::create_dir(&root)?;
+        let state = root.join(PROJECTATLAS_DIR_NAME);
+        let db_path = state.join(PROJECTATLAS_DB_FILE_NAME);
+        let config_path = state.join("config.toml");
+        init_project_with_config(&root, Some(&config_path))?;
+        drop(AtlasStore::open_for_project(&db_path, &root)?);
+        let captured = ProjectAtlasMcpServer::local_worktree_atlas(&root)?
+            .ok_or_else(|| io::Error::other("captured worktree atlas is missing"))?;
+        ProjectAtlasMcpServer::revalidate_local_worktree_atlas_identity(
+            &root,
+            Some(captured.project_instance_id),
+        )?;
+
+        let preserved = root.join(".projectatlas-captured-registration");
+        fs::rename(&state, &preserved)?;
+        fs::create_dir(&state)?;
+        let replacement = AtlasStore::open_for_project(&db_path, &root)?;
+        require(
+            replacement.project_instance_id()? != Some(captured.project_instance_id),
+            "replacement atlas reused the captured registration identity",
+        )?;
+        drop(replacement);
+        let rejected = ProjectAtlasMcpServer::revalidate_local_worktree_atlas_identity(
+            &root,
+            Some(captured.project_instance_id),
+        );
+        require(
+            rejected.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "registration guard accepted a replacement local atlas",
+        )?;
+        fs::remove_dir_all(&state)?;
+        let missing = ProjectAtlasMcpServer::revalidate_local_worktree_atlas_identity(
+            &root,
+            Some(captured.project_instance_id),
+        );
+        require(
+            missing.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains(MCP_ERROR_WORKTREE_IDENTITY_CONFLICT)
+            }),
+            "registration guard accepted a missing captured local atlas",
+        )?;
+
+        let uninitialized = temp.path().join("uninitialized");
+        fs::create_dir(&uninitialized)?;
+        ProjectAtlasMcpServer::revalidate_local_worktree_atlas_identity(&uninitialized, None)
+            .map_err(Into::into)
     }
 
     #[test]
