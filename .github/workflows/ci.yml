@@ -153,6 +153,7 @@ jobs:
 
       - name: Worktree lifecycle race regressions
         timeout-minutes: 10
+        shell: bash
         run: |
           cargo test --locked -p projectatlas-db active_registration_guard -- --nocapture
           cargo test --locked -p projectatlas-cli registered_init_rejects_replaced_git_lifecycle_before_or_during_activation_and_binding -- --nocapture
