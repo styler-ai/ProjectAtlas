@@ -2520,27 +2520,22 @@ mod tests {
     fn unquoted_git_config_escapes_cannot_change_pointer_owner() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let pointer_owner = temp.path().join(r"owner\\root");
-        let git_selected_root = temp.path().join(r"owner\root");
         fs::create_dir(&pointer_owner)?;
-        fs::create_dir(&git_selected_root)?;
         write_structural_primary(&pointer_owner)?;
         fs::write(
             pointer_owner.join(".git").join("config"),
             "[core]\n bare = false\n worktree = ../../owner\\\\root\n",
         )?;
 
-        let effective_root = Command::new("git")
+        let effective_setting = Command::new("git")
             .arg("--git-dir")
             .arg(pointer_owner.join(".git"))
-            .args(["rev-parse", "--show-toplevel"])
+            .args(["config", "--get", "core.worktree"])
             .output()?;
         require(
-            effective_root.status.success()
-                && paths_equal(
-                    &PathBuf::from(String::from_utf8(effective_root.stdout)?.trim())
-                        .canonicalize()?,
-                    &git_selected_root.canonicalize()?,
-                ),
+            effective_setting.status.success()
+                && String::from_utf8(effective_setting.stdout)?.trim_end_matches(['\r', '\n'])
+                    == r"../../owner\root",
             "Git fixture did not decode the unquoted backslash escape",
         )?;
         require_invalid_kind(
