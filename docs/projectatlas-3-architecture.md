@@ -2674,22 +2674,30 @@ only bounded normalized lifetime/daily aggregates with a monotonic revision.
 ```mermaid
 sequenceDiagram
     actor Caller
-    participant MCP as Control MCP process
+    participant Runtime as Control CLI or MCP runtime
+    participant Structure as Bounded Git structure
     participant Target as Exact worktree atlas
     participant Control as Control telemetry and registry
     participant Report as Existing token report and TUI
 
-    Caller->>MCP: Accepted read with worktree alias
-    MCP->>Target: Verify and read exact target generation
-    Target-->>MCP: Bounded result
-    MCP->>Control: Commit one routed event under registration origin
-    MCP-->>Caller: Result
+    Caller->>Runtime: Accepted read with worktree alias
+    Runtime->>Target: Verify and read exact target generation
+    Target-->>Runtime: Bounded result
+    Runtime->>Control: Commit one routed event under registration origin
+    Runtime-->>Caller: Result
     Caller->>Target: Independent local CLI operation
     Target->>Target: Commit raw local event
-    Caller->>MCP: Token report with worktree main
-    MCP->>Target: Read revision, dimensions, and rows in one SQLite snapshot
-    Target-->>MCP: Newer revision or unchanged revision
-    MCP->>Control: Atomic monotonic origin synchronization
+    Caller->>Runtime: Token report with worktree main
+    Runtime->>Control: Capture control identity and registrations read-only
+    Runtime->>Structure: Resolve exact registered lifecycles
+    Structure-->>Runtime: Active roots or typed missing and invalid state
+    Runtime->>Control: Reopen writer and require captured control identity
+    Control-->>Runtime: Same identity or typed failure before target read
+    Runtime->>Target: Read revision, dimensions, and rows in one SQLite snapshot
+    Target-->>Runtime: Newer revision or unchanged revision
+    Runtime->>Structure: Revalidate an unbound origin immediately before binding
+    Structure-->>Runtime: Same lifecycle or typed failure before catalog write
+    Runtime->>Control: Bind if needed and atomically synchronize the origin
     Control->>Report: Native main plus routed plus active and retired snapshots
     Report-->>Caller: Combined existing report or unchanged TUI layout
 ```
@@ -2703,7 +2711,12 @@ trend-retention window. A recent backup rollback or invalid/overflowing snapshot
 preserves the last-valid aggregate. Before capacity admission, synchronization
 prunes expired synchronized daily rows across active and retired origins inside
 the same write transaction; any later failure rolls that reclamation back with
-the attempted update.
+the attempted update. The read-only catalog snapshot also captures the control
+project identity, which the later writer must retain. An origin without a bound
+project identity revalidates its exact Git administrative lifecycle after the
+local snapshot and immediately before the first bind, so neither control-atlas
+replacement nor worktree replacement can import an aggregate into stale
+authority.
 Removal holds one short local SQLite writer-exclusion
 scope while the control atlas atomically synchronizes and retires the origin, so
 a local usage commit cannot land in an export-to-retirement gap. Retired origins

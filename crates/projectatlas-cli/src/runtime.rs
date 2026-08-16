@@ -68,12 +68,12 @@ use projectatlas_db::{
     HealthFindingsPage, HealthQuery, HealthScope, IndexPublication, IndexPublicationGuard,
     IndexPublicationState, IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
     MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
-    TelemetryRetentionState, database_settings_report, read_project_root_read_only,
-    validate_database_location,
+    TelemetryRetentionState, WorktreeRegistration, database_settings_report,
+    read_project_root_read_only, validate_database_location,
 };
 use projectatlas_fs::worktree::{
-    GitManagerSourceSelection, GitRepositorySelection, GitWorktreeState, RepositoryStructure,
-    git_administrative_identity,
+    GitManagerSourceSelection, GitRepositorySelection, GitRepositoryStructure, GitWorktreeState,
+    RepositoryStructure, git_administrative_identity,
 };
 use projectatlas_fs::{
     FsError, RootScanPolicy, ScanLimits, ScanOptions, gitignore_excludes_path,
@@ -784,7 +784,8 @@ pub(crate) fn synchronize_registered_worktree_usage(
     expected_control_project: Option<ProjectInstanceId>,
 ) -> Result<(), CliError> {
     let control_reader = open_atlas_store_read_only_for_project(control_db, control_root)?;
-    require_synchronization_control_identity(&control_reader, expected_control_project)?;
+    let control_project =
+        require_synchronization_control_identity(&control_reader, expected_control_project)?;
     let registrations = control_reader.worktree_registrations(false)?;
     drop(control_reader);
     if registrations.is_empty() {
@@ -817,7 +818,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
         ));
     }
     let control = open_atlas_store_for_project(control_db, control_root)?;
-    require_synchronization_control_identity(&control, expected_control_project)?;
+    require_synchronization_control_identity(&control, Some(control_project))?;
     let common = normalize_native_path_display(&repository.common_directory);
     for registration in registrations {
         let synchronization_incomplete = || {
@@ -832,22 +833,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
             }
             continue;
         }
-        let root = repository
-            .worktrees
-            .iter()
-            .find(|entry| {
-                entry.administrative_directory.to_str().is_some()
-                    && normalize_native_path_display(&entry.administrative_directory)
-                        == registration.git_administrative_directory
-            })
-            .filter(|entry| {
-                git_administrative_identity(&entry.administrative_directory)
-                    .is_ok_and(|identity| identity == registration.git_administrative_identity)
-            })
-            .and_then(|entry| match &entry.state {
-                GitWorktreeState::Active { root, .. } => Some(root),
-                GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
-            });
+        let root = registered_worktree_root(&repository, &registration);
         let Some(root) = root else {
             if registration.project_instance_id.is_some() {
                 return Err(synchronization_incomplete());
@@ -875,6 +861,7 @@ pub(crate) fn synchronize_registered_worktree_usage(
         let snapshot = target.export_worktree_usage_snapshot()?;
         drop(target);
         if registration.project_instance_id.is_none() {
+            require_registered_worktree_lifecycle(control_root, &registration, root)?;
             control.bind_worktree_project(
                 registration.registration_id,
                 &registration.alias,
@@ -887,17 +874,74 @@ pub(crate) fn synchronize_registered_worktree_usage(
     Ok(())
 }
 
+/// Resolve one registration only while its exact Git lifecycle remains active.
+fn registered_worktree_root<'a>(
+    repository: &'a GitRepositoryStructure,
+    registration: &WorktreeRegistration,
+) -> Option<&'a Path> {
+    if repository.common_directory.to_str().is_none()
+        || normalize_native_path_display(&repository.common_directory)
+            != registration.git_common_directory
+    {
+        return None;
+    }
+    repository
+        .worktrees
+        .iter()
+        .find(|entry| {
+            entry.administrative_directory.to_str().is_some()
+                && normalize_native_path_display(&entry.administrative_directory)
+                    == registration.git_administrative_directory
+        })
+        .filter(|entry| {
+            git_administrative_identity(&entry.administrative_directory)
+                .is_ok_and(|identity| identity == registration.git_administrative_identity)
+        })
+        .and_then(|entry| match &entry.state {
+            GitWorktreeState::Active { root, .. } => Some(root.as_path()),
+            GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
+        })
+}
+
+/// Rediscover one unbound registration immediately before its first catalog write.
+fn require_registered_worktree_lifecycle(
+    control_root: &Path,
+    registration: &WorktreeRegistration,
+    expected_root: &Path,
+) -> Result<(), CliError> {
+    let lifecycle_changed = || {
+        CliError::InvalidInput(format!(
+            "registered worktree '{}': its Git administrative lifecycle changed before aggregate token synchronization",
+            registration.alias
+        ))
+    };
+    let repository = projectatlas_fs::worktree::discover_repository_structure(control_root)?;
+    let RepositoryStructure::Git(repository) = repository else {
+        return Err(lifecycle_changed());
+    };
+    if registered_worktree_root(&repository, registration) != Some(expected_root) {
+        return Err(lifecycle_changed());
+    }
+    Ok(())
+}
+
 /// Keep synchronization on the control atlas captured by an alias-routed request.
 fn require_synchronization_control_identity(
     control: &AtlasStore,
     expected: Option<ProjectInstanceId>,
-) -> Result<(), CliError> {
-    if expected.is_some() && control.project_instance_id()? != expected {
+) -> Result<ProjectInstanceId, CliError> {
+    let observed = control.project_instance_id()?.ok_or_else(|| {
+        CliError::InvalidInput(
+            "control atlas has no project identity for registered worktree synchronization"
+                .to_string(),
+        )
+    })?;
+    if expected.is_some_and(|expected| expected != observed) {
         return Err(CliError::InvalidInput(
             "control atlas identity changed before registered worktree synchronization".to_string(),
         ));
     }
-    Ok(())
+    Ok(observed)
 }
 
 /// Attach the exact alias to every typed or generic federated participant failure.
@@ -8297,9 +8341,187 @@ mod tests {
         DocumentTargetUnresolvedReason, ExtendedRelationKind, GraphRelationKind,
         RelationResolution, RepositoryNodePath,
     };
-    use projectatlas_db::RepositoryGraphRelationQuery;
+    use projectatlas_db::{RepositoryGraphRelationQuery, WorktreeAlias};
     use std::error::Error;
     use std::fmt::Debug;
+    use std::process::Command as StdCommand;
+
+    fn run_git_fixture(command: &mut StdCommand) -> Result<(), Box<dyn Error>> {
+        let output = command.output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "Git fixture command failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn synchronization_control_identity_rejects_replacement_without_caller_identity()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("control");
+        let state = root.join(".projectatlas");
+        let database = state.join("projectatlas.db");
+        fs::create_dir_all(&state)?;
+        let original = AtlasStore::open_for_project(&database, &root)?;
+        let captured = require_synchronization_control_identity(&original, None)?;
+        require_eq(
+            &require_synchronization_control_identity(&original, Some(captured))?,
+            &captured,
+            "stable control identity",
+        )?;
+        drop(original);
+
+        fs::rename(&state, root.join(".projectatlas-captured-control"))?;
+        fs::create_dir(&state)?;
+        let replacement = AtlasStore::open_for_project(&database, &root)?;
+        let rejected = require_synchronization_control_identity(&replacement, Some(captured));
+        require_eq(
+            &rejected
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("control atlas identity changed")),
+            &true,
+            "replacement control identity rejection",
+        )
+    }
+
+    #[test]
+    fn unbound_worktree_synchronization_revalidates_git_lifecycle_before_binding()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary = temp.path().join("primary");
+        let linked = temp.path().join("linked");
+        fs::create_dir(&primary)?;
+        run_git_fixture(StdCommand::new("git").current_dir(&primary).arg("init"))?;
+        for (key, value) in [
+            ("user.name", "ProjectAtlas Test"),
+            ("user.email", "projectatlas@example.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.autocrlf", "false"),
+        ] {
+            run_git_fixture(
+                StdCommand::new("git")
+                    .current_dir(&primary)
+                    .args(["config", key, value]),
+            )?;
+        }
+        fs::write(primary.join("lib.rs"), "pub fn primary() {}\n")?;
+        run_git_fixture(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["add", "."]),
+        )?;
+        run_git_fixture(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["commit", "-m", "fixture"]),
+        )?;
+        run_git_fixture(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "captured"])
+                .arg(&linked),
+        )?;
+
+        let RepositoryStructure::Git(repository) =
+            projectatlas_fs::worktree::discover_repository_structure(&primary)?
+        else {
+            return Err(io::Error::other("Git fixture was not discovered").into());
+        };
+        let root = linked.canonicalize()?;
+        let entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| match &entry.state {
+                GitWorktreeState::Active {
+                    root: candidate, ..
+                } => candidate == &root,
+                GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => false,
+            })
+            .ok_or_else(|| io::Error::other("linked fixture was not discovered"))?;
+        let administrative_directory = entry.administrative_directory.clone();
+        let administrative_identity = git_administrative_identity(&administrative_directory)?;
+        let alias = WorktreeAlias::parse("captured")?;
+        let control_database = primary.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(primary.join(".projectatlas"))?;
+        let control = AtlasStore::open_for_project(&control_database, &primary)?;
+        let registration = control.register_worktree(
+            &alias,
+            &repository.common_directory,
+            &administrative_directory,
+            &administrative_identity,
+            &root,
+            None,
+            1,
+        )?;
+        require_registered_worktree_lifecycle(&primary, &registration, &root)?;
+
+        let target_database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let target = AtlasStore::open_for_project(&target_database, &root)?;
+        target.record_usage(&usage_from_text(
+            "captured",
+            "atlas_overview",
+            None,
+            None,
+            "pub fn captured() {}",
+            "repository overview",
+        ))?;
+        let snapshot = target.export_worktree_usage_snapshot()?;
+        drop(target);
+
+        run_git_fixture(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "remove", "--force"])
+                .arg(&linked),
+        )?;
+        run_git_fixture(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "-b", "replacement"])
+                .arg(&linked),
+        )?;
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let replacement = AtlasStore::open_for_project(&target_database, &root)?;
+        require_eq(
+            &(replacement.project_instance_id()? != Some(snapshot.project_instance_id())),
+            &true,
+            "replacement worktree atlas identity",
+        )?;
+        drop(replacement);
+
+        let rejected = require_registered_worktree_lifecycle(&primary, &registration, &root);
+        require_eq(
+            &rejected.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains("administrative lifecycle changed")
+            }),
+            &true,
+            "replacement Git lifecycle rejection",
+        )?;
+        let stored = control.worktree_registration(&alias)?;
+        require_eq(
+            &stored.project_instance_id,
+            &None,
+            "failed revalidation project binding",
+        )?;
+        require_eq(
+            &stored.accepted_telemetry_revision,
+            &0,
+            "failed revalidation telemetry revision",
+        )?;
+        require_eq(
+            &control.registered_worktree_token_overview(&alias)?.calls,
+            &0,
+            "failed revalidation token totals",
+        )
+    }
 
     #[test]
     fn worker_pools_respect_work_cardinality_and_runtime_ceiling() {

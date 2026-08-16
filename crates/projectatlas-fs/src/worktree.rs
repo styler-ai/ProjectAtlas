@@ -644,7 +644,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             continue;
         }
         if in_extensions && key.eq_ignore_ascii_case("worktreeconfig") {
-            if let Some(enabled) = parse_git_boolean(value) {
+            if let Some(enabled) = parse_git_boolean(&value) {
                 worktree_config_enabled = enabled;
             } else {
                 source_root_inference_safe = false;
@@ -683,7 +683,7 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
         if !key.eq_ignore_ascii_case("bare") {
             continue;
         }
-        if let Some(bare) = parse_git_boolean(value) {
+        if let Some(bare) = parse_git_boolean(&value) {
             bare_setting = Some(bare);
         } else {
             bare_setting = None;
@@ -768,8 +768,11 @@ fn git_config_section(line: &str) -> Option<(&str, bool)> {
     (!escaped).then_some((name, true))
 }
 
-/// Remove only unquoted Git comments and unwrap one simple quoted value.
-fn git_config_value(raw_value: &str) -> Option<&str> {
+/// Remove unquoted Git comments and concatenate balanced quoted value segments.
+///
+/// Escape sequences remain encoded so pointer-owned source settings can reject
+/// them conservatively instead of resolving a path under different semantics.
+fn git_config_value(raw_value: &str) -> Option<String> {
     let mut quoted = false;
     let mut escaped = false;
     let mut value_end = raw_value.len();
@@ -795,11 +798,20 @@ fn git_config_value(raw_value: &str) -> Option<&str> {
         return None;
     }
     let value = trim_git_config_whitespace(&raw_value[..value_end]);
-    let value = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(value);
-    (!value.contains('"')).then_some(value)
+    let mut normalized = String::with_capacity(value.len());
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            normalized.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            normalized.push(character);
+            escaped = true;
+        } else if character != '"' {
+            normalized.push(character);
+        }
+    }
+    Some(normalized)
 }
 
 /// Parse the bounded Git boolean forms that can affect source selection.
@@ -2288,7 +2300,39 @@ mod tests {
         }
         fs::write(&bare_config_path, &bare_config)?;
 
-        for malformed_value in ["\"unterminated", r"invalid\q"] {
+        fs::write(
+            &bare_config_path,
+            "[other]\n value = foo\"bar baz\"qux\n[core]\n bare = false\n",
+        )?;
+        let mixed_quoted_value = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--get", "other.value"])
+            .output()?;
+        require(
+            mixed_quoted_value.status.success()
+                && String::from_utf8(mixed_quoted_value.stdout)?.trim_end_matches(['\r', '\n'])
+                    == "foobar bazqux",
+            "Git fixture did not concatenate mixed quoted value segments",
+        )?;
+        let mixed_quoted_value = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            mixed_quoted_value.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::Unambiguous {
+                        root: dot_git_container.canonicalize()?,
+                    },
+                },
+            "valid mixed quoted value in an unrelated section hid the exact manager source",
+        )?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        for malformed_value in [
+            "\"unterminated",
+            r#"foo"unterminated"#,
+            r"invalid\q",
+            r#"foo"invalid\q"bar"#,
+        ] {
             fs::write(
                 &bare_config_path,
                 format!("[other]\n value = {malformed_value}\n[core]\n bare = false\n"),
@@ -2555,6 +2599,24 @@ mod tests {
             "registration overflow returned partial or untyped repository state",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn git_config_values_accept_mixed_quotes_without_weakening_syntax_checks() {
+        for (raw, expected) in [
+            (r#" foo"bar baz"qux "#, "foobar bazqux"),
+            (
+                r#"pre"quoted #; value"post ; ignored comment"#,
+                "prequoted #; valuepost",
+            ),
+            (r#"escaped\"quote"#, r#"escaped\"quote"#),
+            (" false # ignored trailing backslash \\", "false"),
+        ] {
+            assert_eq!(git_config_value(raw).as_deref(), Some(expected));
+        }
+        for malformed in [r#"foo"unterminated"#, r#"foo"invalid\q"bar"#, "trailing\\"] {
+            assert_eq!(git_config_value(malformed), None);
+        }
     }
 
     #[cfg(unix)]
