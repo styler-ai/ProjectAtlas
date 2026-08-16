@@ -655,6 +655,11 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
             continue;
         }
         if key.eq_ignore_ascii_case("worktree") {
+            if value.contains('\\') {
+                source_root_inference_safe = false;
+                source_selection_policy_complete = false;
+                continue;
+            }
             worktree_setting = (!value.is_empty()).then(|| PathBuf::from(value));
             source_root_inference_safe = false;
             source_selection_policy_complete &= worktree_setting.is_some();
@@ -2495,6 +2500,42 @@ mod tests {
                     && observed == projectatlas_core::MAX_GIT_WORKTREE_REGISTRATIONS as u64 + 1
             ),
             "registration overflow returned partial or untyped repository state",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unquoted_git_config_escapes_cannot_change_pointer_owner() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let pointer_owner = temp.path().join(r"owner\\root");
+        let git_selected_root = temp.path().join(r"owner\root");
+        fs::create_dir(&pointer_owner)?;
+        fs::create_dir(&git_selected_root)?;
+        write_structural_primary(&pointer_owner)?;
+        fs::write(
+            pointer_owner.join(".git").join("config"),
+            "[core]\n bare = false\n worktree = ../../owner\\\\root\n",
+        )?;
+
+        let effective_root = Command::new("git")
+            .arg("--git-dir")
+            .arg(pointer_owner.join(".git"))
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        require(
+            effective_root.status.success()
+                && paths_equal(
+                    &PathBuf::from(String::from_utf8(effective_root.stdout)?.trim())
+                        .canonicalize()?,
+                    &git_selected_root.canonicalize()?,
+                ),
+            "Git fixture did not decode the unquoted backslash escape",
+        )?;
+        require_invalid_kind(
+            discover_repository_structure(&pointer_owner)?,
+            |kind| matches!(kind, GitStructureIssueKind::UnsupportedSourceConfiguration),
+            "unquoted backslash escape admitted a pointer owner Git did not select",
         )?;
         Ok(())
     }
