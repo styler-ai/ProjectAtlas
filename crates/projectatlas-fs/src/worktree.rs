@@ -631,15 +631,6 @@ fn local_config_policy(path: &Path) -> Result<GitLocalConfigPolicy, GitStructure
                 source_selection_policy_complete: false,
             });
         };
-        if value.ends_with('\\') {
-            return Ok(GitLocalConfigPolicy {
-                bare_setting: None,
-                source_root_inference_safe: false,
-                worktree_config_enabled: false,
-                worktree_setting: None,
-                source_selection_policy_complete: false,
-            });
-        }
         if !in_core && !in_extensions {
             continue;
         }
@@ -2324,6 +2315,33 @@ mod tests {
                     },
                 },
             "valid mixed quoted value in an unrelated section hid the exact manager source",
+        )?;
+        fs::write(&bare_config_path, &bare_config)?;
+
+        fs::write(
+            &bare_config_path,
+            "[other]\n value = foo\\\\\n[core]\n bare = false\n",
+        )?;
+        let escaped_backslash = Command::new("git")
+            .arg("--git-dir")
+            .arg(&bare_dot_git)
+            .args(["config", "--get", "other.value"])
+            .output()?;
+        require(
+            escaped_backslash.status.success()
+                && String::from_utf8(escaped_backslash.stdout)?.trim_end_matches(['\r', '\n'])
+                    == "foo\\",
+            "Git fixture did not decode the escaped terminal backslash",
+        )?;
+        let escaped_backslash = require_git(discover_repository_structure(&bare_dot_git)?)?;
+        require(
+            escaped_backslash.selection
+                == GitRepositorySelection::CommonManager {
+                    source_selection: GitManagerSourceSelection::Unambiguous {
+                        root: dot_git_container.canonicalize()?,
+                    },
+                },
+            "escaped terminal backslash in an unrelated section hid the exact manager source",
         )?;
         fs::write(&bare_config_path, &bare_config)?;
 
