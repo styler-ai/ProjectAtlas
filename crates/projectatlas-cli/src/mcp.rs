@@ -10108,6 +10108,7 @@ mod tests {
     struct RegisteredWorktreeRaceFixture {
         _temp: tempfile::TempDir,
         primary: PathBuf,
+        control_root: PathBuf,
         linked: PathBuf,
         control_db: PathBuf,
         target_db: PathBuf,
@@ -10158,13 +10159,14 @@ mod tests {
                 .arg(&linked),
         )?;
 
-        let control_config = primary.join(PROJECTATLAS_DIR_NAME).join("config.toml");
-        let control_db = primary
+        let control_root = primary.canonicalize()?;
+        let control_config = control_root.join(PROJECTATLAS_DIR_NAME).join("config.toml");
+        let control_db = control_root
             .join(PROJECTATLAS_DIR_NAME)
             .join(PROJECTATLAS_DB_FILE_NAME);
-        init_project_with_config(&primary, Some(&control_config))?;
-        let mut control = AtlasStore::open_for_project(&control_db, &primary)?;
-        let plan = ScanRuntimePlan::for_path(Some(&control_config), &primary, None)?;
+        init_project_with_config(&control_root, Some(&control_config))?;
+        let mut control = AtlasStore::open_for_project(&control_db, &control_root)?;
+        let plan = ScanRuntimePlan::for_path(Some(&control_config), &control_root, None)?;
         run_scan_pipeline(
             &mut control,
             &plan,
@@ -10220,6 +10222,7 @@ mod tests {
         Ok(RegisteredWorktreeRaceFixture {
             _temp: temp,
             primary,
+            control_root,
             linked,
             control_db,
             target_db,
@@ -10277,7 +10280,8 @@ mod tests {
                 .parent()
                 .ok_or_else(|| io::Error::other("target database has no parent"))?,
         )?;
-        let source = open_atlas_store_read_only_for_project(&fixture.control_db, &fixture.primary)?;
+        let source =
+            open_atlas_store_read_only_for_project(&fixture.control_db, &fixture.control_root)?;
         let work_control =
             index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
         let mut candidate = source.prepare_worktree_hydration(
@@ -11975,7 +11979,7 @@ mod tests {
             "final init binding accepted a replacement Git lifecycle",
         )?;
         let control =
-            open_atlas_store_read_only_for_project(&fixture.control_db, &fixture.primary)?;
+            open_atlas_store_read_only_for_project(&fixture.control_db, &fixture.control_root)?;
         require(
             control
                 .worktree_registration(&fixture.alias)?
@@ -12025,7 +12029,8 @@ mod tests {
         )?;
         let replacement =
             open_atlas_store_read_only_for_project(&during.target_db, &during.state.root)?;
-        let control = open_atlas_store_read_only_for_project(&during.control_db, &during.primary)?;
+        let control =
+            open_atlas_store_read_only_for_project(&during.control_db, &during.control_root)?;
         require(
             replacement.project_instance_id()? == replacement_project.get()
                 && control
@@ -12060,7 +12065,7 @@ mod tests {
             .project_instance_id()?
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
         drop(replacement);
-        let control = open_atlas_store_for_project(&fixture.control_db, &fixture.primary)?;
+        let control = open_atlas_store_for_project(&fixture.control_db, &fixture.control_root)?;
         let (retired, synchronized, blocker) = fixture.server.retire_registered_worktree(
             &control,
             &fixture.registration,
@@ -12159,7 +12164,7 @@ mod tests {
                 .ok_or(DbError::ProjectInstanceIdentityMissing)?;
             drop(replacement);
 
-            let control = open_atlas_store_for_project(&fixture.control_db, &fixture.primary)?;
+            let control = open_atlas_store_for_project(&fixture.control_db, &fixture.control_root)?;
             let classified = control.with_active_worktree_registration(
                 fixture.registration.registration_id,
                 &fixture.alias,
