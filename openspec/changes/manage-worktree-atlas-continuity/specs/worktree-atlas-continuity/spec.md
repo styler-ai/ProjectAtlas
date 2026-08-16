@@ -56,7 +56,7 @@ ProjectAtlas SHALL let one explicitly selected primary/control atlas register st
 #### Scenario: List joins structural and ProjectAtlas state
 
 - **WHEN** an agent calls `atlas_worktree_list` from the control MCP session
-- **THEN** the bounded response labels every structural candidate with a stable selector, exact current path, Git state, registered alias when present, atlas initialization state, telemetry synchronization state, and typed blockers without writing either Git or ProjectAtlas state
+- **THEN** the bounded response labels every structural candidate plus every unmatched active ProjectAtlas registration with its stable selector, current or last validated path, Git state, registered alias when present, atlas initialization state, telemetry synchronization state, and typed blockers without writing either Git or ProjectAtlas state
 
 #### Scenario: Add registers one unambiguous discovered worktree
 

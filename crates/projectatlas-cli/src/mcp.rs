@@ -110,7 +110,7 @@ use rmcp::schemars;
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
@@ -1842,7 +1842,7 @@ struct McpWorktreeListReport {
 /// One structurally discovered Git worktree joined to `ProjectAtlas` state.
 #[derive(Debug, Serialize)]
 struct McpWorktreeRow {
-    /// Stable selector accepted by `atlas_worktree_add`.
+    /// Stable selector derived from the Git administrative identity.
     selector: String,
     /// Reserved `main` or active registered alias when present.
     alias: Option<String>,
@@ -5641,6 +5641,11 @@ impl ProjectAtlasMcpServer {
     /// Derive one stable, short candidate selector from Git administrative identity.
     fn worktree_candidate_selector(entry: &GitWorktreeEntry) -> String {
         let identity = normalize_native_path_display(&entry.administrative_directory);
+        Self::worktree_candidate_selector_from_identity(&identity)
+    }
+
+    /// Derive one stable, short candidate selector from normalized Git identity text.
+    fn worktree_candidate_selector_from_identity(identity: &str) -> String {
         let digest = blake3::hash(identity.as_bytes()).to_hex();
         let mut selector = String::with_capacity(
             MCP_WORKTREE_SELECTOR_PREFIX.len() + MCP_WORKTREE_SELECTOR_DIGEST_CHARS,
@@ -5887,6 +5892,29 @@ impl ProjectAtlasMcpServer {
             local_telemetry_revision,
             project_instance_id,
             blocker,
+        }
+    }
+
+    /// Preserve one active alias when Git no longer reports its worktree registration.
+    fn missing_registered_worktree_row(registration: &WorktreeRegistration) -> McpWorktreeRow {
+        McpWorktreeRow {
+            selector: Self::worktree_candidate_selector_from_identity(
+                &registration.git_administrative_directory,
+            ),
+            alias: Some(registration.alias.to_string()),
+            role: McpGitWorktreeRole::Linked,
+            git_state: McpGitWorktreeState::Missing,
+            registration: McpWorktreeRegistrationState::Registered,
+            administrative_directory: registration.git_administrative_directory.clone(),
+            root: Some(registration.last_root.clone()),
+            atlas_state: McpWorktreeAtlasState::Unavailable,
+            telemetry_state: McpWorktreeTelemetryState::Unavailable,
+            accepted_telemetry_revision: Some(registration.accepted_telemetry_revision),
+            local_telemetry_revision: None,
+            project_instance_id: registration
+                .project_instance_id
+                .map(|identity| identity.to_string()),
+            blocker: Some(MCP_WORKTREE_MISSING_RETENTION_REASON.to_string()),
         }
     }
 
@@ -7232,13 +7260,34 @@ impl ProjectAtlasMcpServer {
             )?;
             let include_retired = params.include_retired.unwrap_or(false);
             let registrations = store.worktree_registrations(include_retired)?;
-            let total_worktrees = repository.worktrees.len();
-            let worktrees = repository
+            let structural_identities = repository
                 .worktrees
                 .iter()
-                .take(MCP_WORKTREE_LIST_MAX_ROWS)
+                .map(|entry| normalize_native_path_display(&entry.administrative_directory))
+                .collect::<HashSet<_>>();
+            let (mut worktrees, unregistered): (Vec<_>, Vec<_>) = repository
+                .worktrees
+                .iter()
                 .map(|entry| self.worktree_list_row(entry, &registrations))
-                .collect::<Vec<_>>();
+                .partition(|row| {
+                    !matches!(row.registration, McpWorktreeRegistrationState::Unregistered)
+                });
+            worktrees.extend(
+                registrations
+                    .iter()
+                    .filter(|registration| {
+                        registration.state == WorktreeRegistrationState::Active
+                            && !structural_identities
+                                .contains(&registration.git_administrative_directory)
+                    })
+                    .map(Self::missing_registered_worktree_row),
+            );
+            let total_worktrees = worktrees.len() + unregistered.len();
+            worktrees.extend(
+                unregistered
+                    .into_iter()
+                    .take(MCP_WORKTREE_LIST_MAX_ROWS.saturating_sub(worktrees.len())),
+            );
             let truncated = total_worktrees > worktrees.len();
             let retired = registrations
                 .iter()
@@ -10891,10 +10940,24 @@ mod tests {
             None,
             1,
         )?;
+        drop(store);
+
+        let server =
+            ProjectAtlasMcpServer::new(database.clone(), None, "worktree-list".to_string(), false);
+        let active = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+            include_retired: Some(false),
+        }));
+        require(
+            active.contains("total_worktrees: 1026")
+                && active.contains("truncated: true")
+                && active.contains("retired-at-capacity"),
+            "full structural inventory starved the active missing registration",
+        )?;
+
+        let store = AtlasStore::open_for_project(&database, &primary)?;
         store.retire_worktree(&retired_alias, 2)?;
         drop(store);
 
-        let server = ProjectAtlasMcpServer::new(database, None, "worktree-list".to_string(), false);
         let listed = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
             include_retired: Some(true),
         }));
@@ -11714,6 +11777,19 @@ mod tests {
                 .current_dir(&primary)
                 .args(["worktree", "remove", "--force"])
                 .arg(&original),
+        )?;
+        let missing_registration =
+            server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+                include_retired: Some(false),
+            }));
+        require(
+            missing_registration.contains("\"replacement-check\",linked,missing,registered")
+                && missing_registration.contains(&normalize_native_path_display(&original))
+                && missing_registration.contains(",unavailable,unavailable,0,")
+                && missing_registration.contains(MCP_WORKTREE_MISSING_RETENTION_REASON),
+            &format!(
+                "active alias disappeared after external Git worktree removal: {missing_registration}"
+            ),
         )?;
         run_fixture_command(
             StdCommand::new("git")
