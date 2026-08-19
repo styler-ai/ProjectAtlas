@@ -1196,7 +1196,7 @@ fn push_tree_symbol(
         return;
     };
     let signature = declaration_signature(node, content);
-    let parent = symbol_parent(node, content);
+    let parent = symbol_parent(node, content).and_then(|parent| compact_symbol_identity(&parent));
     let exported = has_direct_export_parent(node)
         || object_literal_method_owner(node, content).is_some_and(|owner| owner.exported)
         || is_exported_symbol(graph.language.as_deref(), &name, &signature);
@@ -2153,10 +2153,10 @@ fn push_symbol_with_metadata(
     if graph.symbols.len() >= MAX_SYMBOLS_PER_FILE {
         return false;
     }
-    let cleaned_name = compact_text(name);
-    if cleaned_name.is_empty() || cleaned_name.chars().count() > MAX_SNIPPET_CHARS {
+    let Some(cleaned_name) = compact_symbol_identity(name) else {
         return false;
-    }
+    };
+    let parent = parent.and_then(|parent| compact_symbol_identity(&parent));
     graph.symbols.push(CodeSymbol {
         path: graph.path.clone(),
         language: graph.language.clone(),
@@ -2173,6 +2173,12 @@ fn push_symbol_with_metadata(
         detail: detail.map(ToString::to_string),
     });
     true
+}
+
+/// Return one compact identity that can be represented by every graph consumer.
+fn compact_symbol_identity(value: &str) -> Option<String> {
+    let value = compact_text(value);
+    (!value.is_empty() && value.chars().count() <= MAX_SNIPPET_CHARS).then_some(value)
 }
 
 /// Push a relation while enforcing per-file graph bounds.
@@ -3570,6 +3576,36 @@ public class Registry
                     && symbol.name.len() == admitted_unicode_name.len()),
             "admitted Unicode identity was not preserved exactly"
         );
+    }
+
+    #[test]
+    fn invalid_parent_identity_detaches_valid_child() {
+        let overbound_parent = "P".repeat(MAX_SNIPPET_CHARS + 1);
+        let source = format!(
+            "public class {overbound_parent} {{ public void Retained() {{}} }}\n\
+             public class Valid {{ public void Sibling() {{}} }}\n"
+        );
+
+        let graph = extract_symbol_graph("Parents.cs", Some("csharp"), &source);
+
+        assert!(
+            !graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == overbound_parent)
+        );
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.name == "Retained" && symbol.parent.is_none() })
+        );
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.name == "Sibling" && symbol.parent.as_deref() == Some("Valid")
+        }));
+        assert!(!graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Contains && relation.target_name == "Retained"
+        }));
     }
 
     #[test]

@@ -25534,10 +25534,11 @@ fn csharp_symbol_identity_boundary_preserves_full_and_incremental_publication()
         .checked_sub(compact_bytes(&unpadded_declaration))
         .ok_or_else(|| io::Error::other("C# boundary fixture exceeded its target size"))?;
     let padding = "x".repeat(padding_bytes);
+    let overbound_parent = "P".repeat(GRAPH_IDENTITY_BYTES + 1);
     let registry_source = |entry_count: usize| -> Result<String, std::fmt::Error> {
         Ok(format!(
-            "using System.Collections.Generic;\n\npublic class Registry\n{{\n{}    public int Sibling = 1;\n}}\n",
-            declaration(entry_count, &padding)?
+            "using System.Collections.Generic;\n\npublic class {overbound_parent}\n{{\n    public void Retained() {{}}\n}}\n\npublic class Registry\n{{\n{}    public int Sibling = 1;\n}}\n",
+            declaration(entry_count, &padding)?,
         ))
     };
     let source_224 = registry_source(224)?;
@@ -25586,12 +25587,21 @@ fn csharp_symbol_identity_boundary_preserves_full_and_incremental_publication()
             ))
             .into());
         }
-        if registry_symbols
+        if registry_symbols.iter().any(|symbol| {
+            symbol.name.contains("Dictionary")
+                || symbol.name.contains('=')
+                || symbol.name == overbound_parent
+        }) {
+            return Err(
+                io::Error::other("invalid C# declaration identity reached publication").into(),
+            );
+        }
+        if !registry_symbols
             .iter()
-            .any(|symbol| symbol.name.contains("Dictionary") || symbol.name.contains('='))
+            .any(|symbol| symbol.name == "Retained" && symbol.parent.is_none())
         {
             return Err(io::Error::other(
-                "complete C# declaration source became a published symbol identity",
+                "valid C# child was not retained without its invalid parent",
             )
             .into());
         }
