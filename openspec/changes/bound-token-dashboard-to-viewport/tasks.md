@@ -13,7 +13,7 @@
 
 - [x] 3.1 Add deterministic unit tests for viewport resolution, every width/height boundary, buffer bounds, signed negative values, themes, compact fact priority, full-layout compatibility, and Atlas suppression.
 - [x] 3.2 Add real CLI subprocess tests for bounded ANSI rows/cells, invalid and zero dimensions, overview and trend boundaries, output failure, and wide-but-short graph suppression without implicit mutation.
-- [ ] 3.3 Wire the named terminal-size CLI contract into required Linux, Windows, and macOS CI plus Linux and Windows installed-candidate release checks; perform Windows ConPTY and representative Linux/macOS visual review.
+- [x] 3.3 Wire the named terminal-size CLI contract into required Linux, Windows, and macOS CI plus Linux and Windows installed-candidate release checks; perform Windows ConPTY and representative Linux/macOS visual review.
 - [x] 3.4 Run focused tests, `cargo fmt --check`, `cargo check --workspace --all-targets --all-features`, warnings-denied workspace Clippy, full workspace/all-feature and doc tests, warnings-denied docs, strict OpenSpec, IssueOps checklist parity, ProjectAtlas lint, and bounded-output checks with explicit timeouts.
-- [ ] 3.5 Update durable TUI, release, platform, accessibility, and failure guidance; resolve or disposition every live review and automated finding and verify the exact packaged RC2 behavior without displacing v0.4.4 Latest.
+- [x] 3.5 Update durable TUI, release, platform, accessibility, and failure guidance; resolve or disposition every live review and automated finding and verify the exact packaged RC2 behavior without displacing v0.4.4 Latest.
 - [x] 3.6 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

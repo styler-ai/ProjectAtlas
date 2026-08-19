@@ -18,5 +18,5 @@
 ## 4. Verification And Release Proof
 
 - [x] 4.1 Run `cargo test -p projectatlas-symbols`, the owning CLI E2E filters, `cargo fmt --check`, `cargo check --workspace --all-targets --all-features`, warnings-denied workspace Clippy, full workspace/all-feature and doc tests, and warnings-denied docs with explicit timeouts.
-- [ ] 4.2 Run strict OpenSpec, IssueOps checklist parity, ProjectAtlas lint, live review/automated-feedback disposition, and exact packaged RC2 scan/readback without displacing `v0.4.4` Latest.
+- [x] 4.2 Run strict OpenSpec, IssueOps checklist parity, ProjectAtlas lint, live review/automated-feedback disposition, and exact packaged RC2 scan/readback without displacing `v0.4.4` Latest.
 - [x] 4.3 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

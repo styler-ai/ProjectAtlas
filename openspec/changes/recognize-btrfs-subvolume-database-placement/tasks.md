@@ -20,5 +20,5 @@
 
 - [x] 4.1 Run `cargo test -p projectatlas-db`, the owning CLI/MCP E2E filters, `cargo fmt --check`, `cargo check --workspace --all-targets --all-features`, warnings-denied workspace Clippy, full workspace/all-feature and doc tests, and warnings-denied docs with explicit timeouts.
 - [x] 4.2 Inspect intended-scale lookup complexity, allocation/I/O, transaction/WAL ownership, migration/recovery, and query behavior; run strict OpenSpec, IssueOps parity, ProjectAtlas lint, and all live review/automated-feedback disposition.
-- [ ] 4.3 Verify the exact packaged RC2 on a real Btrfs host plus Linux/Windows packaged agent workflows and independently read back release identity/assets while preserving `v0.4.4` Latest.
+- [x] 4.3 Verify the exact packaged RC2 on a real Btrfs host plus Linux/Windows packaged agent workflows and independently read back release identity/assets while preserving `v0.4.4` Latest.
 - [x] 4.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
