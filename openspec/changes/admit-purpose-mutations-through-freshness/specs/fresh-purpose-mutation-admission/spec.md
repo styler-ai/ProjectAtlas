@@ -46,11 +46,11 @@ Approved purpose metadata SHALL survive unchanged full and incremental scans. Pu
 - **AND** applying that current work SHALL succeed once
 - **AND** the following same-binding queue and `watch --once` SHALL converge without repeated refresh-required state.
 
-#### Scenario: Watcher and queue cannot prove the same freshness
+#### Scenario: Native source observation is unavailable
 
-- **WHEN** a queue and watcher use the same captured root/database binding but cannot prove the same source observation
-- **THEN** ProjectAtlas SHALL return one precise typed recovery action
-- **AND** SHALL NOT alternate an unqualified success with the same unresolved refresh requirement.
+- **WHEN** the bounded observer registry is full or native watcher startup is unavailable for the selected root/database binding
+- **THEN** ProjectAtlas SHALL use exact-per-call source admission and final precommit verification
+- **AND** SHALL require the admitted generation and project identity to remain unchanged without expanding or evicting the observer registry.
 
 ### Requirement: Failure and concurrency never certify stale purpose
 

@@ -63,11 +63,11 @@ Approved purpose remains authored responsibility and survives unchanged full and
 
 The exact persistent-MCP queue, zero-candidate watch, and queue sequence converges under the same root/database binding in RC1 and current source, with and without telemetry. This change therefore does not alter source-observer acknowledgement, event filtering, or target routing. A focused regression follows the returned target binding and proves that unchanged work retains the same generation-bound queue identity across the no-op watch.
 
-If a future same-binding, quiescent reproduction cannot establish one verified source observation, the existing typed recovery remains authoritative and the raw root, database, alias, generation, policy, and observer evidence must identify a separate fix. A routing or observer production change is out of scope without that evidence.
+When a native observer cannot start or the bounded process registry is full, mutation admission uses the existing exact-per-call compatibility path instead of making watcher availability a product requirement. It retains the admitted generation and project identity, then requires exact saved-source agreement plus the same durable identity immediately before commit. The observer capacity, eviction policy, and routing remain unchanged.
 
 ## Rust Pattern Fit
 
-The existing closed purpose apply state, freshness classifier, observer registry, and a concrete RAII SQLite transaction guard remain the correct mechanisms. CLI and MCP keep thin adapter-owned closures because MCP owns worktree aliases and request cancellation while CLI owns process-local project selection. No cross-adapter trait, state machine, worker, channel, or dependency is justified.
+The existing closed purpose apply state, freshness classifier, observer registry, and a concrete RAII SQLite transaction guard remain the correct mechanisms. A private sum type retains either an observed epoch or an exact-per-call generation/project witness without optional-state ambiguity. CLI and MCP keep thin adapter-owned closures because MCP owns worktree aliases and request cancellation while CLI owns process-local project selection. No cross-adapter trait, worker, channel, or dependency is justified.
 
 ## Database And SQLite Fit
 
@@ -75,16 +75,16 @@ No schema or query change is needed. SQLite continues to own project identity, g
 
 ## Performance And Bounds
 
-Freshness work is one exact repair-capable admission plus one exact detect-only precommit witness per batch, never per purpose row. Persistent MCP retains its observer epoch for continuity and policy evidence but does not use an empty event queue as mutation authority; separate CLI invocations establish the same process-local contract. Changed source uses existing incremental repair and established full-scan fallback. The purpose writer holds SQLite's single-writer slot for the bounded batch and final witness check; there is no new scanner, per-row filesystem I/O, WAL state, or persistent data.
+Freshness work is one exact repair-capable admission plus one exact detect-only precommit witness per batch, never per purpose row. Persistent MCP retains its observer epoch for continuity and policy evidence but does not use an empty event queue as mutation authority; observer-unavailable calls perform the same bounded exact work without allocating another watcher. Separate CLI invocations establish the same process-local contract. Changed source uses existing incremental repair and established full-scan fallback. The purpose writer holds SQLite's single-writer slot for the bounded batch and final witness check; there is no new scanner, per-row filesystem I/O, WAL state, or persistent data.
 
 ## Failure And Concurrency
 
 - A changed generation makes the complete old conditional batch stale with no partial writes.
 - Deleted, renamed, newly ignored, and wrong-root paths retain the existing reconciliation and refusal behavior before explicit mutation.
-- Busy/read-only repair, cancellation, policy drift, exact-source drift, or observer continuity loss returns typed recovery and never certifies a purpose.
+- Busy/read-only repair, cancellation, policy drift, exact-source drift, observer continuity loss, or exact-fallback identity drift returns typed recovery and never certifies a purpose.
 - Existing concurrent-curator winner, replay, root identity, and authored-revision semantics remain unchanged.
 - Deterministic unobserved edits and synchronous request cancellation prove that the final precommit witness rolls the complete purpose batch back.
 
 ## Verification
 
-Owning tests edit saved source between queue and apply and prove generation advance, stale result, unchanged purpose/revision, successful requeue, replay, scan retention, and final convergence. CLI subprocess and persistent MCP E2E repeat the workflow on real saved files. The persistent session separately proves same-binding queue, zero-candidate watch, and queue convergence without claiming an observer repair. Existing negative, failure, and concurrency suites remain the compatibility boundary. The focused E2E runs in the existing Linux, Windows, and macOS matrix and the packaged RC agent workflow.
+Owning tests edit saved source between queue and apply and prove generation advance, stale result, unchanged purpose/revision, successful requeue, replay, scan retention, and final convergence. A saturated observer registry additionally proves exact-fallback success, cancellation, unpublished drift rollback, and concurrent-publication generation rejection without changing registry occupancy. CLI subprocess and persistent MCP E2E repeat the workflow on real saved files. The persistent session separately proves same-binding queue, zero-candidate watch, and queue convergence without claiming an observer repair. Existing negative, failure, and concurrency suites remain the compatibility boundary. The focused E2E runs in the existing Linux, Windows, and macOS matrix and the packaged RC agent workflow.

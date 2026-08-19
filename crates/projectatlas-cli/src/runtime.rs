@@ -582,16 +582,27 @@ pub(crate) fn verify_saved_source_matches_index_controlled(
     config_path: Option<&Path>,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
-    let exact = open_exact_fresh_atlas_store_for_project_with_repair(
+    let exact =
+        open_exact_saved_source_matches_index_controlled(db_path, root, config_path, control)?;
+    exact.store.finish_index_read_snapshot()?;
+    Ok(())
+}
+
+/// Open an exact current snapshot without publishing a source repair.
+pub(crate) fn open_exact_saved_source_matches_index_controlled(
+    db_path: &Path,
+    root: &Path,
+    config_path: Option<&Path>,
+    control: &IndexWorkControl,
+) -> Result<ExactFreshIndexRead, CliError> {
+    open_exact_fresh_atlas_store_for_project_with_repair(
         db_path,
         root,
         config_path,
         control,
         false,
         ScanLimits::default(),
-    )?;
-    exact.store.finish_index_read_snapshot()?;
-    Ok(())
+    )
 }
 
 /// Open a current read snapshot without repairing stale source or durable state.

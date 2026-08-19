@@ -1,10 +1,11 @@
 //! Process-local source observation for long-lived verified index reads.
 
 use super::{
-    IndexVerificationReason, ScanRuntimePlan, SourceVerificationWork, WatchChangeSet,
+    ScanRuntimePlan, SourceVerificationWork, WatchChangeSet,
     open_atlas_store_read_only_for_project, open_exact_fresh_atlas_store_for_project_controlled,
-    publication_input_error, source_changed_during_derivation, source_inspection_error,
-    verification_incomplete, verify_saved_source_matches_index_controlled,
+    open_exact_saved_source_matches_index_controlled, publication_input_error,
+    source_changed_during_derivation, source_inspection_error,
+    verify_saved_source_matches_index_controlled,
 };
 use crate::CliError;
 use blake3::Hasher;
@@ -102,12 +103,28 @@ impl<T> VerifiedReadOutcome<T> {
     }
 }
 
+/// Source authority retained through one purpose mutation commit boundary.
+enum MutationSourceWitness {
+    /// Native observation plus the accepted source epoch.
+    Observed {
+        /// Exact source binding and observer continuity retained by this admission.
+        entry: Arc<SourceObservationEntry>,
+        /// Exact durable generation and policy epoch accepted before mutation.
+        epoch: VerifiedSourceEpoch,
+    },
+    /// Exact-per-call compatibility witness when no observer can be admitted.
+    Exact {
+        /// Canonical source, database, and configuration identity.
+        binding: SourceBinding,
+        /// Durable generation and project identity accepted before mutation.
+        stamp: VerifiedReadStamp,
+    },
+}
+
 /// Saved-source witness retained through one purpose mutation commit boundary.
 pub(crate) struct VerifiedMutationAdmission {
-    /// Exact source binding and observer continuity retained by this admission.
-    entry: Arc<SourceObservationEntry>,
-    /// Exact durable generation and policy epoch accepted before mutation.
-    epoch: VerifiedSourceEpoch,
+    /// Observed or exact-per-call source authority retained by this admission.
+    witness: MutationSourceWitness,
     /// Cooperative cancellation and work budget shared through commit admission.
     control: IndexWorkControl,
 }
@@ -115,39 +132,79 @@ pub(crate) struct VerifiedMutationAdmission {
 impl VerifiedMutationAdmission {
     /// Revalidate exact saved source, policy, observer continuity, and cancellation before commit.
     pub(crate) fn verify(&self) -> Result<(), CliError> {
-        if let Err(error) = self.verify_observation() {
-            self.entry.invalidate();
+        match &self.witness {
+            MutationSourceWitness::Observed { entry, epoch } => {
+                Self::verify_observed(entry, epoch, &self.control)
+            }
+            MutationSourceWitness::Exact { binding, stamp } => {
+                Self::verify_exact(binding, stamp, &self.control)
+            }
+        }
+    }
+
+    /// Revalidate an observer-backed mutation witness around exact saved source.
+    fn verify_observed(
+        entry: &SourceObservationEntry,
+        epoch: &VerifiedSourceEpoch,
+        control: &IndexWorkControl,
+    ) -> Result<(), CliError> {
+        if let Err(error) = Self::verify_observation(entry, epoch, control) {
+            entry.invalidate();
             return Err(error);
         }
         if let Err(error) = verify_saved_source_matches_index_controlled(
-            &self.entry.binding.database,
-            &self.entry.binding.root,
-            self.entry.binding.config.as_deref(),
-            &self.control,
+            &entry.binding.database,
+            &entry.binding.root,
+            entry.binding.config.as_deref(),
+            control,
         ) {
-            self.entry.invalidate();
+            entry.invalidate();
             return Err(error);
         }
-        if let Err(error) = self.verify_observation() {
-            self.entry.invalidate();
+        if let Err(error) = Self::verify_observation(entry, epoch, control) {
+            entry.invalidate();
             return Err(error);
         }
         Ok(())
     }
 
     /// Require the retained observer epoch to remain current.
-    fn verify_observation(&self) -> Result<(), CliError> {
-        match SourceObservationRegistry::accepts_observed_result(
-            &self.entry,
-            &self.epoch,
-            &self.control,
-        ) {
+    fn verify_observation(
+        entry: &SourceObservationEntry,
+        epoch: &VerifiedSourceEpoch,
+        control: &IndexWorkControl,
+    ) -> Result<(), CliError> {
+        match SourceObservationRegistry::accepts_observed_result(entry, epoch, control) {
             Ok(true) => Ok(()),
-            Ok(false) => Err(source_changed_during_derivation(
-                &self.entry.binding.root,
-                ".",
-            )),
+            Ok(false) => Err(source_changed_during_derivation(&entry.binding.root, ".")),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Revalidate exact saved source plus durable identity immediately before commit.
+    fn verify_exact(
+        binding: &SourceBinding,
+        stamp: &VerifiedReadStamp,
+        control: &IndexWorkControl,
+    ) -> Result<(), CliError> {
+        let exact = open_exact_saved_source_matches_index_controlled(
+            &binding.database,
+            &binding.root,
+            binding.config.as_deref(),
+            control,
+        )?;
+        let publication = exact
+            .store
+            .index_publication()?
+            .ok_or_else(|| source_changed_during_derivation(&binding.root, "."))?;
+        let captured = exact.store.captured_project_binding()?;
+        exact.store.finish_index_read_snapshot()?;
+        if publication.generation == stamp.generation
+            && captured.project_instance_id == stamp.project_instance_id
+        {
+            Ok(())
+        } else {
+            Err(source_changed_during_derivation(&binding.root, "."))
         }
     }
 }
@@ -521,15 +578,7 @@ impl SourceObservationRegistry {
     ) -> Result<VerifiedMutationAdmission, CliError> {
         let binding = SourceBinding::new(database, root, config)?;
         let Some(entry) = self.entry(binding.clone())? else {
-            let unavailable = CliError::InvalidInput(format!(
-                "source observation is unavailable for '{}'",
-                binding.root.display()
-            ));
-            return Err(verification_incomplete(
-                &binding.root,
-                IndexVerificationReason::SourceInspectionFailed,
-                &unavailable,
-            ));
+            return self.admit_exact_mutation(binding, control);
         };
         // Mutation authority always starts from exact saved source; watcher delivery is advisory.
         entry.invalidate();
@@ -563,8 +612,7 @@ impl SourceObservationRegistry {
                         return Err(error.into());
                     }
                     return Ok(VerifiedMutationAdmission {
-                        entry,
-                        epoch,
+                        witness: MutationSourceWitness::Observed { entry, epoch },
                         control: control.clone(),
                     });
                 }
@@ -579,6 +627,26 @@ impl SourceObservationRegistry {
             drop(store.finish_index_read_snapshot());
         }
         Err(source_changed_during_derivation(&binding.root, "."))
+    }
+
+    /// Admit a mutation through exact source when no native observer is available.
+    fn admit_exact_mutation(
+        &self,
+        binding: SourceBinding,
+        control: &IndexWorkControl,
+    ) -> Result<VerifiedMutationAdmission, CliError> {
+        let exact = open_exact_fresh_atlas_store_for_project_controlled(
+            &binding.database,
+            &binding.root,
+            binding.config.as_deref(),
+            control,
+        )?;
+        let stamp = self.exact_stamp(&exact.store, &binding.root)?;
+        exact.store.finish_index_read_snapshot()?;
+        Ok(VerifiedMutationAdmission {
+            witness: MutationSourceWitness::Exact { binding, stamp },
+            control: control.clone(),
+        })
     }
 
     /// Inject one deterministic observer event for owning integration tests.
@@ -846,17 +914,7 @@ impl SourceObservationRegistry {
                 control,
             )?;
             work.add_exact(exact.work);
-            let publication = exact
-                .store
-                .index_publication()?
-                .ok_or_else(|| source_changed_during_derivation(&binding.root, "."))?;
-            let captured = exact.store.captured_project_binding()?;
-            let stamp = VerifiedReadStamp {
-                process_nonce: self.process_nonce,
-                epoch: 0,
-                generation: publication.generation,
-                project_instance_id: captured.project_instance_id,
-            };
+            let stamp = self.exact_stamp(&exact.store, &binding.root)?;
             let value = query(&exact.store, stamp.clone())?;
             exact.store.finish_index_read_snapshot()?;
 
@@ -882,6 +940,20 @@ impl SourceObservationRegistry {
             }
         }
         Err(source_changed_during_derivation(&binding.root, "."))
+    }
+
+    /// Capture durable identity from one exact current read snapshot.
+    fn exact_stamp(&self, store: &AtlasStore, root: &Path) -> Result<VerifiedReadStamp, CliError> {
+        let publication = store
+            .index_publication()?
+            .ok_or_else(|| source_changed_during_derivation(root, "."))?;
+        let captured = store.captured_project_binding()?;
+        Ok(VerifiedReadStamp {
+            process_nonce: self.process_nonce,
+            epoch: 0,
+            generation: publication.generation,
+            project_instance_id: captured.project_instance_id,
+        })
     }
 }
 
@@ -1442,6 +1514,141 @@ mod tests {
                 .load_node_by_path("source.rs")?
                 .is_some_and(|node| node.purpose == before_purpose),
             "mutation admission changed the purpose row",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_admission_uses_exact_fallback_when_observer_capacity_is_full()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let binding = SourceBinding::new(&database, temp.path(), None)?;
+        let filler = registry
+            .entry(binding.clone())?
+            .ok_or_else(|| std::io::Error::other("source observer was unavailable"))?;
+        {
+            let mut entries = registry
+                .entries
+                .lock()
+                .map_err(|_poisoned| std::io::Error::other("observer registry was poisoned"))?;
+            entries.clear();
+            for index in 0..SOURCE_OBSERVATION_CAPACITY {
+                let mut filler_binding = binding.clone();
+                filler_binding.config = Some(temp.path().join(format!("observer-{index}.toml")));
+                entries.insert(filler_binding, Arc::clone(&filler));
+            }
+        }
+
+        let control = test_control();
+        let admission = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        require(
+            matches!(&admission.witness, MutationSourceWitness::Exact { .. }),
+            "full observer registry did not use exact mutation admission",
+        )?;
+        let entries = registry
+            .entries
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("observer registry was poisoned"))?;
+        require(
+            entries.len() == SOURCE_OBSERVATION_CAPACITY && !entries.contains_key(&binding),
+            "exact mutation admission changed the bounded observer registry",
+        )?;
+        drop(entries);
+
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose("source.rs", "Exact fallback purpose", PurposeSource::Agent)?;
+        admission.verify()?;
+        transaction.commit()?;
+        require(
+            store.load_node_by_path("source.rs")?.is_some_and(|node| {
+                node.purpose.purpose.as_deref() == Some("Exact fallback purpose")
+            }),
+            "exact fallback did not commit an unchanged-source mutation",
+        )?;
+
+        let replaced = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        drop(store);
+        fs::write(&source, "fn concurrently_published() {}\n")?;
+        let mut publisher = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        super::super::run_scan_pipeline(
+            &mut publisher,
+            &plan,
+            &super::super::SymbolBuildOptions::new(
+                super::super::MAX_SYMBOL_FILE_BYTES,
+                Some(1),
+                None,
+            ),
+        )?;
+        drop(publisher);
+        verify_saved_source_matches_index_controlled(&database, temp.path(), None, &control)?;
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let before_revision = store.authored_purpose_revision()?;
+        let before_purpose = store
+            .load_node_by_path("source.rs")?
+            .ok_or_else(|| std::io::Error::other("indexed source missing"))?
+            .purpose;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose(
+            "source.rs",
+            "Replaced generation purpose",
+            PurposeSource::Agent,
+        )?;
+        let verification = replaced.verify();
+        transaction.rollback()?;
+        require(
+            matches!(verification, Err(CliError::RefreshRequired(_))),
+            "exact fallback accepted a replacement publication generation",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision
+                && store
+                    .load_node_by_path("source.rs")?
+                    .is_some_and(|node| node.purpose == before_purpose),
+            "replacement-generation rejection changed authored purpose",
+        )?;
+
+        let cancellation = IndexCancellation::new();
+        let canceled_control =
+            IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(30)));
+        let canceled = registry.admit_mutation(&database, temp.path(), None, &canceled_control)?;
+        cancellation.cancel();
+        require(
+            matches!(canceled.verify(), Err(CliError::IndexWork(_))),
+            "exact fallback did not retain cancellation through verification",
+        )?;
+
+        let before_revision = store.authored_purpose_revision()?;
+        let before_purpose = store
+            .load_node_by_path("source.rs")?
+            .ok_or_else(|| std::io::Error::other("indexed source missing"))?
+            .purpose;
+        let stale = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose(
+            "source.rs",
+            "Rejected fallback purpose",
+            PurposeSource::Agent,
+        )?;
+        fs::write(&source, "fn changed_after_exact_admission() {}\n")?;
+        let verification = stale.verify();
+        transaction.rollback()?;
+        require(
+            matches!(verification, Err(CliError::RefreshRequired(_))),
+            "exact fallback admitted a mutation after saved source changed",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision,
+            "rejected exact fallback advanced authored-purpose revision",
+        )?;
+        require(
+            store
+                .load_node_by_path("source.rs")?
+                .is_some_and(|node| node.purpose == before_purpose),
+            "rejected exact fallback changed the purpose row",
         )?;
         Ok(())
     }
