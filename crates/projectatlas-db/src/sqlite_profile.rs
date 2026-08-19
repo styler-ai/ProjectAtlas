@@ -185,8 +185,11 @@ fn resolve_filesystem_location(
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MountInventoryCandidate<'a> {
+    /// Canonical mount path used for component-boundary ancestry.
     mount_point: &'a Path,
+    /// Device identity reported by the mount inventory.
     device: &'a OsStr,
+    /// Filesystem type reported by the mount inventory.
     filesystem_type: &'a str,
 }
 
@@ -792,9 +795,8 @@ mod tests {
     fn fallback_canonicalization_failure_remains_uncertain() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let missing = temp.path().join("missing");
-        let error = match resolve_linux_mount_inventory(&missing, &missing) {
-            Ok(_) => return Err(io::Error::other("missing fallback probe was accepted").into()),
-            Err(error) => error,
+        let Err(error) = resolve_linux_mount_inventory(&missing, &missing) else {
+            return Err(io::Error::other("missing fallback probe was accepted").into());
         };
         let DbError::DatabaseFilesystemUncertain { reason, .. } = error else {
             return Err(io::Error::other("unexpected fallback error classification").into());
