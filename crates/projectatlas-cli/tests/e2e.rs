@@ -589,8 +589,9 @@ fn token_tui_cli_respects_selected_terminal_viewport() -> Result<(), Box<dyn Err
         require_tui_output_within_viewport(&dashboard, 140, 50)?;
     }
 
-    let rejected_output_path = temp.path().join("read-only-token-output.txt");
-    fs::write(&rejected_output_path, [])?;
+    // Rust stdout treats Unix EBADF as absent stdio; a closed pipe reports portable BrokenPipe.
+    let (rejected_output_reader, rejected_output_writer) = io::pipe()?;
+    drop(rejected_output_reader);
     let rejected_output = StdCommand::new(mcp_contract_executable())
         .current_dir(&repo)
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
@@ -599,7 +600,7 @@ fn token_tui_cli_respects_selected_terminal_viewport() -> Result<(), Box<dyn Err
         .arg("--db")
         .arg(&database)
         .args(["token", "--view", "tui"])
-        .stdout(Stdio::from(fs::File::open(&rejected_output_path)?))
+        .stdout(Stdio::from(rejected_output_writer))
         .stderr(Stdio::piped())
         .output()?;
     if rejected_output.status.success() || rejected_output.stderr.is_empty() {
