@@ -307,8 +307,8 @@ struct SourceObservationEntry {
     binding: SourceBinding,
     /// Native watcher kept alive for the entry lifetime.
     _watcher: RecommendedWatcher,
-    /// Bounded watcher event receiver drained during reconciliation.
-    receiver: Mutex<Receiver<Event>>,
+    /// Bounded receiver whose lock serializes callback publication with drain acknowledgment.
+    receiver: Arc<Mutex<Receiver<Event>>>,
     /// Monotonic count of relevant events accepted by the callback.
     ingress_sequence: Arc<AtomicU64>,
     /// Whether overflow, disconnection, or rescan invalidated event continuity.
@@ -323,6 +323,9 @@ struct SourceObservationEntry {
     #[cfg(test)]
     /// One event injected after an acceptance drain for owning race tests.
     acceptance_event: Mutex<Option<Event>>,
+    #[cfg(test)]
+    /// Continuity loss injected between the drain fast check and lock for owning race tests.
+    drain_continuity_invalidations: AtomicU64,
 }
 
 impl fmt::Debug for SourceObservationEntry {
@@ -346,12 +349,14 @@ impl SourceObservationEntry {
     /// Start a bounded native watcher for one source binding.
     fn start(binding: SourceBinding) -> Result<Self, CliError> {
         let (sender, receiver) = sync_channel(SOURCE_OBSERVATION_QUEUE_CAPACITY);
+        let receiver = Arc::new(Mutex::new(receiver));
         #[cfg(test)]
         let test_sender = sender.clone();
         let ingress_sequence = Arc::new(AtomicU64::new(0));
         let continuity_lost = Arc::new(AtomicBool::new(false));
         let mut watcher = notify::recommended_watcher(watcher_callback(
             sender,
+            Arc::clone(&receiver),
             Arc::clone(&ingress_sequence),
             Arc::clone(&continuity_lost),
         ))
@@ -370,7 +375,7 @@ impl SourceObservationEntry {
         Ok(Self {
             binding,
             _watcher: watcher,
-            receiver: Mutex::new(receiver),
+            receiver,
             ingress_sequence,
             continuity_lost,
             reconcile: Mutex::new(()),
@@ -379,7 +384,25 @@ impl SourceObservationEntry {
             test_sender,
             #[cfg(test)]
             acceptance_event: Mutex::new(None),
+            #[cfg(test)]
+            drain_continuity_invalidations: AtomicU64::new(0),
         })
+    }
+
+    /// Publish one deterministic test event through the production handshake.
+    #[cfg(test)]
+    fn publish_test_event(&self, event: Event) -> Result<(), CliError> {
+        let _receiver = self
+            .receiver
+            .lock()
+            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
+        self.test_sender.try_send(event).map_err(|source| {
+            CliError::InvalidInput(format!(
+                "deterministic source observer event injection failed: {source}"
+            ))
+        })?;
+        self.ingress_sequence.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
     /// Discard the current verified epoch after any uncertainty.
@@ -417,10 +440,23 @@ impl SourceObservationEntry {
         if self.continuity_lost.load(Ordering::Acquire) {
             return Ok(true);
         }
+        #[cfg(test)]
+        if self
+            .drain_continuity_invalidations
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            self.continuity_lost.store(true, Ordering::Release);
+        }
         let receiver = self
             .receiver
             .lock()
             .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
+        if self.continuity_lost.load(Ordering::Acquire) {
+            return Ok(true);
+        }
         let mut changes = WatchChangeSet::default();
         loop {
             match receiver.try_recv() {
@@ -740,13 +776,7 @@ impl SourceObservationRegistry {
                     binding.root.display()
                 ))
             })?;
-        entry.test_sender.try_send(event).map_err(|source| {
-            CliError::InvalidInput(format!(
-                "deterministic source observer event injection failed: {source}"
-            ))
-        })?;
-        entry.ingress_sequence.fetch_add(1, Ordering::AcqRel);
-        Ok(())
+        entry.publish_test_event(event)
     }
 
     /// Reuse or admit the bounded observer for an exact source binding.
@@ -978,12 +1008,13 @@ impl SourceObservationRegistry {
                 .map_err(|_poisoned| lock_error(&entry.binding.root, "acceptance test event"))?
                 .take()
             {
-                entry.test_sender.try_send(event).map_err(|source| {
-                    CliError::InvalidInput(format!(
-                        "deterministic acceptance event injection failed: {source}"
-                    ))
-                })?;
-                entry.ingress_sequence.fetch_add(1, Ordering::AcqRel);
+                entry.publish_test_event(event)?;
+            }
+            let _receiver = entry.receiver.lock().map_err(|_poisoned| {
+                lock_error(&entry.binding.root, "source observation receiver")
+            })?;
+            if entry.continuity_lost.load(Ordering::Acquire) {
+                return Ok(false);
             }
             let Some(current) = entry.current_epoch()? else {
                 return Ok(false);
@@ -1067,27 +1098,35 @@ impl SourceObservationRegistry {
 /// Convert native watcher callbacks into bounded ingress and continuity state.
 fn watcher_callback(
     sender: SyncSender<Event>,
+    receiver: Arc<Mutex<Receiver<Event>>>,
     ingress_sequence: Arc<AtomicU64>,
     continuity_lost: Arc<AtomicBool>,
 ) -> impl FnMut(notify::Result<Event>) + Send + 'static {
     move |result| match result {
         Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
-        Ok(event) => {
-            let needs_rescan = event.need_rescan();
-            match sender.try_send(event) {
-                Ok(()) => {
-                    if needs_rescan {
-                        continuity_lost.store(true, Ordering::Release);
+        result => {
+            let _receiver = match receiver.lock() {
+                Ok(receiver) => receiver,
+                Err(_poisoned) => {
+                    continuity_lost.store(true, Ordering::Release);
+                    ingress_sequence.fetch_add(1, Ordering::AcqRel);
+                    return;
+                }
+            };
+            match result {
+                Ok(event) => {
+                    let needs_rescan = event.need_rescan();
+                    match sender.try_send(event) {
+                        Ok(()) if !needs_rescan => {}
+                        Ok(()) | Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                            continuity_lost.store(true, Ordering::Release);
+                        }
                     }
                 }
-                Err(TrySendError::Full(_event) | TrySendError::Disconnected(_event)) => {
+                Err(_source) => {
                     continuity_lost.store(true, Ordering::Release);
                 }
             }
-            ingress_sequence.fetch_add(1, Ordering::AcqRel);
-        }
-        Err(_source) => {
-            continuity_lost.store(true, Ordering::Release);
             ingress_sequence.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -1305,9 +1344,15 @@ mod tests {
     #[test]
     fn watcher_callback_is_bounded_and_marks_overflow_and_rescan() {
         let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(Mutex::new(receiver));
         let sequence = Arc::new(AtomicU64::new(0));
         let lost = Arc::new(AtomicBool::new(false));
-        let mut callback = watcher_callback(sender, Arc::clone(&sequence), Arc::clone(&lost));
+        let mut callback = watcher_callback(
+            sender,
+            Arc::clone(&receiver),
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+        );
         callback(Ok(Event::new(EventKind::Modify(ModifyKind::Name(
             RenameMode::Any,
         )))));
@@ -1315,15 +1360,21 @@ mod tests {
 
         assert_eq!(sequence.load(Ordering::Acquire), 2);
         assert!(lost.load(Ordering::Acquire));
-        assert!(receiver.try_recv().is_ok());
+        assert!(
+            receiver
+                .lock()
+                .is_ok_and(|receiver| receiver.try_recv().is_ok())
+        );
     }
 
     #[test]
     fn watcher_callback_ignores_access_events_without_advancing_epoch() {
-        let (sender, _receiver) = sync_channel(1);
+        let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(Mutex::new(receiver));
         let sequence = Arc::new(AtomicU64::new(0));
         let lost = Arc::new(AtomicBool::new(false));
-        let mut callback = watcher_callback(sender, Arc::clone(&sequence), Arc::clone(&lost));
+        let mut callback =
+            watcher_callback(sender, receiver, Arc::clone(&sequence), Arc::clone(&lost));
         callback(Ok(Event::new(EventKind::Access(AccessKind::Any))));
 
         assert_eq!(sequence.load(Ordering::Acquire), 0);
@@ -1568,17 +1619,9 @@ mod tests {
                         path: source.clone(),
                         source: source_error,
                     })?;
-                    entry
-                        .test_sender
-                        .try_send(
-                            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source.clone()),
-                        )
-                        .map_err(|source_error| {
-                            CliError::InvalidInput(format!(
-                                "deterministic observation injection failed: {source_error}"
-                            ))
-                        })?;
-                    entry.ingress_sequence.fetch_add(1, Ordering::AcqRel);
+                    entry.publish_test_event(
+                        Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source.clone()),
+                    )?;
                 }
                 Ok(hash)
             },
@@ -1765,6 +1808,32 @@ mod tests {
         require(
             matches!(admission.verify(), Err(CliError::RefreshRequired(_))),
             "delayed relevant event was accepted",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_verification_rechecks_continuity_under_drain_lock() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let admission = registry.admit_mutation(&database, temp.path(), None, &test_control())?;
+        let MutationSourceWitness::Observed { entry, .. } = &admission.witness else {
+            return Err(
+                std::io::Error::other("mutation did not retain an observed witness").into(),
+            );
+        };
+        entry
+            .drain_continuity_invalidations
+            .store(1, Ordering::Release);
+
+        require(
+            matches!(admission.verify(), Err(CliError::RefreshRequired(_))),
+            "continuity loss during drain admission was accepted",
+        )?;
+        require(
+            entry.drain_continuity_invalidations.load(Ordering::Acquire) == 0,
+            "drain continuity invalidation was not consumed",
         )?;
         Ok(())
     }

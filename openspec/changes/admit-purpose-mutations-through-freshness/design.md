@@ -59,9 +59,9 @@ No source hash is added to the token: a hash stored in an unrefreshed database c
 
 Approved purpose remains authored responsibility and survives unchanged full and incremental scans. A file edit does not automatically erase or demote it. The fix prevents stale source-derived approval at admission; semantic correction after a later intentional edit remains an explicit curator action.
 
-### Protect no-op watch and queue verification without an unproven observer change
+### Serialize observer acknowledgement without weakening source authority
 
-The exact persistent-MCP queue, zero-candidate watch, and queue sequence converges under the same root/database binding in RC1 and current source, with and without telemetry. This change therefore does not alter source-observer acknowledgement, event filtering, or target routing. A focused regression follows the returned target binding and proves that unchanged work retains the same generation-bound queue identity across the no-op watch.
+The bounded receiver lock now serializes callback event publication, continuity state, and ingress sequence with drain acknowledgement and final epoch acceptance. A late irrelevant database event is re-drained within the existing fixed retry budget, while a relevant source event or continuity loss still refuses the result. Event filtering and target routing remain unchanged. The focused persistent-MCP regression follows the returned target binding and proves that unchanged work retains the same generation-bound queue identity across a zero-candidate watch.
 
 When a native observer cannot start or the bounded process registry is full, mutation admission uses the existing exact-per-call compatibility path instead of making watcher availability a product requirement. It retains the admitted generation and project identity, then requires exact saved-source agreement plus the same durable identity immediately before commit. The observer capacity, eviction policy, and routing remain unchanged.
 
