@@ -455,6 +455,139 @@ pub(crate) struct LintOptions {
     pub(crate) strict_untracked: bool,
 }
 
+/// Typed map-owned portion of one lint result.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct MapLintReport {
+    /// Whether every map-owned check passed.
+    pub(crate) ok: bool,
+    /// Compatibility notices that do not fail lint.
+    pub(crate) notes: Vec<String>,
+    /// Validation state for the non-source purpose registry.
+    pub(crate) non_source: NonSourceLintReport,
+    /// Untracked-file inventory when requested.
+    pub(crate) untracked: Option<UntrackedLintReport>,
+}
+
+/// Typed non-source purpose-registry lint facts.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct NonSourceLintReport {
+    /// File-level parse or validation errors.
+    pub(crate) errors: Vec<String>,
+    /// Registry entries whose paths do not exist.
+    pub(crate) missing: Vec<String>,
+    /// Registry entries with invalid summaries, keyed by path.
+    pub(crate) invalid: BTreeMap<String, Vec<String>>,
+}
+
+/// Typed untracked-file lint inventory.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct UntrackedLintReport {
+    /// Total untracked non-source files found.
+    pub(crate) total: usize,
+    /// Files admitted by configured purpose or allow-list policy.
+    pub(crate) allowed: usize,
+    /// Files not admitted by configured purpose or allow-list policy.
+    pub(crate) disallowed: Vec<String>,
+    /// Disallowed file counts grouped by normalized extension.
+    pub(crate) disallowed_extension_counts: BTreeMap<String, usize>,
+    /// Allowed file counts grouped by normalized extension.
+    pub(crate) allowed_extension_counts: BTreeMap<String, usize>,
+    /// Configured asset roots that currently exist.
+    pub(crate) asset_roots_present: usize,
+    /// Asset files found outside configured asset roots.
+    pub(crate) assets_outside_roots: Vec<String>,
+    /// Existing paths excluded from source scanning.
+    pub(crate) excluded_paths_present: usize,
+    /// Whether disallowed untracked files fail lint.
+    pub(crate) strict: bool,
+}
+
+impl MapLintReport {
+    /// Return the CLI-compatible exit code for map-owned findings.
+    pub(crate) const fn exit_code(&self) -> i32 {
+        if self.ok { 0 } else { 1 }
+    }
+
+    /// Render the compatibility text from the same typed facts.
+    pub(crate) fn render_text(&self) -> String {
+        let mut report = self.notes.clone();
+        if let Some(untracked) = &self.untracked {
+            untracked.append_text(&mut report);
+        }
+        self.non_source.append_errors(&mut report);
+        if self
+            .untracked
+            .as_ref()
+            .is_some_and(|untracked| untracked.strict && !untracked.disallowed.is_empty())
+        {
+            report.push("Untracked files detected.".to_string());
+        }
+        join_report(&report)
+    }
+}
+
+impl NonSourceLintReport {
+    /// Return whether the non-source registry contains blocking findings.
+    fn is_empty(&self) -> bool {
+        self.errors.is_empty() && self.missing.is_empty() && self.invalid.is_empty()
+    }
+
+    /// Append compatibility text for blocking non-source findings.
+    fn append_errors(&self, report: &mut Vec<String>) {
+        if !self.errors.is_empty() {
+            report.push("Non-source file list errors:".to_string());
+            report.push(format_list(&self.errors));
+        }
+        if !self.missing.is_empty() {
+            report.push("Missing non-source file entries:".to_string());
+            report.push(format_list(&self.missing));
+        }
+        if !self.invalid.is_empty() {
+            report.push("Invalid non-source file summaries:".to_string());
+            report.extend(
+                self.invalid
+                    .iter()
+                    .map(|(path, issues)| format!(" - {path}: {}", issues.join(", "))),
+            );
+        }
+    }
+}
+
+impl UntrackedLintReport {
+    /// Append compatibility text for the typed untracked-file inventory.
+    fn append_text(&self, report: &mut Vec<String>) {
+        report.push(format!(
+            "Untracked files (non-source extensions): {} (allowed {}, disallowed {})",
+            self.total,
+            self.allowed,
+            self.disallowed.len()
+        ));
+        if self.disallowed.is_empty() {
+            report.push("Disallowed untracked files: 0".to_string());
+        } else {
+            report.push("Disallowed untracked files:".to_string());
+            report.push(format_list(&self.disallowed));
+            report.push("Disallowed extension counts:".to_string());
+            report.push(format_extension_counts(&self.disallowed_extension_counts));
+        }
+        report.push("Allowed untracked extension counts:".to_string());
+        report.push(if self.allowed_extension_counts.is_empty() {
+            " (none)".to_string()
+        } else {
+            format_extension_counts(&self.allowed_extension_counts)
+        });
+        report.push(format!("Asset roots present: {}", self.asset_roots_present));
+        if !self.assets_outside_roots.is_empty() {
+            report.push("Asset files outside allowed roots:".to_string());
+            report.push(format_list(&self.assets_outside_roots));
+        }
+        report.push(format!(
+            "Excluded paths present: {}",
+            self.excluded_paths_present
+        ));
+    }
+}
+
 /// Purpose record imported from legacy `ProjectAtlas` metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImportedPurposeRecord {
@@ -918,31 +1051,40 @@ fn load_db_purpose_records(config: &AtlasMapConfig) -> AtlasMapResult<BTreeMap<S
         .collect())
 }
 
-/// Lint the atlas map and return a report plus exit code.
+/// Lint map-owned repository inputs and return typed facts.
 pub(crate) fn lint_map(
     config: &AtlasMapConfig,
     options: LintOptions,
-) -> AtlasMapResult<(String, i32)> {
+) -> AtlasMapResult<MapLintReport> {
     let paths = collect_repo_paths(config)?;
     let nonsource = read_nonsource_file_entries(config)?;
-    let mut report = Vec::new();
-    let mut errors = Vec::new();
-    if options.strict_folders {
-        report.push(
+    let notes = if options.strict_folders {
+        vec![
             "Note: --strict-folders is deprecated; database folder purpose linting uses --purpose-level."
                 .to_string(),
-        );
-    }
-
-    append_nonsource_errors(&mut errors, &nonsource);
-    if options.report_untracked {
-        append_untracked_report(&mut report, &mut errors, config, &paths, options)?;
-    }
-    if !errors.is_empty() {
-        report.extend(errors);
-        return Ok((join_report(&report), 1));
-    }
-    Ok((join_report(&report), 0))
+        ]
+    } else {
+        Vec::new()
+    };
+    let non_source = NonSourceLintReport {
+        errors: nonsource.errors,
+        missing: nonsource.missing,
+        invalid: nonsource.invalid,
+    };
+    let untracked = options
+        .report_untracked
+        .then(|| build_untracked_report(config, &paths, options))
+        .transpose()?;
+    let ok = non_source.is_empty()
+        && !untracked
+            .as_ref()
+            .is_some_and(|report| report.strict && !report.disallowed.is_empty());
+    Ok(MapLintReport {
+        ok,
+        notes,
+        non_source,
+        untracked,
+    })
 }
 
 /// Find a default config path under the current root.
@@ -2500,39 +2642,12 @@ fn record_json(record: &MapRecord) -> serde_json::Value {
     })
 }
 
-/// Append non-source validation errors.
-fn append_nonsource_errors(errors: &mut Vec<String>, nonsource: &NonsourceEntries) {
-    if !nonsource.errors.is_empty() {
-        errors.push("Non-source file list errors:".to_string());
-        errors.push(format_list(&nonsource.errors));
-    }
-    if !nonsource.missing.is_empty() {
-        errors.push("Missing non-source file entries:".to_string());
-        errors.push(format_list(&nonsource.missing));
-    }
-    if !nonsource.invalid.is_empty() {
-        errors.push("Invalid non-source file summaries:".to_string());
-        append_invalid_map(errors, &nonsource.invalid);
-    }
-}
-
-/// Append invalid path issue map.
-fn append_invalid_map(errors: &mut Vec<String>, invalid: &BTreeMap<String, Vec<String>>) {
-    errors.extend(
-        invalid
-            .iter()
-            .map(|(path, issues)| format!(" - {path}: {}", issues.join(", "))),
-    );
-}
-
-/// Append untracked-file report and optional errors.
-fn append_untracked_report(
-    report: &mut Vec<String>,
-    errors: &mut Vec<String>,
+/// Build the typed untracked-file inventory.
+fn build_untracked_report(
     config: &AtlasMapConfig,
     paths: &RepoPaths,
     options: LintOptions,
-) -> AtlasMapResult<()> {
+) -> AtlasMapResult<UntrackedLintReport> {
     let nonsource = read_nonsource_file_entries(config)?;
     let nonsource_paths = nonsource
         .records
@@ -2558,43 +2673,17 @@ fn append_untracked_report(
             disallowed.push(path.clone());
         }
     }
-    report.push(format!(
-        "Untracked files (non-source extensions): {} (allowed {}, disallowed {})",
-        paths.untracked_files.len(),
-        allowed.len(),
-        disallowed.len()
-    ));
-    if disallowed.is_empty() {
-        report.push("Disallowed untracked files: 0".to_string());
-    } else {
-        report.push("Disallowed untracked files:".to_string());
-        report.push(format_list(&disallowed));
-        report.push("Disallowed extension counts:".to_string());
-        report.push(format_list(&summarize_extensions(&disallowed)));
-    }
-    report.push("Allowed untracked extension counts:".to_string());
-    let allowed_summary = summarize_extensions(&allowed);
-    report.push(if allowed_summary.is_empty() {
-        " (none)".to_string()
-    } else {
-        format_list(&allowed_summary)
-    });
-    report.push(format!(
-        "Asset roots present: {}",
-        existing_asset_roots(config).len()
-    ));
-    if !asset_outside_roots.is_empty() {
-        report.push("Asset files outside allowed roots:".to_string());
-        report.push(format_list(&asset_outside_roots));
-    }
-    report.push(format!(
-        "Excluded paths present: {}",
-        paths.excluded_paths.len()
-    ));
-    if options.strict_untracked && !disallowed.is_empty() {
-        errors.push("Untracked files detected.".to_string());
-    }
-    Ok(())
+    Ok(UntrackedLintReport {
+        total: paths.untracked_files.len(),
+        allowed: allowed.len(),
+        disallowed_extension_counts: summarize_extensions(&disallowed),
+        allowed_extension_counts: summarize_extensions(&allowed),
+        asset_roots_present: existing_asset_roots(config).len(),
+        assets_outside_roots: asset_outside_roots,
+        excluded_paths_present: paths.excluded_paths.len(),
+        strict: options.strict_untracked,
+        disallowed,
+    })
 }
 
 /// Parse file and folder hashes from TOON.
@@ -2646,7 +2735,7 @@ fn existing_asset_roots(config: &AtlasMapConfig) -> Vec<String> {
 }
 
 /// Summarize extensions for reporting.
-fn summarize_extensions(paths: &[String]) -> Vec<String> {
+fn summarize_extensions(paths: &[String]) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for path in paths {
         let extension = normalized_extension(path);
@@ -2658,9 +2747,16 @@ fn summarize_extensions(paths: &[String]) -> Vec<String> {
         *counts.entry(key).or_default() += 1;
     }
     counts
-        .into_iter()
-        .map(|(extension, count)| format!("{extension}={count}"))
-        .collect()
+}
+
+/// Format deterministic extension counts as compatibility list items.
+fn format_extension_counts(counts: &BTreeMap<String, usize>) -> String {
+    format_list(
+        &counts
+            .iter()
+            .map(|(extension, count)| format!("{extension}={count}"))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Format report list items.

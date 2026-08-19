@@ -28,6 +28,7 @@ pub use resolution_keys::{
     resolve_relative_import_path, semantic_resolution_contract_digest, source_stems_for_path,
 };
 
+use projectatlas_core::graph::QUALIFIED_SYMBOL_SCOPE_PREFIX;
 use projectatlas_core::language::{
     EmbeddedHostKind, EmbeddedLanguageCapability, SymbolParserOwner, TreeSitterGrammar,
     builtin_tree_sitter_language_ids, language_capability, tree_sitter_grammar,
@@ -2178,7 +2179,10 @@ fn push_symbol_with_metadata(
 /// Return one compact identity that can be represented by every graph consumer.
 fn compact_symbol_identity(value: &str) -> Option<String> {
     let value = compact_text(value);
-    (!value.is_empty() && value.chars().count() <= MAX_SNIPPET_CHARS).then_some(value)
+    (!value.is_empty()
+        && value.chars().count() <= MAX_SNIPPET_CHARS
+        && !value.starts_with(QUALIFIED_SYMBOL_SCOPE_PREFIX))
+    .then_some(value)
 }
 
 /// Push a relation while enforcing per-file graph bounds.
@@ -2272,8 +2276,9 @@ fn is_snippet_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, content_without_leading_purpose_header,
-        empty_graph, extract_cargo_manifest_graph_checked, extract_fallback_graph,
+        MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, QUALIFIED_SYMBOL_SCOPE_PREFIX,
+        compact_symbol_identity, content_without_leading_purpose_header, empty_graph,
+        extract_cargo_manifest_graph_checked, extract_fallback_graph,
         extract_fallback_graph_checked, extract_powershell_graph_checked, extract_symbol_graph,
         extract_symbol_graph_checked, extract_symbol_graph_controlled,
         extract_vue_sfc_graph_checked, languages, specialized_languages,
@@ -3606,6 +3611,16 @@ public class Registry
         assert!(!graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Contains && relation.target_name == "Retained"
         }));
+    }
+
+    #[test]
+    fn derived_qualified_scope_namespace_is_reserved_from_source_symbols() {
+        let reserved = format!("{QUALIFIED_SYMBOL_SCOPE_PREFIX}literal");
+        assert!(compact_symbol_identity(&reserved).is_none());
+        assert_eq!(
+            compact_symbol_identity("ordinary"),
+            Some("ordinary".to_string())
+        );
     }
 
     #[test]

@@ -13,9 +13,9 @@ use projectatlas_core::graph::{
     CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
     ExtendedRelationKind, ExternalSelector, GraphContractError, GraphEntity, GraphIdentityText,
     GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation, LogicalRelationKey,
-    PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationOccurrence,
-    RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, SourceSpan,
-    SymbolSelector,
+    MAX_GRAPH_IDENTITY_BYTES, PackageSelector, ProjectInstanceId, QUALIFIED_SYMBOL_SCOPE_PREFIX,
+    RelationDependencyKey, RelationOccurrence, RelationResolution, RepositoryFilePath,
+    RepositoryNodePath, ResolutionKeyDomain, SourceSpan, SymbolSelector,
 };
 use projectatlas_core::language::{SemanticProviderOwner, SymbolParserOwner, language_capability};
 use projectatlas_core::symbols::{
@@ -697,40 +697,103 @@ fn is_cargo_manifest_path(path: &str) -> bool {
 
 /// Qualify graph-only parent identity from the parser's existing containment rows.
 ///
-/// Sorting is `O(n log n)`; each same-name candidate is pushed and popped at most once.
-fn qualified_symbol_parents(graph: &SymbolGraph) -> Vec<Option<String>> {
+/// Sorting and active-scope lookup are `O(n log n)`. Identity work is
+/// `O(n * MAX_GRAPH_IDENTITY_BYTES)`: every retained parent is bounded, and an
+/// overflowing candidate is hashed without materializing more than one bounded
+/// parent plus one admitted component.
+fn qualified_symbol_parents(
+    graph: &SymbolGraph,
+) -> Result<Vec<Option<GraphIdentityText>>, CliError> {
     let mut order = (0..graph.symbols.len()).collect::<Vec<_>>();
     order.sort_by_key(|&index| (graph.symbols[index].line_start, index));
     let mut active_by_name = BTreeMap::<&str, Vec<usize>>::new();
-    let mut qualified_names = vec![None::<String>; graph.symbols.len()];
+    let mut qualified_names = vec![None::<GraphIdentityText>; graph.symbols.len()];
     let mut parents = vec![None; graph.symbols.len()];
     for index in order {
         let symbol = &graph.symbols[index];
-        let parent = symbol.parent.as_deref().map(|parent| {
-            let Some(candidates) = active_by_name.get_mut(parent) else {
-                return parent.to_string();
-            };
+        let name = source_symbol_identity(symbol.name.clone())?;
+        let mut parent = symbol
+            .parent
+            .clone()
+            .map(source_symbol_identity)
+            .transpose()?;
+        if let Some(immediate_parent) = parent.as_ref()
+            && let Some(candidates) = active_by_name.get_mut(immediate_parent.as_str())
+        {
             while candidates.last().is_some_and(|&candidate_index| {
                 graph.symbols[candidate_index].line_end < symbol.line_end
             }) {
                 candidates.pop();
             }
-            candidates
+            if let Some(qualified_parent) = candidates
                 .last()
                 .and_then(|&candidate_index| qualified_names[candidate_index].clone())
-                .unwrap_or_else(|| parent.to_string())
+            {
+                parent = Some(qualified_parent);
+            }
+        }
+        qualified_names[index] = Some(match parent.as_ref() {
+            Some(parent) => qualified_symbol_identity(parent, &name)?,
+            None => name,
         });
-        qualified_names[index] = Some(parent.as_ref().map_or_else(
-            || symbol.name.clone(),
-            |parent| format!("{parent}::{}", symbol.name),
-        ));
         parents[index] = parent;
         active_by_name
             .entry(symbol.name.as_str())
             .or_default()
             .push(index);
     }
-    parents
+    Ok(parents)
+}
+
+/// Admit one parser-owned symbol identity outside the derived-scope namespace.
+fn source_symbol_identity(value: String) -> Result<GraphIdentityText, CliError> {
+    let identity = GraphIdentityText::new(value).map_err(invalid_graph_contract)?;
+    if identity.as_str().starts_with(QUALIFIED_SYMBOL_SCOPE_PREFIX) {
+        return Err(invalid_graph_contract(
+            GraphContractError::InvalidIdentityText {
+                reason: "source symbol identity uses the reserved derived-scope namespace",
+            },
+        ));
+    }
+    Ok(identity)
+}
+
+/// Derive one exact or compact qualified scope from validated components.
+fn qualified_symbol_identity(
+    parent: &GraphIdentityText,
+    name: &GraphIdentityText,
+) -> Result<GraphIdentityText, CliError> {
+    const SEPARATOR: &str = "::";
+    const DIGEST_DOMAIN: &str = "projectatlas.graph.qualified-symbol-scope.v1";
+    let qualified_len = parent.as_str().len() + SEPARATOR.len() + name.as_str().len();
+    if qualified_len <= MAX_GRAPH_IDENTITY_BYTES {
+        let mut qualified = String::with_capacity(qualified_len);
+        qualified.push_str(parent.as_str());
+        qualified.push_str(SEPARATOR);
+        qualified.push_str(name.as_str());
+        return GraphIdentityText::new(qualified).map_err(invalid_graph_contract);
+    }
+
+    let compact_len =
+        QUALIFIED_SYMBOL_SCOPE_PREFIX.len() + 64 + SEPARATOR.len() + name.as_str().len();
+    if compact_len > MAX_GRAPH_IDENTITY_BYTES {
+        return Err(invalid_graph_contract(
+            GraphContractError::InvalidIdentityText {
+                reason: "derived scope cannot retain its nearest admitted symbol name",
+            },
+        ));
+    }
+    let mut hasher = blake3::Hasher::new_derive_key(DIGEST_DOMAIN);
+    hasher.update(parent.as_str().as_bytes());
+    hasher.update(SEPARATOR.as_bytes());
+    hasher.update(name.as_str().as_bytes());
+    let digest = hasher.finalize().to_hex();
+    let mut compact = String::with_capacity(compact_len);
+    compact.push_str(QUALIFIED_SYMBOL_SCOPE_PREFIX);
+    compact.push_str(digest.as_str());
+    compact.push_str(SEPARATOR);
+    compact.push_str(name.as_str());
+    GraphIdentityText::new(compact).map_err(invalid_graph_contract)
 }
 
 /// Project file, symbol, package, and canonical export facts from parser graphs.
@@ -823,7 +886,7 @@ fn build_entity_projection_with_config(
         let file_digest = file.key().digest().to_string();
         insert_entity(&mut entity_by_digest, file)?;
         let mut symbol_digests = Vec::with_capacity(graph.symbols.len());
-        let qualified_parents = qualified_symbol_parents(graph);
+        let qualified_parents = qualified_symbol_parents(graph)?;
         for (symbol, qualified_parent) in graph.symbols.iter().zip(qualified_parents) {
             control.check(IndexWorkStage::SymbolParsing)?;
             let entity = match symbol.kind {
@@ -855,10 +918,7 @@ fn build_entity_projection_with_config(
                                 name: GraphIdentityText::new(symbol.name.clone())
                                     .map_err(invalid_graph_contract)?,
                                 kind: symbol.kind,
-                                parent: qualified_parent
-                                    .map(GraphIdentityText::new)
-                                    .transpose()
-                                    .map_err(invalid_graph_contract)?,
+                                parent: qualified_parent,
                                 signature: GraphIdentityText::new(
                                     if symbol.signature.trim().is_empty() {
                                         symbol.name.clone()
@@ -3940,14 +4000,16 @@ mod tests {
         CliError, DocumentResolutionIndex, DocumentTargetIdentity, GRAPH_STAGE_DATABASE_FILE_NAME,
         GRAPH_STAGE_DIRECTORY_PREFIX, GraphOwners, GraphSymbolIndex, MAX_INCREMENTAL_GRAPH_BYTES,
         MAX_INCREMENTAL_GRAPH_ROWS, PackageIndex, ProjectResolutionRegistry,
-        RepositoryGraphMutation, StagedRepositoryGraph, build_entity_projection,
-        build_entity_projection_with_config, cleanup_abandoned_graph_staging,
-        document_casefold_resolution_key, document_coverage, document_fact_map_retained_bytes,
-        enforce_incremental_projection_budget, enforce_incremental_projection_limits,
-        explicit_external_selector, finish_projection, finish_projection_in_database,
-        insert_relation, is_cargo_manifest_path, normalize_document_target, project_document_rows,
-        registry_resolution_matches, relation_resolution, remove_owned_graph_stage_payload,
-        repository_path_belongs_to, resolution_registry_from_exports, rust_toolchain_identity,
+        QUALIFIED_SYMBOL_SCOPE_PREFIX, RepositoryGraphMutation, StagedRepositoryGraph,
+        build_entity_projection, build_entity_projection_with_config,
+        cleanup_abandoned_graph_staging, document_casefold_resolution_key, document_coverage,
+        document_fact_map_retained_bytes, enforce_incremental_projection_budget,
+        enforce_incremental_projection_limits, explicit_external_selector, finish_projection,
+        finish_projection_in_database, insert_relation, is_cargo_manifest_path,
+        normalize_document_target, project_document_rows, qualified_symbol_identity,
+        qualified_symbol_parents, registry_resolution_matches, relation_resolution,
+        remove_owned_graph_stage_payload, repository_path_belongs_to,
+        resolution_registry_from_exports, rust_toolchain_identity, source_symbol_identity,
         stage_incremental_repository_graph, try_graph_stage_lease,
     };
     use crate::runtime::{
@@ -3956,9 +4018,10 @@ mod tests {
     use projectatlas_core::graph::{
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageScope, CoverageState,
         DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector, ExtendedRelationKind,
-        GraphEntity, GraphIdentityText, GraphRelationKind, LogicalRelation, PackageSelector,
-        ProjectInstanceId, RelationDependencyKey, RelationResolution, RepositoryFilePath,
-        RepositoryNodePath, ResolutionKeyDomain, ReusableTargetSelector, SymbolSelector,
+        GraphEntity, GraphIdentityText, GraphLimitKind, GraphRelationKind, LogicalRelation,
+        MAX_GRAPH_IDENTITY_BYTES, PackageSelector, ProjectInstanceId, RelationDependencyKey,
+        RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain,
+        ReusableTargetSelector, SymbolSelector,
     };
     use projectatlas_core::relation_capabilities::{
         RELATION_FAMILY_CAPABILITIES, RelationFamilyState,
@@ -3978,7 +4041,8 @@ mod tests {
     use projectatlas_symbols::extract_symbol_graph;
     use projectatlas_symbols::{
         ConfiguredModuleResolution, EcmaScriptConfigKind, EcmaScriptModuleConfig,
-        EcmaScriptPathMapping,
+        EcmaScriptPathMapping, MAX_DOCUMENT_SELECTOR_BYTES, MAX_MARKDOWN_EVIDENCE_BYTES,
+        MAX_MARKDOWN_LABEL_BYTES, MarkdownFactLimit,
     };
     use std::borrow::Cow;
     use std::collections::{BTreeMap, BTreeSet};
@@ -4780,6 +4844,193 @@ mod tests {
                 .iter()
                 .all(|entity| !entity.key().canonical_identity().contains("super-secret")),
             "negative fixture leaked a secret into graph identity",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn qualified_symbol_identity_preserves_boundaries_and_compacts_stably()
+    -> Result<(), Box<dyn Error>> {
+        let name = GraphIdentityText::new("leaf")?;
+        require_eq(
+            &qualified_symbol_identity(&GraphIdentityText::new("outer")?, &name)?,
+            &GraphIdentityText::new("outer::leaf")?,
+            "shallow qualified identity",
+        )?;
+
+        let exact_parent = GraphIdentityText::new(
+            "x".repeat(MAX_GRAPH_IDENTITY_BYTES - "::".len() - name.as_str().len()),
+        )?;
+        let exact = qualified_symbol_identity(&exact_parent, &name)?;
+        require_eq(
+            &exact.as_str().len(),
+            &MAX_GRAPH_IDENTITY_BYTES,
+            "exact-boundary qualified identity bytes",
+        )?;
+        require(
+            exact.as_str().ends_with("::leaf"),
+            "exact-boundary qualified identity changed its readable suffix",
+        )?;
+
+        let first_overbound_parent = GraphIdentityText::new(
+            "x".repeat(MAX_GRAPH_IDENTITY_BYTES - "::".len() - name.as_str().len() + 1),
+        )?;
+        let compact = qualified_symbol_identity(&first_overbound_parent, &name)?;
+        require(
+            compact.as_str().len() <= MAX_GRAPH_IDENTITY_BYTES,
+            "first overbound qualified identity remained oversized",
+        )?;
+        require(
+            compact.as_str().ends_with("::leaf"),
+            "compacted qualified identity lost its nearest symbol name",
+        )?;
+        require_eq(
+            &qualified_symbol_identity(&first_overbound_parent, &name)?,
+            &compact,
+            "repeated compact qualified identity",
+        )?;
+
+        let multibyte_parent = GraphIdentityText::new(format!(
+            "{}x",
+            "é".repeat((MAX_GRAPH_IDENTITY_BYTES - "::".len() - "界".len() - 1) / "é".len())
+        ))?;
+        let multibyte =
+            qualified_symbol_identity(&multibyte_parent, &GraphIdentityText::new("界")?)?;
+        require_eq(
+            &multibyte.as_str().len(),
+            &MAX_GRAPH_IDENTITY_BYTES,
+            "multibyte exact-boundary qualified identity bytes",
+        )?;
+        require(
+            multibyte.as_str().ends_with("::界"),
+            "multibyte qualified identity changed its readable suffix",
+        )?;
+
+        let parent_a = GraphIdentityText::new("a".repeat(MAX_GRAPH_IDENTITY_BYTES))?;
+        let parent_b = GraphIdentityText::new("b".repeat(MAX_GRAPH_IDENTITY_BYTES))?;
+        let scoped_a = qualified_symbol_identity(&parent_a, &name)?;
+        let scoped_b = qualified_symbol_identity(&parent_b, &name)?;
+        require(
+            scoped_a != scoped_b,
+            "distinct deep ancestors with an equal suffix shared one identity",
+        )?;
+        require(
+            scoped_a != qualified_symbol_identity(&parent_a, &GraphIdentityText::new("other")?)?,
+            "distinct overbound candidates shared one compact identity",
+        )?;
+        let (literal_parent, _) = scoped_a
+            .as_str()
+            .rsplit_once("::")
+            .ok_or_else(|| io::Error::other("compact scope omitted its readable suffix"))?;
+        require(
+            source_symbol_identity(literal_parent.to_string()).is_err(),
+            "compact scope namespace remained admissible as an exact source parent",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn qualified_symbol_parents_reject_invalid_raw_components() -> Result<(), Box<dyn Error>> {
+        for (name, parent) in [
+            ("bad\nname".to_string(), None),
+            ("valid".to_string(), Some("bad\nparent".to_string())),
+            (
+                format!("{QUALIFIED_SYMBOL_SCOPE_PREFIX}literal"),
+                Some("parent".to_string()),
+            ),
+            (
+                "valid".to_string(),
+                Some(format!("{QUALIFIED_SYMBOL_SCOPE_PREFIX}literal")),
+            ),
+            (
+                "x".repeat(MAX_GRAPH_IDENTITY_BYTES + 1),
+                Some("parent".to_string()),
+            ),
+        ] {
+            let graph = SymbolGraph {
+                path: "src/invalid.rs".to_string(),
+                language: Some("rust".to_string()),
+                parser: ParserKind::TreeSitter,
+                symbols: vec![CodeSymbol {
+                    path: "src/invalid.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    name,
+                    kind: SymbolKind::Function,
+                    signature: "fn valid()".to_string(),
+                    exported: false,
+                    documentation: None,
+                    line_start: 1,
+                    line_end: 1,
+                    source_selector: None,
+                    parent,
+                    parser: ParserKind::TreeSitter,
+                    detail: Some("function_item".to_string()),
+                }],
+                relations: Vec::new(),
+            };
+            require(
+                qualified_symbol_parents(&graph).is_err(),
+                "invalid raw symbol identity reached qualified derivation",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn qualified_symbol_parents_bound_four_thousand_deep_scopes() -> Result<(), Box<dyn Error>> {
+        const DEPTH: usize = 4_000;
+        let names = (0..DEPTH)
+            .map(|index| format!("scope_{index:04}_{}", "x".repeat(229)))
+            .collect::<Vec<_>>();
+        let graph = SymbolGraph {
+            path: "src/deep.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| CodeSymbol {
+                    path: "src/deep.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    name: name.clone(),
+                    kind: SymbolKind::Module,
+                    signature: name.clone(),
+                    exported: false,
+                    documentation: None,
+                    line_start: index + 1,
+                    line_end: DEPTH * 2 - index,
+                    source_selector: None,
+                    parent: index.checked_sub(1).map(|parent| names[parent].clone()),
+                    parser: ParserKind::TreeSitter,
+                    detail: Some("mod_item".to_string()),
+                })
+                .collect(),
+            relations: Vec::new(),
+        };
+        let first = qualified_symbol_parents(&graph)?;
+        require_eq(&first.len(), &DEPTH, "deep qualified parent count")?;
+        require(
+            first.first().is_some_and(Option::is_none),
+            "deep root unexpectedly gained a parent",
+        )?;
+        require(
+            first
+                .iter()
+                .flatten()
+                .all(|parent| parent.as_str().len() <= MAX_GRAPH_IDENTITY_BYTES),
+            "deep qualification retained an oversized parent",
+        )?;
+        require(
+            first
+                .iter()
+                .flatten()
+                .any(|parent| parent.as_str().starts_with("@projectatlas.scope.v1:")),
+            "deep qualification never exercised compact scope identity",
+        )?;
+        require_eq(
+            &qualified_symbol_parents(&graph)?,
+            &first,
+            "repeated deep qualified parents",
         )?;
         Ok(())
     }
@@ -6157,6 +6408,44 @@ mod tests {
             "empty document relation coverage",
         )?;
         require_eq(&coverage.total(), &0, "empty document relation total")?;
+        Ok(())
+    }
+
+    #[test]
+    fn partial_markdown_evidence_limit_maps_to_intermediate_bytes_coverage()
+    -> Result<(), Box<dyn Error>> {
+        let label = "l".repeat(MAX_MARKDOWN_LABEL_BYTES);
+        let selector = format!(
+            "src/{}.rs",
+            "s".repeat(MAX_DOCUMENT_SELECTOR_BYTES - "src/".len() - ".rs".len())
+        );
+        let evidence_bytes = label.len() + selector.len();
+        let source = format!("[{label}]({selector})\n")
+            .repeat(MAX_MARKDOWN_EVIDENCE_BYTES / evidence_bytes + 1);
+        let facts = projectatlas_symbols::extract_markdown_facts(&source);
+        require(
+            facts
+                .coverage
+                .limits
+                .contains(&MarkdownFactLimit::EvidenceBytes),
+            "real Markdown extraction did not reach its evidence-byte limit",
+        )?;
+        require(
+            !facts.link_candidates.is_empty(),
+            "evidence-limited Markdown extraction lost every valid candidate",
+        )?;
+
+        let coverage = document_coverage("docs/limited.md", &facts, IndexGeneration::new(7))?;
+        require_eq(
+            &coverage.state(),
+            &CoverageState::Partial,
+            "evidence-limited document coverage state",
+        )?;
+        require_eq(
+            &coverage.reached_limit(),
+            &Some(GraphLimitKind::IntermediateBytes),
+            "evidence-limited document graph limit",
+        )?;
         Ok(())
     }
 

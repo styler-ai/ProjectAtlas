@@ -10,7 +10,7 @@ mod token_tui;
 
 use atlas_map::{
     AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
-    init_gitignore, init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
+    init_gitignore, init_project_with_config, list_ignore_entries, load_atlas_config,
     remove_ignore_entry, write_map,
 };
 use clap::parser::ValueSource;
@@ -70,7 +70,7 @@ use runtime::{
     config_root_mismatch_error, default_cli_project_root, default_mcp_project_root,
     defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, index_work_control, init_config_path, init_path_status,
-    lint_database_if_present, load_synchronized_repository_token_report, next_step_report_payload,
+    lint_project, load_synchronized_repository_token_report, next_step_report_payload,
     next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
     open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
     open_fresh_atlas_store_for_project, purpose_curation_page, ranked_folder_nodes_with_reasons,
@@ -2752,30 +2752,28 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
         } => {
             cli.preflight_implicit_project_root()?;
             let config = load_cli_atlas_config(cli)?;
-            let (mut report, mut exit_code) = lint_map(
+            let report = lint_project(
                 &config,
+                &cli.db,
+                cli.config.as_deref(),
                 LintOptions {
                     strict_folders: *strict_folders,
                     report_untracked: *report_untracked,
                     strict_untracked: *strict_untracked,
                 },
-            )?;
-            let (db_report, db_exit_code) = lint_database_if_present(
-                &cli.db,
-                &config.root,
-                cli.config.as_deref(),
                 (*purpose_level).into(),
             )?;
-            if !db_report.is_empty() {
-                if !report.ends_with('\n') {
-                    report.push('\n');
-                }
-                report.push_str(&db_report);
-            }
-            exit_code = exit_code.max(db_exit_code);
-            write_stderr(&report)?;
-            if exit_code != 0 {
-                std::process::exit(exit_code);
+            let payload = NamedPayload {
+                key: "lint",
+                payload: &report,
+            };
+            let output = match cli.format {
+                OutputFormat::Toon => encode_agent_payload(&payload),
+                OutputFormat::Json => format!("{}\n", serde_json::to_string_pretty(&payload)?),
+            };
+            write_stdout(&output)?;
+            if report.exit_code != 0 {
+                std::process::exit(report.exit_code);
             }
         }
         Command::Token {

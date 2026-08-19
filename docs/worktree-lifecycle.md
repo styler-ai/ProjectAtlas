@@ -49,7 +49,7 @@ flowchart LR
 Ownership remains inside the existing crates:
 
 - `projectatlas-fs` reads bounded structural Git evidence without starting Git.
-- `projectatlas-db` owns schema 18 registration, hydration, exact database identity, and normalized telemetry synchronization.
+- `projectatlas-db` owns schema 19 registration, hydration, exact database identity, and normalized telemetry synchronization.
 - `projectatlas-cli` owns MCP schemas, alias resolution, targeted init orchestration, and aggregate token presentation.
 - `projectatlas-service` owns bounded read-only graph federation.
 

@@ -5169,7 +5169,7 @@ fn insert_coverage(
             sqlite_count("graph_coverage.covered", record.covered())?,
             sqlite_count("graph_coverage.omitted", record.omitted())?,
             record.reason().map(GraphIdentityText::as_str),
-            record.reached_limit().map(limit_kind_name),
+            record.reached_limit().map(GraphLimitKind::as_str),
         ])?;
     }
     Ok(())
@@ -6885,38 +6885,12 @@ fn parse_parser_kind(field: &'static str, value: &str) -> DbResult<ParserKind> {
     }
 }
 
-/// Return the normalized reached-limit spelling.
-const fn limit_kind_name(limit: GraphLimitKind) -> &'static str {
-    match limit {
-        GraphLimitKind::Rows => "rows",
-        GraphLimitKind::Nodes => "nodes",
-        GraphLimitKind::Edges => "edges",
-        GraphLimitKind::Occurrences => "occurrences",
-        GraphLimitKind::Visited => "visited",
-        GraphLimitKind::IntermediateBytes => "intermediate_bytes",
-        GraphLimitKind::Deadline => "deadline",
-        GraphLimitKind::Depth => "depth",
-        GraphLimitKind::OutputBytes => "output_bytes",
-    }
-}
-
 /// Parse one normalized reached-limit spelling.
 pub(crate) fn parse_limit_kind(value: &str) -> DbResult<GraphLimitKind> {
-    match value {
-        "rows" => Ok(GraphLimitKind::Rows),
-        "nodes" => Ok(GraphLimitKind::Nodes),
-        "edges" => Ok(GraphLimitKind::Edges),
-        "occurrences" => Ok(GraphLimitKind::Occurrences),
-        "visited" => Ok(GraphLimitKind::Visited),
-        "intermediate_bytes" => Ok(GraphLimitKind::IntermediateBytes),
-        "deadline" => Ok(GraphLimitKind::Deadline),
-        "depth" => Ok(GraphLimitKind::Depth),
-        "output_bytes" => Ok(GraphLimitKind::OutputBytes),
-        _ => Err(DbError::InvalidEnum {
-            field: "graph_coverage.reached_limit",
-            value: value.to_string(),
-        }),
-    }
+    GraphLimitKind::from_stable_name(value).ok_or_else(|| DbError::InvalidEnum {
+        field: "graph_coverage.reached_limit",
+        value: value.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -10895,6 +10869,88 @@ mod tests {
             |row| row.get::<_, usize>(0),
         )?;
         require_eq(&relation_count, &FANOUT, "retained document relation count")?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_graph_limit_kind_round_trips_and_unknown_spelling_rolls_back()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("graph-limit-kinds");
+        fs::create_dir_all(&root)?;
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("graph-limit fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let mut coverage = Vec::with_capacity(GraphLimitKind::ALL.len());
+        for kind in GraphLimitKind::ALL {
+            coverage.push(CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(&format!(
+                        "limits/{}.rs",
+                        kind.as_str()
+                    )))?,
+                },
+                None,
+                CoverageState::Partial,
+                1,
+                1,
+                generation,
+                Some(GraphIdentityText::new("graph limit reached")?),
+                Some(kind),
+            )?);
+        }
+        let mut publication = store.begin_index_publication("graph-limit-kinds")?;
+        publication.replace_repository_graph(project, &[], &[], &[], &coverage)?;
+        publication.complete()?;
+
+        let verify = |store: &AtlasStore| -> Result<(), Box<dyn Error>> {
+            for kind in GraphLimitKind::ALL {
+                let page = store.repository_graph_coverage(
+                    project,
+                    &CoverageScope::Path {
+                        path: RepositoryNodePath::new(Path::new(&format!(
+                            "limits/{}.rs",
+                            kind.as_str()
+                        )))?,
+                    },
+                    1,
+                )?;
+                require_eq(&page.rows.len(), &1, "graph-limit coverage row count")?;
+                require_eq(
+                    &page.rows[0].reached_limit(),
+                    &Some(kind),
+                    "graph-limit coverage spelling",
+                )?;
+            }
+            Ok(())
+        };
+        verify(&store)?;
+
+        store.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let invalid = (|| -> DbResult<()> {
+            store.connection.execute("DELETE FROM graph_coverage", [])?;
+            store.connection.execute(
+                "INSERT INTO graph_coverage(
+                    project_instance_id, scope_kind, state, total, covered, omitted,
+                    reason, reached_limit
+                 ) VALUES(?1, 'project', 'partial', 2, 1, 1, 'invalid limit', 'rowz')",
+                [&project.as_bytes()[..]],
+            )?;
+            Ok(())
+        })();
+        require(
+            matches!(invalid, Err(DbError::Sqlite(_))),
+            "unknown graph-limit spelling bypassed the SQLite constraint",
+        )?;
+        store.connection.execute_batch("ROLLBACK")?;
+        verify(&store)?;
+        drop(store);
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        verify(&reopened)?;
         Ok(())
     }
 

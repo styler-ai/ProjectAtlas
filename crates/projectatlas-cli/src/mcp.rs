@@ -3,7 +3,7 @@
 
 use crate::atlas_map::{
     AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
-    init_gitignore, init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
+    init_gitignore, init_project_with_config, list_ignore_entries, load_atlas_config,
     load_atlas_config_for_root, remove_ignore_entry, write_map,
 };
 use crate::runtime::{
@@ -19,7 +19,7 @@ use crate::runtime::{
     config_root_mismatch_error, default_mcp_project_root,
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     federated_worktree_error, index_init_required, index_work_control, init_config_path,
-    init_next_steps, lint_database_if_present, load_synchronized_repository_token_report,
+    init_next_steps, lint_project, load_synchronized_repository_token_report,
     next_step_report_payload, next_step_report_with_selection, normalized_folder_filter,
     open_atlas_store_for_project, open_atlas_store_read_only_for_project,
     open_federated_atlas_stores_for_project, purpose_curation_page, purpose_curator_handoff,
@@ -1822,17 +1822,6 @@ struct McpMapReport {
     json: bool,
     /// Human-readable reason when no file was written.
     skipped_reason: Option<String>,
-}
-
-/// MCP response for lint reports.
-#[derive(Debug, Serialize)]
-struct McpLintReport {
-    /// Whether lint passed.
-    ok: bool,
-    /// CLI-compatible exit code that callers can gate on.
-    exit_code: i32,
-    /// Combined lint report text.
-    report: String,
 }
 
 /// Bounded control-atlas view of Git and `ProjectAtlas` worktree state.
@@ -5818,35 +5807,20 @@ impl ProjectAtlasMcpServer {
     fn lint_report_for_state(
         state: &McpProjectState,
         params: &AtlasLintParams,
-    ) -> Result<McpLintReport, CliError> {
+    ) -> Result<crate::runtime::LintReport, CliError> {
         let config = Self::load_config_for_state(state)?;
-        let (mut report, mut exit_code) = lint_map(
+        let purpose_level = Self::parse_purpose_lint_level(params.purpose_level.as_deref())?;
+        lint_project(
             &config,
+            &state.db_path,
+            state.config_path.as_deref(),
             LintOptions {
                 strict_folders: params.strict_folders.unwrap_or(false),
                 report_untracked: params.report_untracked.unwrap_or(false),
                 strict_untracked: params.strict_untracked.unwrap_or(false),
             },
-        )?;
-        let purpose_level = Self::parse_purpose_lint_level(params.purpose_level.as_deref())?;
-        let (db_report, db_exit_code) = lint_database_if_present(
-            &state.db_path,
-            &state.root,
-            state.config_path.as_deref(),
             purpose_level,
-        )?;
-        if !db_report.is_empty() {
-            if !report.ends_with('\n') {
-                report.push('\n');
-            }
-            report.push_str(&db_report);
-        }
-        exit_code = exit_code.max(db_exit_code);
-        Ok(McpLintReport {
-            ok: exit_code == 0,
-            exit_code,
-            report,
-        })
+        )
     }
 
     /// Build startup state from CLI-supplied DB/config paths.
@@ -12905,6 +12879,32 @@ mod tests {
             .ok_or_else(|| io::Error::other("migratable target identity is missing"))?;
         drop(migratable_store);
         let predecessor = rusqlite::Connection::open(&target_b_db)?;
+        let current_limits = GraphLimitKind::ALL
+            .iter()
+            .map(|limit| format!("'{}'", limit.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let current_coverage_schema: String = predecessor.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'graph_coverage'",
+            [],
+            |row| row.get(0),
+        )?;
+        let predecessor_coverage_schema = current_coverage_schema.replace(
+            &current_limits,
+            "'rows', 'occurrences', 'depth', 'output_bytes'",
+        );
+        require(
+            predecessor_coverage_schema != current_coverage_schema,
+            "predecessor fixture did not replace the current graph limit domain",
+        )?;
+        // This isolated fixture needs the exact released schema-17 declaration; rebuilding the
+        // table here would duplicate the complete production graph DDL in the CLI crate.
+        predecessor.execute_batch("PRAGMA writable_schema = ON;")?;
+        predecessor.execute(
+            "UPDATE sqlite_schema SET sql = ?1 WHERE type = 'table' AND name = 'graph_coverage'",
+            [predecessor_coverage_schema],
+        )?;
+        predecessor.execute_batch("PRAGMA writable_schema = OFF;")?;
         predecessor.execute_batch(
             "DROP TABLE usage_instance_worktree_origins;
              DROP TABLE worktree_usage_aggregates;

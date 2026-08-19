@@ -33,7 +33,7 @@ use projectatlas_core::graph::{ExtendedRelationKind, GraphRelationKind, ProjectI
 use projectatlas_core::health::{
     CATEGORY_DUPLICATE_PURPOSE, CATEGORY_MISSING_PURPOSE, CATEGORY_PURPOSE_AGENT_REVIEW_REQUIRED,
     CATEGORY_REPEATED_TEMPORARY_FOLDER, CATEGORY_STALE_PURPOSE, CATEGORY_SUGGESTED_PURPOSE_REVIEW,
-    Severity,
+    HealthFinding, Severity,
 };
 use projectatlas_core::language::{
     ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION, ContentClassification, ContentSelection,
@@ -5603,15 +5603,99 @@ pub(crate) fn watcher_status_report(active: bool) -> WatchStatusReport {
     }
 }
 
-/// Build lint output for an existing `SQLite` index.
+/// Typed SQLite-owned portion of one lint result.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct DatabaseLintReport {
+    /// Purpose strictness used to select blocking health categories.
+    pub(crate) purpose_level: String,
+    /// Blocking findings returned within the bounded page.
+    pub(crate) shown: usize,
+    /// Total matching health findings before category blocking policy.
+    pub(crate) total: usize,
+    /// Typed blocking health findings.
+    pub(crate) findings: Vec<HealthFinding>,
+}
+
+impl DatabaseLintReport {
+    /// Render the compatibility text from typed health findings.
+    fn render_text(&self) -> Result<String, CliError> {
+        if self.findings.is_empty() {
+            return Ok(String::new());
+        }
+        let mut report = format!(
+            "ProjectAtlas SQLite index health findings (purpose-level {}, showing {} of {}):\n",
+            self.purpose_level, self.shown, self.total
+        );
+        for finding in &self.findings {
+            writeln!(
+                &mut report,
+                "- [{}] {}: {}",
+                finding.category, finding.path, finding.recommendation
+            )
+            .map_err(|source| CliError::Output(io::Error::other(source.to_string())))?;
+        }
+        Ok(report)
+    }
+}
+
+/// Shared typed lint result consumed by CLI and MCP adapters.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct LintReport {
+    /// Whether every selected lint check passed.
+    pub(crate) ok: bool,
+    /// CLI-compatible process exit code.
+    pub(crate) exit_code: i32,
+    /// Map and filesystem-owned lint facts.
+    pub(crate) map: atlas_map::MapLintReport,
+    /// SQLite-owned lint facts when an index exists.
+    pub(crate) index: Option<DatabaseLintReport>,
+    /// Human-readable compatibility rendering of the same facts.
+    pub(crate) report: String,
+}
+
+/// Build one shared typed lint result for CLI and MCP callers.
+pub(crate) fn lint_project(
+    config: &atlas_map::AtlasMapConfig,
+    db: &Path,
+    config_path: Option<&Path>,
+    options: atlas_map::LintOptions,
+    purpose_level: PurposeLintLevel,
+) -> Result<LintReport, CliError> {
+    let map = atlas_map::lint_map(config, options)?;
+    let index = lint_database_if_present(db, &config.root, config_path, purpose_level)?;
+    let exit_code = map.exit_code().max(i32::from(
+        index
+            .as_ref()
+            .is_some_and(|report| !report.findings.is_empty()),
+    ));
+    let mut report = map.render_text();
+    if let Some(index) = &index {
+        let index_text = index.render_text()?;
+        if !index_text.is_empty() {
+            if !report.is_empty() && !report.ends_with('\n') {
+                report.push('\n');
+            }
+            report.push_str(&index_text);
+        }
+    }
+    Ok(LintReport {
+        ok: exit_code == 0,
+        exit_code,
+        map,
+        index,
+        report,
+    })
+}
+
+/// Build typed lint facts for an existing `SQLite` index.
 pub(crate) fn lint_database_if_present(
     db: &Path,
     root: &Path,
     config_path: Option<&Path>,
     purpose_level: PurposeLintLevel,
-) -> Result<(String, i32), CliError> {
+) -> Result<Option<DatabaseLintReport>, CliError> {
     match db.try_exists() {
-        Ok(false) => return Ok((String::new(), 0)),
+        Ok(false) => return Ok(None),
         Ok(true) => {}
         Err(source) => {
             return Err(CliError::Io {
@@ -5620,32 +5704,24 @@ pub(crate) fn lint_database_if_present(
             });
         }
     }
-    let store = open_fresh_atlas_store_for_project(db, root, config_path)?;
+    let control = standalone_index_work_control();
+    let exact = open_exact_saved_source_matches_index_controlled(db, root, config_path, &control)?;
+    let store = &exact.store;
     let query = purpose_level.health_query();
     let page = store.unresolved_health_findings_page_current(&query)?;
     let blocking = page
         .findings
-        .iter()
+        .into_iter()
         .filter(|finding| purpose_level.blocks_category(finding.category.as_str()))
         .collect::<Vec<_>>();
-    if blocking.is_empty() {
-        return Ok((String::new(), 0));
-    }
-    let mut report = format!(
-        "ProjectAtlas SQLite index health findings (purpose-level {}, showing {} of {}):\n",
-        purpose_level.as_str(),
-        blocking.len(),
-        page.total
-    );
-    for finding in blocking {
-        writeln!(
-            &mut report,
-            "- [{}] {}: {}",
-            finding.category, finding.path, finding.recommendation
-        )
-        .map_err(|source| CliError::Output(io::Error::other(source.to_string())))?;
-    }
-    Ok((report, 1))
+    let report = DatabaseLintReport {
+        purpose_level: purpose_level.as_str().to_string(),
+        shown: blocking.len(),
+        total: page.total,
+        findings: blocking,
+    };
+    store.finish_index_read_snapshot()?;
+    Ok(Some(report))
 }
 
 /// Purpose curation strictness used by `projectatlas lint`.

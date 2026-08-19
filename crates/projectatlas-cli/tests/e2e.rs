@@ -264,6 +264,7 @@ const AGENT_EFFICIENCY_BENCHMARK_PATH: &str =
 const AGENT_EFFICIENCY_PARTIAL_FILE: &str = "partial.json";
 const SUBDIR_CONFIG_DIR: &str = "config";
 const SESSION_TEST_FILE_NAME: &str = "session.rs";
+const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 #[cfg(any(
     windows,
     all(target_os = "macos", feature = "optional-parser-supervisor")
@@ -8644,13 +8645,33 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    let symbol_identity_contract = "cargo test --locked -p projectatlas-cli --test e2e csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture";
-    for (name, workflow) in [("ordinary CI", ci.as_str()), ("release", release.as_str())] {
-        if !workflow.contains(symbol_identity_contract) {
-            return Err(io::Error::other(format!(
-                "{name} omitted the C# symbol-identity publication contract"
-            ))
-            .into());
+    for (test, label) in [
+        (
+            "csharp_symbol_identity_boundary_preserves_full_and_incremental_publication",
+            "C# symbol-identity publication",
+        ),
+        (
+            "deep_qualified_symbol_parents_preserve_full_and_incremental_publication",
+            "deep qualified-symbol publication",
+        ),
+        (
+            "partial_markdown_limit_persists_without_losing_complete_publication",
+            "partial Markdown publication",
+        ),
+        (
+            "lint_formats_share_typed_cli_and_mcp_report",
+            "typed lint serialization",
+        ),
+    ] {
+        let contract = format!(
+            "cargo test --locked -p projectatlas-cli --test e2e {test} -- --exact --include-ignored --nocapture"
+        );
+        for (name, workflow) in [("ordinary CI", ci.as_str()), ("release", release.as_str())] {
+            if !workflow.contains(&contract) {
+                return Err(
+                    io::Error::other(format!("{name} omitted the {label} contract")).into(),
+                );
+            }
         }
     }
     let checklist_step = ci
@@ -8975,6 +8996,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         for contract in [
             "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
             "csharp_symbol_identity_boundary_preserves_full_and_incremental_publication",
+            "deep_qualified_symbol_parents_preserve_full_and_incremental_publication",
+            "partial_markdown_limit_persists_without_losing_complete_publication",
+            "lint_formats_share_typed_cli_and_mcp_report",
             "token_tui_cli_respects_selected_terminal_viewport",
             "classified_document_navigation_agrees_across_cli_and_mcp",
             "conditional_purpose_review_cli_reconciles_source_before_apply",
@@ -20508,7 +20532,7 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
                 "--purpose-level".to_string(),
                 "low".to_string(),
             ],
-            output: CliContractOutput::Empty,
+            output: CliContractOutput::JsonObject,
             effect: McpSqliteEffect::None,
             expected_exit_code: 0,
         },
@@ -20706,7 +20730,7 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
     Connection::open(&database)?.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
     let missing_root = temp.path().join(MISSING_INDEX_DIR_NAME);
     fs::create_dir(&missing_root)?;
-    let wrong_root = temp.path().join("wrong-owner");
+    let wrong_root = temp.path().join(WRONG_PROJECT_OWNER_DIR_NAME);
     let wrong_atlas_dir = wrong_root.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&wrong_atlas_dir)?;
     let wrong_database = wrong_atlas_dir.join("projectatlas.db");
@@ -25719,6 +25743,210 @@ fn csharp_symbol_identity_boundary_preserves_full_and_incremental_publication()
 }
 
 #[test]
+fn deep_qualified_symbol_parents_preserve_full_and_incremental_publication()
+-> Result<(), Box<dyn Error>> {
+    const DEEP_PATH: &str = "src/deep.rs";
+    const UNRELATED_PATH: &str = "src/unrelated.rs";
+
+    let nested_source = |depth: usize| -> Result<String, std::fmt::Error> {
+        let mut source = String::new();
+        for index in 0..depth {
+            let name = format!("scope{index:02}{}", "x".repeat(233));
+            writeln!(source, "mod {name} {{")?;
+        }
+        source.push_str("pub fn deep_marker() {}\n");
+        for _ in 0..depth {
+            source.push_str("}\n");
+        }
+        Ok(source)
+    };
+    let assert_deep_publication = |snapshot: &DerivedResultSnapshot| -> Result<(), Box<dyn Error>> {
+        if !snapshot
+            .symbols
+            .iter()
+            .any(|symbol| symbol.path == DEEP_PATH && symbol.name == "deep_marker")
+        {
+            return Err(io::Error::other("deep Rust marker was not published").into());
+        }
+        if !snapshot.graph_entities.iter().any(|entity| {
+            entity.contains("deep_marker") && entity.contains("@projectatlas.scope.v1:")
+        }) {
+            return Err(io::Error::other(
+                "deep Rust marker did not receive a bounded qualified graph parent",
+            )
+            .into());
+        }
+        Ok(())
+    };
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let database = temp.path().join("deep-qualified-symbol-parents.db");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n")?;
+    let deep = repo.join(DEEP_PATH);
+    fs::write(&deep, nested_source(18)?)?;
+    fs::write(
+        repo.join(UNRELATED_PATH),
+        "pub fn retained_entry() -> u32 { retained_helper() }\nfn retained_helper() -> u32 { 7 }\n",
+    )?;
+
+    run_scan(&repo, &database)?;
+    let initial_publication = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("initial deep publication missing"))?;
+    let initial = derived_result_snapshot(&database)?;
+    assert_deep_publication(&initial)?;
+    let unrelated_symbols = initial
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.path == UNRELATED_PATH)
+        .cloned()
+        .collect::<Vec<_>>();
+    let unrelated_relations = initial
+        .symbol_relations
+        .iter()
+        .filter(|relation| relation.path == UNRELATED_PATH)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    fs::write(&deep, nested_source(19)?)?;
+    run_watch_once(&repo, &database)?;
+    let refreshed_publication = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("incremental deep publication missing"))?;
+    if refreshed_publication.generation <= initial_publication.generation {
+        return Err(io::Error::other("deep-scope edit did not publish a new generation").into());
+    }
+    let refreshed = derived_result_snapshot(&database)?;
+    assert_deep_publication(&refreshed)?;
+    if refreshed
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.path == UNRELATED_PATH)
+        .cloned()
+        .collect::<Vec<_>>()
+        != unrelated_symbols
+        || refreshed
+            .symbol_relations
+            .iter()
+            .filter(|relation| relation.path == UNRELATED_PATH)
+            .cloned()
+            .collect::<Vec<_>>()
+            != unrelated_relations
+    {
+        return Err(io::Error::other(
+            "deep-scope incremental publication changed unrelated graph facts",
+        )
+        .into());
+    }
+    let listed = run_packaged_cli_json(
+        &mcp_contract_executable(),
+        &repo,
+        &database,
+        &["symbols", "list", "--file", DEEP_PATH, "--limit", "50"],
+    )?;
+    if !listed
+        .as_array()
+        .is_some_and(|symbols| symbols.iter().any(|symbol| symbol["name"] == "deep_marker"))
+    {
+        return Err(io::Error::other("CLI navigation omitted the deep Rust marker").into());
+    }
+    assert_clean_scan_convergence(
+        &repo,
+        &database,
+        temp.path(),
+        "deep-qualified-symbol-parents",
+    )
+}
+
+#[test]
+fn partial_markdown_limit_persists_without_losing_complete_publication()
+-> Result<(), Box<dyn Error>> {
+    const DOCUMENT_PATH: &str = "docs/limited.md";
+
+    let label = "l".repeat(projectatlas_symbols::MAX_MARKDOWN_LABEL_BYTES);
+    let selector = format!(
+        "src/{}.rs",
+        "s".repeat(projectatlas_symbols::MAX_DOCUMENT_SELECTOR_BYTES - "src/".len() - ".rs".len())
+    );
+    let evidence_bytes = label.len() + selector.len();
+    let limited_source = format!("[{label}]({selector})\n")
+        .repeat(projectatlas_symbols::MAX_MARKDOWN_EVIDENCE_BYTES / evidence_bytes + 1);
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let database = temp.path().join("partial-markdown-limit.db");
+    fs::create_dir_all(repo.join("docs"))?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n")?;
+    let document = repo.join(DOCUMENT_PATH);
+    fs::write(&document, &limited_source)?;
+
+    let assert_partial_coverage = || -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::open_read_only(&database)?;
+        let publication = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("Markdown publication missing"))?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("Markdown project identity missing"))?;
+        let coverage = store.repository_graph_coverage(
+            project,
+            &CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new(DOCUMENT_PATH))?,
+            },
+            100,
+        )?;
+        if publication.state != projectatlas_db::IndexPublicationState::Complete
+            || !coverage.rows.iter().any(|row| {
+                row.state() == CoverageState::Partial
+                    && row.reached_limit() == Some(GraphLimitKind::IntermediateBytes)
+            })
+        {
+            return Err(io::Error::other(format!(
+                "Markdown intermediate-byte coverage was not durably published: {coverage:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    };
+
+    run_scan(&repo, &database)?;
+    assert_partial_coverage()?;
+    let before_failed_publication = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing before failed Markdown refresh"))?;
+    let before_failed_snapshot = derived_result_snapshot(&database)?;
+    fs::write(
+        &document,
+        format!("{limited_source}\n[extra](missing.md)\n"),
+    )?;
+    Command::new(mcp_contract_executable())
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["watch", ".", "--once", "--timeout-seconds", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("index work deadline was reached"));
+    let after_failed_publication = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("publication missing after failed Markdown refresh"))?;
+    if after_failed_publication != before_failed_publication
+        || derived_result_snapshot(&database)? != before_failed_snapshot
+    {
+        return Err(io::Error::other(
+            "failed Markdown refresh changed the last complete publication",
+        )
+        .into());
+    }
+
+    run_watch_once(&repo, &database)?;
+    assert_partial_coverage()?;
+    assert_clean_scan_convergence(&repo, &database, temp.path(), "partial-markdown-limit")
+}
+
+#[test]
 fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dyn Error>> {
     const CONFIG: &str = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n";
     const CHANGED_CONFIG: &str = "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\ntext_index_max_bytes = 8192\n";
@@ -29545,6 +29773,325 @@ fn generated_purpose_queue_avoids_generic_and_asset_noise() -> Result<(), Box<dy
 }
 
 #[test]
+fn lint_formats_share_typed_cli_and_mcp_report() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    let source = repo.join(SRC_DIR_NAME);
+    let database = atlas.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    fs::create_dir_all(&atlas)?;
+    fs::create_dir(&source)?;
+    fs::write(
+        atlas.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    fs::write(
+        atlas.join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n",
+    )?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\ntarget/\n")?;
+    fs::write(source.join("lib.rs"), "pub fn lint_contract() {}\n")?;
+    fs::write(repo.join("stray.bin"), b"untracked")?;
+
+    Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    let store = AtlasStore::open(&database)?;
+    for node in store.load_nodes()? {
+        if node.node.path == "stray.bin" {
+            continue;
+        }
+        store.set_purpose(
+            &node.node.path,
+            &format!(
+                "Agent-reviewed lint contract purpose for {}",
+                node.node.path
+            ),
+            PurposeSource::Agent,
+        )?;
+    }
+    let before = mcp_database_snapshot(&database)?;
+
+    let clean_json = Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&database)
+        .args(["lint", "--purpose-level", "low"])
+        .output()?;
+    if !clean_json.status.success() || !clean_json.stderr.is_empty() {
+        return Err(io::Error::other(format!(
+            "clean JSON lint violated status or stream ownership: {}",
+            String::from_utf8_lossy(&clean_json.stderr)
+        ))
+        .into());
+    }
+    let clean_json_value: Value = serde_json::from_slice(&clean_json.stdout)?;
+    require_json_bool(&clean_json_value, &["lint", "ok"], true)?;
+    require_json_usize(&clean_json_value, &["lint", "exit_code"], 0)?;
+
+    let clean_toon = Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("toon")
+        .arg("--db")
+        .arg(&database)
+        .args(["lint", "--purpose-level", "low"])
+        .output()?;
+    if !clean_toon.status.success()
+        || !clean_toon.stderr.is_empty()
+        || clean_toon.stdout == clean_json.stdout
+    {
+        return Err(io::Error::other("clean TOON lint violated format or stream ownership").into());
+    }
+    let clean_toon_value: Value =
+        toon_format::decode_default(&String::from_utf8(clean_toon.stdout)?)?;
+    if clean_toon_value != clean_json_value {
+        return Err(io::Error::other("clean JSON and TOON lint facts diverged").into());
+    }
+
+    let (rejected_reader, rejected_writer) = io::pipe()?;
+    drop(rejected_reader);
+    let rejected = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&database)
+        .args(["lint", "--purpose-level", "low"])
+        .stdout(Stdio::from(rejected_writer))
+        .stderr(Stdio::piped())
+        .output()?;
+    if rejected.status.success() || rejected.stderr.is_empty() {
+        return Err(io::Error::other("lint did not propagate a rejected stdout write").into());
+    }
+
+    let lint_arguments = [
+        "lint",
+        "--report-untracked",
+        "--strict-untracked",
+        "--purpose-level",
+        "low",
+    ];
+    let failing_json = Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&database)
+        .args(lint_arguments)
+        .output()?;
+    if failing_json.status.code() != Some(1) || !failing_json.stderr.is_empty() {
+        return Err(io::Error::other(format!(
+            "failing JSON lint violated status or stream ownership: {}",
+            String::from_utf8_lossy(&failing_json.stderr)
+        ))
+        .into());
+    }
+    let failing_json_value: Value = serde_json::from_slice(&failing_json.stdout)?;
+    require_json_bool(&failing_json_value, &["lint", "ok"], false)?;
+    require_json_usize(&failing_json_value, &["lint", "exit_code"], 1)?;
+    let disallowed = json_at(
+        &failing_json_value,
+        &["lint", "map", "untracked", "disallowed"],
+    )?
+    .as_array()
+    .ok_or_else(|| io::Error::other("typed disallowed lint paths were not an array"))?;
+    if !disallowed.iter().any(|path| path == "stray.bin") {
+        return Err(io::Error::other("typed lint report omitted stray.bin").into());
+    }
+
+    let failing_toon = Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("toon")
+        .arg("--db")
+        .arg(&database)
+        .args(lint_arguments)
+        .output()?;
+    if failing_toon.status.code() != Some(1)
+        || !failing_toon.stderr.is_empty()
+        || failing_toon.stdout == failing_json.stdout
+    {
+        return Err(
+            io::Error::other("failing TOON lint violated format or stream ownership").into(),
+        );
+    }
+    let failing_toon_value: Value =
+        toon_format::decode_default(&String::from_utf8(failing_toon.stdout)?)?;
+    if failing_toon_value != failing_json_value {
+        return Err(io::Error::other("failing JSON and TOON lint facts diverged").into());
+    }
+    let cli_after = mcp_database_snapshot(&database)?;
+    if cli_after != before {
+        return Err(io::Error::other(format!(
+            "CLI lint mutated SQLite state: authoritative={:?} usage={:?} generation={}=>{} purpose_revision={}=>{} publication={}=>{}",
+            changed_snapshot_keys(&before.authoritative, &cli_after.authoritative),
+            changed_snapshot_keys(&before.usage, &cli_after.usage),
+            before.generation,
+            cli_after.generation,
+            before.purpose_revision,
+            cli_after.purpose_revision,
+            before.publication_state,
+            cli_after.publication_state
+        ))
+        .into());
+    }
+
+    let mut mcp = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_before = mcp_database_snapshot(&database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let mcp_lint: Value = toon_format::decode_default(&mcp.call_tool(
+            "atlas_lint",
+            &serde_json::json!({
+                "project_path": repo.to_string_lossy(),
+                "report_untracked": true,
+                "strict_untracked": true,
+                "purpose_level": "low"
+            }),
+        )?)?;
+        if json_at(&mcp_lint, &["lint"])? != json_at(&failing_json_value, &["lint"])? {
+            return Err(io::Error::other("CLI and MCP typed lint reports diverged").into());
+        }
+        if mcp_database_snapshot(&database)? != mcp_before {
+            return Err(io::Error::other("MCP lint mutated SQLite state").into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || mcp.shutdown())?;
+
+    let missing_root = temp.path().join(MISSING_INDEX_DIR_NAME);
+    let missing_atlas = missing_root.join(ATLAS_DIR_NAME);
+    let missing_database = missing_atlas.join("projectatlas.db");
+    fs::create_dir_all(&missing_atlas)?;
+    fs::write(
+        missing_atlas.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    fs::write(
+        missing_atlas.join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n",
+    )?;
+    fs::write(missing_root.join(".gitignore"), ".projectatlas/\n")?;
+    let missing_cli = Command::new(&executable)
+        .current_dir(&missing_root)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&missing_database)
+        .args(["lint", "--purpose-level", "low"])
+        .output()?;
+    if !missing_cli.status.success() || !missing_cli.stderr.is_empty() {
+        return Err(
+            io::Error::other("missing-index CLI lint did not return a clean report").into(),
+        );
+    }
+    let missing_cli: Value = serde_json::from_slice(&missing_cli.stdout)?;
+    if !json_at(&missing_cli, &["lint", "index"])?.is_null() || missing_database.exists() {
+        return Err(io::Error::other("missing-index CLI lint created or reported an index").into());
+    }
+
+    Connection::open(&database)?.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    let wrong_root = temp.path().join(WRONG_PROJECT_OWNER_DIR_NAME);
+    let wrong_atlas = wrong_root.join(ATLAS_DIR_NAME);
+    let wrong_database = wrong_atlas.join("projectatlas.db");
+    fs::create_dir_all(&wrong_atlas)?;
+    fs::write(
+        wrong_atlas.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    fs::write(
+        wrong_atlas.join("projectatlas-nonsource-files.toon"),
+        "nonsource_files[]:\n",
+    )?;
+    fs::write(wrong_root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::copy(&database, &wrong_database)?;
+    let wrong_before = mcp_database_snapshot(&wrong_database)?;
+    let wrong_cli = Command::new(&executable)
+        .current_dir(&wrong_root)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&wrong_database)
+        .args(["lint", "--purpose-level", "low"])
+        .output()?;
+    if wrong_cli.status.success()
+        || !String::from_utf8_lossy(&wrong_cli.stderr).contains("project_mismatch")
+        || mcp_database_snapshot(&wrong_database)? != wrong_before
+    {
+        return Err(
+            io::Error::other("wrong-root CLI lint lost identity or no-mutation behavior").into(),
+        );
+    }
+
+    let mut routing = McpContractSession::spawn(&executable, &repo, &database)?;
+    let routing_result = (|| -> Result<(), Box<dyn Error>> {
+        let missing_mcp: Value = toon_format::decode_default(&routing.call_tool(
+            "atlas_lint",
+            &serde_json::json!({
+                "project_path": missing_root,
+                "purpose_level": "low"
+            }),
+        )?)?;
+        if json_at(&missing_mcp, &["lint"])? != json_at(&missing_cli, &["lint"])?
+            || missing_database.exists()
+        {
+            return Err(io::Error::other(
+                "missing-index CLI/MCP lint facts diverged or created an index",
+            )
+            .into());
+        }
+        let wrong_mcp = routing.call_tool(
+            "atlas_lint",
+            &serde_json::json!({
+                "project_path": wrong_root,
+                "purpose_level": "low"
+            }),
+        )?;
+        if !wrong_mcp.contains("project_mismatch")
+            || mcp_database_snapshot(&wrong_database)? != wrong_before
+        {
+            return Err(io::Error::other(
+                "wrong-root MCP lint lost identity or no-mutation behavior",
+            )
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(routing_result, || routing.shutdown())?;
+
+    let stale_before = mcp_database_snapshot(&database)?;
+    fs::write(source.join("lib.rs"), "pub fn lint_contract_changed() {}\n")?;
+    let stale = Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&database)
+        .args(["lint", "--purpose-level", "low"])
+        .output()?;
+    if stale.status.success()
+        || !stale.stdout.is_empty()
+        || !String::from_utf8_lossy(&stale.stderr).contains("refresh_required")
+    {
+        return Err(
+            io::Error::other("stale lint did not fail closed with typed refresh guidance").into(),
+        );
+    }
+    if mcp_database_snapshot(&database)? != stale_before {
+        return Err(io::Error::other("stale lint repaired or mutated SQLite state").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -29608,12 +30155,12 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
     if fresh_strict.status.success() {
         return Err(io::Error::other("fresh strict purpose lint unexpectedly passed").into());
     }
-    let fresh_strict_stderr = String::from_utf8(fresh_strict.stderr)?;
-    if !fresh_strict_stderr.contains("[missing-purpose]")
-        && !fresh_strict_stderr.contains("[suggested-purpose-review]")
+    let fresh_strict_stdout = String::from_utf8(fresh_strict.stdout)?;
+    if !fresh_strict_stdout.contains("[missing-purpose]")
+        && !fresh_strict_stdout.contains("[suggested-purpose-review]")
     {
         return Err(io::Error::other(format!(
-            "fresh strict purpose lint did not report missing or suggested purposes:\n{fresh_strict_stderr}"
+            "fresh strict purpose lint did not report missing or suggested purposes:\n{fresh_strict_stdout}"
         ))
         .into());
     }
@@ -29655,15 +30202,15 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         ))
         .into());
     }
-    let low_stderr = String::from_utf8(low.stderr)?;
+    let low_stdout = String::from_utf8(low.stdout)?;
     for unexpected in [
         "purpose-agent-review-required",
         "src/detail.rs",
         "assets/logo.svg",
     ] {
-        if low_stderr.contains(unexpected) {
+        if low_stdout.contains(unexpected) {
             return Err(io::Error::other(format!(
-                "low purpose lint should not block on advisory curation work `{unexpected}`:\n{low_stderr}"
+                "low purpose lint should not block on advisory curation work `{unexpected}`:\n{low_stdout}"
             ))
             .into());
         }
@@ -29680,16 +30227,16 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
     if medium.status.success() {
         return Err(io::Error::other("medium purpose lint unexpectedly passed").into());
     }
-    let medium_stderr = String::from_utf8(medium.stderr)?;
-    if !medium_stderr.contains("[purpose-agent-review-required] src/detail.rs:") {
+    let medium_stdout = String::from_utf8(medium.stdout)?;
+    if !medium_stdout.contains("[purpose-agent-review-required] src/detail.rs:") {
         return Err(io::Error::other(format!(
-            "medium purpose lint missed source file:\n{medium_stderr}"
+            "medium purpose lint missed source file:\n{medium_stdout}"
         ))
         .into());
     }
-    if medium_stderr.contains("assets/logo.svg") {
+    if medium_stdout.contains("assets/logo.svg") {
         return Err(io::Error::other(format!(
-            "medium purpose lint included asset file:\n{medium_stderr}"
+            "medium purpose lint included asset file:\n{medium_stdout}"
         ))
         .into());
     }
@@ -29705,10 +30252,10 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
     if strict.status.success() {
         return Err(io::Error::other("strict purpose lint unexpectedly passed").into());
     }
-    let strict_stderr = String::from_utf8(strict.stderr)?;
-    if !strict_stderr.contains("[purpose-agent-review-required] assets/logo.svg:") {
+    let strict_stdout = String::from_utf8(strict.stdout)?;
+    if !strict_stdout.contains("[purpose-agent-review-required] assets/logo.svg:") {
         return Err(io::Error::other(format!(
-            "strict purpose lint missed asset file:\n{strict_stderr}"
+            "strict purpose lint missed asset file:\n{strict_stdout}"
         ))
         .into());
     }
@@ -29745,6 +30292,15 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         repo.join(SRC_DIR_NAME).join("detail.rs"),
         "// Purpose: Rust implementation detail for purpose lint strictness tests.\npub fn detail_changed() {}\n",
     )?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .args(["watch", "--once"])
+        .assert()
+        .success();
     let changed_low = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--config")
@@ -29760,10 +30316,10 @@ fn lint_purpose_levels_require_agent_review_at_configured_scope() -> Result<(), 
         ))
         .into());
     }
-    let changed_low_stderr = String::from_utf8(changed_low.stderr)?;
-    if changed_low_stderr.contains("[stale-purpose]") {
+    let changed_low_stdout = String::from_utf8(changed_low.stdout)?;
+    if changed_low_stdout.contains("[stale-purpose]") {
         return Err(io::Error::other(format!(
-            "ordinary source changes produced stale-purpose findings:\n{changed_low_stderr}"
+            "ordinary source changes produced stale-purpose findings:\n{changed_low_stdout}"
         ))
         .into());
     }

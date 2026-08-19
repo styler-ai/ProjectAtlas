@@ -5,7 +5,7 @@ use crate::sqlite_profile::{
     open_read_only_connection, verify_current_read_profile,
 };
 use crate::{DbError, DbResult};
-use projectatlas_core::graph::ProjectInstanceId;
+use projectatlas_core::graph::{GraphLimitKind, ProjectInstanceId};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use projectatlas_core::normalize_native_path_display;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 18;
+pub(crate) const SCHEMA_VERSION: i64 = 19;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
@@ -36,6 +36,8 @@ const LEXICAL_SCHEMA_VERSION: i64 = 15;
 const COMPACT_GRAPH_SCHEMA_VERSION: i64 = 16;
 /// First schema with classified documentation graph storage.
 const CLASSIFIED_GRAPH_SCHEMA_VERSION: i64 = 17;
+/// First schema with local worktree registration and aggregate telemetry control state.
+const WORKTREE_CONTROL_SCHEMA_VERSION: i64 = 18;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -138,8 +140,13 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         from: CLASSIFIED_GRAPH_SCHEMA_VERSION,
-        to: SCHEMA_VERSION,
+        to: WORKTREE_CONTROL_SCHEMA_VERSION,
         apply: migrate_17_to_18,
+    },
+    Migration {
+        from: WORKTREE_CONTROL_SCHEMA_VERSION,
+        to: SCHEMA_VERSION,
+        apply: migrate_18_to_19,
     },
 ];
 
@@ -275,6 +282,8 @@ static COVERAGE_DISCOVERY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> 
 static COMPACT_GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 /// Immutable expected schema-17 contract before worktree control storage.
 static CLASSIFIED_GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Immutable expected schema-18 contract before complete graph-limit admission.
+static WORKTREE_CONTROL_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -283,6 +292,10 @@ const RELEASED_SCHEMA_EIGHT_SQL: &str = include_str!("../tests/fixtures/released
 #[cfg(test)]
 const EVOLVED_RELEASED_SCHEMA_EIGHT_SQL: &str =
     include_str!("../tests/fixtures/released-schema-8-evolved.sql");
+/// BLAKE3 of the complete schema-18 contract captured before schema 19 existed.
+#[cfg(test)]
+const RELEASED_SCHEMA_EIGHTEEN_CONTRACT_BLAKE3: &str =
+    "5fbdebf57bae7e3320d000e6c419390380f266d6a426cf0ea236a2728e057673";
 
 /// Create the historical released schema without consulting current DDL.
 #[cfg(test)]
@@ -736,7 +749,7 @@ const GRAPH_SCHEMA_SQL: &str = "
         omitted INTEGER NOT NULL CHECK(typeof(omitted) = 'integer' AND omitted >= 0),
         reason TEXT CHECK(reason IS NULL OR (typeof(reason) = 'text' AND length(reason) > 0)),
         reached_limit TEXT
-            CHECK(reached_limit IS NULL OR reached_limit IN ('rows', 'occurrences', 'depth', 'output_bytes')),
+            CHECK(reached_limit IS NULL OR reached_limit IN (__GRAPH_LIMIT_KINDS__)),
         FOREIGN KEY(project_instance_id)
             REFERENCES project_identity(project_instance_id) ON DELETE RESTRICT,
         CHECK(
@@ -796,6 +809,27 @@ const GRAPH_SCHEMA_SQL: &str = "
     CREATE INDEX idx_graph_coverage_relation_state
         ON graph_coverage(relation_scope, relation_kind, state, id);
 ";
+
+/// Exact reached-limit domain emitted by schemas 10 through 18.
+const HISTORICAL_GRAPH_LIMIT_KINDS_SQL: &str = "'rows', 'occurrences', 'depth', 'output_bytes'";
+
+/// Closed graph DDL shapes retained for supported historical contracts.
+#[derive(Clone, Copy)]
+enum GraphSchemaShape {
+    /// Compact graph storage without classified-document additions.
+    Compact,
+    /// Classified-document storage with the historical reached-limit domain.
+    ClassifiedDocuments,
+    /// Current classified-document storage with every closed reached-limit kind.
+    Current,
+}
+
+impl GraphSchemaShape {
+    /// Return whether this shape includes classified-document graph contracts.
+    const fn includes_classified_documents(self) -> bool {
+        matches!(self, Self::ClassifiedDocuments | Self::Current)
+    }
+}
 
 /// Persist one closed content role for every currently admitted file node.
 const FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL: &str = "
@@ -914,27 +948,37 @@ const WORKTREE_CONTROL_SCHEMA_SQL: &str = "
         ON usage_instance_worktree_origins(registration_id, instance_row_id);
 ";
 
-/// Produce the historical or current graph constraints from one DDL authority.
-fn graph_schema_sql(include_classified_documents: bool) -> String {
-    let heading = if include_classified_documents {
+/// Produce one exact historical or current graph contract from one DDL authority.
+fn graph_schema_sql(shape: GraphSchemaShape) -> String {
+    let heading = if shape.includes_classified_documents() {
         ", 'heading'"
     } else {
         ""
     };
-    let documents = if include_classified_documents {
+    let documents = if shape.includes_classified_documents() {
         ", 'documents'"
     } else {
         ""
     };
-    let reason_column = if include_classified_documents {
+    let reason_column = if shape.includes_classified_documents() {
         "document_unresolved_reason TEXT CHECK(document_unresolved_reason IS NULL OR document_unresolved_reason IN ('missing', 'ignored', 'outside_root', 'case_conflict', 'unsupported', 'no_static_target')),"
     } else {
         ""
     };
-    let reason_constraint = if include_classified_documents {
+    let reason_constraint = if shape.includes_classified_documents() {
         ", CHECK(document_unresolved_reason IS NULL OR (relation_scope = 'extended' AND relation_kind = 'documents' AND resolution_status = 'unresolved'))"
     } else {
         ""
+    };
+    let reached_limit_kinds = match shape {
+        GraphSchemaShape::Compact | GraphSchemaShape::ClassifiedDocuments => {
+            HISTORICAL_GRAPH_LIMIT_KINDS_SQL.to_string()
+        }
+        GraphSchemaShape::Current => GraphLimitKind::ALL
+            .iter()
+            .map(|kind| format!("'{}'", kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(", "),
     };
     GRAPH_SCHEMA_SQL
         .replace("__DOCUMENT_HEADING_SYMBOL_KIND__", heading)
@@ -944,14 +988,12 @@ fn graph_schema_sql(include_classified_documents: bool) -> String {
             "__DOCUMENT_UNRESOLVED_REASON_CONSTRAINT__",
             reason_constraint,
         )
+        .replace("__GRAPH_LIMIT_KINDS__", &reached_limit_kinds)
 }
 
 /// Create one historical or current normalized graph schema.
-fn create_graph_schema(
-    connection: &Connection,
-    include_classified_documents: bool,
-) -> DbResult<()> {
-    let sql = graph_schema_sql(include_classified_documents);
+fn create_graph_schema(connection: &Connection, shape: GraphSchemaShape) -> DbResult<()> {
+    let sql = graph_schema_sql(shape);
     connection.execute_batch(&sql)?;
     Ok(())
 }
@@ -1680,7 +1722,7 @@ fn create_fresh(connection: &Connection, expected_root: Option<&str>) -> DbResul
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     add_symbol_source_selector_storage(connection)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    create_graph_schema(connection, true)?;
+    create_graph_schema(connection, GraphSchemaShape::Current)?;
     create_coverage_discovery_schema(connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
@@ -1726,7 +1768,7 @@ fn migrate_8_to_9(connection: &Connection) -> DbResult<()> {
 
 /// Add normalized graph storage and invalidate predecessor publication trust.
 fn migrate_9_to_10(connection: &Connection) -> DbResult<()> {
-    create_graph_schema(connection, false)?;
+    create_graph_schema(connection, GraphSchemaShape::Compact)?;
     if read_metadata(connection, PROJECT_ROOT_KEY)?.is_some() {
         crate::project_identity::ensure_project_identity(connection)?;
     }
@@ -1809,6 +1851,11 @@ fn migrate_17_to_18(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Admit every closed graph limit while rebuilding only disposable graph state.
+fn migrate_18_to_19(connection: &Connection) -> DbResult<()> {
+    recreate_disposable_graph_projection_with_shape(connection, GraphSchemaShape::Current)
+}
+
 /// Add selector columns by rebuilding the derived symbol table in the caller transaction.
 fn add_symbol_source_selector_storage(connection: &Connection) -> DbResult<()> {
     connection.execute_batch(SYMBOL_SOURCE_SELECTOR_SCHEMA_SQL)?;
@@ -1819,6 +1866,19 @@ fn add_symbol_source_selector_storage(connection: &Connection) -> DbResult<()> {
 pub(crate) fn recreate_disposable_graph_projection(
     connection: &Connection,
     include_classified_documents: bool,
+) -> DbResult<()> {
+    let shape = if include_classified_documents {
+        GraphSchemaShape::ClassifiedDocuments
+    } else {
+        GraphSchemaShape::Compact
+    };
+    recreate_disposable_graph_projection_with_shape(connection, shape)
+}
+
+/// Rebuild disposable normalized graph state under one exact schema contract.
+fn recreate_disposable_graph_projection_with_shape(
+    connection: &Connection,
+    shape: GraphSchemaShape,
 ) -> DbResult<()> {
     let project_identity = connection
         .query_row(
@@ -1839,7 +1899,7 @@ pub(crate) fn recreate_disposable_graph_projection(
         DROP TABLE project_identity;
         ",
     )?;
-    create_graph_schema(connection, include_classified_documents)?;
+    create_graph_schema(connection, shape)?;
     if let Some(project_identity) = project_identity {
         connection.execute(
             "INSERT INTO project_identity(singleton, project_instance_id, active_generation)
@@ -1912,6 +1972,7 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
                 }
                 COMPACT_GRAPH_SCHEMA_VERSION => compact_graph_predecessor_schema_contract()?,
                 CLASSIFIED_GRAPH_SCHEMA_VERSION => classified_graph_predecessor_schema_contract()?,
+                WORKTREE_CONTROL_SCHEMA_VERSION => worktree_control_predecessor_schema_contract()?,
                 found => {
                     return Err(DbError::SchemaVersion {
                         found,
@@ -2217,7 +2278,7 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     add_symbol_source_selector_storage(&connection)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    create_graph_schema(&connection, true)?;
+    create_graph_schema(&connection, GraphSchemaShape::Current)?;
     create_coverage_discovery_schema(&connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
@@ -2238,7 +2299,7 @@ fn graph_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(LEGACY_USAGE_SCHEMA_SQL)?;
-    create_graph_schema(&connection, false)?;
+    create_graph_schema(&connection, GraphSchemaShape::Compact)?;
     let contract = read_schema_contract(&connection)?;
     Ok(GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
@@ -2250,7 +2311,7 @@ fn telemetry_predecessor_schema_contract() -> DbResult<&'static SchemaContract> 
     }
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
-    create_graph_schema(&connection, false)?;
+    create_graph_schema(&connection, GraphSchemaShape::Compact)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
@@ -2264,7 +2325,7 @@ fn resolution_predecessor_schema_contract() -> DbResult<&'static SchemaContract>
     }
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
-    create_graph_schema(&connection, false)?;
+    create_graph_schema(&connection, GraphSchemaShape::Compact)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -2280,7 +2341,7 @@ fn parser_provenance_predecessor_schema_contract() -> DbResult<&'static SchemaCo
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    create_graph_schema(&connection, false)?;
+    create_graph_schema(&connection, GraphSchemaShape::Compact)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
     connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -2296,7 +2357,7 @@ fn coverage_discovery_predecessor_schema_contract() -> DbResult<&'static SchemaC
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    create_graph_schema(&connection, false)?;
+    create_graph_schema(&connection, GraphSchemaShape::Compact)?;
     create_coverage_discovery_schema(&connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
@@ -2313,7 +2374,7 @@ fn compact_graph_predecessor_schema_contract() -> DbResult<&'static SchemaContra
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    create_graph_schema(&connection, false)?;
+    create_graph_schema(&connection, GraphSchemaShape::Compact)?;
     create_coverage_discovery_schema(&connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
@@ -2333,7 +2394,7 @@ fn classified_graph_predecessor_schema_contract() -> DbResult<&'static SchemaCon
     connection.execute_batch(BASE_SCHEMA_SQL)?;
     add_symbol_source_selector_storage(&connection)?;
     connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
-    create_graph_schema(&connection, true)?;
+    create_graph_schema(&connection, GraphSchemaShape::ClassifiedDocuments)?;
     create_coverage_discovery_schema(&connection)?;
     connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
     connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
@@ -2343,6 +2404,28 @@ fn classified_graph_predecessor_schema_contract() -> DbResult<&'static SchemaCon
     connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(CLASSIFIED_GRAPH_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the immutable schema-18 contract before complete graph-limit admission.
+fn worktree_control_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = WORKTREE_CONTROL_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    add_symbol_source_selector_storage(&connection)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    create_graph_schema(&connection, GraphSchemaShape::ClassifiedDocuments)?;
+    create_coverage_discovery_schema(&connection)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
+    connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(WORKTREE_CONTROL_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-8/9 contract from the unchanged base DDL.
@@ -2740,6 +2823,7 @@ pub(crate) fn recreate_pre_selector_symbol_storage_for_test(
 mod tests {
     use super::*;
     use crate::{AtlasStore, DbError};
+    use projectatlas_core::graph::{CoverageScope, RepositoryNodePath};
     use projectatlas_core::telemetry::{
         TokenOverview, TokenTrendPeriod, TokenTrendWindow, UsageEvent, usage_from_estimates,
     };
@@ -4386,6 +4470,7 @@ mod tests {
              ) VALUES(?1, ?2, 7, 700, 70)",
             params![project_identity.as_slice(), dimension_id],
         )?;
+        recreate_disposable_graph_projection(&store.connection, true)?;
         store.connection.execute_batch(
             "DROP TABLE usage_instance_worktree_origins;
              DROP TABLE worktree_usage_aggregates;
@@ -4449,6 +4534,263 @@ mod tests {
     }
 
     #[test]
+    fn schema_eighteen_upgrade_is_atomic_and_preserves_only_authored_graph_state()
+    -> Result<(), Box<dyn Error>> {
+        let predecessor_contract = worktree_control_predecessor_schema_contract()?;
+        let predecessor_digest =
+            blake3::hash(format!("{predecessor_contract:?}").as_bytes()).to_hex();
+        if predecessor_digest.as_str() != RELEASED_SCHEMA_EIGHTEEN_CONTRACT_BLAKE3 {
+            return Err(io::Error::other(format!(
+                "captured schema-18 contract drifted: {predecessor_digest}"
+            ))
+            .into());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-18 fixture identity is missing"))?;
+        store.connection.execute(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'Own the library.', 'agent', 'approved', 'schema-test'
+               FROM nodes WHERE path = 'src/lib.rs'",
+            [],
+        )?;
+        recreate_disposable_graph_projection(&store.connection, true)?;
+        store.connection.execute(
+            "UPDATE project_identity SET active_generation = 7 WHERE singleton = 1",
+            [],
+        )?;
+        for limit in ["rows", "occurrences", "depth", "output_bytes"] {
+            store.connection.execute(
+                "INSERT INTO graph_coverage(
+                    project_instance_id, scope_kind, scope_path, state,
+                    total, covered, omitted, reason, reached_limit
+                 ) VALUES(?1, 'path', ?2, 'partial', 2, 1, 1, 'graph limit', ?3)",
+                params![
+                    &project.as_bytes()[..],
+                    format!("historical/{limit}.rs"),
+                    limit,
+                ],
+            )?;
+        }
+        if store
+            .connection
+            .execute(
+                "INSERT INTO graph_coverage(
+                    project_instance_id, scope_kind, scope_path, state,
+                    total, covered, omitted, reason, reached_limit
+                 ) VALUES(?1, 'path', 'historical/nodes.rs', 'partial',
+                          2, 1, 1, 'graph limit', 'nodes')",
+                [&project.as_bytes()[..]],
+            )
+            .is_ok()
+        {
+            return Err(io::Error::other("schema-18 admitted a schema-19 graph limit").into());
+        }
+        for (key, value) in [
+            (INDEX_PUBLICATION_STATE_KEY, "complete"),
+            (INDEX_PUBLICATION_FINGERPRINT_KEY, "schema-18-fixture"),
+            (INDEX_PUBLICATION_GENERATION_KEY, "7"),
+            (SCHEMA_VERSION_KEY, "18"),
+        ] {
+            set_metadata(&store.connection, key, value)?;
+        }
+        if read_schema_contract(&store.connection)?
+            != *worktree_control_predecessor_schema_contract()?
+        {
+            return Err(io::Error::other("schema-18 fixture shape drifted").into());
+        }
+        drop(store);
+
+        let expected_root = normalize_native_path_display(&root);
+        let (before, _) = preflight(&database, Some(&expected_root))?;
+        if before.state != SchemaState::UpgradeRequired
+            || before.schema_version != Some(WORKTREE_CONTROL_SCHEMA_VERSION)
+        {
+            return Err(io::Error::other("exact schema-18 fixture was not admitted").into());
+        }
+
+        let connection = Connection::open(&database)?;
+        configure_writable(&connection)?;
+        connection.execute_batch(&format!(
+            "CREATE TEMP TRIGGER abort_schema_nineteen
+             BEFORE UPDATE OF value ON metadata
+             WHEN OLD.key = 'schema_version' AND NEW.value = '{SCHEMA_VERSION}'
+             BEGIN SELECT RAISE(ABORT, 'injected schema-19 failure'); END;"
+        ))?;
+        let failed = initialize(&connection, Some(&expected_root));
+        if !matches!(failed, Err(DbError::Sqlite(_))) {
+            return Err(io::Error::other(format!(
+                "schema-19 injected failure returned the wrong result: {failed:?}"
+            ))
+            .into());
+        }
+        let rolled_back = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT project_instance_id FROM project_identity WHERE singleton = 1),
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT COUNT(*) FROM purposes
+                  WHERE purpose = 'Own the library.' AND source = 'agent'
+                    AND status = 'approved' AND updated_by = 'schema-test'),
+                (SELECT COUNT(*) FROM graph_coverage
+                  WHERE reached_limit IN ('rows', 'occurrences', 'depth', 'output_bytes')
+                    AND state = 'partial'),
+                (SELECT COUNT(*) FROM metadata WHERE key IN (
+                    'index_publication_state',
+                    'index_publication_fingerprint',
+                    'index_publication_generation'
+                ))",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        if rolled_back
+            != (
+                WORKTREE_CONTROL_SCHEMA_VERSION.to_string(),
+                project.as_bytes().to_vec(),
+                7,
+                1,
+                4,
+                3,
+            )
+            || read_schema_contract(&connection)?
+                != *worktree_control_predecessor_schema_contract()?
+        {
+            return Err(io::Error::other(format!(
+                "schema-19 failure exposed partial migration state: {rolled_back:?}"
+            ))
+            .into());
+        }
+        drop(connection);
+
+        let mut migrated = AtlasStore::open_for_project(&database, &root)?;
+        let migrated_state = migrated.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT project_instance_id FROM project_identity WHERE singleton = 1),
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT COUNT(*) FROM purposes
+                  WHERE purpose = 'Own the library.' AND source = 'agent'
+                    AND status = 'approved' AND updated_by = 'schema-test'),
+                (SELECT COUNT(*) FROM graph_coverage),
+                (SELECT COUNT(*) FROM metadata WHERE key IN (
+                    'index_publication_state',
+                    'index_publication_fingerprint',
+                    'index_publication_generation'
+                ))",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        if migrated_state
+            != (
+                SCHEMA_VERSION.to_string(),
+                project.as_bytes().to_vec(),
+                0,
+                1,
+                0,
+                0,
+            )
+            || read_schema_contract(&migrated.connection)? != *schema_contract()?
+        {
+            return Err(io::Error::other(format!(
+                "schema-19 migration changed its authority boundary: {migrated_state:?}"
+            ))
+            .into());
+        }
+
+        let transaction = migrated.connection.transaction()?;
+        transaction.execute(
+            "UPDATE project_identity SET active_generation = 1 WHERE singleton = 1",
+            [],
+        )?;
+        for kind in GraphLimitKind::ALL {
+            transaction.execute(
+                "INSERT INTO graph_coverage(
+                    project_instance_id, scope_kind, scope_path, state,
+                    total, covered, omitted, reason, reached_limit
+                 ) VALUES(?1, 'path', ?2, 'partial', 2, 1, 1, 'graph limit', ?3)",
+                params![
+                    &project.as_bytes()[..],
+                    format!("limits/{}.rs", kind.as_str()),
+                    kind.as_str(),
+                ],
+            )?;
+        }
+        set_metadata(&transaction, INDEX_PUBLICATION_STATE_KEY, "complete")?;
+        set_metadata(
+            &transaction,
+            INDEX_PUBLICATION_FINGERPRINT_KEY,
+            "schema-19-limit-round-trip",
+        )?;
+        set_metadata(&transaction, INDEX_PUBLICATION_GENERATION_KEY, "1")?;
+        transaction.commit()?;
+
+        for kind in GraphLimitKind::ALL {
+            let coverage = migrated.repository_graph_coverage(
+                project,
+                &CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(&format!(
+                        "limits/{}.rs",
+                        kind.as_str()
+                    )))?,
+                },
+                1,
+            )?;
+            if coverage.rows.len() != 1 || coverage.rows[0].reached_limit() != Some(kind) {
+                return Err(io::Error::other(format!(
+                    "migrated schema did not round-trip graph limit {}",
+                    kind.as_str()
+                ))
+                .into());
+            }
+        }
+        drop(migrated);
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        if read_schema_contract(&reopened.connection)? != *schema_contract()? {
+            return Err(io::Error::other("reopened schema-19 contract drifted").into());
+        }
+        let last = GraphLimitKind::OutputBytes;
+        let coverage = reopened.repository_graph_coverage(
+            project,
+            &CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("limits/output_bytes.rs"))?,
+            },
+            1,
+        )?;
+        if coverage.rows.len() != 1 || coverage.rows[0].reached_limit() != Some(last) {
+            return Err(io::Error::other("reopen changed migrated graph-limit rows").into());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn resolution_schema_migrates_parser_provenance_without_weakening_existing_facts()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -4456,7 +4798,7 @@ mod tests {
         let connection = Connection::open(&database)?;
         configure_writable(&connection)?;
         connection.execute_batch(BASE_SCHEMA_SQL)?;
-        create_graph_schema(&connection, false)?;
+        create_graph_schema(&connection, GraphSchemaShape::Compact)?;
         connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
         connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
         connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
@@ -4562,7 +4904,7 @@ mod tests {
         let connection = Connection::open(&db_path)?;
         configure_writable(&connection)?;
         connection.execute_batch(BASE_SCHEMA_SQL)?;
-        create_graph_schema(&connection, false)?;
+        create_graph_schema(&connection, GraphSchemaShape::Compact)?;
         connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
         connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
         crate::telemetry::initialize_empty_storage(&connection)?;
