@@ -320,6 +320,9 @@ struct SourceObservationEntry {
     #[cfg(test)]
     /// Deterministic event ingress used only by owning tests.
     test_sender: SyncSender<Event>,
+    #[cfg(test)]
+    /// One event injected after an acceptance drain for owning race tests.
+    acceptance_event: Mutex<Option<Event>>,
 }
 
 impl fmt::Debug for SourceObservationEntry {
@@ -374,6 +377,8 @@ impl SourceObservationEntry {
             state: Mutex::new(ObservationState::default()),
             #[cfg(test)]
             test_sender,
+            #[cfg(test)]
+            acceptance_event: Mutex::new(None),
         })
     }
 
@@ -735,12 +740,13 @@ impl SourceObservationRegistry {
                     binding.root.display()
                 ))
             })?;
-        entry.ingress_sequence.fetch_add(1, Ordering::AcqRel);
         entry.test_sender.try_send(event).map_err(|source| {
             CliError::InvalidInput(format!(
                 "deterministic source observer event injection failed: {source}"
             ))
-        })
+        })?;
+        entry.ingress_sequence.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
     /// Reuse or admit the bounded observer for an exact source binding.
@@ -947,29 +953,52 @@ impl SourceObservationRegistry {
         epoch: &VerifiedSourceEpoch,
         control: &IndexWorkControl,
     ) -> Result<bool, CliError> {
-        control.check(IndexWorkStage::Publication)?;
-        if entry.continuity_lost.load(Ordering::Acquire) {
-            return Ok(false);
+        for _attempt in 0..VERIFIED_READ_ATTEMPTS {
+            control.check(IndexWorkStage::Publication)?;
+            if entry.continuity_lost.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            let plan = ScanRuntimePlan::for_path_controlled(
+                entry.binding.config.as_deref(),
+                &entry.binding.root,
+                None,
+                control,
+            )
+            .map_err(|source| publication_input_error(&entry.binding.root, source))?;
+            if entry.changed_since_exact_verification(&plan.scan_options)?
+                || plan.publication_contract_fingerprint() != epoch.contract_fingerprint
+                || source_policy_witness(&plan, control)? != epoch.policy_witness
+            {
+                return Ok(false);
+            }
+            #[cfg(test)]
+            if let Some(event) = entry
+                .acceptance_event
+                .lock()
+                .map_err(|_poisoned| lock_error(&entry.binding.root, "acceptance test event"))?
+                .take()
+            {
+                entry.test_sender.try_send(event).map_err(|source| {
+                    CliError::InvalidInput(format!(
+                        "deterministic acceptance event injection failed: {source}"
+                    ))
+                })?;
+                entry.ingress_sequence.fetch_add(1, Ordering::AcqRel);
+            }
+            let Some(current) = entry.current_epoch()? else {
+                return Ok(false);
+            };
+            if current.stamp != epoch.stamp
+                || current.contract_fingerprint != epoch.contract_fingerprint
+                || current.policy_witness != epoch.policy_witness
+            {
+                return Ok(false);
+            }
+            if current.ingress_sequence == entry.ingress_sequence.load(Ordering::Acquire) {
+                return Ok(true);
+            }
         }
-        let plan = ScanRuntimePlan::for_path_controlled(
-            entry.binding.config.as_deref(),
-            &entry.binding.root,
-            None,
-            control,
-        )
-        .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-        if entry.changed_since_exact_verification(&plan.scan_options)?
-            || plan.publication_contract_fingerprint() != epoch.contract_fingerprint
-            || source_policy_witness(&plan, control)? != epoch.policy_witness
-        {
-            return Ok(false);
-        }
-        Ok(entry.current_epoch()?.is_some_and(|current| {
-            current.stamp == epoch.stamp
-                && current.contract_fingerprint == epoch.contract_fingerprint
-                && current.policy_witness == epoch.policy_witness
-                && current.ingress_sequence == entry.ingress_sequence.load(Ordering::Acquire)
-        }))
+        Ok(false)
     }
 
     /// Exact-per-call compatibility path when a native observer cannot be admitted.
@@ -1044,20 +1073,22 @@ fn watcher_callback(
     move |result| match result {
         Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
         Ok(event) => {
-            ingress_sequence.fetch_add(1, Ordering::AcqRel);
-            if event.need_rescan() {
-                continuity_lost.store(true, Ordering::Release);
-            }
+            let needs_rescan = event.need_rescan();
             match sender.try_send(event) {
-                Ok(()) => {}
+                Ok(()) => {
+                    if needs_rescan {
+                        continuity_lost.store(true, Ordering::Release);
+                    }
+                }
                 Err(TrySendError::Full(_event) | TrySendError::Disconnected(_event)) => {
                     continuity_lost.store(true, Ordering::Release);
                 }
             }
+            ingress_sequence.fetch_add(1, Ordering::AcqRel);
         }
         Err(_source) => {
-            ingress_sequence.fetch_add(1, Ordering::AcqRel);
             continuity_lost.store(true, Ordering::Release);
+            ingress_sequence.fetch_add(1, Ordering::AcqRel);
         }
     }
 }
@@ -1537,7 +1568,6 @@ mod tests {
                         path: source.clone(),
                         source: source_error,
                     })?;
-                    entry.ingress_sequence.fetch_add(1, Ordering::AcqRel);
                     entry
                         .test_sender
                         .try_send(
@@ -1548,6 +1578,7 @@ mod tests {
                                 "deterministic observation injection failed: {source_error}"
                             ))
                         })?;
+                    entry.ingress_sequence.fetch_add(1, Ordering::AcqRel);
                 }
                 Ok(hash)
             },
@@ -1695,6 +1726,45 @@ mod tests {
         require(
             matches!(read, Err(CliError::RefreshRequired(_))),
             "observer read did not retain continuity-loss recovery",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_verification_redrains_delayed_observer_events() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let admission = registry.admit_mutation(&database, temp.path(), None, &test_control())?;
+        let MutationSourceWitness::Observed { entry, .. } = &admission.witness else {
+            return Err(
+                std::io::Error::other("mutation did not retain an observed witness").into(),
+            );
+        };
+        *entry
+            .acceptance_event
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("acceptance event lock poisoned"))? =
+            Some(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(database));
+
+        admission.verify()?;
+
+        require(
+            entry
+                .acceptance_event
+                .lock()
+                .map_err(|_poisoned| std::io::Error::other("acceptance event lock poisoned"))?
+                .is_none(),
+            "delayed irrelevant event was not consumed",
+        )?;
+        *entry
+            .acceptance_event
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("acceptance event lock poisoned"))? =
+            Some(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source));
+        require(
+            matches!(admission.verify(), Err(CliError::RefreshRequired(_))),
+            "delayed relevant event was accepted",
         )?;
         Ok(())
     }
