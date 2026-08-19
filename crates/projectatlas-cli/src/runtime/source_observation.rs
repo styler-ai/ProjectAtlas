@@ -118,6 +118,10 @@ enum MutationSourceWitness {
         binding: SourceBinding,
         /// Durable generation and project identity accepted before mutation.
         stamp: VerifiedReadStamp,
+        /// Scanner contract accepted around exact source verification.
+        contract_fingerprint: String,
+        /// Dynamic source-selection policy accepted around exact verification.
+        policy_witness: String,
     },
 }
 
@@ -136,9 +140,18 @@ impl VerifiedMutationAdmission {
             MutationSourceWitness::Observed { entry, epoch } => {
                 Self::verify_observed(entry, epoch, &self.control)
             }
-            MutationSourceWitness::Exact { binding, stamp } => {
-                Self::verify_exact(binding, stamp, &self.control)
-            }
+            MutationSourceWitness::Exact {
+                binding,
+                stamp,
+                contract_fingerprint,
+                policy_witness,
+            } => Self::verify_exact(
+                binding,
+                stamp,
+                contract_fingerprint,
+                policy_witness,
+                &self.control,
+            ),
         }
     }
 
@@ -185,21 +198,36 @@ impl VerifiedMutationAdmission {
     fn verify_exact(
         binding: &SourceBinding,
         stamp: &VerifiedReadStamp,
+        contract_fingerprint: &str,
+        policy_witness: &str,
         control: &IndexWorkControl,
     ) -> Result<(), CliError> {
+        let before = exact_source_policy(binding, control)?;
+        if before.0 != contract_fingerprint || before.1 != policy_witness {
+            return Err(source_changed_during_derivation(&binding.root, "."));
+        }
         let exact = open_exact_saved_source_matches_index_controlled(
             &binding.database,
             &binding.root,
             binding.config.as_deref(),
             control,
         )?;
-        let publication = exact
-            .store
-            .index_publication()?
-            .ok_or_else(|| source_changed_during_derivation(&binding.root, "."))?;
-        let captured = exact.store.captured_project_binding()?;
-        exact.store.finish_index_read_snapshot()?;
-        if publication.generation == stamp.generation
+        let verification = (|| {
+            let publication = exact
+                .store
+                .index_publication()?
+                .ok_or_else(|| source_changed_during_derivation(&binding.root, "."))?;
+            let captured = exact.store.captured_project_binding()?;
+            let after = exact_source_policy(binding, control)?;
+            Ok::<_, CliError>((publication, captured, after))
+        })();
+        let finished = exact.store.finish_index_read_snapshot();
+        let (publication, captured, after) = verification?;
+        finished?;
+        if before == after
+            && after.0 == contract_fingerprint
+            && after.1 == policy_witness
+            && publication.generation == stamp.generation
             && captured.project_instance_id == stamp.project_instance_id
         {
             Ok(())
@@ -635,18 +663,45 @@ impl SourceObservationRegistry {
         binding: SourceBinding,
         control: &IndexWorkControl,
     ) -> Result<VerifiedMutationAdmission, CliError> {
-        let exact = open_exact_fresh_atlas_store_for_project_controlled(
-            &binding.database,
-            &binding.root,
-            binding.config.as_deref(),
-            control,
-        )?;
-        let stamp = self.exact_stamp(&exact.store, &binding.root)?;
-        exact.store.finish_index_read_snapshot()?;
-        Ok(VerifiedMutationAdmission {
-            witness: MutationSourceWitness::Exact { binding, stamp },
-            control: control.clone(),
-        })
+        for _attempt in 0..VERIFIED_READ_ATTEMPTS {
+            control.check(IndexWorkStage::Publication)?;
+            let before = exact_source_policy(&binding, control)?;
+            let exact = open_exact_fresh_atlas_store_for_project_controlled(
+                &binding.database,
+                &binding.root,
+                binding.config.as_deref(),
+                control,
+            )?;
+            let after = match exact_source_policy(&binding, control) {
+                Ok(after) => after,
+                Err(error) => {
+                    drop(exact.store.finish_index_read_snapshot());
+                    return Err(error);
+                }
+            };
+            if before != after {
+                drop(exact.store.finish_index_read_snapshot());
+                continue;
+            }
+            let stamp = match self.exact_stamp(&exact.store, &binding.root) {
+                Ok(stamp) => stamp,
+                Err(error) => {
+                    drop(exact.store.finish_index_read_snapshot());
+                    return Err(error);
+                }
+            };
+            exact.store.finish_index_read_snapshot()?;
+            return Ok(VerifiedMutationAdmission {
+                witness: MutationSourceWitness::Exact {
+                    binding,
+                    stamp,
+                    contract_fingerprint: after.0,
+                    policy_witness: after.1,
+                },
+                control: control.clone(),
+            });
+        }
+        Err(source_changed_during_derivation(&binding.root, "."))
     }
 
     /// Inject one deterministic observer event for owning integration tests.
@@ -1025,6 +1080,23 @@ fn source_policy_witness(
         }
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Capture the scanner contract and dynamic policy for one exact source binding.
+fn exact_source_policy(
+    binding: &SourceBinding,
+    control: &IndexWorkControl,
+) -> Result<(String, String), CliError> {
+    let plan = ScanRuntimePlan::for_path_controlled(
+        binding.config.as_deref(),
+        &binding.root,
+        None,
+        control,
+    )
+    .map_err(|source| publication_input_error(&binding.root, source))?;
+    let contract_fingerprint = plan.publication_contract_fingerprint();
+    let policy_witness = source_policy_witness(&plan, control)?;
+    Ok((contract_fingerprint, policy_witness))
 }
 
 /// Collect every scanner policy input whose state contributes to source selection.
@@ -1523,6 +1595,15 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let (database, source) = indexed_project(temp.path())?;
+        let git = temp.path().join(".git");
+        let git_info = git.join("info");
+        let git_exclude = git_info.join("exclude");
+        fs::create_dir_all(&git_info)?;
+        fs::create_dir_all(git.join("objects"))?;
+        fs::create_dir_all(git.join("refs"))?;
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n")?;
+        fs::write(git.join("config"), "[core]\n")?;
+        fs::write(&git_exclude, "")?;
         let registry = SourceObservationRegistry::default();
         let binding = SourceBinding::new(&database, temp.path(), None)?;
         let filler = registry
@@ -1567,6 +1648,29 @@ mod tests {
                 node.purpose.purpose.as_deref() == Some("Exact fallback purpose")
             }),
             "exact fallback did not commit an unchanged-source mutation",
+        )?;
+
+        let policy_admission = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let before_revision = store.authored_purpose_revision()?;
+        let before_purpose = store
+            .load_node_by_path("source.rs")?
+            .ok_or_else(|| std::io::Error::other("indexed source missing"))?
+            .purpose;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose("source.rs", "Rejected policy purpose", PurposeSource::Agent)?;
+        fs::write(&git_exclude, "never-present-policy-only.tmp\n")?;
+        let verification = policy_admission.verify();
+        transaction.rollback()?;
+        require(
+            matches!(verification, Err(CliError::RefreshRequired(_))),
+            "exact fallback accepted changed source-selection policy",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision
+                && store
+                    .load_node_by_path("source.rs")?
+                    .is_some_and(|node| node.purpose == before_purpose),
+            "policy-drift rejection changed authored purpose",
         )?;
 
         let replaced = registry.admit_mutation(&database, temp.path(), None, &control)?;
