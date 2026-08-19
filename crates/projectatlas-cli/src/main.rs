@@ -5360,9 +5360,11 @@ fn render_file_summary(report: &FileSummaryReport) -> String {
     encode_agent_payload(&json!({ "file_summary": report }))
 }
 
-/// Write text to stdout without using print macros.
+/// Write and flush text to stdout without using print macros.
 fn write_stdout(text: &str) -> Result<(), CliError> {
-    io::stdout().write_all(text.as_bytes())?;
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()?;
     Ok(())
 }
 
