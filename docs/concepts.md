@@ -23,6 +23,16 @@ Generated file-purpose guesses may be stored as suggestions, but they remain `ag
 
 An accepted purpose is durable authored responsibility state. Scans and watch refreshes update `content_summary` and other derived facts without demoting, invalidating, or overwriting that purpose. The legacy `stale` purpose status remains readable for wire/schema compatibility and is normalized to `approved` during migration; normal source, hash, summary, symbol, and graph changes do not create it. An agent or user may still correct an accepted purpose explicitly after finding a mistake, inconsistency, or genuine repurposing.
 
+Purpose set and applied review force exact saved-source admission once for the
+mutation batch, retain the resulting witness across the existing purpose
+transaction, and perform one exact detect-only verification at the final
+precommit linearization point. Conditional work issued for an older generation
+returns stale; a later source, policy, continuity, or cancellation change
+explicitly rolls the batch back. Both paths preserve the purpose rows and
+authored revision, while current explicit and requeued work keep the existing
+atomic and replay behavior. Watcher events remain an additional fail-closed
+signal; an empty asynchronous event queue is not mutation authority.
+
 ## Legacy metadata
 
 Legacy `.purpose` files, source `Purpose:` headers, and `.projectatlas/projectatlas-nonsource-files.toon` remain import/migration sources. They are not the final ProjectAtlas 3 storage model.

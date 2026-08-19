@@ -1781,6 +1781,8 @@ impl RelationOccurrence {
 pub enum CoverageState {
     /// Every supported item was covered.
     Complete,
+    /// Complete document extraction found no supported static targets.
+    NoCandidates,
     /// Some supported items were covered and some were omitted.
     Partial,
     /// Extraction failed for the whole scope.
@@ -1880,8 +1882,16 @@ impl CoverageRecord {
             .ok_or(GraphContractError::InvalidCoverage {
                 reason: "coverage counts overflow",
             })?;
+        if state == CoverageState::NoCandidates
+            && relation != Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents))
+        {
+            return Err(GraphContractError::InvalidCoverage {
+                reason: "no-candidates coverage requires the documents relation",
+            });
+        }
         let valid_counts = match state {
             CoverageState::Complete => omitted == 0,
+            CoverageState::NoCandidates => covered == 0 && omitted == 0,
             CoverageState::Partial => covered > 0 && omitted > 0,
             CoverageState::Failed
             | CoverageState::Ignored
@@ -1894,12 +1904,16 @@ impl CoverageRecord {
                 reason: "coverage state contradicts covered and omitted counts",
             });
         }
-        if state == CoverageState::Complete && (reason.is_some() || reached_limit.is_some()) {
+        if matches!(state, CoverageState::Complete | CoverageState::NoCandidates)
+            && (reason.is_some() || reached_limit.is_some())
+        {
             return Err(GraphContractError::InvalidCoverage {
-                reason: "complete coverage cannot report an omission reason or limit",
+                reason: "trusted coverage cannot report an omission reason or limit",
             });
         }
-        if state != CoverageState::Complete && reason.is_none() {
+        if !matches!(state, CoverageState::Complete | CoverageState::NoCandidates)
+            && reason.is_none()
+        {
             return Err(GraphContractError::InvalidCoverage {
                 reason: "non-complete coverage requires an actionable reason",
             });
@@ -3296,6 +3310,63 @@ mod tests {
             None,
         )?;
         require(complete.total() == 8, "complete coverage total drifted")?;
+
+        let no_candidates = CoverageRecord::new(
+            CoverageScope::Project,
+            Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+            CoverageState::NoCandidates,
+            0,
+            0,
+            IndexGeneration::new(9),
+            None,
+            None,
+        )?;
+        require(
+            no_candidates.total() == 0,
+            "zero-candidate coverage total drifted",
+        )?;
+        require(
+            CoverageRecord::new(
+                CoverageScope::Project,
+                Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                CoverageState::NoCandidates,
+                1,
+                0,
+                IndexGeneration::new(9),
+                None,
+                None,
+            )
+            .is_err(),
+            "zero-candidate coverage accepted a covered row",
+        )?;
+        require(
+            CoverageRecord::new(
+                CoverageScope::Project,
+                Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                CoverageState::NoCandidates,
+                0,
+                0,
+                IndexGeneration::new(9),
+                Some(GraphIdentityText::new("unexpected reason")?),
+                None,
+            )
+            .is_err(),
+            "zero-candidate coverage accepted an omission reason",
+        )?;
+        require(
+            CoverageRecord::new(
+                CoverageScope::Project,
+                None,
+                CoverageState::NoCandidates,
+                0,
+                0,
+                IndexGeneration::new(9),
+                None,
+                None,
+            )
+            .is_err(),
+            "zero-candidate coverage accepted a non-document relation",
+        )?;
 
         let partial = CoverageRecord::new(
             CoverageScope::Path {

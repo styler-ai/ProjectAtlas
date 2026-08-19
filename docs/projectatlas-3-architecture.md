@@ -879,11 +879,56 @@ are added.
 
 | CLI route | MCP route | Physical access and authority | Transaction and generation contract | Bounds, telemetry, and target owner |
 | --- | --- | --- | --- | --- |
-| `purpose set` | `atlas_purpose_set` | Validate the current schema/root through bounded metadata and schema-contract reads, validate one indexed path, and write its reviewed purpose into `purposes` in the same project database. Ordinary current-schema opens do not run a whole-database integrity scan; migration and explicit verification retain that work. | The authored write is atomic for that item and does not rewrite graph rows or advance the derived generation; later reads project the new authoritative purpose. | One item and no telemetry. Purpose projection into enriched folder/file/relation results is current. |
-| `purpose review` preview/apply | `atlas_purpose_review` | Admit at most 200 rows, 4 KiB per path, 64 KiB per other string field, and 512 KiB of aggregate request strings before project/database selection; CLI file input is metadata-preflighted and `limit + 1` read under a 2 MiB ceiling. Then read each requested indexed node and preview or apply agent-reviewed purpose rows in the same database. | Preview uses a fresh read snapshot. Conditional apply keeps one SQLite transaction. Explicit correction remains item-oriented for semantic row outcomes, but every admitted row plus the exact supported JSON-with-newline and TOON report is preflighted before the first write, so a later oversized stored value or output cannot partially apply an earlier item. Purpose writes do not advance graph generation. | Retained report strings and each exact supported encoding are capped at 4 MiB. CLI and MCP propagate count, field, and aggregate admission failures without mutation; small JSON, TOON, UTF-8, preview, explicit-apply, and conditional-apply compatibility remains current. No telemetry. |
+| `purpose set` | `atlas_purpose_set` | Force exact saved-source admission through the existing selected-root freshness boundary, retain that witness, then validate one indexed path and write its reviewed purpose into `purposes` in the same project database. Ordinary current-schema opens do not run a whole-database integrity scan; migration and explicit verification retain that work. | Freshness publication, when needed, completes before the purpose transaction. Immediately before commit, the adapter synchronizes cancellation and performs an exact detect-only saved-source verification. A failed witness explicitly rolls back and preserves both the initiating and rollback errors. The authored write is atomic for that item and does not rewrite graph rows or advance the derived generation. | One exact admission, one final exact witness, and one item, with no telemetry. Purpose projection into enriched folder/file/relation results is current. |
+| `purpose review` preview/apply | `atlas_purpose_review` | Admit at most 200 rows, 4 KiB per path, 64 KiB per other string field, and 512 KiB of aggregate request strings before project/database selection; CLI file input is metadata-preflighted and `limit + 1` read under a 2 MiB ceiling. Preview uses a fresh read. Apply retains one exact saved-source witness for the complete batch through the writer transaction. | Conditional apply keeps one SQLite transaction. A source publication advances the generation first, so old queue work is stale and changes neither purpose rows nor authored revision. The final exact detect-only witness and synchronous cancellation fence linearize the mutation before explicit commit; a later source, policy, continuity, or cancellation change explicitly rolls every write back. Explicit correction remains item-oriented for semantic row outcomes, and every admitted row plus the exact supported JSON-with-newline and TOON report is preflighted before the first write. | Retained report strings and each exact supported encoding are capped at 4 MiB. CLI and MCP propagate source freshness, count, field, aggregate, cancellation, conditional conflicts, and rollback failures without partial mutation; small JSON, TOON, UTF-8, preview, explicit-apply, and conditional-apply compatibility remains current. No telemetry. |
 | `health resolve` | `atlas_health_resolve` | Validate one currently active deterministic finding and write one authored `health_resolutions` row in the same database. | The resolution write is item-atomic and does not mutate derived graph rows or advance generation. | One item, no telemetry. Resolution lookup and later health pages remain subject to the bounded-read contract above. |
 | `root set` with bind/move/detach | `atlas_root_set` | Validate destination identity, mutate project/root identity in the same database, and regenerate project-local MCP config files. Detach assigns an independent identity to a copied destination database without merging authorities. | One explicit root-transition transaction owns identity changes and rollback. A copied worktree database becomes the authority only for that different selected source tree. | Bounded metadata operation, no telemetry, no cross-project graph write. |
 | `reset-index` | `atlas_reset_index` | Preview or explicitly delete the selected database and owned WAL/SHM/journal sidecars, plus optional generated MCP config. | Applied reset for a registered alias holds the control catalog's active-registration `BEGIN IMMEDIATE`, reloads the exact row as still unbound, revalidates the current Git lifecycle, stages only the fixed owned inventory in a unique target-local recovery directory, and revalidates before deleting only staged paths. A changed lifecycle restores staged entries without clobbering replacement files or retains an explicit recovery directory if restoration cannot complete. Every production binder uses the same guard, so bind-wins refuses reset and reset-wins cannot be recreated or bound by a late caller. | Explicit apply only, five fixed target paths, no telemetry; staging uses same-filesystem no-clobber moves and never scans recursively. |
+
+### Purpose Mutation Freshness Admission
+
+```mermaid
+sequenceDiagram
+    actor Curator
+    participant Adapter as CLI or MCP adapter
+    participant Freshness as Source freshness
+    participant Publication as Derived publication
+    participant Purpose as Purpose transaction
+
+    Curator->>Adapter: set or applied review
+    Adapter->>Freshness: force exact admission for selected root and batch once
+    alt saved source changed
+        Freshness->>Publication: reconcile and publish current generation G2
+        Publication-->>Freshness: complete G2
+        Freshness-->>Adapter: retained witness W for generation G2
+    else source and policy unchanged
+        Freshness-->>Adapter: retained witness W for generation G1
+    end
+    Adapter->>Purpose: begin transaction and evaluate the complete batch
+    Purpose-->>Adapter: current update, accepted replay, or zero-write stale result
+    Adapter->>Adapter: synchronize request cancellation
+    Adapter->>Freshness: exact detect-only verification at final witness
+    alt source, policy, continuity, or cancellation changed
+        Freshness-->>Adapter: typed refresh or failure
+        Adapter->>Purpose: explicit rollback of the complete transaction
+    else W remains current
+        Freshness-->>Adapter: commit admitted
+        Adapter->>Purpose: explicit commit
+    end
+    Adapter-->>Curator: bounded typed result
+```
+
+Persistent MCP uses its existing verified observation path; a one-shot CLI owns
+one process-local observer for the same contract. An empty observer queue is not
+mutation authority: exact admission and the final exact saved-source witness are
+batch operations, never per-purpose-row filesystem scans. SQLite and arbitrary
+filesystem writers cannot share one transaction, so the final witness is the
+declared mutation linearization point; observer ingress remains an additional
+fail-closed signal. This change does not add a watcher acknowledgement or routing
+mechanism: under one unchanged root/database binding, the existing queue,
+zero-candidate watch, and queue sequence is protected by regression coverage.
+An observer or routing repair requires a separate reproducible failure with the
+captured binding and typed recovery evidence.
 
 #### Diagnostics, administration, and non-database routes
 
@@ -1356,7 +1401,7 @@ flowchart TB
 ```
 
 ```mermaid
-flowchart LR
+flowchart TB
     Delete[Exact required detail expiry<br/>inside a fixed work bound] --> Reuse[SQLite freelist pages remain reusable]
     Reuse --> State[Content-free page and statistics state]
     Policy[Planner-statistics maintenance policy] --> NotConfigured[Not configured]
@@ -1403,7 +1448,7 @@ resolutions, or future separately capped Memory Atlas records.
 #### Derived Graph Snapshot Export And Import
 
 ```mermaid
-flowchart LR
+flowchart TB
     Export[CLI snapshot export] --> Source[(Source projectatlas.db)]
     Source --> Capture[(Private SQLite backup)]
     Capture --> Validate[quick_check and bounded<br/>typed derived-row decode]
@@ -1802,6 +1847,46 @@ flowchart TB
 Detection and parsing do not imply semantic certainty. Parser and fact-provider
 provenance remain separate, resolution retains uncertainty, and the existing MCP
 summary, relation, and slice routes expose the smallest trustworthy next step.
+
+### Canonical Documentation Relation Projection
+
+```mermaid
+flowchart TB
+    Markdown[Admitted Markdown file] --> File[Owning document file entity]
+    File --> Extract[Bounded heading and explicit-reference extraction]
+    Extract --> Candidates{Supported static targets found?}
+    Extract --> Headings[Exact heading entities]
+    Candidates -- No --> Empty[Trusted file coverage: no_candidates]
+    Candidates -- Yes: file is source --> Occurrences[Exact link occurrence spans]
+    Occurrences --> Relations[Deduplicated documents relations]
+    Relations --> Resolution{Repository target resolution}
+    Resolution -->|one exact target| Resolved[Resolved source file or symbol]
+    Resolution -->|several exact candidates| Ambiguous[Typed ambiguous evidence]
+    Resolution -->|missing, ignored, outside root, case conflict, unsupported| Unresolved[Typed unresolved reason]
+    Empty --> Normalize[Schema-18 documents complete-zero row]
+    Normalize --> Generation[(Complete graph generation)]
+    Headings --> Generation
+    Resolved --> Generation
+    Ambiguous --> Generation
+    Unresolved --> Generation
+    Contract[Projection contract fingerprint v3] --> Generation
+    Generation --> Outbound[File-outbound documents traversal]
+    Generation --> Inbound[Target-inbound documented_by view]
+    Generation --> Coverage[Coverage discovery<br/>SQLite progress cancellation and 2s ceiling]
+```
+
+The document file is the canonical graph source, so a user can start from the
+known file without guessing which heading owns a link. Headings remain exact
+slice and occurrence evidence; repeated references to one target deduplicate to
+one logical edge while preserving every retained span. Only explicit supported
+references become relations. Ordinary prose, similarity, topic overlap, and
+unproven implementation claims create no edges. Complete extraction with no
+supported candidates remains graph-visible as trusted `no_candidates` coverage;
+an admitted candidate that cannot resolve remains a typed relation with its
+exact unresolved reason. Schema 18 stores the trusted zero state through its
+existing constrained complete-zero row. RC1's older projection fingerprint
+forces one typed full refresh before stale heading-owned rows can be served;
+authored purpose and project identity remain intact.
 
 ### Classified Documentation And Worktree Navigation
 
@@ -2663,6 +2748,34 @@ ProjectAtlas 3 should estimate and persist token savings for every agent-facing
 funnel usage. The goal is not perfect accounting; the goal is a useful,
 consistent local metric that shows whether ProjectAtlas is reducing context
 load.
+
+### Token Dashboard Viewport Selection
+
+```mermaid
+flowchart TB
+    Request[Explicit token TUI request] --> Capture[Capture one columns-by-rows viewport]
+    Capture -->|live terminal| Live[Use stdout terminal dimensions]
+    Capture -->|otherwise| Environment[Use valid environment dimensions or defaults]
+    Live --> Fit{Full layout fits?}
+    Environment --> Fit
+    Fit -->|overview 80x50 or trend 80x30| Full[Existing full Ratatui snapshot]
+    Fit -->|smaller| Compact[Priority-ordered compact snapshot]
+    Full --> Atlas{Overview at least 190 columns?}
+    Atlas -->|yes| Load[Load bounded Atlas preview]
+    Atlas -->|no| Skip[Skip Atlas read]
+    Load --> ANSI[CellWidth ANSI serializer<br/>skips wide-symbol continuation cells]
+    Skip --> ANSI
+    Compact --> ANSI
+    ANSI --> Output[Propagate render or output failure]
+```
+
+Loading, layout selection, and serialization share the same captured viewport.
+Compact mode renders only the highest-priority facts that fit; it does not
+change telemetry calculations, persistence, or structured CLI/MCP reports.
+Full overview and trend layouts retain their established dimensions when they
+fit, while wide-but-short terminals skip the optional graph read. The serializer
+emits CJK, combining, emoji, and ASCII graphemes once and bounds rows by terminal
+display cells rather than Unicode scalar count.
 
 For registered worktrees, the explicitly selected control atlas is the durable
 repository-total authority while each worktree remains the authority for its

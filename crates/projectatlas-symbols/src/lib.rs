@@ -49,7 +49,7 @@ use tree_sitter::{Language, Node, ParseOptions, Parser};
 const MAX_SYMBOLS_PER_FILE: usize = 4_000;
 /// Maximum relations kept from one file to bound call-heavy sources.
 const MAX_RELATIONS_PER_FILE: usize = 8_000;
-/// Maximum text length stored for signatures and relation context.
+/// Maximum text length stored for symbol names, signatures, and relation context.
 const MAX_SNIPPET_CHARS: usize = 240;
 /// Maximum text length stored for extracted documentation.
 const MAX_DOC_CHARS: usize = 500;
@@ -1192,18 +1192,16 @@ fn push_tree_symbol(
     content: &str,
     symbol_kind: SymbolKind,
 ) {
-    let name = node_name(node, content)
-        .unwrap_or_else(|| compact_text(node_text(node, content).as_deref().unwrap_or("")));
-    if name.is_empty() {
+    let Some(name) = node_name(node, content) else {
         return;
-    }
+    };
     let signature = declaration_signature(node, content);
-    let parent = symbol_parent(node, content);
+    let parent = symbol_parent(node, content).and_then(|parent| compact_symbol_identity(&parent));
     let exported = has_direct_export_parent(node)
         || object_literal_method_owner(node, content).is_some_and(|owner| owner.exported)
         || is_exported_symbol(graph.language.as_deref(), &name, &signature);
     let documentation = symbol_documentation(node, content);
-    push_symbol_with_metadata(
+    let admitted = push_symbol_with_metadata(
         graph,
         &name,
         symbol_kind,
@@ -1215,7 +1213,7 @@ fn push_tree_symbol(
         exported,
         documentation.as_deref(),
     );
-    if let Some(parent_name) = parent {
+    if admitted && let Some(parent_name) = parent {
         push_relation(
             graph,
             &parent_name,
@@ -1540,6 +1538,7 @@ fn node_name(node: Node<'_>, content: &str) -> Option<String> {
 /// Extract names that need language-specific cleanup from a declaration node.
 fn declaration_specific_name(node: Node<'_>, content: &str) -> Option<String> {
     match node.kind() {
+        kind if is_import_node(kind) => import_declaration_name(node, content),
         "package_declaration" | "package_clause" | "package_header" => {
             prefixed_declaration_name(node, content, &["package"])
         }
@@ -1551,11 +1550,54 @@ fn declaration_specific_name(node: Node<'_>, content: &str) -> Option<String> {
         }
         "type_declaration" => keyword_identifier_name(node, content, "type"),
         "lexical_declaration"
+        | "field_declaration"
         | "variable_declaration"
         | "variable_statement"
         | "var_declaration" => first_variable_declarator_name(node, content),
         _ => None,
     }
+}
+
+/// Extract the semantic target of an import-like declaration.
+fn import_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "import_spec_list" {
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor);
+        let only_child = children.next()?;
+        if children.next().is_some() {
+            return None;
+        }
+        return import_declaration_name(only_child, content);
+    }
+    for field_name in ["argument", "source", "module_name", "path", "name"] {
+        if let Some(target) = node.child_by_field_name(field_name)
+            && let Some(name) = named_text(target, content)
+        {
+            return Some(name);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "import_spec" | "import_spec_list")
+            && let Some(name) = import_declaration_name(child, content)
+        {
+            return Some(name);
+        }
+        if matches!(
+            child.kind(),
+            "identifier"
+                | "scoped_identifier"
+                | "dotted_name"
+                | "string"
+                | "string_literal"
+                | "system_lib_string"
+                | "type"
+        ) && let Some(name) = named_text(child, content)
+        {
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// Extract a declaration name by removing a language keyword prefix.
@@ -1626,10 +1668,16 @@ fn clean_type_name(value: &str) -> String {
 fn first_variable_declarator_name(node: Node<'_>, content: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if matches!(
-            child.kind(),
-            "variable_declarator" | "variable_declaration" | "identifier"
-        ) && let Some(name) = declarator_name(child, content)
+        if matches!(child.kind(), "variable_declarator" | "identifier")
+            && let Some(name) = declarator_name(child, content)
+        {
+            return Some(name);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "variable_declaration"
+            && let Some(name) = first_variable_declarator_name(child, content)
         {
             return Some(name);
         }
@@ -2101,14 +2149,14 @@ fn push_symbol_with_metadata(
     signature: &str,
     exported: bool,
     documentation: Option<&str>,
-) {
+) -> bool {
     if graph.symbols.len() >= MAX_SYMBOLS_PER_FILE {
-        return;
+        return false;
     }
-    let cleaned_name = compact_text(name);
-    if cleaned_name.is_empty() {
-        return;
-    }
+    let Some(cleaned_name) = compact_symbol_identity(name) else {
+        return false;
+    };
+    let parent = parent.and_then(|parent| compact_symbol_identity(&parent));
     graph.symbols.push(CodeSymbol {
         path: graph.path.clone(),
         language: graph.language.clone(),
@@ -2124,6 +2172,13 @@ fn push_symbol_with_metadata(
         parser: graph.parser,
         detail: detail.map(ToString::to_string),
     });
+    true
+}
+
+/// Return one compact identity that can be represented by every graph consumer.
+fn compact_symbol_identity(value: &str) -> Option<String> {
+    let value = compact_text(value);
+    (!value.is_empty() && value.chars().count() <= MAX_SNIPPET_CHARS).then_some(value)
 }
 
 /// Push a relation while enforcing per-file graph bounds.
@@ -2217,8 +2272,8 @@ fn is_snippet_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SYMBOLS_PER_FILE, content_without_leading_purpose_header, empty_graph,
-        extract_cargo_manifest_graph_checked, extract_fallback_graph,
+        MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, content_without_leading_purpose_header,
+        empty_graph, extract_cargo_manifest_graph_checked, extract_fallback_graph,
         extract_fallback_graph_checked, extract_powershell_graph_checked, extract_symbol_graph,
         extract_symbol_graph_checked, extract_symbol_graph_controlled,
         extract_vue_sfc_graph_checked, languages, specialized_languages,
@@ -2229,6 +2284,7 @@ mod tests {
     use projectatlas_core::{
         IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
     };
+    use std::fmt::Write as _;
 
     fn tree_symbol<'a>(
         graph: &'a SymbolGraph,
@@ -3385,6 +3441,12 @@ func helper() {
                 .iter()
                 .any(|symbol| { symbol.kind == SymbolKind::Function && symbol.name == "helper" })
         );
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Import && symbol.name == "\"fmt\"" })
+        );
         assert!(graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Imports && relation.target_name.contains("\"fmt\"")
         }));
@@ -3420,6 +3482,129 @@ public class Runner
                 && symbol.name == "Run"
                 && symbol.parent.as_deref() == Some("Runner")
                 && symbol.exported
+        }));
+    }
+
+    #[test]
+    fn csharp_field_identity_is_stable_across_large_initializer_boundary() {
+        for entry_count in [224, 225] {
+            let mut entries = String::new();
+            for index in 0..entry_count {
+                let result = write!(entries, "[\"key{index}\"] = \"value{index}\",");
+                assert!(result.is_ok(), "writing to a String must succeed");
+            }
+            let source = format!(
+                r"
+using System.Collections.Generic;
+
+public class Registry
+{{
+    public static readonly Dictionary<string, string> D = new()
+    {{
+        {entries}
+    }};
+}}
+"
+            );
+
+            let graph = extract_symbol_graph("Registry.cs", Some("csharp"), &source);
+
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Value && symbol.name == "D"),
+                "missing exact D identity with {entry_count} initializer entries"
+            );
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .all(|symbol| !symbol.name.contains("Dictionary") && !symbol.name.contains('=')),
+                "complete declaration became an identity with {entry_count} initializer entries"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_csharp_field_identities_do_not_hide_valid_siblings() {
+        let admitted_unicode_name = "名".repeat(MAX_SNIPPET_CHARS);
+        let overbound_unicode_name = "名".repeat(MAX_SNIPPET_CHARS + 1);
+        let source = format!(
+            r"
+using System.Collections.Generic;
+
+public class Registry
+{{
+    public int Before = 1;
+    public int {admitted_unicode_name} = 2;
+    public int {overbound_unicode_name} = 3;
+    public static readonly Dictionary<string, string> = new();
+    public int After = 4;
+}}
+"
+        );
+
+        let graph = extract_symbol_graph("Registry.cs", Some("csharp"), &source);
+
+        for expected in ["Before", admitted_unicode_name.as_str(), "After"] {
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == expected),
+                "missing valid sibling {expected}"
+            );
+        }
+        assert!(
+            !graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == overbound_unicode_name),
+            "overbound Unicode identity was admitted"
+        );
+        assert!(
+            graph.symbols.iter().all(|symbol| {
+                symbol.name.chars().count() <= MAX_SNIPPET_CHARS
+                    && !symbol.name.contains("Dictionary")
+                    && !symbol.name.contains('=')
+            }),
+            "unnameable declaration or overbound identity leaked into the graph"
+        );
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == admitted_unicode_name
+                    && symbol.name.len() == admitted_unicode_name.len()),
+            "admitted Unicode identity was not preserved exactly"
+        );
+    }
+
+    #[test]
+    fn invalid_parent_identity_detaches_valid_child() {
+        let overbound_parent = "P".repeat(MAX_SNIPPET_CHARS + 1);
+        let source = format!(
+            "public class {overbound_parent} {{ public void Retained() {{}} }}\n\
+             public class Valid {{ public void Sibling() {{}} }}\n"
+        );
+
+        let graph = extract_symbol_graph("Parents.cs", Some("csharp"), &source);
+
+        assert!(
+            !graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == overbound_parent)
+        );
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.name == "Retained" && symbol.parent.is_none() })
+        );
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.name == "Sibling" && symbol.parent.as_deref() == Some("Valid")
+        }));
+        assert!(!graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Contains && relation.target_name == "Retained"
         }));
     }
 

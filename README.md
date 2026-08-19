@@ -146,7 +146,7 @@ Warm indexed CLI reads in the same audit stayed around 160–166 ms. Repository 
 
 Full benchmark campaigns are manual-only and run only when explicitly requested.
 
-The [v0.4.5-rc1 candidate](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5-rc1) and [release notes](docs/v0.4.5-rc1-release-notes.md) cover short-alias routing, hydration, isolated federation, aggregate tokens, compatibility, and cross-platform proof. RC1 is published as a prerelease and does not replace the preceding stable GitHub Latest release.
+The [v0.4.5-rc2 candidate](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5-rc2) and [release notes](docs/v0.4.5-rc2-release-notes.md) cover RC1 workflow stabilization across documentation navigation, purpose mutation, terminal rendering, symbol publication, Btrfs database placement, and recreated worktrees. RC2 is published as a prerelease and does not replace the preceding stable GitHub Latest release.
 
 ## Documentation
 
@@ -156,7 +156,7 @@ The [v0.4.5-rc1 candidate](https://github.com/styler-ai/ProjectAtlas/releases/ta
 | Scan, ignore, purpose, and runtime settings | [Configuration](docs/configuration.md) |
 | Human CLI workflow | [Workflow](docs/workflow.md) |
 | Existing Git worktree registration, hydration, routing, federation, and token continuity | [Worktree atlas continuity](docs/worktree-lifecycle.md) |
-| v0.4.5-rc1 highlights, compatibility, boundaries, and proof policy | [RC1 release notes](docs/v0.4.5-rc1-release-notes.md) |
+| v0.4.5-rc2 stabilization, compatibility, boundaries, and proof policy | [RC2 release notes](docs/v0.4.5-rc2-release-notes.md) |
 | Formats and compact agent output | [Format](docs/format.md) |
 | Structural summaries | [Structural summaries](docs/structural-summaries.md) |
 | Language and relation coverage | [Language support](https://styler-ai.github.io/ProjectAtlas/language-support/) · [Relation support](https://styler-ai.github.io/ProjectAtlas/relation-support/) |

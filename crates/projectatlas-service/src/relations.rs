@@ -2,9 +2,10 @@
 
 use super::{ServiceError, ServiceResult, selected_project_binding};
 use projectatlas_core::graph::{
-    ConfidenceClass, CoverageRecord, CoverageScope, EntitySelector, ExtendedRelationKind,
-    GraphEntity, GraphEntityKey, GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation,
-    RelationOccurrence, RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
+    ConfidenceClass, CoverageRecord, CoverageScope, DocumentTargetUnresolvedReason, EntitySelector,
+    ExtendedRelationKind, GraphEntity, GraphEntityKey, GraphLimitKind, GraphLimits,
+    GraphRelationKind, LogicalRelation, RelationOccurrence, RelationResolution, RepositoryFilePath,
+    RepositoryNodePath, SymbolSelector,
 };
 use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::symbols::SymbolKind;
@@ -426,6 +427,9 @@ pub struct DetailedRelationRow {
     pub direction: RelationDirection,
     /// Fully reconstructed normalized relation.
     pub relation: LogicalRelation,
+    /// Closed reason retained only for an unresolved canonical document relation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_unresolved_reason: Option<DocumentTargetUnresolvedReason>,
     /// Read-only inverse label for an inbound document relation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inbound_view: Option<&'static str>,
@@ -2123,6 +2127,7 @@ fn detailed_row(
     occurrence_page: (Vec<RelationOccurrence>, bool),
 ) -> DetailedRelationRow {
     let (occurrences, occurrences_truncated) = occurrence_page;
+    let document_unresolved_reason = row.detail.document_unresolved_reason;
     let inbound_view = inbound_relation_view(query.direction, &row.detail.relation);
     let next_call = traversable_entity(&row.detail, query.direction).and_then(|entity| {
         let classification =
@@ -2153,6 +2158,7 @@ fn detailed_row(
         depth: row.depth,
         direction: query.direction,
         relation: row.detail.relation,
+        document_unresolved_reason,
         inbound_view,
         source: detailed_node(
             row.detail.source,
@@ -3835,6 +3841,56 @@ mod tests {
             Completeness::Complete,
             generation,
         )?;
+        let first_document_occurrence = RelationOccurrence::new(
+            &guide_documents_source,
+            RepositoryFilePath::new(Path::new("docs/guide.md"))?,
+            SourceSpan::new(2, 0, 2, 12)?,
+            generation,
+        )?;
+        let second_document_occurrence = RelationOccurrence::new(
+            &guide_documents_source,
+            RepositoryFilePath::new(Path::new("docs/guide.md"))?,
+            SourceSpan::new(4, 0, 4, 12)?,
+            generation,
+        )?;
+        let document_coverage = [
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new("docs/guide.md"))?,
+                },
+                Some(documents),
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )?,
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new("docs/other.md"))?,
+                },
+                Some(documents),
+                CoverageState::NoCandidates,
+                0,
+                0,
+                generation,
+                None,
+                None,
+            )?,
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+                },
+                Some(documents),
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )?,
+        ];
         let mut publication = store.begin_index_publication("classified-relations")?;
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&[
@@ -3867,8 +3923,8 @@ mod tests {
                 source_documents_other,
                 guide_references_other,
             ],
-            &[],
-            &[],
+            &[first_document_occurrence, second_document_occurrence],
+            &document_coverage,
         )?;
         publication.complete()?;
         drop(store);
@@ -3931,7 +3987,7 @@ mod tests {
                 relation: Some(documents),
                 minimum_confidence: ConfidenceClass::Low,
                 resolution: RelationResolutionFilter::Resolved,
-                include_occurrences: false,
+                include_occurrences: true,
                 budget: DetailedRelationBudget::from_graph_limits(GraphLimits::new(
                     10,
                     5,
@@ -3953,6 +4009,10 @@ mod tests {
         )?;
         require(
             explicit_documents.returned == 1
+                && explicit_documents.anchor.coverage.iter().any(|coverage| {
+                    coverage.relation() == Some(documents)
+                        && coverage.state() == CoverageState::Complete
+                })
                 && explicit_documents.rows[0].inbound_view.is_none()
                 && explicit_documents.anchor.classification
                     == Some(ContentClassification::Documentation)
@@ -3971,6 +4031,39 @@ mod tests {
                     })
                 ),
             "explicit document relation did not retain its classified cross-class endpoint",
+        )?;
+
+        let empty_documents = load_detailed_relations(
+            &store,
+            &DetailedRelationQuery {
+                anchor: RelationAnchor::File {
+                    file: RepositoryFilePath::new(Path::new("docs/other.md"))?,
+                },
+                direction: RelationDirection::Outbound,
+                relation: Some(documents),
+                minimum_confidence: ConfidenceClass::Low,
+                resolution: RelationResolutionFilter::Any,
+                include_occurrences: true,
+                budget: DetailedRelationBudget::from_graph_limits(GraphLimits::new(
+                    10,
+                    5,
+                    3,
+                    256 * 1024,
+                )?),
+                cursor: None,
+                content_selection: ContentSelection::Documentation,
+            },
+            None,
+        )?;
+        require(
+            empty_documents.returned == 0
+                && empty_documents.total == RelationTotalState::Exact(0)
+                && empty_documents.anchor.coverage.iter().any(|coverage| {
+                    coverage.relation() == Some(documents)
+                        && coverage.state() == CoverageState::NoCandidates
+                        && coverage.total() == 0
+                }),
+            "empty document traversal omitted explicit no-candidate coverage",
         )?;
         require(
             explicit_documents.rows.iter().all(|row| row.depth == 1),
@@ -4004,7 +4097,7 @@ mod tests {
                 relation: Some(documents),
                 minimum_confidence: ConfidenceClass::Low,
                 resolution: RelationResolutionFilter::Resolved,
-                include_occurrences: false,
+                include_occurrences: true,
                 budget: DetailedRelationBudget::from_graph_limits(GraphLimits::new(
                     10,
                     5,
@@ -4038,6 +4131,20 @@ mod tests {
                     })
                 ),
             "inbound document relation did not expose its read-only documented_by view",
+        )?;
+        let outbound_row = &explicit_documents.rows[0];
+        let inbound_row = &inbound_documents.rows[0];
+        require(
+            outbound_row.relation.key() == inbound_row.relation.key()
+                && outbound_row.relation.resolution() == inbound_row.relation.resolution()
+                && outbound_row.relation.confidence() == inbound_row.relation.confidence()
+                && outbound_row.relation.completeness() == inbound_row.relation.completeness()
+                && outbound_row.relation.generation() == inbound_row.relation.generation()
+                && outbound_row.occurrences == inbound_row.occurrences
+                && outbound_row.occurrences.len() == 2
+                && !outbound_row.occurrences_truncated
+                && !inbound_row.occurrences_truncated,
+            "outbound documents and inbound documented_by views disagreed on canonical evidence",
         )?;
         let inbound_documents_json = serde_json::to_value(&inbound_documents)?;
         let inbound_documents_encoded = serde_json::to_string(&inbound_documents)?;

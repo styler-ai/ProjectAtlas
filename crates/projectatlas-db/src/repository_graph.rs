@@ -2855,6 +2855,21 @@ impl AtlasStore {
         project: ProjectInstanceId,
         query: &RepositoryCoverageQuery,
     ) -> DbResult<RepositoryGraphPage<RepositoryCoverageRow>> {
+        self.repository_coverage_page_controlled(project, query, None)
+    }
+
+    /// Discover coverage through the shared cancellation and deadline boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::repository_coverage_page`] plus typed
+    /// cancellation or deadline failure while `SQLite` is scanning candidates.
+    pub fn repository_coverage_page_controlled(
+        &self,
+        project: ProjectInstanceId,
+        query: &RepositoryCoverageQuery,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphPage<RepositoryCoverageRow>> {
         let limit_plus_one = validated_limit_plus_one(
             query.limit,
             GraphLimits::MAX_ROWS,
@@ -2927,15 +2942,34 @@ impl AtlasStore {
             values.push(Value::Text(kind.to_string()));
         }
         if let Some(state) = query.state {
-            sql.push_str(" AND coverage.state = ?");
-            values.push(Value::Text(coverage_state_name(state).to_string()));
+            match state {
+                CoverageState::NoCandidates => {
+                    sql.push_str(
+                        " AND coverage.state = 'complete' AND coverage.total = 0 AND coverage.relation_scope = 'extended' AND coverage.relation_kind = 'documents'",
+                    );
+                }
+                CoverageState::Complete => {
+                    sql.push_str(
+                        " AND coverage.state = 'complete' AND NOT (coverage.total = 0 AND coverage.relation_scope IS 'extended' AND coverage.relation_kind IS 'documents')",
+                    );
+                }
+                _ => {
+                    sql.push_str(" AND coverage.state = ?");
+                    values.push(Value::Text(coverage_state_name(state).to_string()));
+                }
+            }
         }
         if let Some(reason) = query.reason.as_deref() {
             sql.push_str(" AND coverage.reason = ?");
             values.push(Value::Text(reason.to_string()));
         }
 
-        if provenance_driven {
+        if matches!(query.state, Some(CoverageState::NoCandidates)) {
+            sql.push_str(
+                " ORDER BY coverage.relation_scope, coverage.relation_kind,
+                          coverage.state, coverage.id",
+            );
+        } else if provenance_driven {
             sql.push_str(" ORDER BY metadata.path, coverage.id");
         } else if path_prefix.is_some() {
             sql.push_str(
@@ -2962,15 +2996,20 @@ impl AtlasStore {
         values.push(Value::Integer(limit_plus_one));
         values.push(Value::Integer(i64::from(query.start_index)));
 
-        let raw = {
-            let mut statement = self.connection.prepare_cached(&sql)?;
-            let mut rows = statement.query(params_from_iter(values.iter()))?;
-            let mut collected = Vec::new();
-            while let Some(row) = rows.next()? {
-                collected.push(coverage_row(row)?);
-            }
-            collected
-        };
+        let raw = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare_cached(&sql)?;
+                let mut rows = statement.query(params_from_iter(values.iter()))?;
+                let mut collected = Vec::new();
+                while let Some(row) = rows.next()? {
+                    collected.push(coverage_row(row)?);
+                }
+                Ok(collected)
+            },
+        )?;
         page_from_raw(raw, query.limit, |row| {
             coverage_discovery_from_row(row, project, generation)
         })
@@ -6165,12 +6204,24 @@ fn coverage_from_row(
         }
     };
     let persisted_total = nonnegative_u64("graph_coverage.total", row.total)?;
+    let covered = nonnegative_u64("graph_coverage.covered", row.covered)?;
+    let omitted = nonnegative_u64("graph_coverage.omitted", row.omitted)?;
+    let persisted_state = parse_coverage_state(&row.state)?;
+    let state = if persisted_state == CoverageState::Complete
+        && covered == 0
+        && omitted == 0
+        && relation == Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents))
+    {
+        CoverageState::NoCandidates
+    } else {
+        persisted_state
+    };
     let record = CoverageRecord::new(
         scope,
         relation,
-        parse_coverage_state(&row.state)?,
-        nonnegative_u64("graph_coverage.covered", row.covered)?,
-        nonnegative_u64("graph_coverage.omitted", row.omitted)?,
+        state,
+        covered,
+        omitted,
         generation,
         row.reason.map(GraphIdentityText::new).transpose()?,
         row.reached_limit
@@ -6793,7 +6844,7 @@ fn coverage_scope_parts(scope: &CoverageScope) -> (&'static str, Option<&str>) {
 /// Return the normalized coverage lifecycle spelling.
 const fn coverage_state_name(state: CoverageState) -> &'static str {
     match state {
-        CoverageState::Complete => "complete",
+        CoverageState::Complete | CoverageState::NoCandidates => "complete",
         CoverageState::Partial => "partial",
         CoverageState::Failed => "failed",
         CoverageState::Ignored => "ignored",
@@ -7199,6 +7250,26 @@ mod tests {
                 None,
                 CoverageState::Complete,
                 4,
+                0,
+                generation,
+                None,
+                None,
+            )?,
+            CoverageRecord::new(
+                CoverageScope::Project,
+                Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                CoverageState::NoCandidates,
+                0,
+                0,
+                generation,
+                None,
+                None,
+            )?,
+            CoverageRecord::new(
+                CoverageScope::Project,
+                Some(GraphRelationKind::Extended(ExtendedRelationKind::Tests)),
+                CoverageState::Complete,
+                0,
                 0,
                 generation,
                 None,
@@ -10399,7 +10470,16 @@ mod tests {
         }
         let coverage =
             store.repository_graph_coverage(fixture.project, &CoverageScope::Project, 10)?;
-        require_eq(&coverage.rows.len(), &6, "graph coverage count")?;
+        let expected_coverage = fixture
+            .coverage
+            .iter()
+            .filter(|record| matches!(record.scope(), CoverageScope::Project))
+            .count();
+        require_eq(
+            &coverage.rows.len(),
+            &expected_coverage,
+            "graph coverage count",
+        )?;
         require(
             coverage
                 .rows
@@ -10984,8 +11064,24 @@ mod tests {
             },
             10,
         )?;
-        require_eq(&project_coverage.rows.len(), &6, "project coverage states")?;
+        require_eq(&project_coverage.rows.len(), &8, "project coverage states")?;
         require_eq(&path_coverage.rows.len(), &1, "path coverage state")?;
+        require(
+            project_coverage
+                .rows
+                .iter()
+                .any(|row| row.state() == CoverageState::NoCandidates && row.total() == 0),
+            "zero-candidate coverage did not round-trip",
+        )?;
+        require(
+            project_coverage.rows.iter().any(|row| {
+                row.state() == CoverageState::Complete
+                    && row.total() == 0
+                    && row.relation()
+                        == Some(GraphRelationKind::Extended(ExtendedRelationKind::Tests))
+            }),
+            "non-document complete-zero coverage changed public state",
+        )?;
         require(
             path_coverage.rows[0].state() == CoverageState::Partial,
             "partial coverage did not round-trip",
@@ -13380,6 +13476,118 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "sqlite-progress-test-observer")]
+    #[test]
+    fn zero_candidate_coverage_discovery_is_cancellable_at_scale() -> Result<(), Box<dyn Error>> {
+        use crate::sqlite_progress_test_observer::{
+            SqliteReadProgressEvent, observe_sqlite_read_progress,
+        };
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        const POSITIVE_DOCUMENT_ROWS: usize = 100_000;
+
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("coverage-zero-candidate-scale");
+        let atlas_dir = project_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        let db_path = atlas_dir.join("projectatlas.db");
+        let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
+        let fixture = publish_fixture(&mut writer, "coverage-zero-candidate-scale")?;
+        writer.connection.execute(
+            "DELETE FROM graph_coverage
+              WHERE relation_scope = 'extended'
+                AND relation_kind = 'documents'
+                AND state = 'complete' AND total = 0",
+            [],
+        )?;
+        writer.connection.execute(
+            "WITH RECURSIVE sequence(value) AS (
+                 VALUES(1)
+                 UNION ALL
+                 SELECT value + 1 FROM sequence WHERE value < ?2
+             )
+             INSERT INTO graph_coverage(
+                 project_instance_id, scope_kind, scope_path,
+                 relation_scope, relation_kind, state,
+                 total, covered, omitted, reason, reached_limit
+             )
+             SELECT ?1, 'path', printf('src/perf-%06d.rs', value),
+                    'extended', 'documents', 'complete',
+                    1, 1, 0, NULL, NULL
+               FROM sequence",
+            params![
+                fixture.project.as_bytes().as_slice(),
+                POSITIVE_DOCUMENT_ROWS
+            ],
+        )?;
+        writer.connection.execute(
+            "INSERT INTO graph_coverage(
+                 project_instance_id, scope_kind, scope_path,
+                 relation_scope, relation_kind, state,
+                 total, covered, omitted, reason, reached_limit
+             ) VALUES (?1, 'path', 'docs/empty.md',
+                       'extended', 'documents', 'complete',
+                       0, 0, 0, NULL, NULL)",
+            params![fixture.project.as_bytes().as_slice()],
+        )?;
+        drop(writer);
+
+        let store = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let inspected_steps = Rc::new(Cell::new(0_usize));
+        let page = observe_sqlite_read_progress(
+            {
+                let inspected_steps = Rc::clone(&inspected_steps);
+                move |event| {
+                    if matches!(
+                        event,
+                        SqliteReadProgressEvent::CallbackEntered {
+                            stage: IndexWorkStage::RepositoryTraversal
+                        }
+                    ) {
+                        inspected_steps.set(inspected_steps.get().saturating_add(1_000));
+                        cancellation.cancel();
+                    }
+                }
+            },
+            || {
+                store.repository_coverage_page_controlled(
+                    fixture.project,
+                    &RepositoryCoverageQuery {
+                        start_index: 0,
+                        limit: 1,
+                        path_prefix: None,
+                        parser: None,
+                        provider: None,
+                        relation: None,
+                        state: Some(CoverageState::NoCandidates),
+                        reason: None,
+                    },
+                    Some(&control),
+                )
+            },
+        );
+        require(
+            matches!(
+                page,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::RepositoryTraversal
+                    }
+                ))
+            ),
+            "scaled zero-candidate discovery did not propagate cancellation",
+        )?;
+        require(
+            inspected_steps.get() <= 1_000,
+            "zero-candidate discovery exceeded one SQLite progress interval before cancellation",
+        )?;
+        store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
     #[test]
     fn coverage_discovery_filters_provenance_and_fails_closed_after_reopen()
     -> Result<(), Box<dyn Error>> {
@@ -13452,6 +13660,36 @@ mod tests {
             &store.connection,
             "EXPLAIN QUERY PLAN
              SELECT coverage.id FROM graph_coverage AS coverage
+              WHERE coverage.project_instance_id = ?
+                AND coverage.state = 'complete' AND coverage.total = 0
+                AND coverage.relation_scope = 'extended'
+                AND coverage.relation_kind = 'documents'
+              ORDER BY coverage.relation_scope, coverage.relation_kind,
+                       coverage.state, coverage.id LIMIT 11",
+            std::slice::from_ref(&project_value),
+            &["idx_graph_coverage_relation_state"],
+            false,
+            "zero-candidate coverage filter",
+        )?;
+        assert_coverage_discovery_plan(
+            &store.connection,
+            "EXPLAIN QUERY PLAN
+             SELECT coverage.id FROM graph_coverage AS coverage
+              WHERE coverage.project_instance_id = ?
+                AND coverage.state = 'complete'
+                AND NOT (coverage.total = 0
+                         AND coverage.relation_scope IS 'extended'
+                         AND coverage.relation_kind IS 'documents')
+              ORDER BY coverage.state, coverage.scope_path, coverage.id LIMIT 11",
+            std::slice::from_ref(&project_value),
+            &["idx_graph_coverage_discovery_state"],
+            false,
+            "positive-complete coverage filter",
+        )?;
+        assert_coverage_discovery_plan(
+            &store.connection,
+            "EXPLAIN QUERY PLAN
+             SELECT coverage.id FROM graph_coverage AS coverage
               WHERE coverage.project_instance_id = ? AND coverage.reason = ?
               ORDER BY coverage.reason, coverage.scope_path, coverage.id LIMIT 11",
             &[
@@ -13517,7 +13755,7 @@ mod tests {
             fixture.project,
             &RepositoryCoverageQuery {
                 start_index: 0,
-                limit: 10,
+                limit: 20,
                 path_prefix: None,
                 parser: None,
                 provider: None,
@@ -13528,6 +13766,7 @@ mod tests {
         )?;
         for state in [
             CoverageState::Complete,
+            CoverageState::NoCandidates,
             CoverageState::Partial,
             CoverageState::Failed,
             CoverageState::Ignored,
@@ -13543,6 +13782,57 @@ mod tests {
                 &format!("coverage discovery omitted {state:?}"),
             )?;
         }
+
+        let complete = store.repository_coverage_page(
+            fixture.project,
+            &RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 10,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: None,
+                state: Some(CoverageState::Complete),
+                reason: None,
+            },
+        )?;
+        let complete_contract = !complete.rows.is_empty()
+            && complete
+                .rows
+                .iter()
+                .all(|row| row.coverage.state() == CoverageState::Complete)
+            && complete.rows.iter().any(|row| {
+                row.coverage.total() == 0
+                    && row.coverage.relation()
+                        == Some(GraphRelationKind::Extended(ExtendedRelationKind::Tests))
+            });
+        require(
+            complete_contract,
+            &format!(
+                "complete coverage filter changed a non-document zero row or admitted no-candidates: {:?}",
+                complete.rows
+            ),
+        )?;
+        let no_candidates = store.repository_coverage_page(
+            fixture.project,
+            &RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 10,
+                path_prefix: None,
+                parser: None,
+                provider: None,
+                relation: None,
+                state: Some(CoverageState::NoCandidates),
+                reason: None,
+            },
+        )?;
+        require(
+            !no_candidates.rows.is_empty()
+                && no_candidates.rows.iter().all(|row| {
+                    row.coverage.state() == CoverageState::NoCandidates && row.coverage.total() == 0
+                }),
+            "zero-candidate coverage filter admitted a positive-complete row",
+        )?;
 
         let exact_path = store.repository_coverage_page(
             fixture.project,

@@ -435,6 +435,15 @@ wrong-file opens, and unnecessary full-code reads avoided by the session-brief -
 -> exact-slice funnel. Agent and MCP surfaces stay structured TOON; Ratatui terminal charts belong only to the
 explicit `projectatlas token --view tui` view.
 
+The TUI captures one columns-by-rows viewport. The established overview uses the
+full layout only at 80x50 or larger, and trends use it at 80x30 or larger; a
+smaller width or height selects a priority-ordered compact Ratatui snapshot that
+never emits more rows or columns than the captured viewport. The optional Atlas
+preview is loaded only for a full overview at 190 columns or wider. For redirected
+or test output, valid non-zero `COLUMNS` and `LINES` provide deterministic bounds;
+invalid or zero values fall back to 140x50. Structured CLI and MCP token reports
+are unchanged.
+
 The default token report is a fast offline heuristic, not provider billing telemetry. It estimates emitted
 ProjectAtlas payload text with `ceil(chars / 4)` and file-size baselines with `ceil(bytes / 4)`. Reports expose
 bucket, baseline kind, confidence, accounting layer, provider, model, tokenizer backend, and accuracy labels so agents can separate

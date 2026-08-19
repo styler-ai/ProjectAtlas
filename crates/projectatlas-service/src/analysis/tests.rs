@@ -1,8 +1,8 @@
 use super::analysis_test_observer::{AnalysisPhaseEvent, observe_analysis_phase};
 use super::*;
 use projectatlas_core::graph::{
-    CoverageRecord, CoverageScope, GraphIdentityText, LogicalRelation, RelationResolution,
-    RepositoryFilePath, RepositoryNodePath, SymbolSelector,
+    CoverageRecord, CoverageScope, CoverageState, GraphIdentityText, LogicalRelation,
+    RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
 };
 use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
 use projectatlas_core::{IndexGeneration, Node, NodeKind, PurposeSource};
@@ -82,11 +82,12 @@ fn analysis_uses_real_graph_rows_dependency_sccs_and_resumable_output() -> Resul
         cycle.nodes.iter().all(|node| {
             node.next_call.is_some()
                 && !node.node.coverage.is_empty()
-                && node
-                    .node
-                    .coverage
-                    .iter()
-                    .all(|coverage| coverage.state() == CoverageState::Complete)
+                && node.node.coverage.iter().all(|coverage| {
+                    matches!(
+                        coverage.state(),
+                        CoverageState::Complete | CoverageState::NoCandidates
+                    )
+                })
         }),
         "analysis nodes omitted typed next calls or authoritative coverage",
     )?;
@@ -1434,7 +1435,7 @@ fn analysis_store_with_coverage(
             generation,
         )?,
     ];
-    let coverage = ["src/a.rs", "src/b.rs", "tools/c.rs"]
+    let mut coverage = ["src/a.rs", "src/b.rs", "tools/c.rs"]
         .into_iter()
         .filter(|path| include_tools_coverage || *path != "tools/c.rs")
         .map(|path| {
@@ -1453,6 +1454,27 @@ fn analysis_store_with_coverage(
             .map_err(Into::into)
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    coverage.extend(
+        ["src/a.rs", "src/b.rs", "tools/c.rs"]
+            .into_iter()
+            .filter(|path| include_tools_coverage || *path != "tools/c.rs")
+            .map(|path| {
+                CoverageRecord::new(
+                    CoverageScope::Path {
+                        path: RepositoryNodePath::new(Path::new(path))?,
+                    },
+                    Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                    CoverageState::NoCandidates,
+                    0,
+                    0,
+                    generation,
+                    None,
+                    None,
+                )
+                .map_err(Into::into)
+            })
+            .collect::<Result<Vec<_>, Box<dyn Error>>>()?,
+    );
     let mut publication = store.begin_index_publication("analysis-service")?;
     publication.begin_scan_replacement()?;
     publication.upsert_scan_node_batch(&[

@@ -2,6 +2,8 @@
 
 use crate::{DbError, DbResult};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
+#[cfg(any(target_os = "linux", test))]
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -23,6 +25,9 @@ const JOURNAL_MODE_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum diagnostic length retained from an operating-system error.
 const MAX_REASON_CHARS: usize = 512;
+/// Exact `whichdisk` Linux failure that permits decoded mount-inventory fallback.
+#[cfg(any(target_os = "linux", test))]
+const WHICH_DISK_NO_MOUNT_FOR_DEVICE: &str = "no mount point found for device";
 
 /// Known local filesystems for supported Windows hosts.
 #[cfg(any(windows, test))]
@@ -116,17 +121,8 @@ pub(crate) fn inspect_database_location(path: &Path) -> DbResult<DatabaseLocatio
     #[cfg(windows)]
     reject_unsupported_windows_prefix(&absolute)?;
     let (database_exists, probe) = database_probe_path(&absolute)?;
-    let resolved = whichdisk::resolve(&probe).map_err(|source| {
-        filesystem_uncertain(
-            &absolute,
-            None,
-            None,
-            format!("filesystem resolution failed: {}", bounded_reason(&source)),
-        )
-    })?;
-    let mount_point = resolved.mount_point().to_path_buf();
-    let device = resolved.device().to_os_string();
-    let filesystem_type = resolved.fs_type().trim().to_ascii_lowercase();
+    let (canonical_probe, mount_point, device, filesystem_type) =
+        resolve_filesystem_location(&absolute, &probe)?;
 
     #[cfg(windows)]
     if device.as_os_str() == mount_point.as_os_str() {
@@ -141,7 +137,7 @@ pub(crate) fn inspect_database_location(path: &Path) -> DbResult<DatabaseLocatio
     match classify_filesystem_type(&filesystem_type) {
         FilesystemSupport::SupportedLocal => Ok(DatabaseLocation {
             database_exists,
-            canonical_probe: resolved.canonical_path().to_path_buf(),
+            canonical_probe,
             mount_point,
             device,
             filesystem_type,
@@ -158,6 +154,122 @@ pub(crate) fn inspect_database_location(path: &Path) -> DbResult<DatabaseLocatio
             "filesystem type is not in the supported local profile".to_string(),
         )),
     }
+}
+
+/// Resolve the canonical probe and its owning filesystem.
+fn resolve_filesystem_location(
+    absolute: &Path,
+    probe: &Path,
+) -> DbResult<(PathBuf, PathBuf, OsString, String)> {
+    match whichdisk::resolve(probe) {
+        Ok(resolved) => Ok((
+            resolved.canonical_path().to_path_buf(),
+            resolved.mount_point().to_path_buf(),
+            resolved.device().to_os_string(),
+            resolved.fs_type().trim().to_ascii_lowercase(),
+        )),
+        #[cfg(target_os = "linux")]
+        Err(source) if is_missing_device_mount(&source) => {
+            resolve_linux_mount_inventory(absolute, probe)
+        }
+        Err(source) => Err(filesystem_uncertain(
+            absolute,
+            None,
+            None,
+            format!("filesystem resolution failed: {}", bounded_reason(&source)),
+        )),
+    }
+}
+
+/// One decoded mount-inventory row used to select the canonical path owner.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MountInventoryCandidate<'a> {
+    /// Canonical mount path used for component-boundary ancestry.
+    mount_point: &'a Path,
+    /// Device identity reported by the mount inventory.
+    device: &'a OsStr,
+    /// Filesystem type reported by the mount inventory.
+    filesystem_type: &'a str,
+}
+
+/// Select the unique deepest component-boundary ancestor of a canonical probe.
+#[cfg(any(target_os = "linux", test))]
+fn select_mount_inventory_owner<'a>(
+    canonical_probe: &Path,
+    candidates: impl IntoIterator<Item = MountInventoryCandidate<'a>>,
+) -> Result<MountInventoryCandidate<'a>, &'static str> {
+    let mut best = None;
+    let mut best_depth = 0;
+    let mut conflict = false;
+
+    for candidate in candidates {
+        if !canonical_probe.starts_with(candidate.mount_point) {
+            continue;
+        }
+        let depth = candidate.mount_point.components().count();
+        if depth > best_depth {
+            best = Some(candidate);
+            best_depth = depth;
+            conflict = false;
+        } else if depth == best_depth && best.is_some_and(|current| current != candidate) {
+            conflict = true;
+        }
+    }
+
+    if conflict {
+        return Err("mount inventory has conflicting equally specific owners");
+    }
+    best.ok_or("mount inventory has no owner for the canonical probe")
+}
+
+/// Return whether `whichdisk` failed only because no device-number mount matched.
+#[cfg(any(target_os = "linux", test))]
+fn is_missing_device_mount(source: &io::Error) -> bool {
+    source.kind() == io::ErrorKind::NotFound && source.to_string() == WHICH_DISK_NO_MOUNT_FOR_DEVICE
+}
+
+/// Resolve a Linux mount from `whichdisk`'s decoded inventory after device mismatch.
+#[cfg(target_os = "linux")]
+fn resolve_linux_mount_inventory(
+    absolute: &Path,
+    probe: &Path,
+) -> DbResult<(PathBuf, PathBuf, OsString, String)> {
+    let canonical_probe = probe.canonicalize().map_err(|source| {
+        filesystem_uncertain(
+            absolute,
+            None,
+            None,
+            format!(
+                "fallback probe canonicalization failed: {}",
+                bounded_reason(&source)
+            ),
+        )
+    })?;
+    let mounts = whichdisk::list().map_err(|source| {
+        filesystem_uncertain(
+            absolute,
+            None,
+            None,
+            format!("mount inventory failed: {}", bounded_reason(&source)),
+        )
+    })?;
+    let selected = select_mount_inventory_owner(
+        &canonical_probe,
+        mounts.iter().map(|mount| MountInventoryCandidate {
+            mount_point: mount.mount_point(),
+            device: mount.device(),
+            filesystem_type: mount.fs_type(),
+        }),
+    )
+    .map_err(|reason| filesystem_uncertain(absolute, None, None, reason.to_string()))?;
+
+    Ok((
+        canonical_probe,
+        selected.mount_point.to_path_buf(),
+        selected.device.to_os_string(),
+        selected.filesystem_type.trim().to_ascii_lowercase(),
+    ))
 }
 
 /// Open one writable connection after revalidating the captured location.
@@ -534,13 +646,21 @@ mod tests {
 
     #[test]
     fn filesystem_classification_distinguishes_local_remote_and_unknown() {
-        let local = ["apfs", "ext4", "ntfs", "overlay"];
+        let local = ["apfs", "btrfs", "ext4", "ntfs", "overlay"];
         assert_eq!(
             classify_filesystem_type_with_local("EXT4", &local),
             FilesystemSupport::SupportedLocal
         );
         assert_eq!(
+            classify_filesystem_type_with_local("btrfs", &local),
+            FilesystemSupport::SupportedLocal
+        );
+        assert_eq!(
             classify_filesystem_type_with_local("fuse.sshfs", &local),
+            FilesystemSupport::UnsupportedNetwork
+        );
+        assert_eq!(
+            classify_filesystem_type_with_local("nfs4", &local),
             FilesystemSupport::UnsupportedNetwork
         );
         assert_eq!(
@@ -551,6 +671,140 @@ mod tests {
             classify_filesystem_type_with_local("unknown-local", &local),
             FilesystemSupport::Uncertain
         );
+    }
+
+    #[test]
+    fn btrfs_device_mismatch_uses_unique_path_owner() {
+        let root = MountInventoryCandidate {
+            mount_point: Path::new("/"),
+            device: OsStr::new("0:1"),
+            filesystem_type: "ext4",
+        };
+        let btrfs = MountInventoryCandidate {
+            mount_point: Path::new("/project"),
+            device: OsStr::new("0:34"),
+            filesystem_type: "btrfs",
+        };
+        let stat_device = OsStr::new("0:50");
+
+        assert_ne!(btrfs.device, stat_device);
+        assert_eq!(
+            select_mount_inventory_owner(Path::new("/project/repo/.projectatlas"), [root, btrfs]),
+            Ok(btrfs)
+        );
+    }
+
+    #[test]
+    fn mount_inventory_prefers_nested_component_ancestor() {
+        let root = MountInventoryCandidate {
+            mount_point: Path::new("/"),
+            device: OsStr::new("root"),
+            filesystem_type: "ext4",
+        };
+        let parent = MountInventoryCandidate {
+            mount_point: Path::new("/srv"),
+            device: OsStr::new("parent"),
+            filesystem_type: "btrfs",
+        };
+        let nested = MountInventoryCandidate {
+            mount_point: Path::new("/srv/data"),
+            device: OsStr::new("nested"),
+            filesystem_type: "xfs",
+        };
+
+        assert_eq!(
+            select_mount_inventory_owner(Path::new("/srv/data/project/db"), [root, parent, nested]),
+            Ok(nested)
+        );
+    }
+
+    #[test]
+    fn mount_inventory_rejects_string_prefix_and_equal_conflict() {
+        let root = MountInventoryCandidate {
+            mount_point: Path::new("/"),
+            device: OsStr::new("root"),
+            filesystem_type: "ext4",
+        };
+        let string_prefix = MountInventoryCandidate {
+            mount_point: Path::new("/project/app"),
+            device: OsStr::new("wrong"),
+            filesystem_type: "btrfs",
+        };
+        assert_eq!(
+            select_mount_inventory_owner(
+                Path::new("/project/application/db"),
+                [root, string_prefix]
+            ),
+            Ok(root)
+        );
+
+        let first = MountInventoryCandidate {
+            mount_point: Path::new("/project"),
+            device: OsStr::new("0:34"),
+            filesystem_type: "btrfs",
+        };
+        let conflicting = MountInventoryCandidate {
+            mount_point: Path::new("/project"),
+            device: OsStr::new("0:50"),
+            filesystem_type: "btrfs",
+        };
+        assert_eq!(
+            select_mount_inventory_owner(Path::new("/project/repo/db"), [first, conflicting]),
+            Err("mount inventory has conflicting equally specific owners")
+        );
+        assert_eq!(
+            select_mount_inventory_owner(Path::new("/project/repo/db"), [first, first]),
+            Ok(first)
+        );
+    }
+
+    #[test]
+    fn mount_inventory_handles_missing_and_multibyte_paths() {
+        assert_eq!(
+            select_mount_inventory_owner(
+                Path::new("/project/db"),
+                std::iter::empty::<MountInventoryCandidate<'static>>(),
+            ),
+            Err("mount inventory has no owner for the canonical probe")
+        );
+
+        let multibyte = MountInventoryCandidate {
+            mount_point: Path::new("/mnt/über"),
+            device: OsStr::new("0:77"),
+            filesystem_type: "btrfs",
+        };
+        assert_eq!(
+            select_mount_inventory_owner(Path::new("/mnt/über/projekt/db"), [multibyte]),
+            Ok(multibyte)
+        );
+    }
+
+    #[test]
+    fn fallback_is_limited_to_whichdisk_missing_device_mount() {
+        let missing_mount = io::Error::new(io::ErrorKind::NotFound, WHICH_DISK_NO_MOUNT_FOR_DEVICE);
+        let vanished_path = io::Error::new(io::ErrorKind::NotFound, "path vanished");
+        let permission = io::Error::new(io::ErrorKind::PermissionDenied, "permission denied");
+
+        assert!(is_missing_device_mount(&missing_mount));
+        assert!(!is_missing_device_mount(&vanished_path));
+        assert!(!is_missing_device_mount(&permission));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fallback_canonicalization_failure_remains_uncertain() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let missing = temp.path().join("missing");
+        let Err(error) = resolve_linux_mount_inventory(&missing, &missing) else {
+            return Err(io::Error::other("missing fallback probe was accepted").into());
+        };
+        let DbError::DatabaseFilesystemUncertain { reason, .. } = error else {
+            return Err(io::Error::other("unexpected fallback error classification").into());
+        };
+        if !reason.starts_with("fallback probe canonicalization failed:") {
+            return Err(io::Error::other("canonicalization cause was not preserved").into());
+        }
+        Ok(())
     }
 
     #[test]
@@ -579,6 +833,38 @@ mod tests {
         }
         if database.exists() {
             return Err(io::Error::other("location inspection created the database").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn writable_wal_read_only_reopen_and_location_swap_are_enforced() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let database = temp.path().join("projectatlas.db");
+        let missing_location = inspect_database_location(&database)?;
+        let writer = open_writable_connection(
+            &database,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            &missing_location,
+            SQLITE_BUSY_TIMEOUT,
+            JournalModePolicy::EnsureWal,
+        )?;
+        verify_current_read_profile(&writer)?;
+        drop(writer);
+
+        let existing_location = inspect_database_location(&database)?;
+        let reader = open_read_only_connection(&database, &existing_location)?;
+        verify_current_read_profile(&reader)?;
+        drop(reader);
+
+        let mut changed_location = existing_location;
+        changed_location.device = OsString::from("different-device");
+        if !matches!(
+            open_read_only_connection(&database, &changed_location),
+            Err(DbError::DatabaseFilesystemUncertain { .. })
+        ) {
+            return Err(io::Error::other("changed filesystem location was accepted").into());
         }
         Ok(())
     }

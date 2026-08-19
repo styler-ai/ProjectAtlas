@@ -54,9 +54,10 @@ use crate::{
     schema_migration_required_payload, schema_version_mismatch_payload,
 };
 use projectatlas_core::graph::{
-    Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExternalSelector,
-    GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, ProjectInstanceId,
-    RelationOccurrence, RelationResolution, RepositoryFilePath, ReusableTargetSelector, SourceSpan,
+    Completeness, ConfidenceClass, CoverageRecord, DocumentTargetUnresolvedReason, EntitySelector,
+    ExternalSelector, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
+    ProjectInstanceId, RelationOccurrence, RelationResolution, RepositoryFilePath,
+    ReusableTargetSelector, SourceSpan,
 };
 use projectatlas_core::health::Severity;
 use projectatlas_core::language::{ContentClassification, ContentSelection};
@@ -72,11 +73,12 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    IndexGeneration, IndexWorkControl, IndexWorkFailure, MAX_GIT_WORKTREE_REGISTRATIONS,
-    NavigationNextCall, NavigationNextCapability, Overview, PurposeSource, PurposeStatus,
-    RankedConnection, RankedConnectionCount, RankedConnectionKind, RankedConnectionTarget,
-    RankedNode, RankedReasonCode, normalize_native_path_display, normalize_repo_path,
-    normalize_repo_path_prefix, validated_repo_file_key, validated_repo_node_key,
+    IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    MAX_GIT_WORKTREE_REGISTRATIONS, NavigationNextCall, NavigationNextCapability, Overview,
+    PurposeSource, PurposeStatus, RankedConnection, RankedConnectionCount, RankedConnectionKind,
+    RankedConnectionTarget, RankedNode, RankedReasonCode, normalize_native_path_display,
+    normalize_repo_path, normalize_repo_path_prefix, validated_repo_file_key,
+    validated_repo_node_key,
 };
 use projectatlas_db::{
     ActiveWorktreeRegistrationGuard, AtlasStore, DbError, HealthQuery, HealthResolution,
@@ -100,7 +102,7 @@ use projectatlas_service::{
     RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor, RelationDirection,
     RelationNextCall, RelationPurpose, RelationTotalState, SearchQuery, ServiceError,
     SymbolSliceSelector, TokenReport, TokenReportRequest,
-    build_file_summary_from_source_with_selection, load_coverage_discovery,
+    build_file_summary_from_source_with_selection, load_coverage_discovery_controlled,
     load_detailed_relation_page, load_federated_detailed_relations,
     load_federated_relation_analysis, load_relation_analysis, load_token_report,
     parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
@@ -2538,6 +2540,9 @@ struct McpCompactCoverageStateCounts {
     /// Complete coverage rows.
     #[serde(skip_serializing_if = "is_zero_u32")]
     complete: u32,
+    /// Complete extraction scopes containing no supported candidates.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    no_candidates: u32,
     /// Partial coverage rows.
     #[serde(skip_serializing_if = "is_zero_u32")]
     partial: u32,
@@ -2602,6 +2607,7 @@ impl<'a> From<&'a CoverageDigest> for McpCompactCoverageDigest<'a> {
             provider: coverage.provider.as_ref(),
             states: McpCompactCoverageStateCounts {
                 complete: coverage.states.complete,
+                no_candidates: coverage.states.no_candidates,
                 partial: coverage.states.partial,
                 failed: coverage.states.failed,
                 ignored: coverage.states.ignored,
@@ -2729,6 +2735,9 @@ struct McpCompactDetailedRelationRow<'a> {
     direction: RelationDirection,
     /// Typed relation facts without stable-key duplication.
     relation: McpCompactLogicalRelation<'a>,
+    /// Closed reason retained only for an unresolved canonical document relation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_unresolved_reason: Option<DocumentTargetUnresolvedReason>,
     /// Exact source selector, purpose, and coverage.
     source: McpCompactDetailedRelationNode<'a>,
     /// Retained local or external target when one exists.
@@ -2784,6 +2793,7 @@ impl<'a> From<&'a DetailedRelationRow> for McpCompactDetailedRelationRow<'a> {
                 completeness: row.relation.completeness(),
                 generation: row.relation.generation(),
             },
+            document_unresolved_reason: row.document_unresolved_reason,
             source: McpCompactDetailedRelationNode::from(&row.source),
             target: row
                 .target
@@ -3681,49 +3691,38 @@ struct McpRequestCancellationBridge {
     stop: Arc<std::sync::atomic::AtomicBool>,
     /// Join handle for the bounded request-local monitor thread.
     monitor: Option<thread::JoinHandle<()>>,
-    /// Owned RMCP request context retained for the final cancellation check.
-    context: Option<RequestContext<RoleServer>>,
+    /// Direct request probe retained for synchronous cancellation fences.
+    probe: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl McpRequestCancellationBridge {
     /// Start a request-local monitor from one owned RMCP context.
     fn start(
-        context: RequestContext<RoleServer>,
+        context: &RequestContext<RoleServer>,
         control: &IndexWorkControl,
     ) -> Result<Self, CliError> {
         let token = context.ct.clone();
-        Self::start_with_probe_and_context(move || token.is_cancelled(), control, Some(context))
+        Self::start_with_probe(move || token.is_cancelled(), control)
     }
 
     /// Start a cancellation monitor from a deterministic probe for tests.
-    #[cfg(test)]
     fn start_with_probe<P>(probe: P, control: &IndexWorkControl) -> Result<Self, CliError>
     where
-        P: Fn() -> bool + Send + 'static,
+        P: Fn() -> bool + Send + Sync + 'static,
     {
-        Self::start_with_probe_and_context(probe, control, None)
-    }
-
-    /// Start a cancellation monitor and retain its owning request context.
-    fn start_with_probe_and_context<P>(
-        probe: P,
-        control: &IndexWorkControl,
-        context: Option<RequestContext<RoleServer>>,
-    ) -> Result<Self, CliError>
-    where
-        P: Fn() -> bool + Send + 'static,
-    {
+        let probe: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(probe);
         if probe() {
             control.cancel();
         }
         let observed_control = control.clone();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let monitor_stop = Arc::clone(&stop);
+        let monitor_probe = Arc::clone(&probe);
         let monitor = thread::Builder::new()
             .name(MCP_CANCELLATION_MONITOR_THREAD_NAME.to_string())
             .spawn(move || {
                 while !monitor_stop.load(Ordering::Acquire) {
-                    if probe() {
+                    if monitor_probe() {
                         observed_control.cancel();
                         break;
                     }
@@ -3738,15 +3737,15 @@ impl McpRequestCancellationBridge {
         Ok(Self {
             stop,
             monitor: Some(monitor),
-            context,
+            probe,
         })
     }
 
-    /// Return whether RMCP canceled the owning request.
-    fn is_cancelled(&self) -> bool {
-        self.context
-            .as_ref()
-            .is_some_and(|context| context.ct.is_cancelled())
+    /// Copy the request token into synchronous index-work cancellation.
+    fn synchronize(&self, control: &IndexWorkControl) {
+        if (self.probe)() {
+            control.cancel();
+        }
     }
 }
 
@@ -3872,7 +3871,7 @@ impl ProjectAtlasMcpServer {
         let control =
             index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
         let bridge = context
-            .map(|context| McpRequestCancellationBridge::start(context, &control))
+            .map(|context| McpRequestCancellationBridge::start(&context, &control))
             .transpose()?;
         let result = self
             .source_observations
@@ -3887,11 +3886,8 @@ impl ProjectAtlasMcpServer {
                 },
             )
             .map_err(|error| Self::with_target_error_context(error, state));
-        if bridge
-            .as_ref()
-            .is_some_and(McpRequestCancellationBridge::is_cancelled)
-        {
-            control.cancel();
+        if let Some(bridge) = bridge.as_ref() {
+            bridge.synchronize(&control);
         }
         drop(bridge);
         result
@@ -4125,6 +4121,75 @@ impl ProjectAtlasMcpServer {
             ));
         }
         Self::open_mut_store(state, control_state)
+    }
+
+    /// Apply one purpose mutation under a source witness retained through commit.
+    fn with_admitted_purpose_mutation<T>(
+        &self,
+        state: &McpProjectState,
+        context: Option<RequestContext<RoleServer>>,
+        mutation: impl FnOnce(&AtlasStore) -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
+        if !state.db_path.is_file() {
+            return Err(Self::with_target_error_context(
+                index_init_required(&state.root, &state.db_path),
+                state,
+            ));
+        }
+        let control =
+            index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
+        let bridge = context
+            .map(|context| McpRequestCancellationBridge::start(&context, &control))
+            .transpose()?;
+        let result = self
+            .with_admitted_purpose_mutation_controlled(state, &control, bridge.as_ref(), mutation)
+            .map_err(|error| Self::with_target_error_context(error, state));
+        drop(bridge);
+        result
+    }
+
+    /// Apply one admitted mutation with explicit cancellation and rollback boundaries.
+    fn with_admitted_purpose_mutation_controlled<T>(
+        &self,
+        state: &McpProjectState,
+        control: &IndexWorkControl,
+        bridge: Option<&McpRequestCancellationBridge>,
+        mutation: impl FnOnce(&AtlasStore) -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
+        if let Some(bridge) = bridge {
+            bridge.synchronize(control);
+        }
+        let admission = self.source_observations.admit_mutation(
+            &state.db_path,
+            &state.root,
+            state.config_path.as_deref(),
+            control,
+        )?;
+        let store = Self::open_existing_mut_store(state, &self.control_state)?;
+        Self::require_captured_worktree_identity(state.worktree.as_ref(), &store)?;
+        let transaction = store.begin_purpose_mutation()?;
+        let operation = (|| {
+            let value = mutation(&store)?;
+            if let Some(bridge) = bridge {
+                bridge.synchronize(control);
+            }
+            admission.verify()?;
+            if let Some(bridge) = bridge {
+                bridge.synchronize(control);
+            }
+            control.check(IndexWorkStage::Publication)?;
+            Ok(value)
+        })();
+        match operation {
+            Ok(value) => {
+                transaction.commit()?;
+                Ok(value)
+            }
+            Err(operation) => Err(crate::rollback_rejected_purpose_mutation(
+                transaction,
+                operation,
+            )),
+        }
     }
 
     /// Return whether this MCP process can record optional telemetry.
@@ -9279,7 +9344,7 @@ impl ProjectAtlasMcpServer {
                             params.deadline_ms.unwrap_or(10_000).clamp(1, 60_000),
                         ));
                 let bridge = context
-                    .map(|context| McpRequestCancellationBridge::start(context, &control))
+                    .map(|context| McpRequestCancellationBridge::start(&context, &control))
                     .transpose()?;
                 let (roots, worktree_selections) = if let Some(worktrees) = federated_worktrees {
                     let (roots, selections) = self.federated_worktree_roots(worktrees)?;
@@ -9326,11 +9391,8 @@ impl ProjectAtlasMcpServer {
                     &control,
                 )
                 .map(|(toon, _usage)| toon);
-                if bridge
-                    .as_ref()
-                    .is_some_and(McpRequestCancellationBridge::is_cancelled)
-                {
-                    control.cancel();
+                if let Some(bridge) = bridge.as_ref() {
+                    bridge.synchronize(&control);
                 }
                 drop(bridge);
                 return result;
@@ -9421,11 +9483,12 @@ impl ProjectAtlasMcpServer {
                 self.state_for_target(params.project_path.clone(), params.worktree.clone())?;
             if params.coverage.unwrap_or(false) {
                 let query = coverage_query_from_params(&params)?;
-                return self.with_fresh_string_and_usage_for_request(
+                return self.with_fresh_string_and_usage_controlled_for_request(
                     &state,
                     Some(context),
-                    |store, stamp| {
-                        let mut report = load_coverage_discovery(store, query.clone())?;
+                    |store, stamp, control| {
+                        let mut report =
+                            load_coverage_discovery_controlled(store, query.clone(), control)?;
                         let toon = finalize_coverage_output(OutputFormat::Toon, &mut report)?;
                         let usage = Self::telemetry_enabled()
                             .then(|| {
@@ -9964,31 +10027,33 @@ impl ProjectAtlasMcpServer {
     fn atlas_purpose_set(
         &self,
         Parameters(params): Parameters<AtlasPurposeSetParams>,
+        context: RequestContext<RoleServer>,
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_target(params.project_path, params.worktree)?;
-            let store = Self::open_existing_mut_store(&state, &self.control_state)?;
-            let node_key = Self::validated_indexed_node_key(&store, &params.path)?;
-            store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
-            let classification = if store
-                .load_node_by_path(&node_key)?
-                .is_some_and(|node| node.node.kind == projectatlas_core::NodeKind::File)
-            {
-                store
-                    .file_content_classifications_for_paths(std::slice::from_ref(&node_key))?
-                    .first()
-                    .map(|row| row.classification)
-            } else {
-                None
-            };
-            Self::encode_serialized_payload(McpPurposeSetResponse {
-                purpose_set: McpPurposeSetPayload {
-                    path: node_key,
-                    classification,
-                    status: PurposeStatus::Approved,
-                    source: PurposeSource::Agent,
-                    agent_reviewed: true,
-                },
+            self.with_admitted_purpose_mutation(&state, Some(context), |store| {
+                let node_key = Self::validated_indexed_node_key(store, &params.path)?;
+                store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
+                let classification = if store
+                    .load_node_by_path(&node_key)?
+                    .is_some_and(|node| node.node.kind == projectatlas_core::NodeKind::File)
+                {
+                    store
+                        .file_content_classifications_for_paths(std::slice::from_ref(&node_key))?
+                        .first()
+                        .map(|row| row.classification)
+                } else {
+                    None
+                };
+                Self::encode_serialized_payload(McpPurposeSetResponse {
+                    purpose_set: McpPurposeSetPayload {
+                        path: node_key,
+                        classification,
+                        status: PurposeStatus::Approved,
+                        source: PurposeSource::Agent,
+                        agent_reviewed: true,
+                    },
+                })
             })
         })())
     }
@@ -10020,9 +10085,10 @@ impl ProjectAtlasMcpServer {
             validate_purpose_review_admission(&requests)?;
             let state = self.state_for_target(params.project_path, params.worktree)?;
             if apply {
-                let store = Self::open_existing_mut_store(&state, &self.control_state)?;
-                let report = review_purposes(&store, &requests, true)?;
-                return Ok(render_purpose_review_report(&report));
+                return self.with_admitted_purpose_mutation(&state, Some(context), |store| {
+                    let report = review_purposes(store, &requests, true)?;
+                    Ok(render_purpose_review_report(&report))
+                });
             }
             self.with_fresh_string_for_request(&state, Some(context), |store, _stamp| {
                 let report = review_purposes(store, &requests, false)?;
@@ -10444,6 +10510,71 @@ mod tests {
         require(
             canceled,
             "RMCP cancellation probe did not reach the shared index work control",
+        )
+    }
+
+    #[test]
+    fn purpose_mutation_synchronously_rolls_back_request_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("purpose-cancellation");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        fs::write(root.join("source.rs"), "fn current() {}\n")?;
+        let db_path = root.join(".projectatlas/projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, &root, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
+        run_scan_pipeline(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+        )?;
+        let before_revision = store.authored_purpose_revision()?;
+        let before_purpose = store
+            .load_node_by_path("source.rs")?
+            .ok_or_else(|| io::Error::other("indexed cancellation source missing"))?
+            .purpose;
+        drop(store);
+
+        let server = ProjectAtlasMcpServer::new(
+            db_path.clone(),
+            None,
+            "purpose-cancellation".to_string(),
+            false,
+        );
+        let state = server.state_for_target(Some(normalize_native_path_display(&root)), None)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation_probe = Arc::clone(&cancelled);
+        let bridge = McpRequestCancellationBridge::start_with_probe(
+            move || cancellation_probe.load(Ordering::Acquire),
+            &control,
+        )?;
+        let result = server.with_admitted_purpose_mutation_controlled(
+            &state,
+            &control,
+            Some(&bridge),
+            |store| {
+                store.set_purpose("source.rs", "Canceled purpose", PurposeSource::Agent)?;
+                cancelled.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+        drop(bridge);
+
+        require(
+            matches!(result, Err(CliError::IndexWork(_))),
+            "request cancellation did not reject the purpose transaction",
+        )?;
+        let store = open_atlas_store_for_project(&db_path, &state.root)?;
+        require(
+            store.authored_purpose_revision()? == before_revision,
+            "request cancellation advanced the authored-purpose revision",
+        )?;
+        require(
+            store
+                .load_node_by_path("source.rs")?
+                .is_some_and(|node| node.purpose == before_purpose),
+            "request cancellation persisted the rejected purpose",
         )
     }
 

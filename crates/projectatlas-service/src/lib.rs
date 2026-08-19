@@ -84,6 +84,8 @@ const NEXT_REPORT_DEFAULT_LIMIT: usize = 3;
 const NEXT_REPORT_MAX_LIMIT: usize = 10;
 /// Maximum rows returned by one agent-facing coverage page.
 pub const COVERAGE_PAGE_MAX_LIMIT: u32 = 200;
+/// Maximum elapsed work for one project-wide coverage discovery query.
+const COVERAGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum rows retained by one selected-file coverage digest.
 const COVERAGE_DIGEST_ROW_LIMIT: u32 = 16;
 /// Status emitted when live source was read successfully.
@@ -390,6 +392,8 @@ pub enum CoverageTotalState {
 pub struct CoverageStateCounts {
     /// Complete coverage rows.
     pub complete: u32,
+    /// Complete extraction scopes containing no supported candidates.
+    pub no_candidates: u32,
     /// Partial coverage rows.
     pub partial: u32,
     /// Failed coverage rows.
@@ -545,10 +549,11 @@ pub fn parse_coverage_relation(value: &str) -> ServiceResult<GraphRelationKind> 
 ///
 /// # Errors
 ///
-/// Returns an error when the value is not one of the seven closed states.
+/// Returns an error when the value is not one of the eight closed states.
 pub fn parse_coverage_state(value: &str) -> ServiceResult<CoverageState> {
     match value.trim().to_ascii_lowercase().as_str() {
         "complete" => Ok(CoverageState::Complete),
+        "no-candidates" | "no_candidates" => Ok(CoverageState::NoCandidates),
         "partial" => Ok(CoverageState::Partial),
         "failed" => Ok(CoverageState::Failed),
         "ignored" => Ok(CoverageState::Ignored),
@@ -569,7 +574,22 @@ pub fn parse_coverage_state(value: &str) -> ServiceResult<CoverageState> {
 /// are invalid, or persisted coverage/provenance is inconsistent.
 pub fn load_coverage_discovery(
     store: &AtlasStore,
+    query: RepositoryCoverageQuery,
+) -> ServiceResult<CoverageDiscoveryReport> {
+    let control = IndexWorkControl::new(IndexCancellation::new(), Some(COVERAGE_DISCOVERY_TIMEOUT));
+    load_coverage_discovery_controlled(store, query, &control)
+}
+
+/// Load one coverage page under caller cancellation and a fixed elapsed ceiling.
+///
+/// # Errors
+///
+/// Returns the same errors as [`load_coverage_discovery`] plus typed
+/// cancellation or deadline failure.
+pub fn load_coverage_discovery_controlled(
+    store: &AtlasStore,
     mut query: RepositoryCoverageQuery,
+    control: &IndexWorkControl,
 ) -> ServiceResult<CoverageDiscoveryReport> {
     if query.start_index >= GraphLimits::MAX_ROWS {
         return Err(ServiceError::InvalidInput(format!(
@@ -584,7 +604,8 @@ pub fn load_coverage_discovery(
     let project = store
         .project_instance_id()?
         .ok_or(ServiceError::SelectedProjectUnavailable)?;
-    let page = store.repository_coverage_page(project, &query)?;
+    let control = control.with_timeout_ceiling(COVERAGE_DISCOVERY_TIMEOUT);
+    let page = store.repository_coverage_page_controlled(project, &query, Some(&control))?;
     let rows = page
         .rows
         .into_iter()
@@ -659,7 +680,7 @@ fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
 /// Return the conservative trust state for one coverage lifecycle state.
 const fn coverage_trust(state: CoverageState) -> CoverageTrustState {
     match state {
-        CoverageState::Complete => CoverageTrustState::Trusted,
+        CoverageState::Complete | CoverageState::NoCandidates => CoverageTrustState::Trusted,
         CoverageState::Partial => CoverageTrustState::Partial,
         CoverageState::Failed
         | CoverageState::Ignored
@@ -763,6 +784,7 @@ fn checked_coverage_sum(current: u64, value: u64, field: &str) -> ServiceResult<
 fn increment_coverage_state(counts: &mut CoverageStateCounts, state: CoverageState) {
     let count = match state {
         CoverageState::Complete => &mut counts.complete,
+        CoverageState::NoCandidates => &mut counts.no_candidates,
         CoverageState::Partial => &mut counts.partial,
         CoverageState::Failed => &mut counts.failed,
         CoverageState::Ignored => &mut counts.ignored,

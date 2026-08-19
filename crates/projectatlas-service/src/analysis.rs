@@ -67,16 +67,16 @@ use super::relations::{
     ExternalRelationIdentity, external_relation_identities, load_detailed_relations,
 };
 use super::{
-    DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery, DetailedRelationReport,
-    DetailedRelationWork, RelationAnchor, RelationDirection, RelationNextCall, RelationPurpose,
-    RelationResolutionFilter, RelationTotalState, ServiceError, ServiceResult,
-    selected_project_binding,
+    CoverageTrustState, DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery,
+    DetailedRelationReport, DetailedRelationWork, RelationAnchor, RelationDirection,
+    RelationNextCall, RelationPurpose, RelationResolutionFilter, RelationTotalState, ServiceError,
+    ServiceResult, coverage_trust, selected_project_binding,
 };
 use impact::{LoadedVcs, digest_vcs_paths, impact_findings, load_vcs_paths};
 use projectatlas_core::graph::{
-    Completeness, ConfidenceClass, CoverageState, EntitySelector, ExtendedRelationKind,
-    GraphEntity, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
-    ProjectInstanceId, RelationResolution,
+    Completeness, ConfidenceClass, EntitySelector, ExtendedRelationKind, GraphEntity,
+    GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, ProjectInstanceId,
+    RelationResolution,
 };
 use projectatlas_core::language::ContentSelection;
 use projectatlas_core::symbols::{CodeSymbol, RelationKind};
@@ -1496,10 +1496,9 @@ fn relation_evidence_complete(
             | EntitySelector::Package { .. }
             | EntitySelector::Symbol { .. } => {
                 !node.coverage.is_empty()
-                    && node
-                        .coverage
-                        .iter()
-                        .all(|coverage| coverage.state() == CoverageState::Complete)
+                    && node.coverage.iter().all(|coverage| {
+                        coverage_trust(coverage.state()) == CoverageTrustState::Trusted
+                    })
             }
             EntitySelector::External { .. } => false,
         })
@@ -1536,7 +1535,7 @@ fn dead_code_scope_complete(
             .anchor
             .coverage
             .iter()
-            .all(|coverage| coverage.state() == CoverageState::Complete)
+            .all(|coverage| coverage_trust(coverage.state()) == CoverageTrustState::Trusted)
         && report.rows.iter().all(|row| {
             matches!(
                 row.relation.resolution(),

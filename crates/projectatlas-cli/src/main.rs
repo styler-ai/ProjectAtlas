@@ -39,8 +39,8 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
-    ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphDirection,
-    verify_project_database,
+    ProjectRootTransitionResult, PurposeMutationTransaction, RepositoryCoverageQuery,
+    RepositoryGraphDirection, verify_project_database,
 };
 use projectatlas_fs::worktree::{
     GitManagerSourceSelection, GitRepositorySelection, GitWorktreeRole, GitWorktreeState,
@@ -63,14 +63,14 @@ use rmcp::schemars;
 use runtime::{
     DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, InitHostConfigStatus, InitSetupReport,
     MAX_HEALTH_LIMIT, MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
-    PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions,
-    UsageRuntimeInstance, WatchStatusReport, absolute_path, build_settings_report,
-    byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
-    classified_ranked_file_nodes_with_reasons, config_root_mismatch_error,
-    default_cli_project_root, default_mcp_project_root, defaultable_cli_project_root,
-    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    index_work_control, init_config_path, init_path_status, lint_database_if_present,
-    load_synchronized_repository_token_report, next_step_report_payload,
+    PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SourceObservationRegistry,
+    SymbolBuildOptions, UsageRuntimeInstance, WatchStatusReport, absolute_path,
+    build_settings_report, byte_count_to_tokens, canonical_project_root,
+    canonical_source_project_root, classified_ranked_file_nodes_with_reasons,
+    config_root_mismatch_error, default_cli_project_root, default_mcp_project_root,
+    defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
+    estimated_source_tokens_for_paths, index_work_control, init_config_path, init_path_status,
+    lint_database_if_present, load_synchronized_repository_token_report, next_step_report_payload,
     next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
     open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
     open_fresh_atlas_store_for_project, purpose_curation_page, ranked_folder_nodes_with_reasons,
@@ -98,9 +98,9 @@ use std::time::Duration;
 use std::time::Instant;
 use thiserror::Error;
 use token_tui::{
-    TokenAtlasPreview, TokenDashboardTheme, render_token_dashboard_with_atlas,
-    render_token_trend_dashboard_with_theme, token_atlas_network_relation,
-    token_dashboard_wants_atlas,
+    TokenAtlasPreview, TokenDashboardTheme, capture_token_dashboard_viewport,
+    render_token_dashboard_with_atlas, render_token_trend_dashboard_with_theme,
+    token_atlas_network_relation, token_dashboard_wants_atlas,
 };
 #[cfg(test)]
 use token_tui::{render_token_dashboard, render_token_dashboard_with_atlas_at_width};
@@ -230,6 +230,14 @@ enum CliError {
         operation: Box<Self>,
         /// Cleanup failure observed before releasing process ownership.
         cleanup: Box<Self>,
+    },
+    /// Purpose mutation failed and its mandatory rollback also failed.
+    #[error("purpose mutation failed: {operation}; mandatory rollback also failed: {rollback}")]
+    PurposeMutationRollback {
+        /// Original mutation, freshness, or cancellation failure.
+        operation: Box<Self>,
+        /// Storage failure observed while rolling the transaction back.
+        rollback: DbError,
     },
     /// User input was invalid.
     #[error("invalid input: {0}")]
@@ -1260,7 +1268,7 @@ enum Command {
         /// Optional relationship-family coverage filter.
         #[arg(long, requires = "coverage")]
         relation: Option<String>,
-        /// Optional complete, partial, failed, ignored, oversized, quarantined, or stale filter.
+        /// Optional complete, `no_candidates`, partial, failed, ignored, oversized, quarantined, or stale filter.
         #[arg(long, requires = "coverage")]
         coverage_state: Option<String>,
         /// Optional exact coverage reason filter.
@@ -2825,10 +2833,9 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         print_output(cli.format, &render_token_trends(&report), &report)?;
                     }
                     TokenView::Tui => {
-                        write_stdout(&render_token_trend_dashboard_with_theme(
-                            &report,
-                            (*theme).into(),
-                        ))?;
+                        let dashboard =
+                            render_token_trend_dashboard_with_theme(&report, (*theme).into())?;
+                        write_stdout(&dashboard)?;
                     }
                 }
             } else {
@@ -2857,17 +2864,20 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         print_output(cli.format, &render_token_overview(&overview), &overview)?;
                     }
                     TokenView::Tui => {
-                        let atlas = if token_dashboard_wants_atlas() {
+                        let viewport = capture_token_dashboard_viewport();
+                        let atlas = if token_dashboard_wants_atlas(viewport) {
                             load_token_atlas_preview(&store)
                         } else {
                             TokenAtlasPreview::empty()
                         };
-                        write_stdout(&render_token_dashboard_with_atlas(
+                        let dashboard = render_token_dashboard_with_atlas(
                             &overview,
                             session.as_deref(),
                             &atlas,
                             (*theme).into(),
-                        ))?;
+                            viewport,
+                        )?;
+                        write_stdout(&dashboard)?;
                     }
                 }
             }
@@ -2970,39 +2980,42 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
         }
         Command::Purpose { command } => match command {
             PurposeCommand::Set { path, purpose } => {
-                let store = open_index_for_mutation(cli)?;
-                store.set_purpose(path, purpose, PurposeSource::Agent)?;
-                let classification = if store
-                    .load_node_by_path(path)?
-                    .is_some_and(|node| node.node.kind == projectatlas_core::NodeKind::File)
-                {
-                    store
-                        .file_content_classifications_for_paths(std::slice::from_ref(path))?
-                        .first()
-                        .map(|row| row.classification)
-                } else {
-                    None
-                };
-                let report = PurposeSetReport {
-                    purpose_set: PurposeSetPayload {
-                        path: path.clone(),
-                        classification,
-                        status: PurposeStatus::Approved,
-                        source: PurposeSource::Agent,
-                        agent_reviewed: true,
-                    },
-                };
+                let report = with_admitted_purpose_mutation(cli, |store| {
+                    store.set_purpose(path, purpose, PurposeSource::Agent)?;
+                    let classification = if store
+                        .load_node_by_path(path)?
+                        .is_some_and(|node| node.node.kind == projectatlas_core::NodeKind::File)
+                    {
+                        store
+                            .file_content_classifications_for_paths(std::slice::from_ref(path))?
+                            .first()
+                            .map(|row| row.classification)
+                    } else {
+                        None
+                    };
+                    Ok(PurposeSetReport {
+                        purpose_set: PurposeSetPayload {
+                            path: path.clone(),
+                            classification,
+                            status: PurposeStatus::Approved,
+                            source: PurposeSource::Agent,
+                            agent_reviewed: true,
+                        },
+                    })
+                })?;
                 print_output(cli.format, &encode_agent_payload(&report), &report)?;
             }
             PurposeCommand::Review { from_file, apply } => {
                 let requests = load_purpose_review_requests(from_file)?;
                 validate_purpose_review_admission(&requests)?;
-                let store = if *apply {
-                    open_index_for_mutation(cli)?
+                let report = if *apply {
+                    with_admitted_purpose_mutation(cli, |store| {
+                        review_purposes(store, &requests, true)
+                    })?
                 } else {
-                    open_index_for_read(cli)?
+                    let store = open_index_for_read(cli)?;
+                    review_purposes(&store, &requests, false)?
                 };
-                let report = review_purposes(&store, &requests, *apply)?;
                 print_output(cli.format, &render_purpose_review_report(&report), &report)?;
                 if report.failed > 0 {
                     std::process::exit(1);
@@ -3358,6 +3371,50 @@ fn open_index_for_mutation(cli: &Cli) -> Result<AtlasStore, CliError> {
         return Err(runtime::index_init_required(&root, &cli.db));
     }
     open_atlas_store_for_project(&cli.db, &root)
+}
+
+/// Apply one purpose mutation under a source witness retained through commit.
+fn with_admitted_purpose_mutation<T>(
+    cli: &Cli,
+    mutation: impl FnOnce(&AtlasStore) -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let root = cli.project_root()?;
+    if !cli.db.is_file() {
+        return Err(runtime::index_init_required(&root, &cli.db));
+    }
+    let control = index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
+    let observations = SourceObservationRegistry::default();
+    let database = absolute_path(&cli.db)?;
+    let config = cli.config.as_deref().map(absolute_path).transpose()?;
+    let admission = observations.admit_mutation(&database, &root, config.as_deref(), &control)?;
+    let store = open_index_for_mutation(cli)?;
+    let transaction = store.begin_purpose_mutation()?;
+    let operation = (|| {
+        let value = mutation(&store)?;
+        admission.verify()?;
+        Ok(value)
+    })();
+    match operation {
+        Ok(value) => {
+            transaction.commit()?;
+            Ok(value)
+        }
+        Err(operation) => Err(rollback_rejected_purpose_mutation(transaction, operation)),
+    }
+}
+
+/// Preserve a rejected purpose mutation when its explicit rollback also fails.
+fn rollback_rejected_purpose_mutation(
+    transaction: PurposeMutationTransaction<'_>,
+    operation: CliError,
+) -> CliError {
+    match transaction.rollback() {
+        Ok(()) => operation,
+        Err(rollback) => CliError::PurposeMutationRollback {
+            operation: Box::new(operation),
+            rollback,
+        },
+    }
 }
 
 /// Build a harness-specific MCP configuration document for this binary.
@@ -5305,9 +5362,11 @@ fn render_file_summary(report: &FileSummaryReport) -> String {
     encode_agent_payload(&json!({ "file_summary": report }))
 }
 
-/// Write text to stdout without using print macros.
+/// Write and flush text to stdout without using print macros.
 fn write_stdout(text: &str) -> Result<(), CliError> {
-    io::stdout().write_all(text.as_bytes())?;
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()?;
     Ok(())
 }
 
