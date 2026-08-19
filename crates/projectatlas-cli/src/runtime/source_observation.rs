@@ -552,6 +552,9 @@ pub(crate) struct SourceObservationRegistry {
     /// Acceptance invalidations forced by owning mutation-admission tests.
     #[cfg(test)]
     mutation_acceptance_invalidations: AtomicU64,
+    /// Preparation invalidations forced by owning mutation-admission tests.
+    #[cfg(test)]
+    preparation_invalidations: AtomicU64,
 }
 
 impl fmt::Debug for SourceObservationRegistry {
@@ -572,6 +575,8 @@ impl Default for SourceObservationRegistry {
             entries: Mutex::new(HashMap::new()),
             #[cfg(test)]
             mutation_acceptance_invalidations: AtomicU64::new(0),
+            #[cfg(test)]
+            preparation_invalidations: AtomicU64::new(0),
         }
     }
 }
@@ -617,7 +622,11 @@ impl SourceObservationRegistry {
                 return Err(error.into());
             }
             let (store, epoch) = match self.prepare_observed_store(&entry, control, &mut work) {
-                Ok(prepared) => prepared,
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => {
+                    entry.invalidate();
+                    return self.admit_exact_mutation(binding, control);
+                }
                 Err(error) => {
                     entry.invalidate();
                     return Err(error);
@@ -775,7 +784,11 @@ impl SourceObservationRegistry {
                 return Err(error.into());
             }
             let (store, epoch) = match self.prepare_observed_store(entry, control, &mut work) {
-                Ok(prepared) => prepared,
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => {
+                    entry.invalidate();
+                    return Err(source_changed_during_derivation(&entry.binding.root, "."));
+                }
                 Err(error) => {
                     entry.invalidate();
                     return Err(error);
@@ -823,7 +836,7 @@ impl SourceObservationRegistry {
         entry: &SourceObservationEntry,
         control: &IndexWorkControl,
         work: &mut VerifiedReadWork,
-    ) -> Result<(AtlasStore, VerifiedSourceEpoch), CliError> {
+    ) -> Result<Option<(AtlasStore, VerifiedSourceEpoch)>, CliError> {
         let _reconcile = entry
             .reconcile
             .lock()
@@ -860,7 +873,7 @@ impl SourceObservationRegistry {
                 .is_some_and(|publication| publication.generation == epoch.stamp.generation)
                 && captured.project_instance_id == epoch.stamp.project_instance_id
             {
-                return Ok((store, epoch));
+                return Ok(Some((store, epoch)));
             }
             entry.invalidate();
             drop(store.finish_index_read_snapshot());
@@ -893,6 +906,16 @@ impl SourceObservationRegistry {
             .map_err(|source| publication_input_error(&entry.binding.root, source))?;
             let after_contract = after_plan.publication_contract_fingerprint();
             let after_policy = source_policy_witness(&after_plan, control)?;
+            #[cfg(test)]
+            if self
+                .preparation_invalidations
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                entry.continuity_lost.store(true, Ordering::Release);
+            }
             let changed = entry.changed_since_exact_verification(&after_plan.scan_options)?;
             if changed || before_contract != after_contract || before_policy != after_policy {
                 drop(exact.store.finish_index_read_snapshot());
@@ -913,9 +936,9 @@ impl SourceObservationRegistry {
                 after_contract,
                 after_policy,
             )?;
-            return Ok((exact.store, epoch));
+            return Ok(Some((exact.store, epoch)));
         }
-        Err(source_changed_during_derivation(&entry.binding.root, "."))
+        Ok(None)
     }
 
     /// Confirm that no source, policy, or observer event invalidated a query result.
@@ -1634,6 +1657,44 @@ mod tests {
                 .load_node_by_path("source.rs")?
                 .is_some_and(|node| node.purpose == before_purpose),
             "mutation admission changed the purpose row",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn preparation_continuity_loss_falls_back_only_for_mutations() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        registry
+            .preparation_invalidations
+            .store(u64::try_from(VERIFIED_READ_ATTEMPTS)?, Ordering::Release);
+
+        let admission = registry.admit_mutation(&database, temp.path(), None, &test_control())?;
+
+        require(
+            matches!(&admission.witness, MutationSourceWitness::Exact { .. }),
+            "preparation continuity loss did not fall back to exact source",
+        )?;
+        require(
+            registry.preparation_invalidations.load(Ordering::Acquire) == 0,
+            "preparation invalidation attempts were not bounded",
+        )?;
+        admission.verify()?;
+
+        registry
+            .preparation_invalidations
+            .store(u64::try_from(VERIFIED_READ_ATTEMPTS)?, Ordering::Release);
+        let read = registry.with_verified_read(
+            &database,
+            temp.path(),
+            None,
+            &test_control(),
+            |store, _stamp| Ok(store.overview()?),
+        );
+        require(
+            matches!(read, Err(CliError::RefreshRequired(_))),
+            "observer read did not retain continuity-loss recovery",
         )?;
         Ok(())
     }
