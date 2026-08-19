@@ -29029,6 +29029,44 @@ fn conditional_purpose_review_cli_reconciles_source_before_apply() -> Result<(),
         .args(["lint", "--purpose-level", "low"])
         .assert()
         .success();
+    let config = atlas_dir.join("config.toml");
+    let project_root = normalize_native_path_display(fs::canonicalize(&repo)?);
+    fs::write(&config, format!("[project]\nroot = \"{project_root}\"\n"))?;
+    Command::new(mcp_contract_executable())
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .arg("--config")
+        .arg(&config)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    let relative_db = Path::new(TEST_REPO_DIR)
+        .join(ATLAS_DIR_NAME)
+        .join("projectatlas.db");
+    let relative_config = Path::new(TEST_REPO_DIR)
+        .join(ATLAS_DIR_NAME)
+        .join("config.toml");
+    Command::new(mcp_contract_executable())
+        .current_dir(temp.path())
+        .arg("--db")
+        .arg(relative_db)
+        .arg("--config")
+        .arg(relative_config)
+        .args([
+            "purpose",
+            "set",
+            "src/main.rs",
+            "Application entry point addressed outside the repository.",
+        ])
+        .assert()
+        .success();
+    let addressed = json_summary_command(&repo, &db, "src/main.rs")?;
+    require_json_string(
+        &addressed,
+        &["file_purpose"],
+        "Application entry point addressed outside the repository.",
+    )?;
     Ok(())
 }
 

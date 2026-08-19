@@ -3384,7 +3384,9 @@ fn with_admitted_purpose_mutation<T>(
     }
     let control = index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
     let observations = SourceObservationRegistry::default();
-    let admission = observations.admit_mutation(&cli.db, &root, cli.config.as_deref(), &control)?;
+    let database = absolute_path(&cli.db)?;
+    let config = cli.config.as_deref().map(absolute_path).transpose()?;
+    let admission = observations.admit_mutation(&database, &root, config.as_deref(), &control)?;
     let store = open_index_for_mutation(cli)?;
     let transaction = store.begin_purpose_mutation()?;
     let operation = (|| {
