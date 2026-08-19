@@ -2752,7 +2752,10 @@ fn buffer_to_ansi_string(buffer: &Buffer) -> String {
             output.push_str(cell.symbol());
             x = x.saturating_add(cell.symbol().cell_width().max(1));
         }
-        output.push_str("\x1b[0m\n");
+        output.push_str("\x1b[0m");
+        if y + 1 < height {
+            output.push('\n');
+        }
         active_style = None;
     }
     output
@@ -3118,6 +3121,7 @@ mod tests {
             overview_viewport,
         ));
         assert_ansi_bounds(&dashboard, overview_viewport);
+        assert!(!dashboard.ends_with('\n'));
         let dashboard = strip_ansi(&dashboard);
         assert!(dashboard.contains(&reference_title("AVERAGE TOKENS AVOIDED")));
         assert!(dashboard.contains(&reference_title("WHERE THE SAVINGS CAME FROM")));
@@ -3129,6 +3133,7 @@ mod tests {
             trend_viewport,
         ));
         assert_ansi_bounds(&trend, trend_viewport);
+        assert!(!trend.ends_with('\n'));
         assert!(strip_ansi(&trend).contains(&reference_title("SAVED TOKENS TREND")));
     }
 
