@@ -1648,30 +1648,6 @@ fn project_document_rows(
     let file_source = staged_entities.get(&owners.file_digest).ok_or_else(|| {
         CliError::InvalidInput("document graph file owner was not staged".to_string())
     })?;
-    let mut heading_sources = BTreeMap::new();
-    for (symbol_index, symbol) in graph.symbols.iter().enumerate() {
-        if symbol.kind != SymbolKind::Heading {
-            continue;
-        }
-        let digest = owners
-            .symbol_digests
-            .get(symbol_index)
-            .and_then(Option::as_ref)
-            .ok_or_else(|| {
-                CliError::InvalidInput("document heading owner was not staged".to_string())
-            })?;
-        let entity = staged_entities.get(digest).ok_or_else(|| {
-            CliError::InvalidInput("document heading entity was not staged".to_string())
-        })?;
-        if heading_sources
-            .insert(symbol.signature.as_str(), entity)
-            .is_some()
-        {
-            return Err(CliError::InvalidInput(
-                "document heading selector is not unique".to_string(),
-            ));
-        }
-    }
     let completeness = match facts.coverage.completeness {
         MarkdownFactCompleteness::Complete => Completeness::Complete,
         MarkdownFactCompleteness::Partial => Completeness::Partial,
@@ -1687,19 +1663,7 @@ fn project_document_rows(
         {
             continue;
         }
-        let source = candidate
-            .enclosing_heading
-            .as_ref()
-            .map_or(Ok(file_source), |heading| {
-                heading_sources
-                    .get(heading.as_str())
-                    .copied()
-                    .ok_or_else(|| {
-                        CliError::InvalidInput(
-                            "document link enclosing heading was not staged".to_string(),
-                        )
-                    })
-            })?;
+        let source = file_source;
         let outcome = resolve_document_candidate(
             project,
             &graph.path,
@@ -1908,6 +1872,17 @@ fn document_coverage(
     });
     let relation = Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents));
     match facts.coverage.completeness {
+        MarkdownFactCompleteness::Complete if covered == 0 => CoverageRecord::new(
+            scope,
+            relation,
+            CoverageState::NoCandidates,
+            0,
+            0,
+            generation,
+            None,
+            None,
+        )
+        .map_err(invalid_graph_contract),
         MarkdownFactCompleteness::Complete => CoverageRecord::new(
             scope,
             relation,
@@ -3967,7 +3942,7 @@ mod tests {
         MAX_INCREMENTAL_GRAPH_ROWS, PackageIndex, ProjectResolutionRegistry,
         RepositoryGraphMutation, StagedRepositoryGraph, build_entity_projection,
         build_entity_projection_with_config, cleanup_abandoned_graph_staging,
-        document_casefold_resolution_key, document_fact_map_retained_bytes,
+        document_casefold_resolution_key, document_coverage, document_fact_map_retained_bytes,
         enforce_incremental_projection_budget, enforce_incremental_projection_limits,
         explicit_external_selector, finish_projection, finish_projection_in_database,
         insert_relation, is_cargo_manifest_path, normalize_document_target, project_document_rows,
@@ -6053,7 +6028,7 @@ mod tests {
     }
 
     #[test]
-    fn document_rows_preserve_enclosing_heading_identity_and_deduplicate_per_heading()
+    fn document_rows_use_file_identity_and_deduplicate_across_headings()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         fs::create_dir_all(temp.path().join("src"))?;
@@ -6121,40 +6096,26 @@ mod tests {
             &projection.entity_by_digest,
             &control,
         )?;
-        require_eq(&rows.relations.len(), &4, "heading-owned relation count")?;
-        require_eq(&rows.occurrences.len(), &5, "distinct link occurrences")?;
-        let sources = rows
-            .relations
-            .iter()
-            .map(|relation| {
+        require_eq(&rows.relations.len(), &3, "file-owned relation count")?;
+        require_eq(&rows.occurrences.len(), &7, "distinct link occurrences")?;
+        require(
+            rows.relations.iter().all(|relation| {
                 projection
                     .entity_by_digest
                     .get(relation.source().digest())
-                    .and_then(|entity| match entity.selector() {
-                        EntitySelector::Symbol { symbol } => Some(symbol.signature.as_str()),
-                        _ => None,
+                    .is_some_and(|entity| {
+                        matches!(
+                            entity.selector(),
+                            EntitySelector::File { path } if path.as_str() == "docs/guide.md"
+                        )
                     })
-                    .ok_or_else(|| io::Error::other("document source was not a heading"))
-            })
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        require_eq(
-            &sources,
-            &BTreeSet::from(["first", "second"]),
-            "heading source identities",
+            }),
+            "document relations were not owned by the document file",
         )?;
-        let heading_edges = rows
+        let heading_targets = rows
             .relations
             .iter()
             .filter_map(|relation| {
-                let source = projection
-                    .entity_by_digest
-                    .get(relation.source().digest())
-                    .and_then(|entity| match entity.selector() {
-                        EntitySelector::Symbol { symbol } => {
-                            Some(symbol.signature.as_str().to_string())
-                        }
-                        _ => None,
-                    })?;
                 let RelationResolution::Resolved {
                     selector: projectatlas_core::graph::ReusableTargetSelector::Symbol { symbol },
                     ..
@@ -6162,18 +6123,40 @@ mod tests {
                 else {
                     return None;
                 };
-                (symbol.kind == SymbolKind::Heading)
-                    .then(|| (source, symbol.signature.as_str().to_string()))
+                (symbol.kind == SymbolKind::Heading).then(|| symbol.signature.as_str().to_string())
             })
             .collect::<BTreeSet<_>>();
         require_eq(
-            &heading_edges,
-            &BTreeSet::from([
-                ("first".to_string(), "second".to_string()),
-                ("second".to_string(), "first".to_string()),
-            ]),
-            "cross-heading links without self edges",
+            &heading_targets,
+            &BTreeSet::from(["first".to_string(), "second".to_string()]),
+            "file-owned heading targets",
         )?;
+        let source_target_occurrences = rows
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.file().as_str() == "docs/guide.md")
+            .count();
+        require_eq(
+            &source_target_occurrences,
+            &7,
+            "file-owned relation occurrences",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn complete_document_without_static_candidates_reports_no_candidates()
+    -> Result<(), Box<dyn Error>> {
+        let facts = projectatlas_symbols::extract_markdown_facts(
+            "# Overview\n\nLong prose without a repository reference.\n",
+        );
+        let coverage = document_coverage("docs/overview.md", &facts, IndexGeneration::new(6))?;
+        require_eq(
+            &coverage.state(),
+            &CoverageState::NoCandidates,
+            "empty document relation coverage",
+        )?;
+        require_eq(&coverage.total(), &0, "empty document relation total")?;
         Ok(())
     }
 

@@ -151,6 +151,103 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
 
+      - name: Graph, symbol, purpose, and viewport regressions
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          cargo test --locked -p projectatlas-cli --test e2e csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli token_tui::tests -- --nocapture
+
+      - name: Capture hosted PTY token dashboards
+        if: matrix.label != 'windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/.tmp/tui-hosted-${{ matrix.label }}"
+          repo="$evidence/repo"
+          binary="$GITHUB_WORKSPACE/target/debug/projectatlas"
+          mkdir -p "$repo/src"
+          git init -q "$repo"
+          git -C "$repo" config user.email "ci@projectatlas.invalid"
+          git -C "$repo" config user.name "ProjectAtlas CI"
+          printf 'pub fn hosted_terminal_contract() {}\n' > "$repo/src/lib.rs"
+          git -C "$repo" add src/lib.rs
+          git -C "$repo" commit -qm "test: seed hosted terminal evidence"
+          cargo build --locked -p projectatlas-cli
+          (cd "$repo" && "$binary" --format json init --no-scan)
+          (cd "$repo" && "$binary" --format json scan)
+          export PROJECTATLAS_TUI_BINARY="$binary"
+          export PROJECTATLAS_TUI_DB="$repo/.projectatlas/projectatlas.db"
+          render='stty rows "$PROJECTATLAS_TUI_ROWS" cols "$PROJECTATLAS_TUI_COLUMNS"; export COLUMNS="$PROJECTATLAS_TUI_COLUMNS" LINES="$PROJECTATLAS_TUI_ROWS"; case "$PROJECTATLAS_TUI_CASE" in compact-overview) "$PROJECTATLAS_TUI_BINARY" --db "$PROJECTATLAS_TUI_DB" token --session "界" --view tui ;; full-overview) "$PROJECTATLAS_TUI_BINARY" --db "$PROJECTATLAS_TUI_DB" token --view tui --theme light ;; compact-trend|full-trend) "$PROJECTATLAS_TUI_BINARY" --db "$PROJECTATLAS_TUI_DB" token --view tui --trend month ;; *) exit 64 ;; esac'
+          capture() {
+            local name="$1" rows="$2" columns="$3" case_name="$4"
+            local output="$evidence/$name.ansi"
+            export PROJECTATLAS_TUI_ROWS="$rows"
+            export PROJECTATLAS_TUI_COLUMNS="$columns"
+            export PROJECTATLAS_TUI_CASE="$case_name"
+            if [[ "$RUNNER_OS" == "macOS" ]]; then
+              script -q "$output" sh -c "$render"
+            else
+              script -q -e -c "$render" "$output"
+            fi
+            test -s "$output"
+            grep -a -q "Token" "$output"
+          }
+          capture compact-overview-40x8 8 40 compact-overview
+          capture full-overview-80x50 50 80 full-overview
+          capture compact-trend-79x29 29 79 compact-trend
+          capture full-trend-80x30 30 80 full-trend
+          printf '%s\n' \
+            'compact-overview-40x8.ansi: 40 columns x 8 rows, CJK session' \
+            'full-overview-80x50.ansi: 80 columns x 50 rows, light theme' \
+            'compact-trend-79x29.ansi: 79 columns x 29 rows' \
+            'full-trend-80x30.ansi: 80 columns x 30 rows' \
+            > "$evidence/manifest.txt"
+
+      - name: Upload hosted PTY token dashboards
+        if: matrix.label != 'windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: token-tui-pty-${{ matrix.label }}
+          path: |
+            .tmp/tui-hosted-${{ matrix.label }}/*.ansi
+            .tmp/tui-hosted-${{ matrix.label }}/manifest.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Native Btrfs database placement contract
+        if: matrix.label == 'linux'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes btrfs-progs
+          image="$RUNNER_TEMP/projectatlas-btrfs.img"
+          mount_root="$RUNNER_TEMP/projectatlas-btrfs"
+          subvolume="$mount_root/projectatlas-subvolume"
+          mkdir -p "$mount_root"
+          truncate -s 256M "$image"
+          sudo mkfs.btrfs -f "$image"
+          cleanup() {
+            if mountpoint -q "$mount_root"; then
+              sudo umount "$mount_root"
+            fi
+          }
+          trap cleanup EXIT
+          sudo mount -o loop "$image" "$mount_root"
+          sudo btrfs subvolume create "$subvolume"
+          sudo chown "$(id -u):$(id -g)" "$subvolume"
+          cargo build --locked -p projectatlas-cli
+          PROJECTATLAS_BTRFS_TEST_ROOT="$subvolume" \
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$GITHUB_WORKSPACE/target/debug/projectatlas" \
+            cargo test --locked -p projectatlas-cli --test e2e linux_btrfs_subvolume_database_supports_cli_and_persistent_mcp_reopen -- --exact --include-ignored --nocapture
+
       - name: Worktree lifecycle race regressions
         timeout-minutes: 10
         shell: bash

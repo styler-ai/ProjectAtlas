@@ -264,7 +264,7 @@ const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum current source bytes one navigation read may allocate and inspect.
 const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "2";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "3";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -573,6 +573,25 @@ pub(crate) fn open_exact_fresh_atlas_store_for_project_controlled(
         true,
         ScanLimits::default(),
     )
+}
+
+/// Verify exact saved source against the index without publishing a repair.
+pub(crate) fn verify_saved_source_matches_index_controlled(
+    db_path: &Path,
+    root: &Path,
+    config_path: Option<&Path>,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    let exact = open_exact_fresh_atlas_store_for_project_with_repair(
+        db_path,
+        root,
+        config_path,
+        control,
+        false,
+        ScanLimits::default(),
+    )?;
+    exact.store.finish_index_read_snapshot()?;
+    Ok(())
 }
 
 /// Open a current read snapshot without repairing stale source or durable state.
@@ -1354,29 +1373,27 @@ fn index_derivation_fingerprint(
     #[cfg(feature = "optional-parser-supervisor")]
     optional_parser_selection: &OptionalParserPackProjectSelection,
 ) -> String {
-    index_derivation_fingerprint_with_semantic_digest(
+    index_derivation_fingerprint_for_contract(
         scan_options,
         text_options,
         #[cfg(feature = "optional-parser-supervisor")]
         optional_parser_selection,
+        INDEX_DERIVATION_CONTRACT_VERSION,
         &semantic_resolution_contract_digest(),
     )
 }
 
 /// Hash one exact parser, semantic, and source-selection contract.
-fn index_derivation_fingerprint_with_semantic_digest(
+fn index_derivation_fingerprint_for_contract(
     scan_options: &ScanOptions,
     text_options: TextIndexOptions,
     #[cfg(feature = "optional-parser-supervisor")]
     optional_parser_selection: &OptionalParserPackProjectSelection,
+    contract_version: &str,
     semantic_resolution_digest: &str,
 ) -> String {
     let mut hasher = Hasher::new();
-    hash_index_contract_value(
-        &mut hasher,
-        "contract_version",
-        INDEX_DERIVATION_CONTRACT_VERSION,
-    );
+    hash_index_contract_value(&mut hasher, "contract_version", contract_version);
     hash_index_contract_value(
         &mut hasher,
         "language_registry_version",
@@ -8583,7 +8600,7 @@ pub(crate) fn purpose_header_candidates(
 mod tests {
     use super::*;
     use projectatlas_core::graph::{
-        DocumentTargetUnresolvedReason, ExtendedRelationKind, GraphRelationKind,
+        DocumentTargetUnresolvedReason, EntitySelector, ExtendedRelationKind, GraphRelationKind,
         RelationResolution, RepositoryNodePath,
     };
     use projectatlas_db::{DbError, RepositoryGraphRelationQuery, WorktreeAlias};
@@ -10688,13 +10705,14 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     }
 
     #[test]
-    fn semantic_contract_revision_forces_full_projection_refresh() -> Result<(), Box<dyn Error>> {
+    fn projection_contract_revisions_force_full_projection_refresh() -> Result<(), Box<dyn Error>> {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let temp = tempfile::tempdir()?;
         let atlas_dir = temp.path().join(".projectatlas");
         fs::create_dir_all(&atlas_dir)?;
         fs::create_dir_all(temp.path().join("src"))?;
+        fs::create_dir_all(temp.path().join("docs"))?;
         fs::write(
             temp.path().join("src/config.rs"),
             "pub fn load_timeout_millis() -> u64 { 250 }\n",
@@ -10707,6 +10725,10 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             temp.path().join("src/router.rs"),
             "use crate::handler;\npub fn dispatch(path: &str) -> Option<()> { (path == \"/health\").then(handler::health_response) }\n",
         )?;
+        fs::write(
+            temp.path().join("docs/guide.md"),
+            "# Configuration\n\nSee [the timeout source](../src/config.rs).\n",
+        )?;
 
         let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
         let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
@@ -10714,16 +10736,27 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
         run_scan_pipeline(&mut store, &plan, &symbol_options)?;
         let current_fingerprint = plan.publication_contract_fingerprint();
-        let legacy_fingerprint = index_derivation_fingerprint_with_semantic_digest(
+        let prior_projection_fingerprint = index_derivation_fingerprint_for_contract(
             &plan.scan_options,
             text_index_options(plan.config.as_ref(), None),
             #[cfg(feature = "optional-parser-supervisor")]
             &plan.optional_parser_selection,
+            "2",
+            &semantic_resolution_contract_digest(),
+        );
+        let prior_semantic_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            INDEX_DERIVATION_CONTRACT_VERSION,
             PRE_MODULE_CALLBACK_DIGEST,
         );
-        if legacy_fingerprint == current_fingerprint {
+        if prior_projection_fingerprint == current_fingerprint
+            || prior_semantic_fingerprint == current_fingerprint
+        {
             return Err(io::Error::other(
-                "semantic contract revision did not change the derivation fingerprint",
+                "projection or semantic contract revision did not change the derivation fingerprint",
             )
             .into());
         }
@@ -10733,7 +10766,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             .ok_or_else(|| io::Error::other("current publication missing"))?
             .generation;
         store
-            .begin_index_publication_from(&legacy_fingerprint, current_generation)?
+            .begin_index_publication_from(&prior_projection_fingerprint, current_generation)?
             .complete()?;
         if publication_contract_matches(&store, &plan)? {
             return Err(io::Error::other(
@@ -10741,6 +10774,19 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             )
             .into());
         }
+        let Err(CliError::VerificationIncomplete(stale_contract)) =
+            verify_index_publication(&store, &plan)
+        else {
+            return Err(io::Error::other(
+                "stale document projection crossed the publication read boundary",
+            )
+            .into());
+        };
+        require_eq(
+            &stale_contract.reason,
+            &IndexVerificationReason::PublicationContractMismatch,
+            "stale document projection read reason",
+        )?;
 
         let stale_generation = store
             .index_publication()?
@@ -10756,6 +10802,30 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         {
             return Err(io::Error::other(
                 "semantic contract mismatch did not force a current full publication",
+            )
+            .into());
+        }
+        let document_relations = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Family {
+                relation: GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+            },
+            10,
+        )?;
+        let document_source_is_file = document_relations.rows.iter().any(|relation| {
+            store
+                .repository_graph_entity(relation.source())
+                .ok()
+                .flatten()
+                .is_some_and(|source| {
+                    matches!(
+                        source.selector(),
+                        EntitySelector::File { path } if path.as_str() == "docs/guide.md"
+                    )
+                })
+        });
+        if !document_source_is_file {
+            return Err(io::Error::other(
+                "full contract refresh did not republish the document file as source",
             )
             .into());
         }

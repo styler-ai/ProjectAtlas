@@ -1,9 +1,10 @@
 //! Process-local source observation for long-lived verified index reads.
 
 use super::{
-    ScanRuntimePlan, SourceVerificationWork, WatchChangeSet,
+    IndexVerificationReason, ScanRuntimePlan, SourceVerificationWork, WatchChangeSet,
     open_atlas_store_read_only_for_project, open_exact_fresh_atlas_store_for_project_controlled,
     publication_input_error, source_changed_during_derivation, source_inspection_error,
+    verification_incomplete, verify_saved_source_matches_index_controlled,
 };
 use crate::CliError;
 use blake3::Hasher;
@@ -98,6 +99,56 @@ impl<T> VerifiedReadOutcome<T> {
     pub(crate) fn with_output_bytes(mut self, output_bytes: usize) -> Self {
         self.work.output_bytes = u64::try_from(output_bytes).unwrap_or(u64::MAX);
         self
+    }
+}
+
+/// Saved-source witness retained through one purpose mutation commit boundary.
+pub(crate) struct VerifiedMutationAdmission {
+    /// Exact source binding and observer continuity retained by this admission.
+    entry: Arc<SourceObservationEntry>,
+    /// Exact durable generation and policy epoch accepted before mutation.
+    epoch: VerifiedSourceEpoch,
+    /// Cooperative cancellation and work budget shared through commit admission.
+    control: IndexWorkControl,
+}
+
+impl VerifiedMutationAdmission {
+    /// Revalidate exact saved source, policy, observer continuity, and cancellation before commit.
+    pub(crate) fn verify(&self) -> Result<(), CliError> {
+        if let Err(error) = self.verify_observation() {
+            self.entry.invalidate();
+            return Err(error);
+        }
+        if let Err(error) = verify_saved_source_matches_index_controlled(
+            &self.entry.binding.database,
+            &self.entry.binding.root,
+            self.entry.binding.config.as_deref(),
+            &self.control,
+        ) {
+            self.entry.invalidate();
+            return Err(error);
+        }
+        if let Err(error) = self.verify_observation() {
+            self.entry.invalidate();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Require the retained observer epoch to remain current.
+    fn verify_observation(&self) -> Result<(), CliError> {
+        match SourceObservationRegistry::accepts_observed_result(
+            &self.entry,
+            &self.epoch,
+            &self.control,
+        ) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(source_changed_during_derivation(
+                &self.entry.binding.root,
+                ".",
+            )),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -413,6 +464,9 @@ pub(crate) struct SourceObservationRegistry {
     process_nonce: [u8; 16],
     /// Bounded observers keyed by exact source binding.
     entries: Mutex<HashMap<SourceBinding, Arc<SourceObservationEntry>>>,
+    /// Acceptance invalidations forced by owning mutation-admission tests.
+    #[cfg(test)]
+    mutation_acceptance_invalidations: AtomicU64,
 }
 
 impl fmt::Debug for SourceObservationRegistry {
@@ -431,6 +485,8 @@ impl Default for SourceObservationRegistry {
         Self {
             process_nonce: process_nonce(),
             entries: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            mutation_acceptance_invalidations: AtomicU64::new(0),
         }
     }
 }
@@ -453,6 +509,76 @@ impl SourceObservationRegistry {
             return self.with_exact_fallback(&binding, control, query);
         };
         self.with_observed_read(&entry, control, query)
+    }
+
+    /// Admit a purpose mutation and retain its source witness through commit.
+    pub(crate) fn admit_mutation(
+        &self,
+        database: &Path,
+        root: &Path,
+        config: Option<&Path>,
+        control: &IndexWorkControl,
+    ) -> Result<VerifiedMutationAdmission, CliError> {
+        let binding = SourceBinding::new(database, root, config)?;
+        let Some(entry) = self.entry(binding.clone())? else {
+            let unavailable = CliError::InvalidInput(format!(
+                "source observation is unavailable for '{}'",
+                binding.root.display()
+            ));
+            return Err(verification_incomplete(
+                &binding.root,
+                IndexVerificationReason::SourceInspectionFailed,
+                &unavailable,
+            ));
+        };
+        // Mutation authority always starts from exact saved source; watcher delivery is advisory.
+        entry.invalidate();
+        let mut work = VerifiedReadWork::default();
+        for _attempt in 0..VERIFIED_READ_ATTEMPTS {
+            if let Err(error) = control.check(IndexWorkStage::Publication) {
+                entry.invalidate();
+                return Err(error.into());
+            }
+            let (store, epoch) = match self.prepare_observed_store(&entry, control, &mut work) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    entry.invalidate();
+                    return Err(error);
+                }
+            };
+            #[cfg(test)]
+            if self
+                .mutation_acceptance_invalidations
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                entry.continuity_lost.store(true, Ordering::Release);
+            }
+            match Self::accepts_observed_result(&entry, &epoch, control) {
+                Ok(true) => {
+                    if let Err(error) = store.finish_index_read_snapshot() {
+                        entry.invalidate();
+                        return Err(error.into());
+                    }
+                    return Ok(VerifiedMutationAdmission {
+                        entry,
+                        epoch,
+                        control: control.clone(),
+                    });
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    entry.invalidate();
+                    drop(store.finish_index_read_snapshot());
+                    return Err(error);
+                }
+            }
+            entry.invalidate();
+            drop(store.finish_index_read_snapshot());
+        }
+        Err(source_changed_during_derivation(&binding.root, "."))
     }
 
     /// Inject one deterministic observer event for owning integration tests.
@@ -943,7 +1069,7 @@ mod tests {
     use super::*;
     use notify::event::{ModifyKind, RenameMode};
     use notify::{EventKind, event::AccessKind};
-    use projectatlas_core::IndexCancellation;
+    use projectatlas_core::{IndexCancellation, PurposeSource};
     use std::error::Error;
 
     /// Create and publish a minimal indexed repository for observer tests.
@@ -1225,6 +1351,167 @@ mod tests {
         require(
             outcome.value == blake3::hash(revised.as_bytes()).to_hex().to_string(),
             "accepted result did not reflect the revised source",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_admission_reconciles_saved_source_without_waiting_for_observer_delivery()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let _warm = registry.with_verified_read(
+            &database,
+            temp.path(),
+            None,
+            &control,
+            |store, _stamp| Ok(store.overview()?),
+        )?;
+        let revised = "fn revised_before_admission() {}\n";
+        fs::write(&source, revised)?;
+
+        let admission = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let content_hash = store
+            .load_node_by_path("source.rs")?
+            .and_then(|node| node.node.content_hash)
+            .ok_or_else(|| std::io::Error::other("reconciled source hash missing"))?;
+        require(
+            content_hash == blake3::hash(revised.as_bytes()).to_hex().to_string(),
+            "mutation admission reused the warm source epoch",
+        )?;
+        admission.verify()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_admission_retries_transient_invalidation_and_bounds_exhaustion()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let before_source = fs::read(&source)?;
+        let before_revision = store.authored_purpose_revision()?;
+        let before_purpose = store
+            .load_node_by_path("source.rs")?
+            .ok_or_else(|| std::io::Error::other("indexed source missing"))?
+            .purpose;
+
+        registry
+            .mutation_acceptance_invalidations
+            .store(1, Ordering::Release);
+        let admission = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        require(
+            registry
+                .mutation_acceptance_invalidations
+                .load(Ordering::Acquire)
+                == 0,
+            "transient mutation invalidation was not consumed",
+        )?;
+        admission.verify()?;
+
+        registry
+            .mutation_acceptance_invalidations
+            .store(u64::try_from(VERIFIED_READ_ATTEMPTS)?, Ordering::Release);
+        let exhausted = registry.admit_mutation(&database, temp.path(), None, &control);
+        require(
+            matches!(exhausted, Err(CliError::RefreshRequired(_))),
+            "persistent mutation invalidation did not fail closed",
+        )?;
+        require(
+            registry
+                .mutation_acceptance_invalidations
+                .load(Ordering::Acquire)
+                == 0,
+            "mutation invalidation attempts were not bounded",
+        )?;
+        require(
+            fs::read(&source)? == before_source,
+            "mutation admission changed saved source",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision,
+            "mutation admission changed authored-purpose revision",
+        )?;
+        require(
+            store
+                .load_node_by_path("source.rs")?
+                .is_some_and(|node| node.purpose == before_purpose),
+            "mutation admission changed the purpose row",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn post_admission_edit_rolls_back_without_waiting_for_observer_delivery()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let admission = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let before = store
+            .load_node_by_path("source.rs")?
+            .ok_or_else(|| std::io::Error::other("indexed source missing"))?
+            .purpose;
+        let before_revision = store.authored_purpose_revision()?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose("source.rs", "Stale purpose", PurposeSource::Agent)?;
+
+        fs::write(&source, "fn changed_after_admission() {}\n")?;
+        let verification = admission.verify();
+        drop(transaction);
+        require(
+            matches!(verification, Err(CliError::RefreshRequired(_))),
+            "post-admission edit did not invalidate the purpose commit",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision,
+            "rolled-back mutation advanced authored-purpose revision",
+        )?;
+        require(
+            store
+                .load_node_by_path("source.rs")?
+                .is_some_and(|node| node.purpose == before),
+            "rolled-back mutation changed the purpose row",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn post_admission_cancellation_rolls_back_purpose_mutation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(30)));
+        let admission = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let before_revision = store.authored_purpose_revision()?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose("source.rs", "Canceled purpose", PurposeSource::Agent)?;
+
+        cancellation.cancel();
+        let verification = admission.verify();
+        drop(transaction);
+        require(
+            matches!(verification, Err(CliError::IndexWork(_))),
+            "post-admission cancellation did not invalidate the purpose commit",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision,
+            "canceled mutation advanced authored-purpose revision",
+        )?;
+        require(
+            store
+                .load_node_by_path("source.rs")?
+                .is_none_or(|node| node.purpose.purpose.as_deref() != Some("Canceled purpose")),
+            "canceled mutation changed the purpose row",
         )?;
         Ok(())
     }

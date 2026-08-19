@@ -146,6 +146,16 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
 
+      - name: Graph, symbol, purpose, and viewport regressions
+        timeout-minutes: 10
+        run: |
+          cargo test --locked -p projectatlas-cli --test e2e csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli token_tui::tests -- --nocapture
+
       - name: Filtered custom harness compatibility
         run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
 
@@ -456,6 +466,11 @@ jobs:
           fi
           for test in \
             installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
+            csharp_symbol_identity_boundary_preserves_full_and_incremental_publication \
+            token_tui_cli_respects_selected_terminal_viewport \
+            classified_document_navigation_agrees_across_cli_and_mcp \
+            conditional_purpose_review_cli_reconciles_source_before_apply \
+            persistent_mcp_purpose_review_reconciles_source_before_apply \
             persistent_mcp_stdin_does_not_block_repository_startup_probes \
             installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability \
             compiler_config_utf8_bom_refreshes_through_cli_and_mcp \
@@ -478,6 +493,45 @@ jobs:
             PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
               "$contract" "$test" --exact --include-ignored --nocapture
           done
+
+      - name: Installed-candidate native Btrfs database placement contract
+        if: matrix.label == 'linux-x64-posix'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes btrfs-progs
+          image="$RUNNER_TEMP/projectatlas-btrfs-installed.img"
+          mount_root="$RUNNER_TEMP/projectatlas-btrfs-installed"
+          subvolume="$mount_root/projectatlas-subvolume"
+          mkdir -p "$mount_root"
+          truncate -s 256M "$image"
+          sudo mkfs.btrfs -f "$image"
+          cleanup() {
+            if mountpoint -q "$mount_root"; then
+              sudo umount "$mount_root"
+            fi
+          }
+          trap cleanup EXIT
+          sudo mount -o loop "$image" "$mount_root"
+          sudo btrfs subvolume create "$subvolume"
+          sudo chown "$(id -u):$(id -g)" "$subvolume"
+          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          chmod +x "$contract"
+          if ! inventory="$("$contract" --list)"; then
+            echo "Btrfs contract inventory failed." >&2
+            exit 1
+          fi
+          test=linux_btrfs_subvolume_database_supports_cli_and_persistent_mcp_reopen
+          matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+          if [ "$matches" -ne 1 ]; then
+            echo "Btrfs contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+            exit 1
+          fi
+          PROJECTATLAS_BTRFS_TEST_ROOT="$subvolume" \
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+            "$contract" "$test" --exact --include-ignored --nocapture
 
   prepublish-installer-smoke-windows:
     name: prepublish installer smoke windows-x64
@@ -602,6 +656,11 @@ jobs:
           }
           foreach ($test in @(
             "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
+            "csharp_symbol_identity_boundary_preserves_full_and_incremental_publication",
+            "token_tui_cli_respects_selected_terminal_viewport",
+            "classified_document_navigation_agrees_across_cli_and_mcp",
+            "conditional_purpose_review_cli_reconciles_source_before_apply",
+            "persistent_mcp_purpose_review_reconciles_source_before_apply",
             "persistent_mcp_stdin_does_not_block_repository_startup_probes",
             "installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability",
             "compiler_config_utf8_bom_refreshes_through_cli_and_mcp",
@@ -1039,40 +1098,83 @@ jobs:
           root = Path(os.environ["PROJECT_ROOT"]).resolve()
           config = json.loads((root / ".projectatlas" / "projectatlas.mcp.json").read_text(encoding="utf-8"))
           server = config["mcpServers"]["projectatlas"]
-          messages = [
-              {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "projectatlas-release-e2e", "version": "0.1.0"}}},
-              {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-              {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "atlas_session_brief", "arguments": {"project_path": str(root), "query": "release_e2e_marker", "compact": True}}},
-              {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "atlas_slice", "arguments": {"project_path": str(root), "file": "src/lib.rs", "start_line": 1, "end_line": 1}}},
-          ]
-          completed = subprocess.run(
-              [server["command"], *server["args"]],
-              cwd=server.get("cwd", root),
-              env={**os.environ, "PROJECTATLAS_NO_TELEMETRY": "1"},
-              input="\n".join(json.dumps(message) for message in messages) + "\n",
-              text=True,
-              capture_output=True,
-              timeout=30,
-              check=False,
-          )
-          if completed.returncode != 0:
-              raise SystemExit(f"release MCP exited {completed.returncode}: {completed.stderr}")
-          responses = {
-              response["id"]: response
-              for line in completed.stdout.splitlines()
-              if (response := json.loads(line)).get("id") is not None
-          }
+          def tool_text(name, response):
+              if not isinstance(response, dict):
+                  raise ValueError(f"MCP tool {name} omitted response id 2")
+              if "error" in response:
+                  raise ValueError(f"MCP tool {name} returned a protocol error: {response['error']}")
+              result = response.get("result")
+              if not isinstance(result, dict):
+                  raise ValueError(f"MCP tool {name} omitted its result object: {response}")
+              is_error = result.get("isError")
+              if not isinstance(is_error, bool) or is_error:
+                  raise ValueError(f"MCP tool {name} returned isError={is_error!r}: {result}")
+              content = result.get("content")
+              if not isinstance(content, list) or not content:
+                  raise ValueError(f"MCP tool {name} returned no content: {result}")
+              text = "\n".join(
+                  block["text"]
+                  for block in content
+                  if isinstance(block, dict) and isinstance(block.get("text"), str)
+              )
+              if not text.strip():
+                  raise ValueError(f"MCP tool {name} returned no text content: {result}")
+              return text
 
-          def tool_text(request_id):
-              result = responses.get(request_id, {}).get("result", {})
-              if result.get("isError"):
-                  raise SystemExit(f"MCP request {request_id} failed: {result}")
-              return "\n".join(block.get("text", "") for block in result.get("content", []))
+          def call_tool(name, arguments):
+              messages = [
+                  {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "projectatlas-release-e2e", "version": "0.1.0"}}},
+                  {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+                  {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+              ]
+              completed = subprocess.run(
+                  [server["command"], *server["args"]],
+                  cwd=server.get("cwd", root),
+                  env={**os.environ, "PROJECTATLAS_NO_TELEMETRY": "1"},
+                  input="\n".join(json.dumps(message) for message in messages) + "\n",
+                  text=True,
+                  capture_output=True,
+                  timeout=30,
+                  check=False,
+              )
+              if completed.returncode != 0:
+                  raise SystemExit(f"release MCP exited {completed.returncode}: {completed.stderr}")
+              responses = {
+                  response["id"]: response
+                  for line in completed.stdout.splitlines()
+                  if (response := json.loads(line)).get("id") is not None
+              }
+              try:
+                  return tool_text(name, responses.get(2))
+              except ValueError as error:
+                  raise SystemExit(f"{error}: {completed.stdout}") from error
 
-          brief = tool_text(2)
-          source = tool_text(3)
+          for invalid_response in [
+              None,
+              {"id": 2, "error": {"code": -32603, "message": "fault"}},
+              {"id": 2},
+              {"id": 2, "result": {"isError": True, "content": [{"type": "text", "text": "fault"}]}},
+              {"id": 2, "result": {"isError": False, "content": []}},
+          ]:
+              try:
+                  tool_text("fault-probe", invalid_response)
+              except ValueError:
+                  pass
+              else:
+                  raise SystemExit(f"release MCP response validator accepted: {invalid_response}")
+
+          brief = call_tool("atlas_session_brief", {"project_path": str(root), "query": "release_e2e_marker", "compact": True})
+          source = call_tool("atlas_slice", {"project_path": str(root), "file": "src/lib.rs", "start_line": 1, "end_line": 1})
           if "index_status: available" not in brief or "release_e2e_marker" not in source:
               raise SystemExit(f"release MCP contract incomplete:\n{brief}\n{source}")
+          purpose = "Own the installed release-candidate source marker."
+          purpose_result = call_tool("atlas_purpose_set", {"project_path": str(root), "path": "src/lib.rs", "purpose": purpose})
+          scan = call_tool("atlas_scan", {"project_path": str(root), "path": "."})
+          if "scan:" not in scan:
+              raise SystemExit(f"release MCP scan returned no success report:\n{scan}")
+          summary = call_tool("atlas_file_summary", {"project_path": str(root), "file": "src/lib.rs"})
+          if "status: approved" not in purpose_result or purpose not in summary or "release_e2e_marker" not in summary:
+              raise SystemExit(f"release MCP purpose contract incomplete:\n{purpose_result}\n{summary}")
           PY
 
   installer-smoke-windows:

@@ -961,6 +961,35 @@ pub struct AtlasStore {
     library_usage_instances: RefCell<HashMap<String, Option<UsageInstanceId>>>,
 }
 
+/// Caller-owned purpose mutation transaction with an explicit commit boundary.
+///
+/// Purpose adapters keep this guard alive while they revalidate saved-source
+/// admission. Dropping it before [`Self::commit`] rolls the mutation back.
+pub struct PurposeMutationTransaction<'connection> {
+    /// Immediate transaction rolled back on drop until the caller accepts the mutation.
+    transaction: rusqlite::Transaction<'connection>,
+}
+
+impl PurposeMutationTransaction<'_> {
+    /// Commit the admitted purpose mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot commit the transaction.
+    pub fn commit(self) -> DbResult<()> {
+        self.transaction.commit().map_err(Into::into)
+    }
+
+    /// Roll back a rejected purpose mutation and report any storage failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot roll the transaction back.
+    pub fn rollback(self) -> DbResult<()> {
+        self.transaction.rollback().map_err(Into::into)
+    }
+}
+
 /// Root and project identity captured when one store binding was validated.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CapturedProjectBinding {
@@ -1525,6 +1554,29 @@ impl AtlasStore {
             self.validated_project_instance_id,
             operation,
         )
+    }
+
+    /// Begin one purpose mutation whose caller owns final source revalidation.
+    ///
+    /// Purpose writes performed through this store join the returned immediate
+    /// transaction. The caller must revalidate its saved-source witness before
+    /// committing; an early return drops the guard and rolls the complete batch
+    /// back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when mutation is unavailable, the binding changed, or
+    /// `SQLite` cannot start the transaction.
+    pub fn begin_purpose_mutation(&self) -> DbResult<PurposeMutationTransaction<'_>> {
+        self.require_mutation_scope()?;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        schema::validate_active_binding(
+            &transaction,
+            self.validated_project_root.as_deref(),
+            self.validated_project_instance_id,
+        )?;
+        Ok(PurposeMutationTransaction { transaction })
     }
 
     /// Run telemetry against this store's exact captured database binding.
@@ -12321,6 +12373,36 @@ mod tests {
             "explicit accepted-purpose correction",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn explicit_purpose_rollback_reports_storage_failure() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node("source.rs", "hash")])?;
+        let before_revision = store.authored_purpose_revision()?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose("source.rs", "Rejected purpose", PurposeSource::Agent)?;
+        store.connection.execute_batch("ROLLBACK")?;
+
+        require(
+            matches!(transaction.rollback(), Err(DbError::Sqlite(_))),
+            "explicit purpose rollback suppressed its SQLite failure",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &before_revision,
+            "manually rolled-back purpose revision",
+        )?;
+        require(
+            store
+                .load_node_by_path("source.rs")?
+                .is_none_or(|node| node.purpose.purpose.as_deref() != Some("Rejected purpose")),
+            "manual rollback retained the rejected purpose",
+        )
     }
 
     #[test]

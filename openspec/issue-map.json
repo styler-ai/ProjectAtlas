@@ -2,6 +2,7 @@
   "schema_version": 2,
   "changes": {
     "accept-compiler-config-utf8-bom": 408,
+    "admit-purpose-mutations-through-freshness": 463,
     "add-agent-session-brief": 292,
     "add-mcp-task-progress-model": 295,
     "add-nearest-project-routing": 276,
@@ -70,11 +71,15 @@
       ]
     },
     "prefer-worktree-guidance-before-database-preflight": 412,
+    "preserve-indexing-across-invalid-symbol-identities": 467,
     "publish-rustdoc-readme-links": 300,
+    "recognize-btrfs-subvolume-database-placement": 469,
     "reject-incompatible-schema-before-write": 410,
     "release-candidates-and-pr-cleanup": 448,
     "report-installer-host-restart": 383,
     "resolve-configured-module-aliases": 385,
+    "restore-document-file-traversal": 461,
+    "bound-token-dashboard-to-viewport": 462,
     "reuse-release-proof-by-inputs": 366,
     "reuse-unchanged-ci-build-layers": 341,
     "show-agent-efficiency-dashboard": 340,
