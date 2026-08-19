@@ -14,8 +14,10 @@ const ENTITY_KEY_DOMAIN: &str = "projectatlas.graph.entity.v1";
 const RELATION_KEY_DOMAIN: &str = "projectatlas.graph.relation.v1";
 /// Canonical identity namespace for repository resolution keys.
 const RESOLUTION_KEY_DOMAIN: &str = "projectatlas.graph.resolution.v1";
-/// Largest accepted identity component in bytes.
-const MAX_IDENTITY_BYTES: usize = 4_096;
+/// Largest accepted repository graph identity component in bytes.
+pub const MAX_GRAPH_IDENTITY_BYTES: usize = 4_096;
+/// Reserved namespace for compact graph-derived qualified symbol scopes.
+pub const QUALIFIED_SYMBOL_SCOPE_PREFIX: &str = "@projectatlas.scope.v1:";
 /// Maximum portable canonical resolver material retained in a derived snapshot.
 const MAX_PORTABLE_RESOLUTION_IDENTITY_BYTES: usize = 32 * 1_024;
 
@@ -225,7 +227,7 @@ impl GraphIdentityText {
                 reason: "identity text must not contain surrounding whitespace",
             });
         }
-        if value.len() > MAX_IDENTITY_BYTES {
+        if value.len() > MAX_GRAPH_IDENTITY_BYTES {
             return Err(GraphContractError::InvalidIdentityText {
                 reason: "identity text exceeds the byte limit",
             });
@@ -1810,28 +1812,65 @@ pub enum CoverageScope {
     },
 }
 
-/// Absolute product limit that a coverage or query row reached.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphLimitKind {
+/// Define the closed graph-limit domain from one variant-to-spelling inventory.
+macro_rules! define_graph_limit_kinds {
+    ($( $(#[$variant_meta:meta])* $variant:ident => $stable_name:literal),+ $(,)?) => {
+        /// Absolute product limit that a coverage or query row reached.
+        #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+        pub enum GraphLimitKind {
+            $(
+                $(#[$variant_meta])*
+                #[serde(rename = $stable_name)]
+                $variant,
+            )+
+        }
+
+        impl GraphLimitKind {
+            /// Closed ordered inventory of every supported graph limit kind.
+            pub const ALL: [Self; define_graph_limit_kinds!(@count $($variant),+)] = [
+                $(Self::$variant,)+
+            ];
+
+            /// Return the stable persistence and serialization spelling.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $stable_name,)+
+                }
+            }
+
+            /// Parse one stable persistence and serialization spelling.
+            #[must_use]
+            pub fn from_stable_name(value: &str) -> Option<Self> {
+                Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+            }
+        }
+    };
+    (@count $($variant:ident),+) => {
+        <[()]>::len(&[$(define_graph_limit_kinds!(@unit $variant)),+])
+    };
+    (@unit $variant:ident) => { () };
+}
+
+define_graph_limit_kinds! {
     /// Result-row limit.
-    Rows,
+    Rows => "rows",
     /// Unique or active node limit.
-    Nodes,
+    Nodes => "nodes",
     /// Inspected logical-edge limit.
-    Edges,
+    Edges => "edges",
     /// Per-relation source-occurrence limit.
-    Occurrences,
+    Occurrences => "occurrences",
     /// Node-simple visited-state limit.
-    Visited,
+    Visited => "visited",
     /// Decoded or retained intermediate-memory byte limit.
-    IntermediateBytes,
+    IntermediateBytes => "intermediate_bytes",
     /// Elapsed request deadline.
-    Deadline,
+    Deadline => "deadline",
     /// Traversal-depth limit.
-    Depth,
+    Depth => "depth",
     /// Encoded-output byte limit.
-    OutputBytes,
+    OutputBytes => "output_bytes",
 }
 
 /// Coverage report with counts consistent with its lifecycle state.
@@ -2250,7 +2289,7 @@ fn decode_canonical_fields(mut canonical: &str) -> Option<Vec<&str>> {
         }
         canonical = canonical.get(separator + 1..)?;
         if length == 0
-            || length > MAX_IDENTITY_BYTES
+            || length > MAX_GRAPH_IDENTITY_BYTES
             || length > canonical.len()
             || !canonical.is_char_boundary(length)
         {
@@ -2265,7 +2304,9 @@ fn decode_canonical_fields(mut canonical: &str) -> Option<Vec<&str>> {
 
 /// Apply the original identity-field constraints to portable canonical data.
 fn valid_canonical_identity_field(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_IDENTITY_BYTES && !value.chars().any(char::is_control)
+    !value.is_empty()
+        && value.len() <= MAX_GRAPH_IDENTITY_BYTES
+        && !value.chars().any(char::is_control)
 }
 
 /// Append an optional identity field without conflating absent and empty values.
@@ -2821,7 +2862,7 @@ mod tests {
             "control-bearing identity text was accepted",
         )?;
         require(
-            GraphIdentityText::new("x".repeat(super::MAX_IDENTITY_BYTES + 1)).is_err(),
+            GraphIdentityText::new("x".repeat(super::MAX_GRAPH_IDENTITY_BYTES + 1)).is_err(),
             "oversized identity text was accepted",
         )?;
         require(
@@ -2854,6 +2895,43 @@ mod tests {
         require(
             package == serde_json::from_str(&serde_json::to_string(&package)?)?,
             "package selector did not round-trip",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_limit_kind_inventory_and_stable_names_stay_exhaustive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let serialized = serde_json::to_string(&GraphLimitKind::ALL)?;
+        require(
+            serialized
+                == r#"["rows","nodes","edges","occurrences","visited","intermediate_bytes","deadline","depth","output_bytes"]"#,
+            "graph limit stable protocol drifted without an explicit migration",
+        )?;
+        let mut names = std::collections::BTreeSet::new();
+        for kind in GraphLimitKind::ALL {
+            let stable_name = kind.as_str();
+            require(
+                names.insert(stable_name),
+                "graph limit inventory contains a duplicate stable name",
+            )?;
+            let encoded = serde_json::to_string(&kind)?;
+            require(
+                encoded == format!("\"{stable_name}\""),
+                "graph limit serde spelling drifted from its stable name",
+            )?;
+            require(
+                serde_json::from_str::<GraphLimitKind>(&encoded)? == kind,
+                "graph limit serde value did not round-trip",
+            )?;
+            require(
+                GraphLimitKind::from_stable_name(stable_name) == Some(kind),
+                "graph limit stable-name parsing did not round-trip",
+            )?;
+        }
+        require(
+            GraphLimitKind::from_stable_name("unknown").is_none(),
+            "unknown graph limit stable name was accepted",
         )?;
         Ok(())
     }

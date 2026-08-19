@@ -154,10 +154,11 @@ impl MarkdownFacts {
         let symbols = self
             .headings
             .iter()
-            .map(|heading| CodeSymbol {
+            .filter_map(|heading| Some((heading, crate::compact_symbol_identity(&heading.text)?)))
+            .map(|(heading, name)| CodeSymbol {
                 path: path.to_owned(),
                 language: language.map(str::to_owned),
-                name: heading.text.clone(),
+                name,
                 kind: SymbolKind::Heading,
                 signature: heading_signature(&heading.slug, heading.occurrence),
                 exported: false,
@@ -895,6 +896,26 @@ mod tests {
                 .detail
                 .as_deref()
                 .is_some_and(|detail| detail.contains("slug=über-atlas;occurrence=1;bytes="))
+        );
+    }
+
+    #[test]
+    fn symbol_graph_reserves_the_derived_scope_namespace() {
+        let content = format!(
+            "# {}literal\n\n# Visible\n",
+            projectatlas_core::graph::QUALIFIED_SYMBOL_SCOPE_PREFIX
+        );
+        let facts = extract_markdown_facts(&content);
+        let graph = facts.symbol_graph("README.md", Some("markdown"));
+
+        assert_eq!(facts.headings.len(), 2);
+        assert_eq!(
+            graph
+                .symbols
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Visible"]
         );
     }
 

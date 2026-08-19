@@ -9,6 +9,7 @@
     "advance-rust-repository-intelligence": 308,
     "await-observable-watch-readiness": 422,
     "bound-impact-analysis-deadlines": 380,
+    "bound-qualified-symbol-parents": 473,
     "centralize-cargo-dependency-management": 316,
     "close-mcp-cli-parity": 281,
     "close-v043-release-regressions": {
@@ -70,6 +71,7 @@
         }
       ]
     },
+    "persist-graph-coverage-limits": 471,
     "prefer-worktree-guidance-before-database-preflight": 412,
     "preserve-indexing-across-invalid-symbol-identities": 467,
     "publish-rustdoc-readme-links": 300,
@@ -83,6 +85,7 @@
     "reuse-release-proof-by-inputs": 366,
     "reuse-unchanged-ci-build-layers": 341,
     "show-agent-efficiency-dashboard": 340,
+    "serialize-lint-reports": 472,
     "simplify-token-tui-dashboard": 296,
     "stabilize-hostile-parser-fixture-admission": 397,
     "stabilize-parser-recovery-harness": 391
