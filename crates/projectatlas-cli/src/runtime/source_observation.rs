@@ -654,7 +654,7 @@ impl SourceObservationRegistry {
             entry.invalidate();
             drop(store.finish_index_read_snapshot());
         }
-        Err(source_changed_during_derivation(&binding.root, "."))
+        self.admit_exact_mutation(binding, control)
     }
 
     /// Admit a mutation through exact source when no native observer is available.
@@ -1054,7 +1054,7 @@ fn source_policy_witness(
     for path in source_policy_paths(plan, control)? {
         control.check(IndexWorkStage::Publication)?;
         hash_field(&mut hasher, "path", path.to_string_lossy().as_bytes());
-        match path.symlink_metadata() {
+        match path.metadata() {
             Ok(metadata) if metadata.is_file() => {
                 let file = File::open(&path).map_err(|source| CliError::Io {
                     path: path.clone(),
@@ -1064,9 +1064,6 @@ fn source_policy_witness(
             }
             Ok(metadata) if metadata.is_dir() => {
                 hash_field(&mut hasher, "state", b"directory");
-            }
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                hash_field(&mut hasher, "state", b"symlink");
             }
             Ok(_metadata) => {
                 hash_field(&mut hasher, "state", b"other");
@@ -1428,6 +1425,56 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_git_exclude_target_changes_invalidate_the_epoch() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let policy = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let git = temp.path().join(".git");
+        let git_info = git.join("info");
+        let exclude_target = policy.path().join("exclude");
+        fs::create_dir_all(&git_info)?;
+        fs::create_dir_all(git.join("objects"))?;
+        fs::create_dir_all(git.join("refs"))?;
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n")?;
+        fs::write(git.join("config"), "[core]\n")?;
+        fs::write(&exclude_target, "")?;
+        std::os::unix::fs::symlink(&exclude_target, git_info.join("exclude"))?;
+        let registry = SourceObservationRegistry::default();
+        let first = registry.with_verified_read(
+            &database,
+            temp.path(),
+            None,
+            &test_control(),
+            |store, _stamp| Ok(store.load_node_by_path("source.rs")?.is_some()),
+        )?;
+        require(first.value, "initial indexed source was missing")?;
+
+        fs::write(&exclude_target, "source.rs\n")?;
+        let ignored = registry.with_verified_read(
+            &database,
+            temp.path(),
+            None,
+            &test_control(),
+            |store, _stamp| Ok(store.load_node_by_path("source.rs")?.is_some()),
+        )?;
+
+        require(
+            !ignored.value,
+            "symlinked Git exclude target change left the source indexed",
+        )?;
+        require(
+            ignored.work.exact_verifications >= 1,
+            "symlinked Git exclude target change reused the stale source epoch",
+        )?;
+        require(
+            ignored.stamp.epoch > first.stamp.epoch,
+            "symlinked Git exclude target change did not advance the verified source epoch",
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn mid_query_edit_discards_provisional_result_and_reconciles() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -1531,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn mutation_admission_retries_transient_invalidation_and_bounds_exhaustion()
+    fn mutation_admission_retries_transient_invalidation_and_falls_back_to_exact_source()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let (database, source) = indexed_project(temp.path())?;
@@ -1561,10 +1608,10 @@ mod tests {
         registry
             .mutation_acceptance_invalidations
             .store(u64::try_from(VERIFIED_READ_ATTEMPTS)?, Ordering::Release);
-        let exhausted = registry.admit_mutation(&database, temp.path(), None, &control);
+        let exact = registry.admit_mutation(&database, temp.path(), None, &control)?;
         require(
-            matches!(exhausted, Err(CliError::RefreshRequired(_))),
-            "persistent mutation invalidation did not fail closed",
+            matches!(&exact.witness, MutationSourceWitness::Exact { .. }),
+            "persistent mutation invalidation did not fall back to exact source",
         )?;
         require(
             registry
@@ -1573,6 +1620,7 @@ mod tests {
                 == 0,
             "mutation invalidation attempts were not bounded",
         )?;
+        exact.verify()?;
         require(
             fs::read(&source)? == before_source,
             "mutation admission changed saved source",
