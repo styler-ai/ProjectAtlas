@@ -105,6 +105,7 @@ jobs:
                 <div class="grid">
                   <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/agent-integration.md">Agent Integration<span class="label">MCP-first startup, exact navigation, purpose curation, and runtime repair</span></a>
                   <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/worktree-lifecycle.md#worktree-atlas-continuity">Worktree Atlas Continuity<span class="label">short aliases, safe hydration, isolated graphs, federation, and aggregate tokens</span></a>
+                  <a class="card" href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5">v0.4.5 stable<span class="label">worktree navigation, candidate stabilization, and shared root-cause fixes</span></a>
                   <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/v0.4.5-rc3-release-notes.md">v0.4.5-rc3<span class="label">shared graph-limit, qualified-symbol, and typed lint root-cause fixes</span></a>
                   <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/v0.4.5-rc2-release-notes.md">v0.4.5-rc2<span class="label">candidate stabilization, compatibility, deliberate boundaries, and proof policy</span></a>
                   <a class="card" href="https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#architecture-views">Architecture Views<span class="label">system ownership, SQLite authority, indexing, communication, and failure flows</span></a>

@@ -143,6 +143,19 @@ def summary_from_html(body_html, fallback):
     return parser.items[:3] or [fallback]
 
 
+def note_sources(body_html, fallback, closed_issues, seen_issue_numbers):
+    emitted_issue = False
+    for item in closed_issues:
+        if item["number"] in seen_issue_numbers:
+            continue
+        seen_issue_numbers.add(item["number"])
+        emitted_issue = True
+        yield item, item["title"]
+    if not emitted_issue:
+        for line in summary_from_html(body_html, fallback):
+            yield None, line
+
+
 def section_for(title="", labels=(), fallback_title=""):
     names = {label.get("name", "") for label in labels}
     for candidate in (title, fallback_title):
@@ -258,21 +271,23 @@ def write_notes(repo, version):
     prs = merged_prs(repo, start_tag)
     sections = {name: [] for name in SECTIONS}
     changelog = []
+    seen_issue_numbers = set()
 
     for pr in prs:
         author = pr.get("user", {}).get("login", "unknown")
         changelog.append(f"- #{pr['number']} {clean(pr['title'])} @{author}")
         body_html, closed_issues = pr_metadata(repo, pr["number"])
-        if closed_issues:
-            for item in closed_issues:
+        for item, line in note_sources(
+            body_html, pr["title"], closed_issues, seen_issue_numbers
+        ):
+            if item is not None:
                 section = section_for(item.get("title", ""), item.get("labels", []))
                 sections[section].append(
                     f"- {note_title(item['title'])}. "
                     f"([#{item['number']}]({item['html_url']}), "
                     f"[#{pr['number']}]({pr['html_url']}))"
                 )
-        else:
-            for line in summary_from_html(body_html, pr["title"]):
+            else:
                 section = section_for(line, pr.get("labels", []), pr["title"])
                 sections[section].append(
                     f"- {note_title(line)}. "
@@ -338,6 +353,27 @@ def self_test():
         f"<h2>Summary</h2><ul><li>{SUMMARY_PLACEHOLDER}</li></ul>",
         "fallback",
     ) == ["fallback"]
+    shared_issue = {"number": 448, "title": "Gate release candidates"}
+    seen_issue_numbers = set()
+    sources = []
+    for body, title in (
+        ("", "chore: initial release gate"),
+        (
+            "<h2>Summary</h2><ul><li>"
+            "test: Make packaged scan deterministic.</li></ul>",
+            "fallback",
+        ),
+        (
+            "<h2>Summary</h2><ul><li>fix: Repair holistic MCP request.</li></ul>",
+            "fallback",
+        ),
+    ):
+        sources.extend(note_sources(body, title, [shared_issue], seen_issue_numbers))
+    assert sources == [
+        (shared_issue, "Gate release candidates"),
+        (None, "test: Make packaged scan deterministic."),
+        (None, "fix: Repair holistic MCP request."),
+    ]
     assert note_title("bug: stale runtime remains") == "Stale runtime remains"
     assert note_title("docs(memory): specify the Memory Atlas") == "Specify the Memory Atlas"
     assert note_title("test(parser): keep cancellation bounded") == "Keep cancellation bounded"
