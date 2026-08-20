@@ -1,6 +1,6 @@
 # Worktree atlas continuity
 
-ProjectAtlas v0.4.5-rc1 lets an agent remain in one explicitly selected control checkout while it registers, initializes, refreshes, and queries existing Git worktrees through short MCP aliases. The control checkout and every linked checkout may live anywhere on the filesystem, including under `.worktrees`; no branch or directory name defines control authority.
+ProjectAtlas v0.4.5 lets an agent remain in one explicitly selected control checkout while it registers, initializes, refreshes, and queries existing Git worktrees through short MCP aliases. The control checkout and every linked checkout may live anywhere on the filesystem, including under `.worktrees`; no branch or directory name defines control authority.
 
 Every checkout still owns an ignored, independently writable `.projectatlas/projectatlas.db`. ProjectAtlas may hydrate a new target from reusable control-atlas state, but it never shares one writable graph or purpose database across divergent checkouts. It also never creates, switches, moves, prunes, or deletes Git worktrees or branches.
 
@@ -273,4 +273,4 @@ Recovery remains explicit:
 - a registered reset that observes a changed Git lifecycle restores staged files without clobbering replacement state; an incomplete restore reports the retained target-local recovery directory.
 - a missing target retains its last accepted telemetry aggregate but ProjectAtlas cannot fabricate unsynchronized bytes that were externally deleted.
 
-The future distributed/versioned released-main atlas tracked by issue #456 is intentionally separate. v0.4.5-rc1 coordinates only local registrations and local databases visible to one explicitly selected control process.
+The future distributed/versioned released-main atlas tracked by issue #456 is intentionally separate. v0.4.5 coordinates only local registrations and local databases visible to one explicitly selected control process.

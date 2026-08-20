@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.4"><img alt="release" src="https://img.shields.io/badge/release-v0.4.4-blue"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5"><img alt="release" src="https://img.shields.io/badge/release-v0.4.5-blue"></a>
   <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -37,7 +37,7 @@ Point your agent to the ProjectAtlas GitHub repository and ask it to install the
 The Codex plugin is the recommended path:
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.4
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.5
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
@@ -46,8 +46,8 @@ Then tell Codex: **“Use ProjectAtlas for this repo.”**
 | Route | When to use it |
 | --- | --- |
 | Codex plugin | Recommended agent setup; supplies the version-matched skill, native runtime installer, and MCP templates. |
-| [Native release](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.4) | Install a verified prebuilt binary without Rust/Cargo. |
-| Cargo | `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.4 projectatlas-cli --locked` |
+| [Native release](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5) | Install a verified prebuilt binary without Rust/Cargo. |
+| Cargo | `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.5 projectatlas-cli --locked` |
 | Claude Code / OpenCode | Run the native installer, then `projectatlas init`; it writes their version-matched project-local MCP configs. |
 
 Initialize each repository once:
@@ -86,7 +86,7 @@ The complete [agent and MCP workflow](docs/agent-integration.md) owns tool routi
 
 ## Work Across Existing Git Worktrees
 
-ProjectAtlas v0.4.5-rc1 lets an agent stay in one selected control checkout and address existing Git worktrees anywhere on the filesystem by short MCP alias:
+ProjectAtlas v0.4.5 lets an agent stay in one selected control checkout and address existing Git worktrees anywhere on the filesystem by short MCP alias:
 
 ```text
 atlas_worktree_list(include_retired: false)
@@ -137,7 +137,7 @@ Warm indexed CLI reads in the same audit stayed around 160–166 ms. Repository 
 
 ## Release Quality
 
-`v0.4.4` ships through the full release matrix:
+`v0.4.5` ships through the full release matrix:
 
 - Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
 - Linux x64, Windows x64, macOS x64, and macOS arm64 native packages.
@@ -146,7 +146,7 @@ Warm indexed CLI reads in the same audit stayed around 160–166 ms. Repository 
 
 Full benchmark campaigns are manual-only and run only when explicitly requested.
 
-The [v0.4.5-rc3 candidate](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5-rc3) and [release notes](docs/v0.4.5-rc3-release-notes.md) fix graph-limit persistence, deep cross-language symbol identities, and typed CLI/MCP lint output. RC3 is published as a prerelease and does not replace the preceding stable GitHub Latest release. The [RC2 notes](docs/v0.4.5-rc2-release-notes.md) cover preceding stabilization work.
+ProjectAtlas [v0.4.5](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5) promotes the tested RC3 line to stable. The [RC1](docs/v0.4.5-rc1-release-notes.md), [RC2](docs/v0.4.5-rc2-release-notes.md), and [RC3](docs/v0.4.5-rc3-release-notes.md) notes cover worktree navigation, stabilization, and the shared root-cause fixes included in this release.
 
 ## Documentation
 
