@@ -2368,9 +2368,9 @@ fn linux_loader_dependency_removal(
     let section_flags = dynamic_section.sh_flags(endian);
     if dynamic_section.sh_addr(endian) != dynamic_address
         || dynamic_section.sh_entsize(endian) != u64::try_from(ELF64_DYNAMIC_ENTRY_BYTES)?
-        || section_flags & u64::from(object::elf::SHF_ALLOC) == 0
-        || section_flags & u64::from(object::elf::SHF_WRITE) == 0
-        || section_flags & u64::from(object::elf::SHF_EXECINSTR) != 0
+        || !section_flags.contains(object::elf::SHF_ALLOC)
+        || !section_flags.contains(object::elf::SHF_WRITE)
+        || section_flags.contains(object::elf::SHF_EXECINSTR)
     {
         return Err(invalid(
             "parser worker ELF dynamic section has an unsupported load-image shape",
@@ -2401,9 +2401,9 @@ fn linux_loader_dependency_removal(
             || dynamic_file_end > load_file_end
             || dynamic_memory_end > load_memory_end
             || load_address.checked_add(dynamic_offset - load_offset) != Some(dynamic_address)
-            || flags & object::elf::PF_R == 0
-            || flags & object::elf::PF_W == 0
-            || flags & object::elf::PF_X != 0
+            || !flags.contains(object::elf::PF_R)
+            || !flags.contains(object::elf::PF_W)
+            || flags.contains(object::elf::PF_X)
         {
             continue;
         }
@@ -2694,13 +2694,17 @@ fn inspect_executable_exports(
     platform: PackPlatform,
     role: &str,
 ) -> ToolResult<Vec<String>> {
-    let exports = object.exports()?;
-    if exports.len() > MAX_EXPORTS_PER_WORKER {
-        return Err(invalid(format!("{role} exports exceed the audit bound")));
-    }
-    let mut normalized = Vec::with_capacity(exports.len());
-    for export in exports {
-        let symbol = normalize_export(std::str::from_utf8(export.name())?, platform).to_owned();
+    let mut normalized = Vec::new();
+    for export in object
+        .exports()?
+        .take(MAX_EXPORTS_PER_WORKER.saturating_add(1))
+    {
+        let export = export?;
+        let export_name = export.name();
+        let name = export_name
+            .name()
+            .ok_or_else(|| invalid(format!("{role} has an ordinal export")))?;
+        let symbol = normalize_export(std::str::from_utf8(name)?, platform).to_owned();
         validate_native_audit_name(&symbol, "executable export")?;
         if symbol.starts_with(TREE_SITTER_SYMBOL_PREFIX) {
             return Err(invalid(format!(
@@ -2708,6 +2712,9 @@ fn inspect_executable_exports(
             )));
         }
         normalized.push(symbol);
+        if normalized.len() > MAX_EXPORTS_PER_WORKER {
+            return Err(invalid(format!("{role} exports exceed the audit bound")));
+        }
     }
     normalized.sort_unstable();
     Ok(normalized)
@@ -2829,7 +2836,10 @@ fn inspect_clr_runtime_header(object: &NativeObject<'_>) -> ToolResult<(u32, u32
         .map_err(|()| invalid("runtime-containment broker CLR header is truncated"))?;
     let (metadata_rva, metadata_size) = header.meta_data.address_range();
     if header.cb.get(LE) != expected_size
-        || header.flags.get(LE) & object::pe::COMIMAGE_FLAGS_NATIVE_ENTRYPOINT != 0
+        || header
+            .flags
+            .get(LE)
+            .contains(object::pe::COMIMAGE_FLAGS_NATIVE_ENTRYPOINT)
         || header.entry_point_token_or_rva.get(LE) == 0
         || metadata_rva == 0
         || metadata_size == 0
@@ -2870,10 +2880,6 @@ fn validate_exports(
     expected: &str,
     platform: PackPlatform,
 ) -> ToolResult<()> {
-    let exports = object.exports()?;
-    if exports.len() > MAX_EXPORTS_PER_LIBRARY {
-        return Err(invalid("native library exports exceed the audit bound"));
-    }
     let allowed = std::iter::once(expected.to_owned())
         .chain(
             EXTERNAL_SCANNER_EXPORT_SUFFIXES
@@ -2882,8 +2888,22 @@ fn validate_exports(
         )
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
-    for export in exports {
-        let raw = std::str::from_utf8(export.name())?;
+    let mut export_count = 0;
+    for export in object
+        .exports()?
+        .take(MAX_EXPORTS_PER_LIBRARY.saturating_add(1))
+    {
+        let export = export?;
+        export_count += 1;
+        if export_count > MAX_EXPORTS_PER_LIBRARY {
+            return Err(invalid("native library exports exceed the audit bound"));
+        }
+        let export_name = export.name();
+        let raw = std::str::from_utf8(
+            export_name
+                .name()
+                .ok_or_else(|| invalid("native library has an ordinal export"))?,
+        )?;
         let normalized = normalize_export(raw, platform);
         validate_native_audit_name(normalized, "native export")?;
         if !normalized.starts_with("tree_sitter_") {
@@ -2913,13 +2933,21 @@ fn inspect_imports(
     object: &NativeObject<'_>,
     platform: PackPlatform,
 ) -> ToolResult<(BTreeSet<String>, BTreeSet<String>)> {
-    let imports = object.imports()?;
+    let imports = object
+        .imports()?
+        .take(MAX_IMPORTS_PER_LIBRARY.saturating_add(1))
+        .collect::<Result<Vec<_>, _>>()?;
     if imports.len() > MAX_IMPORTS_PER_LIBRARY {
         return Err(invalid("native imports exceed the audit bound"));
     }
     let mut symbols = BTreeSet::new();
     for import in &imports {
-        let symbol = std::str::from_utf8(import.name())?;
+        let import_name = import.name();
+        let symbol = std::str::from_utf8(
+            import_name
+                .name()
+                .ok_or_else(|| invalid("native import by ordinal cannot be policy-audited"))?,
+        )?;
         let normalized = normalize_import_symbol(symbol);
         validate_native_audit_name(&normalized, "native import")?;
         symbols.insert(normalized);
@@ -3321,13 +3349,14 @@ mod tests {
         write_fixture_u16(
             &mut bytes,
             FILE_HEADER_OFFSET,
-            object::pe::IMAGE_FILE_MACHINE_AMD64,
+            object::pe::IMAGE_FILE_MACHINE_AMD64.0,
         );
         write_fixture_u16(&mut bytes, FILE_HEADER_OFFSET + 16, OPTIONAL_HEADER_BYTES);
         write_fixture_u16(
             &mut bytes,
             FILE_HEADER_OFFSET + 18,
-            object::pe::IMAGE_FILE_EXECUTABLE_IMAGE | object::pe::IMAGE_FILE_LARGE_ADDRESS_AWARE,
+            (object::pe::IMAGE_FILE_EXECUTABLE_IMAGE | object::pe::IMAGE_FILE_LARGE_ADDRESS_AWARE)
+                .0,
         );
         write_fixture_u16(
             &mut bytes,
@@ -3345,7 +3374,7 @@ mod tests {
         write_fixture_u16(
             &mut bytes,
             OPTIONAL_HEADER_OFFSET + 68,
-            object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI,
+            object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI.0,
         );
         bytes
     }
@@ -3373,12 +3402,12 @@ mod tests {
 
         let mut worker = vec![0; FIXTURE_FILE_BYTES];
         worker[..4].copy_from_slice(b"\x7fELF");
-        worker[4] = object::elf::ELFCLASS64;
-        worker[5] = object::elf::ELFDATA2LSB;
-        worker[6] = object::elf::EV_CURRENT;
-        write_fixture_u16(&mut worker, 16, object::elf::ET_DYN);
-        write_fixture_u16(&mut worker, 18, object::elf::EM_X86_64);
-        write_fixture_u32(&mut worker, 20, u32::from(object::elf::EV_CURRENT));
+        worker[4] = object::elf::ELFCLASS64.0;
+        worker[5] = object::elf::ELFDATA2LSB.0;
+        worker[6] = object::elf::EV_CURRENT.0;
+        write_fixture_u16(&mut worker, 16, object::elf::ET_DYN.0);
+        write_fixture_u16(&mut worker, 18, object::elf::EM_X86_64.0);
+        write_fixture_u32(&mut worker, 20, u32::from(object::elf::EV_CURRENT.0));
         write_fixture_u64(&mut worker, 24, 0x1000);
         write_fixture_u64(
             &mut worker,
@@ -3412,7 +3441,7 @@ mod tests {
         write_fixture_program_header(
             &mut worker,
             0,
-            object::elf::PT_LOAD,
+            object::elf::PT_LOAD.0,
             FIXTURE_STRINGS_OFFSET,
             FIXTURE_STRINGS_ADDRESS,
             strings.len(),
@@ -3420,7 +3449,7 @@ mod tests {
         write_fixture_program_header(
             &mut worker,
             1,
-            object::elf::PT_LOAD,
+            object::elf::PT_LOAD.0,
             FIXTURE_DYNAMIC_OFFSET,
             FIXTURE_DYNAMIC_ADDRESS,
             dynamic_bytes,
@@ -3428,7 +3457,7 @@ mod tests {
         write_fixture_program_header(
             &mut worker,
             2,
-            object::elf::PT_DYNAMIC,
+            object::elf::PT_DYNAMIC.0,
             FIXTURE_DYNAMIC_OFFSET,
             FIXTURE_DYNAMIC_ADDRESS,
             dynamic_bytes,
@@ -3436,7 +3465,7 @@ mod tests {
         write_fixture_program_header(
             &mut worker,
             3,
-            object::elf::PT_INTERP,
+            object::elf::PT_INTERP.0,
             FIXTURE_INTERPRETER_OFFSET,
             0x0060_0000,
             interpreter_bytes.len(),
@@ -3444,7 +3473,7 @@ mod tests {
         write_fixture_section_header(
             &mut worker,
             1,
-            object::elf::SHT_STRTAB,
+            object::elf::SHT_STRTAB.0,
             FIXTURE_STRINGS_OFFSET,
             FIXTURE_STRINGS_ADDRESS,
             strings.len(),
@@ -3454,7 +3483,7 @@ mod tests {
         write_fixture_section_header(
             &mut worker,
             2,
-            object::elf::SHT_DYNAMIC,
+            object::elf::SHT_DYNAMIC.0,
             FIXTURE_DYNAMIC_OFFSET,
             FIXTURE_DYNAMIC_ADDRESS,
             dynamic_bytes,
@@ -3465,27 +3494,27 @@ mod tests {
         write_fixture_dynamic_entry(
             &mut worker,
             FIXTURE_DYNAMIC_OFFSET,
-            object::elf::DT_STRTAB,
+            object::elf::DT_STRTAB.0,
             FIXTURE_STRINGS_ADDRESS,
         );
         write_fixture_dynamic_entry(
             &mut worker,
             FIXTURE_DYNAMIC_OFFSET + ELF64_DYNAMIC_ENTRY_BYTES,
-            object::elf::DT_STRSZ,
+            object::elf::DT_STRSZ.0,
             u64::try_from(strings.len()).expect("bounded fixture string size"),
         );
         for (index, string_offset) in dependencies.into_iter().enumerate() {
             write_fixture_dynamic_entry(
                 &mut worker,
                 FIXTURE_DYNAMIC_OFFSET + (index + 2) * ELF64_DYNAMIC_ENTRY_BYTES,
-                object::elf::DT_NEEDED,
+                object::elf::DT_NEEDED.0,
                 string_offset,
             );
         }
         write_fixture_dynamic_entry(
             &mut worker,
             FIXTURE_DYNAMIC_OFFSET + (dynamic_entries - 1) * ELF64_DYNAMIC_ENTRY_BYTES,
-            object::elf::DT_NULL,
+            object::elf::DT_NULL.0,
             0,
         );
         worker[FIXTURE_INTERPRETER_OFFSET..FIXTURE_INTERPRETER_OFFSET + interpreter_bytes.len()]
@@ -3506,12 +3535,12 @@ mod tests {
     ) {
         let offset = FIXTURE_PROGRAM_HEADERS_OFFSET + index * FIXTURE_PROGRAM_HEADER_BYTES;
         write_fixture_u32(bytes, offset, kind);
-        let flags = if kind == object::elf::PT_DYNAMIC
-            || (kind == object::elf::PT_LOAD && virtual_address == FIXTURE_DYNAMIC_ADDRESS)
+        let flags = if kind == object::elf::PT_DYNAMIC.0
+            || (kind == object::elf::PT_LOAD.0 && virtual_address == FIXTURE_DYNAMIC_ADDRESS)
         {
-            object::elf::PF_R | object::elf::PF_W
+            (object::elf::PF_R | object::elf::PF_W).0
         } else {
-            object::elf::PF_R
+            object::elf::PF_R.0
         };
         write_fixture_u32(bytes, offset + 4, flags);
         write_fixture_u64(
@@ -3548,8 +3577,8 @@ mod tests {
     ) {
         let offset = FIXTURE_SECTION_HEADERS_OFFSET + index * FIXTURE_SECTION_HEADER_BYTES;
         write_fixture_u32(bytes, offset + 4, kind);
-        let flags = if kind == object::elf::SHT_DYNAMIC {
-            u64::from(object::elf::SHF_ALLOC | object::elf::SHF_WRITE)
+        let flags = if kind == object::elf::SHT_DYNAMIC.0 {
+            (object::elf::SHF_ALLOC | object::elf::SHF_WRITE).0
         } else {
             0
         };
@@ -3681,7 +3710,7 @@ mod tests {
         write_fixture_u32(
             &mut missing_segment,
             FIXTURE_PROGRAM_HEADERS_OFFSET + 2 * FIXTURE_PROGRAM_HEADER_BYTES,
-            object::elf::PT_NULL,
+            object::elf::PT_NULL.0,
         );
         assert_linux_normalization_rejected("missing dynamic segment", missing_segment);
 
@@ -3689,7 +3718,7 @@ mod tests {
         write_fixture_u32(
             &mut duplicate_segment,
             FIXTURE_PROGRAM_HEADERS_OFFSET,
-            object::elf::PT_DYNAMIC,
+            object::elf::PT_DYNAMIC.0,
         );
         assert_linux_normalization_rejected("duplicate dynamic segment", duplicate_segment);
 
@@ -3697,7 +3726,7 @@ mod tests {
         write_fixture_u32(
             &mut missing_section,
             FIXTURE_SECTION_HEADERS_OFFSET + 2 * FIXTURE_SECTION_HEADER_BYTES + 4,
-            object::elf::SHT_NULL,
+            object::elf::SHT_NULL.0,
         );
         assert_linux_normalization_rejected("missing dynamic section", missing_section);
 
@@ -3705,7 +3734,7 @@ mod tests {
         write_fixture_u32(
             &mut duplicate_section,
             FIXTURE_SECTION_HEADERS_OFFSET + FIXTURE_SECTION_HEADER_BYTES + 4,
-            object::elf::SHT_DYNAMIC,
+            object::elf::SHT_DYNAMIC.0,
         );
         assert_linux_normalization_rejected("duplicate dynamic section", duplicate_section);
 
@@ -3742,14 +3771,18 @@ mod tests {
         );
 
         let mut missing_load_owner = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
-        write_fixture_u32(&mut missing_load_owner, dynamic_load, object::elf::PT_NULL);
+        write_fixture_u32(
+            &mut missing_load_owner,
+            dynamic_load,
+            object::elf::PT_NULL.0,
+        );
         assert_linux_normalization_rejected("missing dynamic load owner", missing_load_owner);
 
         let mut invalid_section_flags = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
         write_fixture_u64(
             &mut invalid_section_flags,
             dynamic_section + 8,
-            u64::from(object::elf::SHF_ALLOC),
+            object::elf::SHF_ALLOC.0,
         );
         assert_linux_normalization_rejected("invalid dynamic section flags", invalid_section_flags);
 
@@ -3757,7 +3790,7 @@ mod tests {
         write_fixture_dynamic_entry(
             &mut missing_terminator,
             FIXTURE_DYNAMIC_OFFSET + 7 * ELF64_DYNAMIC_ENTRY_BYTES,
-            object::elf::DT_DEBUG,
+            object::elf::DT_DEBUG.0,
             0,
         );
         assert_linux_normalization_rejected("missing dynamic terminator", missing_terminator);

@@ -92,7 +92,7 @@ nix = { version = "=0.31.3", default-features = false, features = [
     "signal",
 ] }
 notify = "8.2"
-object = "=0.40.0"
+object = { version = "=0.40.0", default-features = false, features = ["read"] }
 pulldown-cmark = "0.13"
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 predicates = "3.1"
