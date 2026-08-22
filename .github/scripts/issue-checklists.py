@@ -1573,20 +1573,14 @@ def mutate_native_relationship_and_revalidate(
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
 ) -> None:
-    """Mutate one authorized edge, then run the shared affected-PR revalidation."""
+    """Mutate one authorized edge, then reconcile every declared release graph."""
 
-    relationship_issues = tuple(
-        sorted(
-            {
-                candidate
-                for graph in release_graphs.values()
-                if issue in graph.blocked_by or related_issue in graph.blocked_by
-                for candidate in graph.blocked_by
-            }
-        )
-    )
     snapshot, affected = build_issueops_snapshot(
-        repo, issue, issue_map, release_graphs, relationship_issues
+        repo,
+        issue,
+        issue_map,
+        release_graphs,
+        reconcile_all_release_graphs=True,
     )
     candidates, candidate_failures = prepare_implementation_status_candidates(affected)
     if snapshot.selection_failures or candidate_failures:
@@ -1690,14 +1684,26 @@ def build_issueops_snapshot(
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
     additional_issues: tuple[int, ...] = (),
+    reconcile_all_release_graphs: bool = False,
 ) -> tuple[IssueOpsSnapshot, list[dict[str, object]]]:
     """Build one bounded immutable issue/graph/PR snapshot for a trigger."""
 
     pull_requests = open_pull_requests_snapshot(repo)
+    selection_issues = additional_issues
+    if reconcile_all_release_graphs:
+        selection_issues = tuple(
+            sorted(
+                {
+                    candidate
+                    for graph in release_graphs.values()
+                    for candidate in graph.blocked_by
+                }
+            )
+        )
     affected, selection_failures = affected_implementation_prs(
-        repo, issue, pull_requests, release_graphs, additional_issues
+        repo, issue, pull_requests, release_graphs, selection_issues
     )
-    trigger_issues = (issue, *additional_issues)
+    trigger_issues = (issue, *selection_issues)
     graph_milestones = {
         graph.milestone
         for graph in release_graphs.values()
@@ -2182,11 +2188,17 @@ def publish_implementation_statuses_for_issue(
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
     additional_issues: tuple[int, ...] = (),
+    reconcile_all_release_graphs: bool = False,
 ) -> None:
-    """Refresh every affected PR from one bounded immutable live snapshot."""
+    """Refresh selected implementation PRs from one bounded live snapshot."""
 
     snapshot, affected = build_issueops_snapshot(
-        repo, issue, issue_map, release_graphs, additional_issues
+        repo,
+        issue,
+        issue_map,
+        release_graphs,
+        additional_issues,
+        reconcile_all_release_graphs,
     )
     candidates, candidate_failures = prepare_implementation_status_candidates(affected)
     failures: list[str] = list(snapshot.selection_failures)
@@ -3796,6 +3808,83 @@ Mitigations:
         for name, value in race_saved.items():
             globals()[name] = value
 
+        coalesced_graphs = {
+            "v0.5.0-00": ReleaseGraph(
+                "v0.5.0-00", 492, {339: (), 492: (339,)}
+            )
+        }
+        coalesced_pr_sha = "c" * 40
+        coalesced_pr = {
+            "number": 910,
+            "headRefOid": coalesced_pr_sha,
+            "closingIssuesReferences": [
+                {
+                    "number": 339,
+                    "repository": {"name": "repo", "owner": {"login": "owner"}},
+                }
+            ],
+            "author": {"login": "atlas"},
+        }
+        coalesced_status_states: list[str] = []
+        coalesced_final_numbers: list[int] = []
+        coalesced_saved = {
+            name: globals()[name]
+            for name in (
+                "open_pull_requests_snapshot",
+                "issue_payload",
+                "release_graph_failures",
+                "gh_json",
+                "commit_status",
+                "publish_implementation_status_for_pr",
+            )
+        }
+        globals()["open_pull_requests_snapshot"] = lambda repo: (coalesced_pr,)
+        globals()["issue_payload"] = (
+            lambda repo, issue: {
+                "number": issue,
+                "state": "CLOSED",
+                "milestone": {"title": "v0.5.0-00"},
+            }
+        )
+        globals()["release_graph_failures"] = lambda *args, **kwargs: []
+
+        def coalesced_gh_json(args: list[str]) -> object:
+            if args[:2] == ["pr", "view"]:
+                return {"number": 910, "headRefOid": coalesced_pr_sha}
+            raise AssertionError(f"unexpected coalesced command: {args}")
+
+        globals()["gh_json"] = coalesced_gh_json
+        globals()["commit_status"] = (
+            lambda repo, sha, state, description: coalesced_status_states.append(state)
+        )
+
+        def coalesced_final(
+            repo: str,
+            number: int,
+            root: Path,
+            issue_map: dict[str, tuple[Owner, ...]],
+            release_graphs: dict[str, ReleaseGraph],
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            coalesced_final_numbers.append(number)
+
+        globals()["publish_implementation_status_for_pr"] = coalesced_final
+        coalesced_issue_events = (310, 339, 314)
+        assert coalesced_issue_events[-1] == 314
+        publish_implementation_statuses_for_issue(
+            "owner/repo",
+            coalesced_issue_events[-1],
+            Path("."),
+            {},
+            coalesced_graphs,
+            reconcile_all_release_graphs=True,
+        )
+        assert coalesced_status_states == ["pending"]
+        assert coalesced_final_numbers == [910]
+        for name, value in coalesced_saved.items():
+            globals()[name] = value
+
         malformed_refresh = {"number": 495, "closingIssuesReferences": None}
         affected, refresh_failures = affected_implementation_prs(
             "owner/repo",
@@ -4251,6 +4340,11 @@ def main() -> None:
         help="publish current-policy implementation statuses for affected open PRs",
     )
     parser.add_argument(
+        "--reconcile-all-release-graphs",
+        action="store_true",
+        help="reconcile every open implementation PR in every declared release graph",
+    )
+    parser.add_argument(
         "--mutate-native-relationship",
         action="store_true",
         help="apply one authorized native relationship and revalidate affected PRs",
@@ -4343,6 +4437,7 @@ def main() -> None:
                     root,
                     issue_map,
                     release_graphs,
+                    reconcile_all_release_graphs=args.reconcile_all_release_graphs,
                 )
         except SystemExit as status_error:
             if closure_error is not None:

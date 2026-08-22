@@ -61,6 +61,8 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'issues'
+    # Native concurrency has one running plus one pending slot, not a lossless queue.
+    # Every surviving publisher reconciles all declared release-graph PRs.
     concurrency:
       group: issueops-implementation-revalidation-${{ github.repository }}
       cancel-in-progress: false
@@ -113,4 +115,5 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json \
             --publish-implementation-statuses-for-issue "$ISSUE_NUMBER" \
+            --reconcile-all-release-graphs \
             --enforce-closed-issue-blockers "$ISSUE_NUMBER"
