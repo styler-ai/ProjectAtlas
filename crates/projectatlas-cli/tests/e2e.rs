@@ -8686,9 +8686,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary checkout step is missing"))?;
-    if !checkout_step.contains("ref: ${{ github.event.pull_request.head.sha || github.sha }}") {
+    if !checkout_step
+        .contains("ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}")
+    {
         return Err(io::Error::other(
-            "PR-derived CI events must check out the pull-request head rather than the base branch",
+            "PR-derived CI events must check out the pull-request merge result rather than the base branch",
         )
         .into());
     }
