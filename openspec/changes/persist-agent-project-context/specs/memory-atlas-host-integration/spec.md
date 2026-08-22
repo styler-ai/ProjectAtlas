@@ -25,12 +25,12 @@ Packaged integration guidance SHALL describe verified memory, goal, skill, plugi
 ### Requirement: Supported lifecycle recovery is quiet and read-only
 When documented host hooks are available, trusted, enabled, and permitted, ProjectAtlas integration SHALL use startup/resume/post-compaction and supported subagent entry to inject a fixed instruction for one read-only recovery brief. Before implementation, packaged guidance SHALL make the agent resolve and completely read current required project-goal skills followed by active-issue skills through the trusted host registry, respecting higher-priority instructions and reporting stale or unavailable routes truthfully. It SHALL NOT automatically write Memory Atlas records, host memory, host goals, task state, or transcripts. Successful maintenance SHALL stay out of normal user-facing output unless it changes the plan or reveals a warning/failure.
 
-#### Scenario: Codex starts, resumes, clears, or continues after compaction
-- **WHEN** the trusted ProjectAtlas `SessionStart` hook receives `startup`, `resume`, `clear`, or `compact`
-- **THEN** it directs the agent to the selected project's recovery brief before broad source reads and performs no authored-state mutation
+#### Scenario: A verified trusted lifecycle event runs
+- **WHEN** the supported host version emits an officially documented startup, resume, or post-compaction event and the trusted ProjectAtlas integration is enabled
+- **THEN** it directs the agent to the selected project's recovery brief before broad source reads, performs no authored-state mutation, and records no invented event name or payload assumption
 
-#### Scenario: Supported subagent starts
-- **WHEN** the trusted ProjectAtlas `SubagentStart` hook runs
+#### Scenario: A verified subagent lifecycle event runs
+- **WHEN** the supported host version exposes an officially documented subagent-entry event and the trusted ProjectAtlas integration is enabled
 - **THEN** the child receives bounded task-specific recovery guidance without inheriting or mutating private parent memory or goals
 
 #### Scenario: Recovery names governing and issue skills
@@ -39,7 +39,7 @@ When documented host hooks are available, trusted, enabled, and permitted, Proje
 
 #### Scenario: Hook is unavailable or untrusted
 - **WHEN** hooks are disabled, pending review, changed, blocked by policy, or unsupported
-- **THEN** ProjectAtlas exposes a visible truthful manual recovery path and does not label the startup automatic
+- **THEN** ProjectAtlas exposes a visible truthful manual recovery path, does not emit configuration for an unverified event, and does not label the startup automatic
 
 ### Requirement: Agents checkpoint at meaningful boundaries
 Packaged guidance SHALL update Memory Atlas state at meaningful recovery, architecture-decision, issue/task-transition, and final-verification boundaries. Before each update, the agent SHALL compare current stable identities, replace changed facts, remove or supersede obsolete facts, keep unrelated protected facts, and submit one bounded conditional batch. Routine file edits SHALL NOT create diary entries or user-facing maintenance spam.

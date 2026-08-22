@@ -8543,6 +8543,26 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "len(meaningful) > 1",
         "ARCHITECTURE_ACCEPTANCE_TASK",
         "planned_issue_failures",
+        "target_graph_failures",
+        "native_relation_issue_number",
+        "implementation_prs_for_issue",
+        "IssueOpsSnapshot",
+        "open_pull_requests_snapshot",
+        "affected_implementation_prs",
+        "mutate_native_relationship",
+        "mutate_native_relationship_and_revalidate",
+        "MAX_AFFECTED_IMPLEMENTATION_PRS",
+        "prepare_implementation_status_candidates",
+        "publish_pending_statuses",
+        "finalize_implementation_statuses",
+        "refresh_snapshot_graph_failures",
+        "commit_status",
+        "implementation_reference_failures",
+        "publish_implementation_status_for_pr",
+        "publish_implementation_statuses_for_issue",
+        "IMPLEMENTATION_STATUS_CONTEXT",
+        "enforce_closed_issue_blockers",
+        "implementation_issue_failures",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
         "planned_issue=args.planned_issue",
@@ -8552,6 +8572,18 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
                 "IssueOps is missing lean checklist behavior {required:?}"
+            ))
+            .into());
+        }
+    }
+    for obsolete in [
+        "implementation_gate_run",
+        "rerun_implementation_gates",
+        "gh run",
+    ] {
+        if issueops.contains(obsolete) {
+            return Err(io::Error::other(format!(
+                "IssueOps retains stale workflow-run implementation policy {obsolete:?}"
             ))
             .into());
         }
@@ -8637,6 +8669,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
+        "statuses: write",
     ] {
         if !ci.contains(required) {
             return Err(io::Error::other(format!(
@@ -8679,11 +8712,95 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary IssueOps step is missing"))?;
+    let checkout_step = ci
+        .split("- name: Checkout")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("ordinary checkout step is missing"))?;
+    if !ci.contains(
+        "pull_request:\n    branches: [main, dev]\n    types: [opened, edited, synchronize, reopened]",
+    ) {
+        return Err(io::Error::other(
+            "pull_request CI must rerun on body edits while retaining the ordinary activity types",
+        )
+        .into());
+    }
+    if !checkout_step.contains(
+        "ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}",
+    )
+    {
+        return Err(io::Error::other(
+            "PR-derived CI events must check out the live pull-request merge ref rather than a payload SHA or base branch",
+        )
+        .into());
+    }
+    for rejected in ["github.event.pull_request.merge_commit_sha"] {
+        if ci.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "PR-derived CI must not trust stale payload checkout identity {rejected:?}"
+            ))
+            .into());
+        }
+    }
+    let default_branch_step = ci
+        .split("- name: Default branch delivery check")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("default branch delivery step is missing"))?;
+    for required in [
+        "github.event.pull_request.base.ref || github.ref_name",
+        "github.event.repository.default_branch",
+        "ProjectAtlas delivery is restricted to the repository default branch",
+        "exit 1",
+    ] {
+        if !default_branch_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "default branch delivery step is missing fail-closed behavior {required:?}"
+            ))
+            .into());
+        }
+    }
+    if ci.find("- name: Default branch delivery check")
+        >= ci.find("- name: Implementation merge-readiness status")
+    {
+        return Err(io::Error::other(
+            "default branch delivery must run before the Dependabot exemption and implementation status",
+        )
+        .into());
+    }
+    for event in ["pull_request_review", "pull_request_review_comment"] {
+        if !checklist_step.contains(event) {
+            return Err(io::Error::other(format!(
+                "ordinary IssueOps checklist must run for {event}"
+            ))
+            .into());
+        }
+    }
     if checklist_step.contains("--milestone") {
         return Err(io::Error::other(
             "ordinary pull requests must not require full milestone completion",
         )
         .into());
+    }
+    let implementation_step = ci
+        .split("- name: Implementation merge-readiness status")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("ordinary implementation status step is missing"))?;
+    for required in [
+        "--publish-implementation-status-for-pr \"$PR_NUMBER\"",
+        "--expected-pr-head-sha \"$EXPECTED_PR_HEAD_SHA\"",
+        "EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+        "github.event_name == 'pull_request_review'",
+        "github.event_name == 'pull_request_review_comment'",
+        "PR_NUMBER: ${{ github.event.pull_request.number }}",
+    ] {
+        if !implementation_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "ordinary implementation status step is missing native merge-boundary behavior {required:?}"
+            ))
+            .into());
+        }
     }
     if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
@@ -8716,15 +8833,59 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "types: [opened, edited, reopened, labeled, unlabeled, milestoned]",
+        "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
+        "relation_kind:",
+        "relation_operation:",
+        "related_issue:",
+        "options: [none, blocked_by, sub_issue]",
+        "options: [none, add, remove]",
+        "inputs.relation_kind == 'none'",
+        "--mutate-native-relationship",
+        "--native-relationship-kind \"$RELATION_KIND\"",
+        "--native-relationship-operation \"$RELATION_OPERATION\"",
+        "--native-relationship-issue \"$ISSUE_NUMBER\"",
+        "--native-related-issue \"$RELATED_ISSUE\"",
         "--planned-issue \"$ISSUE_NUMBER\"",
+        "--publish-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
+        "implementation-status-revalidation",
+        "--enforce-closed-issue-blockers \"$ISSUE_NUMBER\"",
+        "github.event_name == 'issues'",
         "timeout-minutes: 5",
         "contents: read",
-        "issues: read",
+        "issues: write",
+        "statuses: write",
     ] {
         if !issueops_workflow.contains(required) {
             return Err(io::Error::other(format!(
                 "issue-event IssueOps workflow is missing readiness guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    let issueops_revalidation =
+        workflow_job_block(&issueops_workflow, "implementation-status-revalidation")?;
+    for required in [
+        "contents: read",
+        "issues: write",
+        "pull-requests: read",
+        "statuses: write",
+        "timeout-minutes: 15",
+    ] {
+        if !issueops_revalidation.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps relationship dispatcher is missing least permission or timeout {required:?}"
+            ))
+            .into());
+        }
+    }
+    for obsolete in [
+        "--rerun-implementation-gates-for-issue",
+        "actions: write",
+        "gh run cancel",
+    ] {
+        if issueops_workflow.contains(obsolete) {
+            return Err(io::Error::other(format!(
+                "issue-event IssueOps workflow retains obsolete stale-run mechanism {obsolete:?}"
             ))
             .into());
         }
@@ -34583,7 +34744,9 @@ fn command_runs_projectatlas_maintenance(command: &str) -> bool {
 /// Require every GitHub Actions `uses:` reference to pin an immutable 40-char SHA.
 fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<dyn Error>> {
     for (index, line) in workflow.lines().enumerate() {
-        let Some((_, reference)) = line.split_once("uses:") else {
+        let line = line.trim_start();
+        let line = line.strip_prefix("- ").unwrap_or(line);
+        let Some(reference) = line.strip_prefix("uses:") else {
             continue;
         };
         let reference = reference.split('#').next().unwrap_or("").trim();
@@ -34607,6 +34770,29 @@ fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<d
         }
     }
     Ok(())
+}
+
+#[test]
+fn action_pin_policy_ignores_permissions_and_rejects_unpinned_references() {
+    let pinned_workflow = "permissions:\n  statuses: write\njobs:\n  check:\n    steps:\n      - uses: actions/checkout@0123456789012345678901234567890123456789\n";
+    let pinned_result = assert_actions_are_sha_pinned("pinned.yml", pinned_workflow);
+    assert!(
+        pinned_result.is_ok(),
+        "permission values must not be parsed as action references"
+    );
+
+    let unpinned_workflow = "jobs:\n  check:\n    steps:\n      - uses: actions/checkout@v4\n";
+    let unpinned_result = assert_actions_are_sha_pinned("unpinned.yml", unpinned_workflow);
+    assert!(
+        unpinned_result.is_err(),
+        "an unpinned uses: reference must be rejected"
+    );
+    let Err(error) = unpinned_result else { return };
+    assert!(
+        error
+            .to_string()
+            .contains("is not pinned to a 40-character SHA")
+    );
 }
 
 /// Return the deterministic quarantine path for a fixture stale shim.

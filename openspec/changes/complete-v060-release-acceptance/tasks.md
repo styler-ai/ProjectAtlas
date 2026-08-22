@@ -1,0 +1,13 @@
+## 1. Release contract planning (#493)
+
+- [x] 1.1 Finalize the v0.6.0 release-acceptance specification, ownership and task mapping, architecture links, native release hierarchy, declared blocker graph, public-surface inventory contract, holistic acceptance criteria, and non-goals before milestone planning.
+
+## 2. v0.6.0 integrated acceptance (#493)
+
+- [ ] 2.1 Freeze the exact v0.6.0 candidate revision, native hierarchy with #493 as the parent of #310, #314, and every later accepted milestone issue, declared direct-blocker graph, complete supported CLI/MCP/host/public-route inventory, accepted compatibility dispositions, platform matrix, isolated fixture policy, and holistic success criteria; require every child issue plus its required review to be closed successfully before release acceptance.
+- [ ] 2.2 Build the exact candidate with the repository Rust/workspace, database, IssueOps, OpenSpec, documentation, security/dependency, package, installer, asset, checksum, and release-policy gates; abort on revision drift and preserve stable v0.5.0 as Latest.
+- [ ] 2.3 On Windows, Linux, macOS x64, and macOS arm64 as supported, install the exact candidate and reconcile the complete command/tool manifest by safely executing every CLI command and nested command plus every MCP tool against isolated fixtures, covering root/worktree routing, freshness, JSON/TOON, stdout/stderr, exit/error schemas, source evidence, task status/cancellation, mutations, administration, legacy aliases, and accepted removals.
+- [ ] 2.4 Run one clean installed-product E2E spanning install or upgrade, init, scan, purpose-led navigation, graph analysis, the accepted CLI/MCP route policy, Memory Atlas typed storage, conditional writes/reflection, bounded recovery after resume/compaction, host capability fallback, concurrency/pressure, privacy, failure recovery, uninstall, and compatible rollback without reading or mutating unrelated host or project state.
+- [ ] 2.5 Publish `v0.6.0-rc1` as a non-draft prerelease from the exact accepted revision, independently read back tag, metadata, assets, checksums, installers, runtime/plugin/skill/MCP identity, public-surface and holistic E2E results, and return every confirmed blocker through IssueOps before another candidate.
+- [ ] 2.6 After an accepted release candidate, repeat the exact hosted and installed proof for stable v0.6.0, verify Latest and downstream pins, synchronize OpenSpec/issues/reviews/milestone state, and close the release-acceptance issue last.
+- [ ] 2.7 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

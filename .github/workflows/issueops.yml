@@ -2,12 +2,28 @@ name: 00-IssueOps
 
 on:
   issues:
-    types: [opened, edited, reopened, labeled, unlabeled, milestoned]
+    types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
   workflow_dispatch:
     inputs:
       issue:
         description: "Open issue number to validate for release-milestone readiness"
         required: true
+        type: number
+      relation_kind:
+        description: "Authorized native relation to mutate"
+        required: false
+        default: none
+        type: choice
+        options: [none, blocked_by, sub_issue]
+      relation_operation:
+        description: "Authorized native relation operation"
+        required: false
+        default: none
+        type: choice
+        options: [none, add, remove]
+      related_issue:
+        description: "Repository-local related issue number"
+        required: false
         type: number
 
 permissions:
@@ -17,7 +33,9 @@ permissions:
 jobs:
   planned-issue:
     name: planned-issue-readiness
-    if: github.event_name == 'workflow_dispatch' || github.event.issue.milestone != null
+    if: >
+      (github.event_name == 'workflow_dispatch' && inputs.relation_kind == 'none') ||
+      (github.event_name == 'issues' && github.event.issue.milestone != null)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -37,3 +55,58 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json \
             --planned-issue "$ISSUE_NUMBER"
+
+  implementation-status-revalidation:
+    name: implementation-status-revalidation
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'issues'
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Prepare IssueOps parser
+        run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          python3 .github/scripts/issue-checklists.py --self-test
+
+      - name: Publish affected implementation statuses
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
+          RELATION_KIND: ${{ inputs.relation_kind || 'none' }}
+          RELATION_OPERATION: ${{ inputs.relation_operation || 'none' }}
+          RELATED_ISSUE: ${{ inputs.related_issue || '' }}
+        run: |
+          if [[ "$RELATION_KIND" == "none" && "$RELATION_OPERATION" != "none" ]] || \
+             [[ "$RELATION_KIND" != "none" && "$RELATION_OPERATION" == "none" ]] || \
+             [[ "$RELATION_KIND" != "none" && -z "$RELATED_ISSUE" ]]; then
+            echo "relation kind, operation, and related issue must be supplied together" >&2
+            exit 1
+          fi
+          if [[ "$RELATION_KIND" != "none" ]]; then
+            python3 .github/scripts/issue-checklists.py \
+              --repo "$GITHUB_REPOSITORY" \
+              --root . \
+              --issue-map openspec/issue-map.json \
+              --mutate-native-relationship \
+              --native-relationship-kind "$RELATION_KIND" \
+              --native-relationship-operation "$RELATION_OPERATION" \
+              --native-relationship-issue "$ISSUE_NUMBER" \
+              --native-related-issue "$RELATED_ISSUE"
+            exit 0
+          fi
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --publish-implementation-statuses-for-issue "$ISSUE_NUMBER" \
+            --enforce-closed-issue-blockers "$ISSUE_NUMBER"
