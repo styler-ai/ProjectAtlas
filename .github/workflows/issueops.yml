@@ -61,6 +61,9 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'issues'
+    concurrency:
+      group: issueops-implementation-revalidation-${{ github.repository }}
+      cancel-in-progress: true
     permissions:
       contents: read
       issues: write
@@ -79,6 +82,7 @@ jobs:
           python3 .github/scripts/issue-checklists.py --self-test
 
       - name: Publish affected implementation statuses
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}

@@ -8869,6 +8869,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let issueops_revalidation =
         workflow_job_block(&issueops_workflow, "implementation-status-revalidation")?;
     for required in [
+        "concurrency:",
+        "group: issueops-implementation-revalidation-${{ github.repository }}",
+        "cancel-in-progress: true",
+        "if: ${{ !cancelled() }}",
         "contents: read",
         "issues: write",
         "pull-requests: read",
