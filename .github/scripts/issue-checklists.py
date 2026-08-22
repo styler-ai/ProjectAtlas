@@ -170,6 +170,8 @@ MAX_OPEN_PULL_REQUESTS = 1000
 NATIVE_RELATION_KINDS = {"blocked_by", "sub_issue"}
 NATIVE_RELATION_OPERATIONS = {"add", "remove"}
 STATUS_WORKERS = 8
+ISSUEOPS_WORKFLOW_PATH = ".github/workflows/issueops.yml"
+ISSUEOPS_EVENTS = {"issues", "repository_dispatch"}
 
 
 def run(args: list[str]) -> str:
@@ -196,6 +198,43 @@ def gh_json(args: list[str]) -> object:
 
 def gh_api_json(args: list[str]) -> object:
     return json.loads(run(["gh", "api", *args]))
+
+
+def newer_issueops_run_exists(repo: str, current_run_id: int) -> bool:
+    """Reject success when a newer trusted IssueOps event generation exists."""
+
+    current_run_id = positive_issue(current_run_id, "IssueOps workflow run id")
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            f"repos/{owner}/{name}/actions/workflows/{Path(ISSUEOPS_WORKFLOW_PATH).name}/runs",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+            "-F",
+            "per_page=100",
+        ]
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
+        raise SystemExit("GitHub IssueOps workflow-runs response was malformed")
+    current_seen = False
+    for item in payload["workflow_runs"]:
+        if not isinstance(item, dict):
+            raise SystemExit("GitHub IssueOps workflow-runs item was malformed")
+        if item.get("path") != ISSUEOPS_WORKFLOW_PATH:
+            raise SystemExit("GitHub IssueOps workflow-runs response had an unexpected path")
+        run_id = positive_issue(item.get("id"), "IssueOps workflow run id")
+        event = item.get("event")
+        if event not in ISSUEOPS_EVENTS:
+            continue
+        if run_id == current_run_id:
+            current_seen = True
+        if run_id > current_run_id:
+            return True
+    if not current_seen:
+        raise SystemExit("current IssueOps workflow run was missing from workflow-runs response")
+    return False
 
 
 def clean(text: str) -> str:
@@ -1572,6 +1611,7 @@ def mutate_native_relationship_and_revalidate(
     root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
+    run_id: int | None = None,
 ) -> None:
     """Mutate one authorized edge, then reconcile every declared release graph."""
 
@@ -1599,7 +1639,13 @@ def mutate_native_relationship_and_revalidate(
         repo, issue_map, release_graphs, snapshot
     )
     failures = finalize_implementation_statuses(
-        repo, root, issue_map, release_graphs, post_mutation_snapshot, candidates
+        repo,
+        root,
+        issue_map,
+        release_graphs,
+        post_mutation_snapshot,
+        candidates,
+        run_id=run_id,
     )
     if failures:
         raise SystemExit(
@@ -2032,8 +2078,19 @@ def finalize_implementation_statuses(
     release_graphs: dict[str, ReleaseGraph],
     snapshot: IssueOpsSnapshot,
     candidates: list[ImplementationStatusCandidate],
+    run_id: int | None = None,
 ) -> list[str]:
     """Evaluate all candidates after mutation, retaining pending/failure on errors."""
+
+    if run_id is not None and candidates:
+        try:
+            if newer_issueops_run_exists(repo, run_id):
+                return [
+                    f"IssueOps workflow run {run_id} was superseded before final status batch"
+                ]
+        except BaseException as error:
+            detail = str(error).strip() or error.__class__.__name__
+            return [f"IssueOps generation check failed before final status batch: {detail}"]
 
     def finalize(candidate: ImplementationStatusCandidate) -> None:
         publish_implementation_status_for_pr(
@@ -2046,6 +2103,8 @@ def finalize_implementation_statuses(
             expected_pr_head_sha=candidate.expected_sha,
             snapshot=snapshot,
             skip_pending=True,
+            run_id=run_id,
+            generation_checked=run_id is not None,
         )
 
     return run_bounded_status_work(candidates, finalize)
@@ -2086,6 +2145,8 @@ def publish_implementation_status_for_pr(
     expected_pr_head_sha: str | None = None,
     snapshot: IssueOpsSnapshot | None = None,
     skip_pending: bool = False,
+    run_id: int | None = None,
+    generation_checked: bool = False,
 ) -> None:
     """Validate live native references and publish pending then final status."""
 
@@ -2171,6 +2232,15 @@ def publish_implementation_status_for_pr(
             f"found {live_sha or 'missing'}"
         )
     state = "success" if not failures else "failure"
+    if (
+        state == "success"
+        and run_id is not None
+        and not generation_checked
+        and newer_issueops_run_exists(repo, run_id)
+    ):
+        raise SystemExit(
+            f"IssueOps workflow run {run_id} was superseded before PR #{number} success publication"
+        )
     try:
         commit_status(repo, expected_sha, state, description)
     except SystemExit as error:
@@ -2192,6 +2262,7 @@ def publish_implementation_statuses_for_issue(
     release_graphs: dict[str, ReleaseGraph],
     additional_issues: tuple[int, ...] = (),
     reconcile_all_release_graphs: bool = False,
+    run_id: int | None = None,
 ) -> None:
     """Refresh selected implementation PRs from one bounded live snapshot."""
 
@@ -2213,11 +2284,40 @@ def publish_implementation_statuses_for_issue(
     )
     failures.extend(
         finalize_implementation_statuses(
-            repo, root, issue_map, release_graphs, final_snapshot, candidates
+            repo,
+            root,
+            issue_map,
+            release_graphs,
+            final_snapshot,
+            candidates,
+            run_id=run_id,
         )
     )
     if failures:
         raise SystemExit("affected implementation status publication failed:\n" + "\n".join(failures))
+
+
+def invalidate_implementation_statuses_for_issue(
+    repo: str,
+    issue: int,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+    reconcile_all_release_graphs: bool = False,
+) -> None:
+    """Publish fail-closed pending statuses before a queued finalizer runs."""
+
+    snapshot, affected = build_issueops_snapshot(
+        repo,
+        issue,
+        issue_map,
+        release_graphs,
+        reconcile_all_release_graphs=reconcile_all_release_graphs,
+    )
+    candidates, candidate_failures = prepare_implementation_status_candidates(affected)
+    failures = list(snapshot.selection_failures) + candidate_failures
+    failures.extend(publish_pending_statuses(repo, candidates))
+    if failures:
+        raise SystemExit("IssueOps invalidation failed:\n" + "\n".join(failures))
 
 
 def enforce_closed_issue_blockers(
@@ -3381,7 +3481,8 @@ Mitigations:
         saved_commit_status = commit_status
         globals()["publish_implementation_status_for_pr"] = (
             lambda repo, number, root, issue_map, release_graphs, pull_request=None,
-            expected_pr_head_sha=None, snapshot=None, skip_pending=False: status_issue_calls.append(
+            expected_pr_head_sha=None, snapshot=None, skip_pending=False, run_id=None,
+            generation_checked=False: status_issue_calls.append(
                 number
             )
         )
@@ -3438,6 +3539,77 @@ Mitigations:
         assert all(
             IMPLEMENTATION_STATUS_CONTEXT in call for call in (" ".join(args) for args in status_calls)
         )
+
+        saved_generation_guard = newer_issueops_run_exists
+        globals()["newer_issueops_run_exists"] = lambda repo, run_id: True
+        status_calls.clear()
+        globals()["gh_json"] = fake_status_gh_json
+        try:
+            publish_implementation_status_for_pr(
+                "owner/repo", 494, Path("."), {}, {}, run_id=100
+            )
+        except SystemExit as error:
+            assert "superseded before PR #494 success publication" in str(error)
+        else:
+            raise AssertionError("superseded IssueOps run published success")
+        status_states = [
+            argument.split("=", 1)[1]
+            for call in status_calls
+            for argument in call
+            if argument.startswith("state=")
+        ]
+        assert status_states == ["pending"]
+        globals()["newer_issueops_run_exists"] = saved_generation_guard
+
+        saved_workflow_runs_api = globals()["gh_api_json"]
+        globals()["gh_api_json"] = lambda args: {
+            "workflow_runs": [
+                {
+                    "id": 101,
+                    "event": "repository_dispatch",
+                    "path": ISSUEOPS_WORKFLOW_PATH,
+                },
+                {"id": 100, "event": "issues", "path": ISSUEOPS_WORKFLOW_PATH},
+            ]
+        }
+        assert newer_issueops_run_exists("owner/repo", 100)
+        globals()["gh_api_json"] = lambda args: {
+            "workflow_runs": [
+                {"id": 100, "event": "issues", "path": ISSUEOPS_WORKFLOW_PATH}
+            ]
+        }
+        assert not newer_issueops_run_exists("owner/repo", 100)
+        globals()["gh_api_json"] = saved_workflow_runs_api
+
+        invalidation_pending: list[list[int]] = []
+        invalidation_saved = {
+            name: globals()[name]
+            for name in (
+                "build_issueops_snapshot",
+                "prepare_implementation_status_candidates",
+                "publish_pending_statuses",
+            )
+        }
+        invalidation_candidate = ImplementationStatusCandidate(
+            {"number": 912, "headRefOid": "e" * 40}, 912, "e" * 40
+        )
+        globals()["build_issueops_snapshot"] = lambda *args, **kwargs: (
+            IssueOpsSnapshot((), {}, {}, ()),
+            [{"number": 912, "headRefOid": "e" * 40}],
+        )
+        globals()["prepare_implementation_status_candidates"] = (
+            lambda affected: ([invalidation_candidate], [])
+        )
+        globals()["publish_pending_statuses"] = lambda repo, candidates: (
+            invalidation_pending.append([candidate.number for candidate in candidates])
+            or []
+        )
+        invalidate_implementation_statuses_for_issue(
+            "owner/repo", 314, {}, {}, reconcile_all_release_graphs=True
+        )
+        assert invalidation_pending == [[912]]
+        for name, value in invalidation_saved.items():
+            globals()[name] = value
 
         status_calls.clear()
         changed_heads = iter(
@@ -3570,7 +3742,7 @@ Mitigations:
             lambda repo, candidates: mutation_revalidation.append(("pending", candidates))
         )
         globals()["finalize_implementation_statuses"] = (
-            lambda repo, root, issue_map, release_graphs, snapshot, candidates: mutation_revalidation.append(
+            lambda repo, root, issue_map, release_graphs, snapshot, candidates, run_id=None: mutation_revalidation.append(
                 ("finalize", candidates)
             )
             or []
@@ -3664,6 +3836,8 @@ Mitigations:
             expected_pr_head_sha: str | None = None,
             snapshot: IssueOpsSnapshot | None = None,
             skip_pending: bool = False,
+            run_id: int | None = None,
+            generation_checked: bool = False,
         ) -> None:
             record_bounded_work()
             assert skip_pending
@@ -3701,6 +3875,27 @@ Mitigations:
             candidate.number for candidate in thirty_three_candidates
         )
         assert maximum_active_workers <= STATUS_WORKERS
+
+        generation_guard_calls = [0]
+        saved_generation_guard = newer_issueops_run_exists
+        globals()["newer_issueops_run_exists"] = (
+            lambda repo, run_id: generation_guard_calls.__setitem__(
+                0, generation_guard_calls[0] + 1
+            )
+            or False
+        )
+        final_statuses.clear()
+        assert finalize_implementation_statuses(
+            "owner/repo",
+            Path("."),
+            {},
+            {},
+            exact_selected_snapshot,
+            thirty_three_candidates,
+            run_id=100,
+        ) == []
+        assert generation_guard_calls == [1]
+        globals()["newer_issueops_run_exists"] = saved_generation_guard
 
         pending_heads.clear()
         pending_statuses.clear()
@@ -4426,6 +4621,11 @@ def main() -> None:
         help="publish current-policy implementation statuses for affected open PRs",
     )
     parser.add_argument(
+        "--invalidate-implementation-statuses-for-issue",
+        type=int,
+        help="publish pending implementation statuses before queued finalization",
+    )
+    parser.add_argument(
         "--reconcile-all-release-graphs",
         action="store_true",
         help="reconcile every open implementation PR in every declared release graph",
@@ -4444,6 +4644,7 @@ def main() -> None:
         type=int,
         help="reopen a declared issue that closed before its direct blockers",
     )
+    parser.add_argument("--run-id", type=int, help="current IssueOps workflow run id")
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -4453,9 +4654,12 @@ def main() -> None:
         return
     if not args.repo:
         raise SystemExit("--repo is required unless --self-test is used")
+    if args.run_id is not None and args.run_id <= 0:
+        raise SystemExit("--run-id must be a positive IssueOps workflow run id")
     status_modes = [
         args.publish_implementation_status_for_pr,
         args.publish_implementation_statuses_for_issue,
+        args.invalidate_implementation_statuses_for_issue,
     ]
     if args.mutate_native_relationship and (
         any(value is not None for value in status_modes)
@@ -4487,6 +4691,7 @@ def main() -> None:
             Path(args.root),
             issue_map,
             release_graphs,
+            run_id=args.run_id,
         )
         return
     if (
@@ -4507,6 +4712,14 @@ def main() -> None:
                 # the repaired live state before rejecting the triggering event.
                 closure_error = error
         try:
+            if args.invalidate_implementation_statuses_for_issue is not None:
+                invalidate_implementation_statuses_for_issue(
+                    args.repo,
+                    args.invalidate_implementation_statuses_for_issue,
+                    issue_map,
+                    release_graphs,
+                    reconcile_all_release_graphs=args.reconcile_all_release_graphs,
+                )
             if args.publish_implementation_status_for_pr is not None:
                 publish_implementation_status_for_pr(
                     args.repo,
@@ -4515,6 +4728,7 @@ def main() -> None:
                     issue_map,
                     release_graphs,
                     expected_pr_head_sha=args.expected_pr_head_sha,
+                    run_id=args.run_id,
                 )
             if args.publish_implementation_statuses_for_issue is not None:
                 publish_implementation_statuses_for_issue(
@@ -4524,6 +4738,7 @@ def main() -> None:
                     issue_map,
                     release_graphs,
                     reconcile_all_release_graphs=args.reconcile_all_release_graphs,
+                    run_id=args.run_id,
                 )
         except SystemExit as status_error:
             if closure_error is not None:

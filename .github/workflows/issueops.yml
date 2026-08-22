@@ -3,28 +3,11 @@ name: 00-IssueOps
 on:
   issues:
     types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
-  workflow_dispatch:
-    inputs:
-      issue:
-        description: "Open issue number to validate for release-milestone readiness"
-        required: true
-        type: number
-      relation_kind:
-        description: "Authorized native relation to mutate"
-        required: false
-        default: none
-        type: choice
-        options: [none, blocked_by, sub_issue]
-      relation_operation:
-        description: "Authorized native relation operation"
-        required: false
-        default: none
-        type: choice
-        options: [none, add, remove]
-      related_issue:
-        description: "Repository-local related issue number"
-        required: false
-        type: number
+  repository_dispatch:
+    types: [issueops_relationship]
+  # Relationship clients use authenticated gh api repos/OWNER/REPO/dispatches
+  # --method POST -f event_type=issueops_relationship -f client_payload='...';
+  # dispatch admission is not run success; require the resulting run/read-back.
 
 permissions:
   contents: read
@@ -34,7 +17,6 @@ jobs:
   planned-issue:
     name: planned-issue-readiness
     if: >
-      (github.event_name == 'workflow_dispatch' && inputs.relation_kind == 'none') ||
       (github.event_name == 'issues' && github.event.issue.milestone != null)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -45,7 +27,7 @@ jobs:
       - name: Validate IssueOps contract
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           npm ci --ignore-scripts --prefix .github/mermaid-parser
           npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
@@ -56,11 +38,44 @@ jobs:
             --issue-map openspec/issue-map.json \
             --planned-issue "$ISSUE_NUMBER"
 
+  implementation-status-invalidation:
+    name: implementation-status-invalidation
+    if: >
+      github.event_name == 'issues' ||
+      github.event_name == 'repository_dispatch'
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Invalidate implementation statuses
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+        run: |
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --invalidate-implementation-statuses-for-issue "$ISSUE_NUMBER" \
+            --reconcile-all-release-graphs
+
   implementation-status-revalidation:
     name: implementation-status-revalidation
+    needs: implementation-status-invalidation
     if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'issues'
+      github.event_name == 'issues' ||
+      github.event_name == 'repository_dispatch'
     # Native concurrency serializes publishers with a bounded pending queue; it is not correctness.
     # A queued relationship dispatch has not mutated; capacity cancellation is visibly retryable.
     # Every queued publisher reconciles all declared release-graph PRs from live state.
@@ -72,6 +87,7 @@ jobs:
       issues: write
       pull-requests: read
       statuses: write
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -90,11 +106,15 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
-          RELATION_KIND: ${{ inputs.relation_kind || 'none' }}
-          RELATION_OPERATION: ${{ inputs.relation_operation || 'none' }}
-          RELATED_ISSUE: ${{ inputs.related_issue || '' }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          RELATION_KIND: ${{ github.event.client_payload.relation_kind || 'none' }}
+          RELATION_OPERATION: ${{ github.event.client_payload.operation || 'none' }}
+          RELATED_ISSUE: ${{ github.event.client_payload.related_issue_number || '' }}
         run: |
+          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" && "$RELATION_KIND" == "none" ]]; then
+            echo "repository_dispatch requires an authorized native relationship payload" >&2
+            exit 1
+          fi
           if [[ "$RELATION_KIND" == "none" && "$RELATION_OPERATION" != "none" ]] || \
              [[ "$RELATION_KIND" != "none" && "$RELATION_OPERATION" == "none" ]] || \
              [[ "$RELATION_KIND" != "none" && -z "$RELATED_ISSUE" ]]; then
@@ -110,7 +130,8 @@ jobs:
               --native-relationship-kind "$RELATION_KIND" \
               --native-relationship-operation "$RELATION_OPERATION" \
               --native-relationship-issue "$ISSUE_NUMBER" \
-              --native-related-issue "$RELATED_ISSUE"
+              --native-related-issue "$RELATED_ISSUE" \
+              --run-id "$GITHUB_RUN_ID"
             exit 0
           fi
           python3 .github/scripts/issue-checklists.py \
@@ -119,4 +140,5 @@ jobs:
             --issue-map openspec/issue-map.json \
             --publish-implementation-statuses-for-issue "$ISSUE_NUMBER" \
             --reconcile-all-release-graphs \
-            --enforce-closed-issue-blockers "$ISSUE_NUMBER"
+            --enforce-closed-issue-blockers "$ISSUE_NUMBER" \
+            --run-id "$GITHUB_RUN_ID"

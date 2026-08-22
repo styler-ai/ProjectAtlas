@@ -8549,6 +8549,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "IssueOpsSnapshot",
         "CandidateHeadChanged",
         "reconcile_all_release_graphs",
+        "newer_issueops_run_exists",
+        "invalidate_implementation_statuses_for_issue",
+        "ISSUEOPS_WORKFLOW_PATH",
         "open_pull_requests_snapshot",
         "affected_implementation_prs",
         "mutate_native_relationship",
@@ -8841,12 +8844,14 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
-        "relation_kind:",
-        "relation_operation:",
-        "related_issue:",
-        "options: [none, blocked_by, sub_issue]",
-        "options: [none, add, remove]",
-        "inputs.relation_kind == 'none'",
+        "repository_dispatch:",
+        "types: [issueops_relationship]",
+        "gh api repos/OWNER/REPO/dispatches",
+        "dispatch admission is not run success",
+        "client_payload.relation_kind",
+        "client_payload.operation",
+        "client_payload.issue_number",
+        "client_payload.related_issue_number",
         "--mutate-native-relationship",
         "--native-relationship-kind \"$RELATION_KIND\"",
         "--native-relationship-operation \"$RELATION_OPERATION\"",
@@ -8854,8 +8859,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--native-related-issue \"$RELATED_ISSUE\"",
         "--planned-issue \"$ISSUE_NUMBER\"",
         "--publish-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
+        "--invalidate-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
         "--reconcile-all-release-graphs",
         "implementation-status-revalidation",
+        "implementation-status-invalidation",
         "--enforce-closed-issue-blockers \"$ISSUE_NUMBER\"",
         "github.event_name == 'issues'",
         "timeout-minutes: 5",
@@ -8872,17 +8879,38 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     let issueops_revalidation =
         workflow_job_block(&issueops_workflow, "implementation-status-revalidation")?;
+    let issueops_invalidation =
+        workflow_job_block(&issueops_workflow, "implementation-status-invalidation")?;
+    for required in [
+        "ref: ${{ github.event.repository.default_branch }}",
+        "--invalidate-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
+        "--reconcile-all-release-graphs",
+        "contents: read",
+        "issues: read",
+        "pull-requests: read",
+        "statuses: write",
+        "timeout-minutes: 10",
+    ] {
+        if !issueops_invalidation.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps invalidation job is missing fail-closed pending guard {required:?}"
+            ))
+            .into());
+        }
+    }
     for required in [
         "concurrency:",
         "group: issueops-implementation-revalidation-${{ github.repository }}",
         "queue: max",
         "if: ${{ !cancelled() }}",
         "--reconcile-all-release-graphs",
+        "--run-id \"$GITHUB_RUN_ID\"",
         "ref: ${{ github.event.repository.default_branch }}",
         "contents: read",
         "issues: write",
         "pull-requests: read",
         "statuses: write",
+        "actions: read",
         "timeout-minutes: 30",
     ] {
         if !issueops_revalidation.contains(required) {
@@ -8905,6 +8933,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+    if issueops_workflow.contains("workflow_dispatch") {
+        return Err(io::Error::other(
+            "IssueOps relationship authority must not use workflow_dispatch",
+        )
+        .into());
     }
     let prepublish_input = release
         .split("      prepublish_only:")
