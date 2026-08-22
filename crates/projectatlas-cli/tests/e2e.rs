@@ -8681,6 +8681,51 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary IssueOps step is missing"))?;
+    let checkout_step = ci
+        .split("- name: Checkout")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("ordinary checkout step is missing"))?;
+    if !checkout_step.contains("ref: ${{ github.event.pull_request.head.sha || github.sha }}") {
+        return Err(io::Error::other(
+            "PR-derived CI events must check out the pull-request head rather than the base branch",
+        )
+        .into());
+    }
+    let default_branch_step = ci
+        .split("- name: Default branch delivery check")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("default branch delivery step is missing"))?;
+    for required in [
+        "github.event.pull_request.base.ref || github.ref_name",
+        "github.event.repository.default_branch",
+        "ProjectAtlas delivery is restricted to the repository default branch",
+        "exit 1",
+    ] {
+        if !default_branch_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "default branch delivery step is missing fail-closed behavior {required:?}"
+            ))
+            .into());
+        }
+    }
+    if ci.find("- name: Default branch delivery check")
+        >= ci.find("- name: Implementation blocker check")
+    {
+        return Err(io::Error::other(
+            "default branch delivery must run before the Dependabot exemption and native blocker gate",
+        )
+        .into());
+    }
+    for event in ["pull_request_review", "pull_request_review_comment"] {
+        if !checklist_step.contains(event) {
+            return Err(io::Error::other(format!(
+                "ordinary IssueOps checklist must run for {event}"
+            ))
+            .into());
+        }
+    }
     if checklist_step.contains("--milestone") {
         return Err(io::Error::other(
             "ordinary pull requests must not require full milestone completion",
@@ -8696,7 +8741,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "closingIssuesReferences",
         "--implementation-issue \"$issue_number\"",
         "No GitHub-native closing issue references; treating this as a planning PR.",
+        "github.event_name == 'pull_request_review'",
+        "github.event_name == 'pull_request_review_comment'",
         "github.event.pull_request.user.login != 'dependabot[bot]'",
+        "PR_NUMBER: ${{ github.event.pull_request.number }}",
     ] {
         if !implementation_step.contains(required) {
             return Err(io::Error::other(format!(
