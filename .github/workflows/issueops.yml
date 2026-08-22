@@ -63,7 +63,7 @@ jobs:
       github.event_name == 'issues'
     concurrency:
       group: issueops-implementation-revalidation-${{ github.repository }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     permissions:
       contents: read
       issues: write

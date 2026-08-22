@@ -8547,6 +8547,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "native_relation_issue_number",
         "implementation_prs_for_issue",
         "IssueOpsSnapshot",
+        "CandidateHeadChanged",
         "open_pull_requests_snapshot",
         "affected_implementation_prs",
         "mutate_native_relationship",
@@ -8871,7 +8872,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     for required in [
         "concurrency:",
         "group: issueops-implementation-revalidation-${{ github.repository }}",
-        "cancel-in-progress: true",
+        "cancel-in-progress: false",
         "if: ${{ !cancelled() }}",
         "contents: read",
         "issues: write",
@@ -8890,6 +8891,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--rerun-implementation-gates-for-issue",
         "actions: write",
         "gh run cancel",
+        "cancel-in-progress: true",
     ] {
         if issueops_workflow.contains(obsolete) {
             return Err(io::Error::other(format!(

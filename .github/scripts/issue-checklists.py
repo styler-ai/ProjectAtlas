@@ -155,6 +155,17 @@ class ImplementationStatusCandidate:
     expected_sha: str
 
 
+class CandidateHeadChanged(SystemExit):
+    """One selected PR changed heads after the immutable snapshot."""
+
+    def __init__(self, number: int, expected_sha: str, live_sha: str) -> None:
+        self.live_sha = live_sha
+        super().__init__(
+            f"PR #{number} head changed before status publication: "
+            f"expected {expected_sha}, found {live_sha}"
+        )
+
+
 MAX_OPEN_PULL_REQUESTS = 1000
 NATIVE_RELATION_KINDS = {"blocked_by", "sub_issue"}
 NATIVE_RELATION_OPERATIONS = {"add", "remove"}
@@ -1924,7 +1935,10 @@ def verify_live_candidate_head(
         live_pull_request.get("number"), "live pull request number"
     )
     live_sha = live_pull_request.get("headRefOid")
-    if live_number != candidate.number or live_sha != candidate.expected_sha:
+    if live_number == candidate.number and isinstance(live_sha, str):
+        if live_sha != candidate.expected_sha:
+            raise CandidateHeadChanged(candidate.number, candidate.expected_sha, live_sha)
+    elif live_number != candidate.number or live_sha != candidate.expected_sha:
         raise SystemExit(
             f"PR #{candidate.number} head changed before status publication: "
             f"expected {candidate.expected_sha}, found {live_sha or 'missing'}"
@@ -1956,20 +1970,53 @@ def publish_pending_statuses(
 ) -> list[str]:
     """Establish pending status for every candidate before expensive evaluation."""
 
+    validated: set[int] = set()
+    raced_heads: dict[int, str] = {}
+    validation_lock = threading.Lock()
+
+    def validate(candidate: ImplementationStatusCandidate) -> None:
+        try:
+            verify_live_candidate_head(repo, candidate)
+        except CandidateHeadChanged as error:
+            with validation_lock:
+                raced_heads[candidate.number] = error.live_sha
+            raise
+        with validation_lock:
+            validated.add(candidate.number)
+
     head_failures = run_bounded_status_work(
-        candidates, lambda candidate: verify_live_candidate_head(repo, candidate)
+        candidates, validate
     )
-    if head_failures:
-        return head_failures
-    return run_bounded_status_work(
-        candidates,
+    stable_candidates = [candidate for candidate in candidates if candidate.number in validated]
+    raced_candidates = [candidate for candidate in candidates if candidate.number in raced_heads]
+    candidates[:] = stable_candidates
+    raced_failures = run_bounded_status_work(
+        raced_candidates,
         lambda candidate: commit_status(
+            repo,
+            raced_heads[candidate.number],
+            "failure",
+            "PR head changed before IssueOps revalidation completed",
+        ),
+    )
+    pending_candidates: set[int] = set()
+    pending_lock = threading.Lock()
+
+    def publish_pending(candidate: ImplementationStatusCandidate) -> None:
+        commit_status(
             repo,
             candidate.expected_sha,
             "pending",
             "Revalidating native implementation references",
-        ),
-    )
+        )
+        with pending_lock:
+            pending_candidates.add(candidate.number)
+
+    pending_failures = run_bounded_status_work(stable_candidates, publish_pending)
+    candidates[:] = [
+        candidate for candidate in stable_candidates if candidate.number in pending_candidates
+    ]
+    return head_failures + raced_failures + pending_failures
 
 
 def finalize_implementation_statuses(
@@ -2146,12 +2193,11 @@ def publish_implementation_statuses_for_issue(
     failures.extend(candidate_failures)
     pending_failures = publish_pending_statuses(repo, candidates)
     failures.extend(pending_failures)
-    if not pending_failures:
-        failures.extend(
-            finalize_implementation_statuses(
-                repo, root, issue_map, release_graphs, snapshot, candidates
-            )
+    failures.extend(
+        finalize_implementation_statuses(
+            repo, root, issue_map, release_graphs, snapshot, candidates
         )
+    )
     if failures:
         raise SystemExit("affected implementation status publication failed:\n" + "\n".join(failures))
 
@@ -3663,9 +3709,10 @@ Mitigations:
 
         globals()["commit_status"] = failing_worker_status
         pending_failures = publish_pending_statuses("owner/repo", failure_candidates)
-        assert len(pending_attempts) == len(failure_candidates)
+        assert len(pending_attempts) == 4
         assert any("injected pending worker failure" in failure for failure in pending_failures)
 
+        final_failure_candidates = worker_candidates(4)
         final_attempts: list[int] = []
 
         def failing_worker_final(*args: object, **kwargs: object) -> None:
@@ -3677,13 +3724,76 @@ Mitigations:
         globals()["commit_status"] = saved_commit_status
         globals()["publish_implementation_status_for_pr"] = failing_worker_final
         final_failures = finalize_implementation_statuses(
-            "owner/repo", Path("."), {}, {}, exact_selected_snapshot, failure_candidates
+            "owner/repo",
+            Path("."),
+            {},
+            {},
+            exact_selected_snapshot,
+            final_failure_candidates,
         )
         assert sorted(final_attempts) == sorted(
-            candidate.number for candidate in failure_candidates
+            candidate.number for candidate in final_failure_candidates
         )
         assert any("injected final worker failure" in failure for failure in final_failures)
         for name, value in worker_saved.items():
+            globals()[name] = value
+
+        race_candidates = [
+            ImplementationStatusCandidate(
+                {"number": 900, "headRefOid": "9" * 40}, 900, "9" * 40
+            ),
+            ImplementationStatusCandidate(
+                {"number": 901, "headRefOid": "a" * 40}, 901, "a" * 40
+            ),
+        ]
+        race_status_calls: list[tuple[int | str, str]] = []
+        race_final_numbers: list[int] = []
+
+        def race_verify(repo: str, candidate: ImplementationStatusCandidate) -> None:
+            if candidate.number == 901:
+                raise CandidateHeadChanged(candidate.number, candidate.expected_sha, "b" * 40)
+
+        def race_commit(
+            repo: str, sha: str, state: str, description: str
+        ) -> None:
+            race_status_calls.append((sha, state))
+
+        def race_finalize(*args: object, **kwargs: object) -> None:
+            race_final_numbers.append(int(args[1]))
+
+        race_saved = {
+            name: globals()[name]
+            for name in (
+                "verify_live_candidate_head",
+                "commit_status",
+                "publish_implementation_status_for_pr",
+                "build_issueops_snapshot",
+                "prepare_implementation_status_candidates",
+            )
+        }
+        globals()["verify_live_candidate_head"] = race_verify
+        globals()["commit_status"] = race_commit
+        globals()["publish_implementation_status_for_pr"] = race_finalize
+        globals()["build_issueops_snapshot"] = (
+            lambda *args, **kwargs: (exact_selected_snapshot, [])
+        )
+        globals()["prepare_implementation_status_candidates"] = (
+            lambda affected: (race_candidates, [])
+        )
+        try:
+            publish_implementation_statuses_for_issue(
+                "owner/repo", 10, Path("."), {}, {}
+            )
+        except SystemExit as error:
+            assert "head changed before status publication" in str(error)
+        else:
+            raise AssertionError("raced candidate did not fail the aggregate refresh")
+        assert [candidate.number for candidate in race_candidates] == [900]
+        assert ("b" * 40, "failure") in race_status_calls
+        assert ("9" * 40, "pending") in race_status_calls
+        assert all(state != "pending" or sha != "a" * 40 for sha, state in race_status_calls)
+        assert race_final_numbers == [900]
+        for name, value in race_saved.items():
             globals()[name] = value
 
         malformed_refresh = {"number": 495, "closingIssuesReferences": None}
