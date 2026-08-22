@@ -34708,7 +34708,9 @@ fn command_runs_projectatlas_maintenance(command: &str) -> bool {
 /// Require every GitHub Actions `uses:` reference to pin an immutable 40-char SHA.
 fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<dyn Error>> {
     for (index, line) in workflow.lines().enumerate() {
-        let Some((_, reference)) = line.split_once("uses:") else {
+        let line = line.trim_start();
+        let line = line.strip_prefix("- ").unwrap_or(line);
+        let Some(reference) = line.strip_prefix("uses:") else {
             continue;
         };
         let reference = reference.split('#').next().unwrap_or("").trim();
@@ -34732,6 +34734,22 @@ fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<d
         }
     }
     Ok(())
+}
+
+#[test]
+fn action_pin_policy_ignores_permissions_and_rejects_unpinned_references() {
+    let pinned_workflow = "permissions:\n  statuses: write\njobs:\n  check:\n    steps:\n      - uses: actions/checkout@0123456789012345678901234567890123456789\n";
+    assert_actions_are_sha_pinned("pinned.yml", pinned_workflow)
+        .expect("permission values must not be parsed as action references");
+
+    let unpinned_workflow = "jobs:\n  check:\n    steps:\n      - uses: actions/checkout@v4\n";
+    let error = assert_actions_are_sha_pinned("unpinned.yml", unpinned_workflow)
+        .expect_err("an unpinned uses: reference must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("is not pinned to a 40-character SHA")
+    );
 }
 
 /// Return the deterministic quarantine path for a fixture stale shim.
