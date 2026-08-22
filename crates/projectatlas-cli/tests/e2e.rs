@@ -8544,6 +8544,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "ARCHITECTURE_ACCEPTANCE_TASK",
         "planned_issue_failures",
         "target_graph_failures",
+        "native_relation_issue_number",
         "implementation_issue_failures",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
@@ -8686,13 +8687,25 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary checkout step is missing"))?;
-    if !checkout_step
-        .contains("ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}")
+    if !checkout_step.contains(
+        "ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}",
+    )
     {
         return Err(io::Error::other(
-            "PR-derived CI events must check out the pull-request merge result rather than the base branch",
+            "PR-derived CI events must check out the live pull-request merge ref rather than a payload SHA or base branch",
         )
         .into());
+    }
+    for rejected in [
+        "github.event.pull_request.head.sha",
+        "github.event.pull_request.merge_commit_sha",
+    ] {
+        if ci.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "PR-derived CI must not trust stale payload checkout identity {rejected:?}"
+            ))
+            .into());
+        }
     }
     let default_branch_step = ci
         .split("- name: Default branch delivery check")

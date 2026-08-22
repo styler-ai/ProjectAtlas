@@ -1269,6 +1269,45 @@ def milestone_issues(repo: str, milestone: str) -> list[dict[str, object]]:
 GITHUB_API_VERSION = "2026-03-10"
 
 
+def native_relation_issue_number(
+    repo: str, payload: object, label: str
+) -> int:
+    """Read a native relation only when its payload identifies the addressed repo."""
+
+    if not isinstance(payload, dict):
+        raise SystemExit(f"GitHub returned {label} as a non-object")
+    owner, name = repo_parts(repo)
+    expected_full_name = f"{owner}/{name}".casefold()
+    identities: list[bool] = []
+    repository_url = payload.get("repository_url")
+    if repository_url is not None:
+        if not isinstance(repository_url, str):
+            raise SystemExit(f"GitHub returned {label} with malformed repository identity")
+        parsed = urlsplit(repository_url)
+        identities.append(
+            parsed.scheme.casefold() == "https"
+            and parsed.netloc.casefold() == "api.github.com"
+            and parsed.path.rstrip("/").casefold()
+            == f"/repos/{owner}/{name}".casefold()
+            and not parsed.query
+            and not parsed.fragment
+        )
+    repository = payload.get("repository")
+    if repository is not None:
+        if not isinstance(repository, dict):
+            raise SystemExit(f"GitHub returned {label} with malformed repository identity")
+        full_name = repository.get("full_name")
+        if full_name is not None:
+            if not isinstance(full_name, str):
+                raise SystemExit(f"GitHub returned {label} with malformed repository identity")
+            identities.append(full_name.casefold() == expected_full_name)
+    if not identities or not all(identities):
+        raise SystemExit(
+            f"GitHub returned {label} without the exact {repo} repository identity"
+        )
+    return positive_issue(payload.get("number"), label)
+
+
 def native_blocked_by(repo: str, issue: int) -> set[int]:
     """Read GitHub's native blocked-by edges for one issue."""
 
@@ -1289,7 +1328,7 @@ def native_blocked_by(repo: str, issue: int) -> set[int]:
     dependencies = flatten_paginated_response(payload)
     result: set[int] = set()
     for dependency in dependencies:
-        number = positive_issue(dependency.get("number"), "blocked-by issue number")
+        number = native_relation_issue_number(repo, dependency, "blocked-by issue number")
         if number in result:
             raise SystemExit(f"GitHub returned duplicate blocked-by issue #{number} for #{issue}")
         result.add(number)
@@ -1316,7 +1355,7 @@ def native_sub_issues(repo: str, issue: int) -> set[int]:
     children = flatten_paginated_response(payload)
     result: set[int] = set()
     for child in children:
-        number = positive_issue(child.get("number"), "sub-issue number")
+        number = native_relation_issue_number(repo, child, "sub-issue number")
         if number in result:
             raise SystemExit(f"GitHub returned duplicate sub-issue #{number} for #{issue}")
         result.add(number)
@@ -1364,7 +1403,7 @@ def native_parent_issue(repo: str, issue: int) -> int | None:
         raise SystemExit(f"GitHub parent response for #{issue} was not valid JSON: {error}") from error
     if not isinstance(payload, dict):
         raise SystemExit(f"GitHub parent response for #{issue} was not an object")
-    return positive_issue(payload.get("number"), "parent issue number")
+    return native_relation_issue_number(repo, payload, "parent issue number")
 
 
 def _live_graph_failure(operation: str, error: BaseException) -> str:
@@ -2259,19 +2298,86 @@ Mitigations:
     saved_native_parent_issue = globals()["native_parent_issue"]
     saved_issue_payload = globals()["issue_payload"]
     saved_gh_api_json = globals()["gh_api_json"]
+    saved_subprocess_run = subprocess.run
     try:
         api_args: list[list[str]] = []
+        local_identity = {"repository_url": "https://api.github.com/repos/owner/repo"}
+
         def fake_gh_api_json(args: list[str]) -> object:
             api_args.append(args)
             joined = " ".join(args)
             if "/milestones" in joined:
                 return [[{"title": "v1.2.3-00", "number": 7}]]
             if "/dependencies/blocked_by" in joined:
-                return [[{"number": 11}]]
-            return [[{"number": 10}, {"number": 11}]]
+                return [[{**local_identity, "number": 11}]]
+            if "milestone=7" in joined:
+                return [[{"number": 10}, {"number": 11}]]
+            return [[
+                {**local_identity, "number": 10},
+                {**local_identity, "number": 11},
+            ]]
 
         globals()["gh_api_json"] = fake_gh_api_json
         assert native_blocked_by("owner/repo", 10) == {11}
+        assert native_sub_issues("owner/repo", 12) == {10, 11}
+
+        class FakeProcess:
+            def __init__(self, payload: object) -> None:
+                self.returncode = 0
+                self.stdout = "HTTP/2.0 200 OK\r\n\r\n" + json.dumps(payload)
+                self.stderr = ""
+
+        subprocess.run = lambda *args, **kwargs: FakeProcess(
+            {**local_identity, "number": 12}
+        )
+        assert native_parent_issue("owner/repo", 10) == 12
+
+        foreign_identity = {
+            "repository_url": "https://api.github.com/repos/foreign/repo",
+            "number": 11,
+        }
+        for label in (
+            "blocked-by issue number",
+            "sub-issue number",
+            "parent issue number",
+        ):
+            try:
+                native_relation_issue_number("owner/repo", foreign_identity, label)
+            except SystemExit as error:
+                assert "exact owner/repo repository identity" in str(error)
+            else:
+                raise AssertionError(f"foreign {label} was accepted")
+        for malformed in (
+            {"number": 11},
+            {"number": 11, "repository_url": 12},
+            {"number": 11, "repository": {"full_name": 12}},
+        ):
+            try:
+                native_relation_issue_number("owner/repo", malformed, "native relation")
+            except SystemExit as error:
+                assert "repository identity" in str(error)
+            else:
+                raise AssertionError("missing or malformed native identity was accepted")
+
+        globals()["gh_api_json"] = lambda args: [[foreign_identity]]
+        for relation, label in (
+            (native_blocked_by, "blocked-by issue number"),
+            (native_sub_issues, "sub-issue number"),
+        ):
+            try:
+                relation("owner/repo", 10)
+            except SystemExit as error:
+                assert label in str(error)
+            else:
+                raise AssertionError(f"foreign {label} relation was accepted")
+        subprocess.run = lambda *args, **kwargs: FakeProcess(foreign_identity)
+        try:
+            native_parent_issue("owner/repo", 10)
+        except SystemExit as error:
+            assert "parent issue number" in str(error)
+        else:
+            raise AssertionError("foreign parent relation was accepted")
+        globals()["gh_api_json"] = fake_gh_api_json
         assert milestone_number("owner/repo", "v1.2.3-00") == 7
         assert milestone_issues("owner/repo", "v1.2.3-00") == [
             {"number": 10},
@@ -2353,6 +2459,7 @@ Mitigations:
         globals()["native_parent_issue"] = saved_native_parent_issue
         globals()["issue_payload"] = saved_issue_payload
         globals()["gh_api_json"] = saved_gh_api_json
+        subprocess.run = saved_subprocess_run
     assert milestone_issue_failures(
         "v1.0.0-00",
         [{"number": 1, "state": "closed"}, {"number": 3, "state": "open"}],
