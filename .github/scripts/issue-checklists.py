@@ -2492,11 +2492,15 @@ def main() -> None:
     target_issue: dict[str, object] | None = None
     if issue_number is not None:
         target_issue = issue_payload(args.repo, issue_number)
-    task_issue = issue_number
     if not args.skip_openspec:
         failures.extend(
             check_openspec_tasks(
-                args.repo, root, issue_map, planned_issue=task_issue
+                args.repo,
+                root,
+                issue_map,
+                planned_issue=args.planned_issue
+                if args.planned_issue is not None
+                else args.implementation_issue,
             )
         )
     if target_issue is not None:
