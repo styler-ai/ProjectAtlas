@@ -8561,6 +8561,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "publish_pending_statuses",
         "finalize_implementation_statuses",
         "refresh_snapshot_graph_failures",
+        "final_snapshot",
         "commit_status",
         "implementation_reference_failures",
         "publish_implementation_status_for_pr",
@@ -8874,9 +8875,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     for required in [
         "concurrency:",
         "group: issueops-implementation-revalidation-${{ github.repository }}",
-        "cancel-in-progress: true",
+        "queue: max",
         "if: ${{ !cancelled() }}",
         "--reconcile-all-release-graphs",
+        "ref: ${{ github.event.repository.default_branch }}",
         "contents: read",
         "issues: write",
         "pull-requests: read",
@@ -8894,6 +8896,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--rerun-implementation-gates-for-issue",
         "actions: write",
         "gh run cancel",
+        "cancel-in-progress: true",
         "cancel-in-progress: false",
     ] {
         if issueops_workflow.contains(obsolete) {

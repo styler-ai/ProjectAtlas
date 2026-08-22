@@ -2057,8 +2057,11 @@ def refresh_snapshot_graph_failures(
     release_graphs: dict[str, ReleaseGraph],
     snapshot: IssueOpsSnapshot,
 ) -> IssueOpsSnapshot:
-    """Refresh each preselected graph once after a native relationship mutation."""
+    """Refresh live issue payloads and each preselected graph once before finalization."""
 
+    refreshed_issue_payloads = {
+        number: issue_payload(repo, number) for number in sorted(snapshot.issue_payloads)
+    }
     refreshed = {
         milestone: tuple(
             release_graph_failures(repo, release_graphs, issue_map, {milestone})
@@ -2067,7 +2070,7 @@ def refresh_snapshot_graph_failures(
     }
     return IssueOpsSnapshot(
         pull_requests=snapshot.pull_requests,
-        issue_payloads=snapshot.issue_payloads,
+        issue_payloads=refreshed_issue_payloads,
         graph_failures=refreshed,
         selection_failures=snapshot.selection_failures,
     )
@@ -2205,9 +2208,12 @@ def publish_implementation_statuses_for_issue(
     failures.extend(candidate_failures)
     pending_failures = publish_pending_statuses(repo, candidates)
     failures.extend(pending_failures)
+    final_snapshot = refresh_snapshot_graph_failures(
+        repo, issue_map, release_graphs, snapshot
+    )
     failures.extend(
         finalize_implementation_statuses(
-            repo, root, issue_map, release_graphs, snapshot, candidates
+            repo, root, issue_map, release_graphs, final_snapshot, candidates
         )
     )
     if failures:
@@ -3885,6 +3891,84 @@ Mitigations:
         assert coalesced_status_states == ["pending"]
         assert coalesced_final_numbers == [910]
         for name, value in coalesced_saved.items():
+            globals()[name] = value
+
+        live_refresh_graphs = {
+            "v0.5.0-00": ReleaseGraph(
+                "v0.5.0-00", 492, {339: (), 492: (339,)}
+            )
+        }
+        live_refresh_pr_sha = "d" * 40
+        live_refresh_pr = {
+            "number": 911,
+            "headRefOid": live_refresh_pr_sha,
+            "closingIssuesReferences": [
+                {
+                    "number": 339,
+                    "repository": {"name": "repo", "owner": {"login": "owner"}},
+                }
+            ],
+            "author": {"login": "atlas"},
+        }
+        live_refresh_states: list[str] = []
+        live_refresh_calls = [0]
+        live_refresh_b_changed = [False]
+        live_refresh_saved = {
+            name: globals()[name]
+            for name in (
+                "open_pull_requests_snapshot",
+                "issue_payload",
+                "release_graph_failures",
+                "gh_json",
+                "commit_status",
+            )
+        }
+        globals()["open_pull_requests_snapshot"] = lambda repo: (live_refresh_pr,)
+
+        def live_refresh_issue(repo: str, issue: int) -> dict[str, object]:
+            return {
+                "number": issue,
+                "state": "OPEN" if live_refresh_b_changed[0] and issue == 339 else "CLOSED",
+                "milestone": {"title": "v0.5.0-00"},
+            }
+
+        globals()["issue_payload"] = live_refresh_issue
+
+        def live_refresh_graph_failures(*args: object, **kwargs: object) -> list[str]:
+            live_refresh_calls[0] += 1
+            if live_refresh_calls[0] == 1:
+                # A captured its immutable snapshot; B's live graph change is now visible.
+                live_refresh_b_changed[0] = True
+                return []
+            assert live_refresh_b_changed[0]
+            return ["B changed a native release-graph edge after A's snapshot"]
+
+        globals()["release_graph_failures"] = live_refresh_graph_failures
+        globals()["gh_json"] = lambda args: (
+            {"number": 911, "headRefOid": live_refresh_pr_sha}
+            if args[:2] == ["pr", "view"]
+            else (_ for _ in ()).throw(AssertionError(f"unexpected live-refresh command: {args}"))
+        )
+        globals()["commit_status"] = (
+            lambda repo, sha, state, description: live_refresh_states.append(state)
+        )
+        try:
+            publish_implementation_statuses_for_issue(
+                "owner/repo",
+                314,
+                Path("."),
+                {},
+                live_refresh_graphs,
+                reconcile_all_release_graphs=True,
+            )
+        except SystemExit as error:
+            assert "affected implementation status publication failed" in str(error)
+        else:
+            raise AssertionError("live pre-final graph change did not fail the refresh")
+        assert live_refresh_calls == [2]
+        assert live_refresh_states == ["pending", "failure"]
+        assert "success" not in live_refresh_states
+        for name, value in live_refresh_saved.items():
             globals()[name] = value
 
         malformed_refresh = {"number": 495, "closingIssuesReferences": None}
