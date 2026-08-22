@@ -34775,12 +34775,19 @@ fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<d
 #[test]
 fn action_pin_policy_ignores_permissions_and_rejects_unpinned_references() {
     let pinned_workflow = "permissions:\n  statuses: write\njobs:\n  check:\n    steps:\n      - uses: actions/checkout@0123456789012345678901234567890123456789\n";
-    assert_actions_are_sha_pinned("pinned.yml", pinned_workflow)
-        .expect("permission values must not be parsed as action references");
+    let pinned_result = assert_actions_are_sha_pinned("pinned.yml", pinned_workflow);
+    assert!(
+        pinned_result.is_ok(),
+        "permission values must not be parsed as action references"
+    );
 
     let unpinned_workflow = "jobs:\n  check:\n    steps:\n      - uses: actions/checkout@v4\n";
-    let error = assert_actions_are_sha_pinned("unpinned.yml", unpinned_workflow)
-        .expect_err("an unpinned uses: reference must be rejected");
+    let unpinned_result = assert_actions_are_sha_pinned("unpinned.yml", unpinned_workflow);
+    assert!(
+        unpinned_result.is_err(),
+        "an unpinned uses: reference must be rejected"
+    );
+    let Err(error) = unpinned_result else { return };
     assert!(
         error
             .to_string()
