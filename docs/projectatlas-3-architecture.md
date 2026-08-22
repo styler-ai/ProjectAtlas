@@ -2777,6 +2777,32 @@ fit, while wide-but-short terminals skip the optional graph read. The serializer
 emits CJK, combining, emoji, and ASCII graphemes once and bounds rows by terminal
 display cells rather than Unicode scalar count.
 
+### Token trend palette test viewport ownership
+
+```mermaid
+sequenceDiagram
+    actor Runtime as Production request
+    actor Test as Palette regression
+    participant Adapter as Token TUI viewport adapter
+    participant Renderer as Trend renderer
+
+    Runtime->>Adapter: Render token trend
+    Adapter->>Adapter: Capture live terminal viewport
+    alt viewport is at least 80 x 30
+        Adapter->>Renderer: Render full layout
+    else viewport is smaller
+        Adapter->>Renderer: Render compact layout
+    end
+    Renderer-->>Adapter: ANSI snapshot
+    Adapter-->>Runtime: Bounded terminal output
+
+    Test->>Adapter: Render light theme with test_viewport(140, 30)
+    Adapter->>Renderer: Render full layout
+    Renderer-->>Adapter: Full-layout ANSI snapshot
+    Adapter-->>Test: Deterministic snapshot
+    Test->>Test: Assert light semantic palette
+```
+
 For registered worktrees, the explicitly selected control atlas is the durable
 repository-total authority while each worktree remains the authority for its
 own raw local events and exact per-session detail. Alias-routed MCP events

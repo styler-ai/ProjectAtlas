@@ -3382,9 +3382,10 @@ mod tests {
     #[test]
     fn trend_dashboard_light_theme_remaps_semantic_palette() {
         let report = sample_trend_report();
-        let dashboard = rendered_dashboard(render_token_trend_dashboard_with_theme(
+        let dashboard = rendered_dashboard(render_token_trend_dashboard_with_theme_in_viewport(
             &report,
             TokenDashboardTheme::Light,
+            test_viewport(140, 30),
         ));
 
         assert!(dashboard.contains("\x1b["));
