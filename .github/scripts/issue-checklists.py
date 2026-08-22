@@ -20,6 +20,7 @@ TASK_RE = re.compile(
     rf"(?m)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\[([ xX])\]\s+(.+?)\s*$"
 )
 TASK_ID_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+")
+ISSUE_KEY_RE = re.compile(r"^[1-9][0-9]*$")
 HEADING_RE = re.compile(r"(?m)^(#{1,6})\s+(.+?)\s*$")
 TASK_SECTION_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s+")
 HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?(?:-->|$)")
@@ -121,6 +122,15 @@ class Owner:
     issue: int
     first_task: str | None = None
     last_task: str | None = None
+
+
+@dataclass(frozen=True)
+class ReleaseGraph:
+    """One milestone's declared direct issue dependencies."""
+
+    milestone: str
+    release_issue: int
+    blocked_by: dict[int, tuple[int, ...]]
 
 
 def run(args: list[str]) -> str:
@@ -539,6 +549,136 @@ def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
             )
     validate_unique_issue_ownership(path, mapped)
     return mapped
+
+
+def _blocked_by_values(value: object, label: str, path: Path) -> tuple[int, ...]:
+    """Read one graph entry, accepting the compact list and object forms."""
+
+    if isinstance(value, dict):
+        value = value.get("blocked_by")
+    if not isinstance(value, list):
+        raise SystemExit(f"{path} {label} must declare a blocked_by array")
+    parsed = tuple(positive_issue(item, f"{label}.blocked_by") for item in value)
+    if len(parsed) != len(set(parsed)):
+        raise SystemExit(f"{path} {label}.blocked_by contains duplicate issue numbers")
+    return parsed
+
+
+def parse_release_graphs(
+    payload: object,
+    path: str | Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+) -> dict[str, ReleaseGraph]:
+    """Validate and parse optional milestone-level release dependency graphs."""
+
+    path = Path(path)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
+    if "release_graphs" not in payload:
+        return {}
+    raw_graphs = payload["release_graphs"]
+    if not isinstance(raw_graphs, dict):
+        raise SystemExit(f"{path} release_graphs must be an object")
+    mapped = mapped_issue_numbers(issue_map)
+    graphs: dict[str, ReleaseGraph] = {}
+    graph_issue_milestones: dict[int, str] = {}
+    for milestone, raw_graph in raw_graphs.items():
+        if not isinstance(milestone, str) or not milestone:
+            raise SystemExit(f"{path} release_graphs keys must be milestone titles")
+        if RELEASE_MILESTONE_RE.fullmatch(milestone) is None:
+            raise SystemExit(
+                f"{path} release_graphs.{milestone} must use a vMAJOR.MINOR.PATCH-00 milestone title"
+            )
+        if not isinstance(raw_graph, dict):
+            raise SystemExit(f"{path} release_graphs.{milestone} must be an object")
+        release_issue = positive_issue(
+            raw_graph.get("release_issue"), f"release_graphs.{milestone}.release_issue"
+        )
+        raw_issues = raw_graph.get("issues")
+        if not isinstance(raw_issues, dict) or not raw_issues:
+            raise SystemExit(f"{path} release_graphs.{milestone} must contain issues")
+        parsed: dict[int, tuple[int, ...]] = {}
+        for raw_issue, value in raw_issues.items():
+            if not isinstance(raw_issue, str) or ISSUE_KEY_RE.fullmatch(raw_issue) is None:
+                raise SystemExit(
+                    f"{path} release_graphs.{milestone}.issues keys must be issue numbers"
+                )
+            issue = positive_issue(int(raw_issue), f"release_graphs.{milestone}.issues.{raw_issue}")
+            if issue in parsed:
+                raise SystemExit(f"{path} release_graphs.{milestone} repeats issue #{issue}")
+            previous_milestone = graph_issue_milestones.get(issue)
+            if previous_milestone is not None:
+                raise SystemExit(
+                    f"{path} issue #{issue} appears in release graphs for both "
+                    f"{previous_milestone} and {milestone}"
+                )
+            if issue not in mapped:
+                raise SystemExit(
+                    f"{path} release_graphs.{milestone} issue #{issue} has no local OpenSpec mapping"
+                )
+            parsed[issue] = _blocked_by_values(
+                value, f"release_graphs.{milestone}.issues.{raw_issue}", path
+            )
+            graph_issue_milestones[issue] = milestone
+        if release_issue not in parsed:
+            raise SystemExit(
+                f"{path} release_graphs.{milestone} release_issue #{release_issue} is not an issue"
+            )
+        nodes = set(parsed)
+        for issue, blockers in parsed.items():
+            if issue in blockers:
+                raise SystemExit(
+                    f"{path} release_graphs.{milestone} issue #{issue} cannot block itself"
+                )
+            unknown = sorted(set(blockers) - nodes)
+            if unknown:
+                joined = ", ".join(f"#{number}" for number in unknown)
+                raise SystemExit(
+                    f"{path} release_graphs.{milestone} issue #{issue} references "
+                    f"unknown graph issue(s): {joined}"
+                )
+        expected_release_blockers = nodes - {release_issue}
+        if set(parsed[release_issue]) != expected_release_blockers:
+            missing = sorted(expected_release_blockers - set(parsed[release_issue]))
+            extra = sorted(set(parsed[release_issue]) - expected_release_blockers)
+            detail = []
+            if missing:
+                detail.append("missing " + ", ".join(f"#{number}" for number in missing))
+            if extra:
+                detail.append("extra " + ", ".join(f"#{number}" for number in extra))
+            raise SystemExit(
+                f"{path} release_graphs.{milestone} release_issue #{release_issue} "
+                "must be directly blocked by every other graph issue ("
+                + "; ".join(detail)
+                + ")"
+            )
+        # Edges point from an issue to its blockers; a topological peel catches every cycle.
+        remaining = {issue: set(blockers) for issue, blockers in parsed.items()}
+        while remaining:
+            leaves = {issue for issue, blockers in remaining.items() if not blockers}
+            if not leaves:
+                cycle = ", ".join(f"#{issue}" for issue in sorted(remaining))
+                raise SystemExit(
+                    f"{path} release_graphs.{milestone} contains a dependency cycle: {cycle}"
+                )
+            for issue in leaves:
+                remaining.pop(issue)
+            for blockers in remaining.values():
+                blockers.difference_update(leaves)
+        graphs[milestone] = ReleaseGraph(milestone, release_issue, parsed)
+    return graphs
+
+
+def load_release_graphs(
+    path: str | Path, issue_map: dict[str, tuple[Owner, ...]]
+) -> dict[str, ReleaseGraph]:
+    path = Path(path)
+    try:
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"{path} release graph state is unreadable: {error}") from error
+    return parse_release_graphs(payload, path, issue_map)
 
 
 def issue_payload(repo: str, number: int) -> dict[str, object]:
@@ -1085,6 +1225,8 @@ def milestone_number(repo: str, milestone: str) -> int | None:
             f"repos/{owner}/{name}/milestones",
             "--method",
             "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
             "-F",
             "state=all",
             "-F",
@@ -1111,6 +1253,8 @@ def milestone_issues(repo: str, milestone: str) -> list[dict[str, object]]:
             f"repos/{owner}/{name}/issues",
             "--method",
             "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
             "-F",
             "state=all",
             "-F",
@@ -1120,6 +1264,265 @@ def milestone_issues(repo: str, milestone: str) -> list[dict[str, object]]:
         ]
     )
     return [item for item in flatten_paginated_response(payload) if "pull_request" not in item]
+
+
+GITHUB_API_VERSION = "2026-03-10"
+
+
+def native_blocked_by(repo: str, issue: int) -> set[int]:
+    """Read GitHub's native blocked-by edges for one issue."""
+
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+            "-F",
+            "per_page=100",
+        ]
+    )
+    dependencies = flatten_paginated_response(payload)
+    result: set[int] = set()
+    for dependency in dependencies:
+        number = positive_issue(dependency.get("number"), "blocked-by issue number")
+        if number in result:
+            raise SystemExit(f"GitHub returned duplicate blocked-by issue #{number} for #{issue}")
+        result.add(number)
+    return result
+
+
+def native_sub_issues(repo: str, issue: int) -> set[int]:
+    """Read GitHub's native sub-issue children for one issue."""
+
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{name}/issues/{issue}/sub_issues",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+            "-F",
+            "per_page=100",
+        ]
+    )
+    children = flatten_paginated_response(payload)
+    result: set[int] = set()
+    for child in children:
+        number = positive_issue(child.get("number"), "sub-issue number")
+        if number in result:
+            raise SystemExit(f"GitHub returned duplicate sub-issue #{number} for #{issue}")
+        result.add(number)
+    return result
+
+
+def native_parent_issue(repo: str, issue: int) -> int | None:
+    """Read a native parent, distinguishing an absent parent from API failure."""
+
+    owner, name = repo_parts(repo)
+    args = [
+        "gh",
+        "api",
+        f"repos/{owner}/{name}/issues/{issue}/parent",
+        "--method",
+        "GET",
+        "-H",
+        f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        "--include",
+    ]
+    process = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=False,
+    )
+    status_match = re.search(
+        r"HTTP/\S+\s+(\d{3})", process.stdout + process.stderr
+    )
+    status = int(status_match.group(1)) if status_match else None
+    if status == 404:
+        return None
+    if process.returncode:
+        detail = process.stderr.strip() or process.stdout.strip()
+        raise SystemExit(
+            f"command failed ({status or 'unknown HTTP status'}): {json.dumps(args)}"
+            + (f"\n{detail}" if detail else "")
+        )
+    body = process.stdout.rsplit("\r\n\r\n", 1)[-1].rsplit("\n\n", 1)[-1]
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"GitHub parent response for #{issue} was not valid JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise SystemExit(f"GitHub parent response for #{issue} was not an object")
+    return positive_issue(payload.get("number"), "parent issue number")
+
+
+def _live_graph_failure(operation: str, error: BaseException) -> str:
+    detail = str(error).strip() or error.__class__.__name__
+    return f"release dependency state unreadable while {operation}: {detail}"
+
+
+def release_graph_failures(
+    repo: str,
+    graphs: dict[str, ReleaseGraph],
+    issue_map: dict[str, tuple[Owner, ...]],
+    milestones: set[str] | None = None,
+) -> list[str]:
+    """Reconcile selected declarations with milestone membership and native edges."""
+
+    failures: list[str] = []
+    selected = (
+        {milestone: graph for milestone, graph in graphs.items() if milestone in milestones}
+        if milestones is not None
+        else graphs
+    )
+    mapped_numbers = mapped_issue_numbers(issue_map)
+    for milestone, graph in sorted(selected.items()):
+        for issue in sorted(set(graph.blocked_by) - mapped_numbers):
+            failures.append(
+                f"release graph {milestone} issue #{issue} has no local OpenSpec mapping"
+            )
+        try:
+            issues = milestone_issues(repo, milestone)
+        except BaseException as error:
+            failures.append(_live_graph_failure(f"reading milestone {milestone!r}", error))
+            continue
+        live_numbers = set()
+        for item in issues:
+            try:
+                number = positive_issue(item.get("number"), "milestone issue number")
+                if number in live_numbers:
+                    failures.append(
+                        f"live milestone {milestone} repeats issue #{number}; "
+                        "membership is not exactly once"
+                    )
+                live_numbers.add(number)
+            except SystemExit as error:
+                failures.append(_live_graph_failure(f"reading milestone {milestone!r}", error))
+                live_numbers = set()
+                break
+        declared_numbers = set(graph.blocked_by)
+        for issue in sorted(declared_numbers - live_numbers):
+            failures.append(f"release graph {milestone} issue #{issue} is not in the live milestone")
+        for issue in sorted(live_numbers - declared_numbers):
+            failures.append(f"live milestone {milestone} issue #{issue} is missing from release graph")
+        if live_numbers != declared_numbers:
+            # Native checks below would be misleading for an incomplete graph.
+            continue
+        expected_children = declared_numbers - {graph.release_issue}
+        try:
+            actual_children = native_sub_issues(repo, graph.release_issue)
+        except BaseException as error:
+            failures.append(
+                _live_graph_failure(
+                    f"reading native sub-issues for #{graph.release_issue}", error
+                )
+            )
+        else:
+            missing = sorted(expected_children - actual_children)
+            extra = sorted(actual_children - expected_children)
+            if missing:
+                failures.append(
+                    f"#{graph.release_issue} is missing native sub-issue relation(s): "
+                    + ", ".join(f"#{number}" for number in missing)
+                )
+            if extra:
+                failures.append(
+                    f"#{graph.release_issue} has extra native sub-issue relation(s): "
+                    + ", ".join(f"#{number}" for number in extra)
+                )
+        try:
+            root_parent = native_parent_issue(repo, graph.release_issue)
+        except BaseException as error:
+            failures.append(
+                _live_graph_failure(
+                    f"reading native parent for #{graph.release_issue}", error
+                )
+            )
+        else:
+            if root_parent is not None:
+                failures.append(
+                    f"release issue #{graph.release_issue} must not have native parent #{root_parent}"
+                )
+        for child in sorted(expected_children):
+            try:
+                parent = native_parent_issue(repo, child)
+            except BaseException as error:
+                failures.append(
+                    _live_graph_failure(f"reading native parent for #{child}", error)
+                )
+                continue
+            if parent is None:
+                failures.append(
+                    f"graph child #{child} has no native parent; expected #{graph.release_issue}"
+                )
+            elif parent != graph.release_issue:
+                failures.append(
+                    f"graph child #{child} has native parent #{parent}; "
+                    f"expected #{graph.release_issue}"
+                )
+        for issue, expected in sorted(graph.blocked_by.items()):
+            try:
+                actual = native_blocked_by(repo, issue)
+            except BaseException as error:
+                failures.append(_live_graph_failure(f"reading native blocked-by edges for #{issue}", error))
+                continue
+            expected_set = set(expected)
+            missing = sorted(expected_set - actual)
+            extra = sorted(actual - expected_set)
+            if missing:
+                failures.append(
+                    f"#{issue} is missing native blocked-by relation(s): "
+                    + ", ".join(f"#{number}" for number in missing)
+                )
+            if extra:
+                failures.append(
+                    f"#{issue} has extra native blocked-by relation(s): "
+                    + ", ".join(f"#{number}" for number in extra)
+                )
+    return failures
+
+
+def graph_for_issue(
+    graphs: dict[str, ReleaseGraph], issue: int
+) -> ReleaseGraph | None:
+    matches = [graph for graph in graphs.values() if issue in graph.blocked_by]
+    return matches[0] if matches else None
+
+
+def implementation_issue_failures(
+    repo: str, issue: dict[str, object], graphs: dict[str, ReleaseGraph]
+) -> list[str]:
+    """Require every declared direct blocker of an issue to be closed."""
+
+    number = positive_issue(issue.get("number"), "issue number")
+    graph = graph_for_issue(graphs, number)
+    if graph is None:
+        return []
+    failures: list[str] = []
+    for blocker in graph.blocked_by[number]:
+        try:
+            blocker_issue = issue_payload(repo, blocker)
+        except BaseException as error:
+            failures.append(_live_graph_failure(f"reading blocker #{blocker}", error))
+            continue
+        state = str(blocker_issue.get("state", "")).upper()
+        if state != "CLOSED":
+            failures.append(
+                f"#{number} is not implementation/merge-ready: direct blocker #{blocker} is "
+                f"{state or 'UNKNOWN'}, not CLOSED"
+            )
+    return failures
 
 
 def mapped_issue_numbers(issue_map: dict[str, tuple[Owner, ...]]) -> set[int]:
@@ -1666,6 +2069,254 @@ Mitigations:
         1,
         2,
     }
+
+    def graph_failure(payload: object, expected: str) -> None:
+        try:
+            parse_release_graphs(
+                payload,
+                Path("issue-map.json"),
+                {"a": (Owner(10),), "b": (Owner(11),), "release": (Owner(12),)},
+            )
+        except SystemExit as error:
+            assert expected in str(error), str(error)
+        else:
+            raise AssertionError(f"release graph accepted invalid case: {expected}")
+
+    graph_owners = {
+        "a": (Owner(10),),
+        "b": (Owner(11),),
+        "release": (Owner(12),),
+    }
+    valid_graph_payload = {
+        "schema_version": 2,
+        "changes": {},
+        "release_graphs": {
+            "v1.2.3-00": {
+                "release_issue": 12,
+                "issues": {"10": [11], "11": [], "12": [10, 11]},
+            }
+        },
+    }
+    valid_graphs = parse_release_graphs(valid_graph_payload, Path("issue-map.json"), graph_owners)
+    assert valid_graphs["v1.2.3-00"].blocked_by[12] == (10, 11)
+    graph_failure({"schema_version": 2, "changes": {}, "release_graphs": None}, "must be an object")
+    graph_failure({"schema_version": 2, "changes": {}, "release_graphs": []}, "must be an object")
+    graph_failure({"schema_version": 2, "changes": {}, "release_graphs": "invalid"}, "must be an object")
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": valid_graph_payload["release_graphs"]["v1.2.3-00"],
+                "v2.3.4-00": {
+                    "release_issue": 12,
+                    "issues": {"12": []},
+                },
+            },
+        },
+        "appears in release graphs",
+    )
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": {
+                    "release_issue": 12,
+                    "issues": {"010": [11], "11": [], "12": [10, 11]},
+                }
+            },
+        },
+        "must be issue numbers",
+    )
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": {
+                    "release_issue": 12,
+                    "issues": {"١٠": [11], "11": [], "12": [10, 11]},
+                }
+            },
+        },
+        "must be issue numbers",
+    )
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": {
+                    "release_issue": 12,
+                    "issues": {"10": [11], "11": [10], "12": [10, 11]},
+                }
+            },
+        },
+        "dependency cycle",
+    )
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": {
+                    "release_issue": 12,
+                    "issues": {"10": [13], "11": [], "12": [10, 11]},
+                }
+            },
+        },
+        "unknown graph issue",
+    )
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": {
+                    "release_issue": 12,
+                    "issues": {"10": [], "11": [], "12": [10, 11], "13": []},
+                }
+            },
+        },
+        "has no local OpenSpec mapping",
+    )
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": {
+                    "release_issue": 12,
+                    "issues": {"10": [11, 11], "11": [], "12": [10, 11]},
+                }
+            },
+        },
+        "duplicate issue numbers",
+    )
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": {
+                    "release_issue": 12,
+                    "issues": {"10": [10], "11": [], "12": [10, 11]},
+                }
+            },
+        },
+        "cannot block itself",
+    )
+    graph_failure(
+        {
+            **valid_graph_payload,
+            "release_graphs": {
+                "v1.2.3-00": {
+                    "release_issue": 12,
+                    "issues": {"10": [11], "11": [], "12": [10]},
+                }
+            },
+        },
+        "must be directly blocked by every other",
+    )
+    assert parse_release_graphs(
+        {"schema_version": 2, "changes": {"legacy": 1}},
+        Path("issue-map.json"),
+        {"legacy": (Owner(1),)},
+    ) == {}
+
+    saved_milestone_issues = globals()["milestone_issues"]
+    saved_native_blocked_by = globals()["native_blocked_by"]
+    saved_native_sub_issues = globals()["native_sub_issues"]
+    saved_native_parent_issue = globals()["native_parent_issue"]
+    saved_issue_payload = globals()["issue_payload"]
+    saved_gh_api_json = globals()["gh_api_json"]
+    try:
+        api_args: list[list[str]] = []
+        def fake_gh_api_json(args: list[str]) -> object:
+            api_args.append(args)
+            joined = " ".join(args)
+            if "/milestones" in joined:
+                return [[{"title": "v1.2.3-00", "number": 7}]]
+            if "/dependencies/blocked_by" in joined:
+                return [[{"number": 11}]]
+            return [[{"number": 10}, {"number": 11}]]
+
+        globals()["gh_api_json"] = fake_gh_api_json
+        assert native_blocked_by("owner/repo", 10) == {11}
+        assert milestone_number("owner/repo", "v1.2.3-00") == 7
+        assert milestone_issues("owner/repo", "v1.2.3-00") == [
+            {"number": 10},
+            {"number": 11},
+        ]
+        for matching in (
+            [args for args in api_args if "/milestones" in " ".join(args)],
+            [args for args in api_args if "milestone=7" in args],
+        ):
+            assert matching and any(
+                GITHUB_API_VERSION in argument for argument in matching[0]
+            )
+        globals()["milestone_issues"] = lambda repo, milestone: [
+            {"number": 10},
+            {"number": 11},
+            {"number": 12},
+        ]
+        globals()["native_sub_issues"] = lambda repo, issue: {10, 11}
+        globals()["native_parent_issue"] = lambda repo, issue: (
+            None if issue == 12 else 12
+        )
+        globals()["native_blocked_by"] = lambda repo, issue: {
+            10: {11},
+            11: set(),
+            12: {10, 11},
+        }[issue]
+        assert release_graph_failures("owner/repo", valid_graphs, graph_owners) == []
+        globals()["milestone_issues"] = lambda repo, milestone: [
+            {"number": 10},
+            {"number": 11},
+            {"number": 12},
+            {"number": 99},
+        ]
+        membership_failures = release_graph_failures("owner/repo", valid_graphs, graph_owners)
+        assert any("missing from release graph" in failure for failure in membership_failures)
+        globals()["milestone_issues"] = lambda repo, milestone: [
+            {"number": 10},
+            {"number": 11},
+            {"number": 12},
+        ]
+        globals()["native_blocked_by"] = lambda repo, issue: {
+            10: set(),
+            11: {99},
+            12: {10, 11},
+        }[issue]
+        live_failures = release_graph_failures("owner/repo", valid_graphs, graph_owners)
+        assert any("missing native blocked-by" in failure for failure in live_failures)
+        assert any("extra native blocked-by" in failure for failure in live_failures)
+        globals()["native_sub_issues"] = lambda repo, issue: {10}
+        hierarchy_failures = release_graph_failures("owner/repo", valid_graphs, graph_owners)
+        assert any("missing native sub-issue" in failure for failure in hierarchy_failures)
+        globals()["native_parent_issue"] = lambda repo, issue: 99 if issue == 10 else None
+        hierarchy_failures = release_graph_failures("owner/repo", valid_graphs, graph_owners)
+        assert any("native parent #99" in failure for failure in hierarchy_failures)
+        globals()["native_parent_issue"] = lambda repo, issue: 99 if issue == 12 else 12
+        hierarchy_failures = release_graph_failures("owner/repo", valid_graphs, graph_owners)
+        assert any("must not have native parent #99" in failure for failure in hierarchy_failures)
+        globals()["issue_payload"] = lambda repo, issue: {
+            "number": issue,
+            "state": {11: "OPEN", 12: "CLOSED"}.get(issue, "CLOSED"),
+        }
+        assert any(
+            "blocker #11" in failure
+            for failure in implementation_issue_failures(
+                "owner/repo", {"number": 10}, valid_graphs
+            )
+        )
+        globals()["issue_payload"] = lambda repo, issue: {
+            "number": issue,
+            "state": "CLOSED",
+        }
+        assert implementation_issue_failures(
+            "owner/repo", {"number": 10}, valid_graphs
+        ) == []
+    finally:
+        globals()["milestone_issues"] = saved_milestone_issues
+        globals()["native_blocked_by"] = saved_native_blocked_by
+        globals()["native_sub_issues"] = saved_native_sub_issues
+        globals()["native_parent_issue"] = saved_native_parent_issue
+        globals()["issue_payload"] = saved_issue_payload
+        globals()["gh_api_json"] = saved_gh_api_json
     assert milestone_issue_failures(
         "v1.0.0-00",
         [{"number": 1, "state": "closed"}, {"number": 3, "state": "open"}],
@@ -1816,7 +2467,13 @@ def main() -> None:
     parser.add_argument("--root", default=".")
     parser.add_argument("--issue-map", default="openspec/issue-map.json")
     parser.add_argument("--milestone", action="append", default=[])
-    parser.add_argument("--planned-issue", type=int)
+    issue_mode = parser.add_mutually_exclusive_group()
+    issue_mode.add_argument("--planned-issue", type=int)
+    issue_mode.add_argument(
+        "--implementation-issue",
+        type=int,
+        help="require every direct release-graph blocker to be closed",
+    )
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -1830,18 +2487,41 @@ def main() -> None:
     root = Path(args.root)
     failures: list[str] = []
     issue_map = load_issue_map(args.issue_map)
+    release_graphs = load_release_graphs(args.issue_map, issue_map)
+    issue_number = args.planned_issue or args.implementation_issue
+    target_issue: dict[str, object] | None = None
+    if issue_number is not None:
+        target_issue = issue_payload(args.repo, issue_number)
+    task_issue = issue_number
     if not args.skip_openspec:
         failures.extend(
             check_openspec_tasks(
-                args.repo, root, issue_map, planned_issue=args.planned_issue
+                args.repo, root, issue_map, planned_issue=task_issue
             )
         )
-    if args.planned_issue is not None:
+    if target_issue is not None:
         failures.extend(
             planned_issue_failures(
-                issue_payload(args.repo, args.planned_issue), issue_map, root
+                target_issue, issue_map, root
             )
         )
+    if args.implementation_issue is not None and target_issue is not None:
+        failures.extend(
+            implementation_issue_failures(args.repo, target_issue, release_graphs)
+        )
+    graph_milestones = set(args.milestone)
+    if not graph_milestones and target_issue is not None:
+        milestone = target_issue.get("milestone")
+        if isinstance(milestone, dict) and isinstance(milestone.get("title"), str):
+            graph_milestones.add(milestone["title"])
+    failures.extend(
+        release_graph_failures(
+            args.repo,
+            release_graphs,
+            issue_map,
+            graph_milestones or None,
+        )
+    )
     mapped_issues = mapped_issue_numbers(issue_map)
     for milestone in args.milestone:
         failures.extend(check_milestone_complete(args.repo, milestone, mapped_issues))

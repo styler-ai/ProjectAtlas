@@ -1,0 +1,100 @@
+## Context
+
+v0.4.5 is the stable baseline. v0.5.0 combines confirmed correctness repairs, bounded content/analysis capabilities, cross-platform distribution, structural maintenance, evaluation, and a real installed release proof. These issues share contracts but are not one serial implementation: the release graph records genuine prerequisites, while #492 is the native parent and direct final blocker for every other accepted issue.
+
+The accepted Rust shape remains seven crates with concrete modules, typed values/enums, bounded iterators/frontiers, and caller-owned cancellation/transactions. SQLite remains the project-local storage and publication authority. No task may invent an initiative-named crate, generic framework, second database, or stringly action surface.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Make every issue packet implementation-decidable with one owner, exact dependencies, positive/negative/failure/compatibility/platform proof, and one truthful architecture view.
+- Preserve strict identity, freshness, typed errors, exact source evidence, bounded output, one-generation publication, authored state, and platform security.
+- Keep independent graph lanes parallel while requiring accepted predecessors on `main` before dependent implementation/merge.
+- Finish with complete installed CLI/MCP/host/public-surface execution, holistic packaged E2E, RC remediation, stable readback, and #492 closes-last truth.
+
+**Non-goals:**
+
+- Visual clients, Memory Atlas, v0.6 route rationalization, generic extensibility frameworks, speculative persistence, or product fixes in release acceptance.
+- Weakening trust boundaries, replacing real behavior with help/schema/unit proof, or carrying partial work through disposition.
+
+## Decisions
+
+### Release hierarchy communicates scope; blockers control order
+
+#492 is the sole native parent of all other `v0.5.0-00` issues and has no parent. Every non-release issue appears once as its direct sub-issue. `release_graphs.v0.5.0-00.issues[*].blocked_by` is the execution authority; no separate children array duplicates hierarchy. #492 is directly blocked by every child, implements no feature/bug, and closes last.
+
+### Native identity is one typed value and codec
+
+#481 owns a concrete native project-root identity and lossless/versioned SQLite encoding. CLI, MCP, configuration, watcher, worktree, telemetry, graph, and persistence consume it; UTF-8 display is terminal and never feeds comparison. Legacy metadata repairs only after native equivalence proof in one transaction. #484 reuses the same type/codec for worktree root, Git common directory, and Git administrative directory; public UTF-8 adapters return stable alias plus typed display-unavailable state rather than replacement text.
+
+### Graph admission stays strict and publication stays atomic
+
+#476 preserves `GraphIdentityText` validation. One shared source-graph admission result classifies every parser-derived package/symbol/parent/relation/resolution-key input. Valid rows and bounded typed rejection provenance publish under the same generation; rejected text never becomes an identity. #480 validates whole-publication duplicate/target invariants, then processes prepared chunks no larger than `GraphLimits::MAX_ROWS` inside one existing publication transaction/generation. Fault/cancellation exposes no partial current state.
+
+### Rust and parser capability have single authorities
+
+`rust-toolchain.toml` becomes the sole numeric declaration for exact Rust 1.98.0. Rust 1.93.1 remains historical reproduction evidence only; every local/CI/parser-pack/package/release entry point preflights expected versus actual rustc/cargo/clippy/rustfmt before expensive or mutating work. Floating stable and duplicate literals are forbidden.
+
+`PackPlatform` or one closed equivalent enum owns optional-parser containment, tuple selection, installer, lifecycle, supervisor, runtime/MCP capability, fallback, feature gates, and tests. macOS arm64 optional parsing is unavailable in v0.5; install/update/verify/select/start fail before mutation and built-in parsing remains truthful. #486 consumes this authority and changes cfg ownership only for diagnostics reproduced on Rust 1.98.0; a clean matrix closes with no-change evidence.
+
+### PHP and document intelligence are pinned and conservative
+
+#477 pins `tree-sitter-php` 0.24.2 against Tree-sitter 0.26.9 and owns PHP 8 grammar registration plus conservative exact namespace/import/include/call relations. Dynamic PHP and mixed HTML gaps remain typed partial coverage. #339 follows #477 and publishes exactly one evidence-derived PHP guidance profile from the registry, generated support, fixtures, representative repositories, and installed skill.
+
+#465 supports only PDF and DOCX. `pdf-extract` 0.12.0 and `docx-lite` 0.2.0 are pinned and their locked transitive trees are audited before adoption. DOCX admits only `word/document.xml`; PDF runs no script/external reference. Evidence locators are page/text span or part/paragraph/run/text span. Input, expansion, entries, recursion, time, memory, output, cancellation, coverage, and sparse-link policy are explicit; any necessary SQLite delta lands before adapters.
+
+### Analysis is typed, bounded, and measurement-led
+
+#342 measures the existing reverse-caller query/service path and changes it only for a material winner with exact alias/fairness/plan compatibility. #358 evaluates existing worker pools under one process budget and accepts only an exact-graph resource win. #456 accepts a released-main baseline only for measured net benefit, exact revision/digest/schema identity, private writable copy, and safe full-init fallback.
+
+#384 adds a non-persistent typed `EntrypointProfile` request with exact relation anchors/families and bounded node-simple traversal; outcomes are reachable, evidence-backed unreachable candidate, or inconclusive, never deletion authority. #464 replaces only the optional community projection with deterministic weighted label-propagation v1 over resolved local non-containment relations, stable ordering/tie-breaks/IDs, fixed weights and bounds, no persistence, and explicit convergence/coverage/truncation.
+
+### Distribution reuses one verified runtime
+
+#388 is a thin npm adapter with one package identity, exact tuple/asset/version/SHA-256 authority, explicit Node/npm floor, scripts-disabled route, proxy/offline semantics, process-safe cache locking, staged verification, and atomic activation. It never owns another runtime or database.
+
+#390 verifies installer-generated Claude Code/OpenCode configuration through actual host readers in isolated homes/config roots, including MCP initialization and exact source-evidence readback. It never automates authentication or mutates unrelated global state.
+
+#491 installs one collision-safe `atlas` forwarder to the same runtime while preserving `projectatlas`. `atlas health [report flags]` is the read-only report; `atlas health resolve ...` retains administration; `health-check` remains a compatibility alias.
+
+### Maintenance follows proven responsibility
+
+#372 adds only the existing GitHub Actions `timeout-minutes` field to the reported filtered custom-harness step and its narrow contract assertion. #487 uses the accepted five-domain E2E move map and extracts only multiply-owned support. #488 accepts or rejects cohesive moves from an explicit caller/state/data/SQL/transaction/cancellation/test map, preserving seven crates and permitting no-change. #489 removes only the named 42,809,126-byte raw trace from the current tree and extends the narrow existing policy. #490 gap-audits and reuses the existing equal-arm harness, retaining failures and publishing only bounded sanitized evidence.
+
+### Release acceptance composes rather than repairs
+
+#492 freezes one exact revision only after every child and required review is complete. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. Confirmed defects return to owners and invalidate the candidate. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
+
+## Risks / Trade-offs
+
+- Native identity migration could bind an unrelated root. Mitigation: native equivalence, constraints, one transaction, concurrency/fault proof, and no implicit init.
+- Parser/document inputs could exceed resources or invent evidence. Mitigation: single typed authorities, pinned/audited dependencies, pre-mutation refusal, exact locators, hard admission/output bounds, and typed incomplete state.
+- Measurement issues could optimize fixtures instead of products. Mitigation: frozen representative shapes, plans/profiles, material thresholds, and valid no-change closure.
+- Refactors could change contracts while moving code. Mitigation: accepted move maps, intermediate runnable owners, inventory comparison, and compatibility/fault/platform proof.
+- Release proof could mutate ambient state or hide a route. Mitigation: isolated fixtures, independent inventories, behavior execution, cleanup, and defect return.
+
+## Migration Plan
+
+Parallel delivery waves derived from the exact graph:
+
+1. Independent foundations: #482, #372, and #489.
+2. After #482: #476, #480, #481, and #483 may proceed independently.
+3. #484 follows #481; #486 follows #482/#483; #487 follows #481/#476/#480.
+4. #488 follows #487.
+5. #477 follows #476/#488; #342, #358, and #465 follow #476/#480/#488; #491 follows #487.
+6. #339 follows #477; #384 follows #358/#477; #464 follows #358; #456 follows #358/#465/#477/#484; #485 follows #481/#482/#483/#484/#486; #388 and #390 follow #491.
+7. #490 follows #339/#342/#358/#384/#464/#465/#485/#489/#491.
+8. #492 follows every child issue, runs RC remediation and stable proof, and closes last.
+
+Each dependent worktree refreshes/rebases onto accepted predecessors on `main` and reruns affected proof. Independent, disjoint lanes remain parallel.
+
+## Dependencies / Cross-Issue Impact
+
+The authoritative direct blockers are exactly those in `openspec/issue-map.json.release_graphs.v0.5.0-00`. #492 is the hierarchy root and release-acceptance issue, not an implementation predecessor. #310/#314 remain v0.6 children of separate release owner #493.
+
+Database-first transitions apply to #481, #484, #476 when a coverage gap is proven, #480, #465 when extraction state needs a delta, and #456 only if the baseline wins. Other issues preserve database/schema identity and prove continuity.
+
+## Open Questions
+
+None.

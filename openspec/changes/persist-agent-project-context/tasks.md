@@ -1,7 +1,7 @@
 ## 1. Contract and dependency order
 
-- [x] 1.1 Finalize the lean Memory Atlas proposal, design, capability specs, issue title/body, `checklist-v1` ownership mapping, synchronized OpenSpec/GitHub checklist, and shared behavior-focused test plan.
-- [ ] 1.2 Before runtime implementation, confirm #308 has stabilized the schema epoch, authored/derived publication boundary, freshness preflight, coherent read snapshot, selected-root behavior, `atlas_session_brief` extension point, and streamlined MCP inventory consumed by this change.
+- [ ] 1.1 Finalize the lean Memory Atlas proposal, design, capability specs, issue title/body draft, `checklist-v1` ownership mapping, native #493 sub-issue hierarchy, synchronized checklist plan, and shared behavior-focused test plan without treating unverified host-hook names as frozen contracts.
+- [ ] 1.2 After stable v0.5.0 and accepted #310, confirm #308's schema epoch, authored/derived publication boundary, freshness preflight, coherent read snapshot, selected-root behavior, `atlas_session_brief` extension point, and streamlined CLI/MCP inventory remain stable on the implementation baseline.
 - [ ] 1.3 Trace the existing core, database, service, CLI/MCP, settings, host-plugin, and migration callers; record the Rust pattern-fit decision and keep ownership within the existing seven crates unless a demonstrated durable boundary requires otherwise.
 
 ## 2. Typed Memory Atlas model and measured budgets
@@ -13,7 +13,7 @@
 
 ## 3. SQLite authored-state lifecycle
 
-- [ ] 3.1 Add the append-only SQLite migration, constrained tables/indexes, one context revision, retained-size accounting, and schema inventory for authored Memory Atlas rows without adding a database, crate, or runtime dependency.
+- [ ] 3.1 Add the append-only SQLite migration, constrained tables and indexes, stable `(kind, key)` identity, one independent context revision, retained-size accounting, and schema inventory. Identify bounded recovery/list/update/cleanup hot queries and land prepared/batched access plus stable query-plan assertions before service, CLI, MCP, reflection, or host-adapter work.
 - [ ] 3.2 Implement coherent root-bound read/list snapshots and one revision-conditional transaction for complete-batch validation, stable-key upsert, exact remove/supersession, deterministic volatile cleanup, budget reconciliation, and one revision advance.
 - [ ] 3.3 Preserve exact no-op semantics and rollback guarantees: no revision/timestamp change for identical state, and no partial cleanup or mutation after stale revision, busy database, malformed input, revision exhaustion, or protected pressure.
 - [ ] 3.4 Preserve Memory Atlas rows and independent revision across supported migrations, repair/rollback, backup/restore, full and incremental source publication, watcher refresh, and derived-state cleanup while older runtimes reject the newer schema.
@@ -36,7 +36,7 @@
 
 ## 6. Host integration and agent workflow
 
-- [ ] 6.1 Encode and document verified capability-based startup, resume, clear, post-compaction, and supported subagent recovery for Codex, Claude Code, OpenCode, and generic MCP, with trusted-hook activation state and truthful manual fallbacks.
+- [ ] 6.1 Verify each supported host and version against current official capability documentation before naming startup, resume, clear, compact, or subagent hook events. Record activation, trust, ordering, timeout/failure, read-only, and skill-resolution behavior; where no trusted documented hook exists, require the explicit manual/session-brief fallback without host-private file access or invented event names.
 - [ ] 6.2 Update packaged ProjectAtlas skills, plugin guidance, `AGENTS.md` snippets, and user documentation so agents resolve and completely read current required project-goal skills followed by active-issue skills, checkpoint only meaningful bird's-eye changes, keep successful maintenance quiet, and never crawl or duplicate host-private memory/goals/tasks.
 - [ ] 6.3 Add isolated host-contract tests for startup/resume/clear/compact/subagent paths, disabled/untrusted hooks, synthetic homes/configs, offline behavior, project-goal/active-issue route resolution and complete-read ordering, stale/unavailable routes, privacy sentinels, and no host-global mutation or capability invention.
 
