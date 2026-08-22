@@ -1344,24 +1344,26 @@ fn impact_analysis_deadline_and_mcp_cancellation_release_resources() -> Result<(
         "notifications/cancelled",
         &json!({"requestId": request_id, "reason": "bounded impact contract"}),
     )?;
-    let canceled = session.wait_for_response(request_id, "tools/call")?;
-    let canceled_text = canceled
-        .pointer("/result/content/0/text")
-        .and_then(Value::as_str)
-        .ok_or_else(|| io::Error::other("canceled MCP analysis returned no text"))?;
-    let canceled_payload: Value = toon_format::decode_default(canceled_text)?;
-    if !canceled_payload
-        .pointer("/error/message")
-        .and_then(Value::as_str)
-        .is_some_and(|message| message.to_ascii_lowercase().contains("cancel"))
-        || mcp_database_snapshot(&database)? != before
-    {
+    // RMCP 3.x follows the MCP cancellation contract: a response to a request
+    // already cancelled on the wire is intentionally suppressed.  The follow-up
+    // request proves the server remains responsive and also lets the helper reject
+    // an incorrectly emitted late response for the cancelled request.
+    let follow_up_id = session.start_request(
+        "tools/call",
+        &json!({"name": "atlas_overview", "arguments": {}}),
+    )?;
+    let follow_up = session.wait_for_response_rejecting(
+        follow_up_id,
+        "tools/call",
+        request_id,
+        "cancelled tools/call",
+    )?;
+    if follow_up.get("result").is_none() || mcp_database_snapshot(&database)? != before {
         return Err(io::Error::other(format!(
-            "MCP cancellation was not typed and read-only: {canceled_payload}"
+            "MCP cancellation did not preserve a live, read-only follow-up: {follow_up}"
         ))
         .into());
     }
-    session.call_tool("atlas_overview", &json!({}))?;
     Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
     session.shutdown()
 }
@@ -32669,6 +32671,86 @@ impl McpContractSession {
             let response: Value = serde_json::from_str(line.trim())?;
             if response.get("id").and_then(Value::as_u64) == Some(request_id) {
                 return Ok(response);
+            }
+        }
+    }
+
+    /// Wait for a follow-up response while rejecting a late response to a
+    /// request that the MCP peer already cancelled.
+    fn wait_for_response_rejecting(
+        &mut self,
+        request_id: u64,
+        method: &str,
+        rejected_id: u64,
+        rejected_method: &str,
+    ) -> Result<Value, Box<dyn Error>> {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;
+        let follow_up = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("MCP contract request {request_id} for {method} timed out"),
+                )
+                .into());
+            }
+            let line = match self.responses.recv_timeout(remaining) {
+                Ok(line) => line?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("MCP contract request {request_id} for {method} timed out"),
+                    )
+                    .into());
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "MCP contract response stream disconnected",
+                    )
+                    .into());
+                }
+            };
+            let response: Value = serde_json::from_str(line.trim())?;
+            match response.get("id").and_then(Value::as_u64) {
+                Some(id) if id == rejected_id => {
+                    return Err(io::Error::other(format!(
+                        "MCP emitted a late response for cancelled {rejected_method}: {response}"
+                    ))
+                    .into());
+                }
+                Some(id) if id == request_id => break response,
+                _ => {}
+            }
+        };
+
+        let grace_deadline = Instant::now()
+            .checked_add(Duration::from_millis(300))
+            .ok_or_else(|| io::Error::other("MCP cancellation grace deadline overflowed"))?;
+        loop {
+            let remaining = grace_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(follow_up);
+            }
+            let line = match self.responses.recv_timeout(remaining) {
+                Ok(line) => line?,
+                Err(mpsc::RecvTimeoutError::Timeout) => return Ok(follow_up),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "MCP contract response stream disconnected during cancellation grace window",
+                    )
+                    .into());
+                }
+            };
+            let response: Value = serde_json::from_str(line.trim())?;
+            if response.get("id").and_then(Value::as_u64) == Some(rejected_id) {
+                return Err(io::Error::other(format!(
+                    "MCP emitted a late response for cancelled {rejected_method}: {response}"
+                ))
+                .into());
             }
         }
     }

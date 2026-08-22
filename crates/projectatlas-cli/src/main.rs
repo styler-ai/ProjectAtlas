@@ -6911,7 +6911,7 @@ mod tests {
         let scan_text = scan
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("scan result did not contain text"))?;
         if !scan_text.contains("scan:") {
@@ -6930,7 +6930,7 @@ mod tests {
         let symbols_text = symbols
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("symbols result did not contain text"))?;
         if !symbols_text.contains("symbols[") {
@@ -6951,7 +6951,7 @@ mod tests {
         let summary_text = summary
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("summary result did not contain text"))?;
         if !summary_text.contains("file_summary:") {
@@ -6985,7 +6985,7 @@ mod tests {
         let slice_text = slice
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("slice result did not contain text"))?;
         if !slice_text.contains("indexed ProjectAtlas project")
@@ -7004,7 +7004,7 @@ mod tests {
         let token_text = token_report
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("token report did not contain text"))?;
         if !token_text.contains("token_savings:") {
@@ -7032,7 +7032,7 @@ mod tests {
         let parity_text = parity_report
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("parity report did not contain text"))?;
         if !parity_text.contains("parity:")
@@ -7052,7 +7052,7 @@ mod tests {
         let health_text = health
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("health result did not contain text"))?;
         if !health_text.contains("health:")
@@ -7083,7 +7083,7 @@ mod tests {
         let summary_health_text = summary_health
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("summary health result did not contain text"))?;
         if !summary_health_text.contains("returned: 0")
@@ -7110,7 +7110,7 @@ mod tests {
         let purpose_queue_text = purpose_queue
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("purpose queue result did not contain text"))?;
         if !purpose_queue_text.contains("purpose_curation:")
@@ -7148,7 +7148,7 @@ mod tests {
         let asset_purpose_queue_text = asset_purpose_queue
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| {
                 std::io::Error::other("asset purpose queue result did not contain text")
@@ -7176,7 +7176,7 @@ mod tests {
         let broad_purpose_queue_text = broad_purpose_queue
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| {
                 std::io::Error::other("broad purpose queue result did not contain text")
@@ -7245,7 +7245,7 @@ mod tests {
                 result
                     .content
                     .first()
-                    .and_then(|content| content.raw.as_text())
+                    .and_then(|content| content.as_text())
                     .map(|text| text.text.clone())
                     .ok_or_else(|| {
                         std::io::Error::other(format!("{} result did not contain text", $tool))
@@ -8034,7 +8034,7 @@ mod tests {
                 result
                     .content
                     .first()
-                    .and_then(|content| content.raw.as_text())
+                    .and_then(|content| content.as_text())
                     .map(|text| text.text.clone())
                     .ok_or_else(|| {
                         std::io::Error::other(format!("{} result did not contain text", $tool))
