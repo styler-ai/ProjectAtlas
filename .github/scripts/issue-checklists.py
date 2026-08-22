@@ -2336,6 +2336,11 @@ Mitigations:
             "repository_url": "https://api.github.com/repos/foreign/repo",
             "number": 11,
         }
+        conflicting_identity = {
+            **local_identity,
+            "repository": {"full_name": "foreign/repo"},
+            "number": 11,
+        }
         for label in (
             "blocked-by issue number",
             "sub-issue number",
@@ -2347,6 +2352,14 @@ Mitigations:
                 assert "exact owner/repo repository identity" in str(error)
             else:
                 raise AssertionError(f"foreign {label} was accepted")
+        try:
+            native_relation_issue_number(
+                "owner/repo", conflicting_identity, "conflicting native relation"
+            )
+        except SystemExit as error:
+            assert "exact owner/repo repository identity" in str(error)
+        else:
+            raise AssertionError("conflicting native identities were accepted")
         for malformed in (
             {"number": 11},
             {"number": 11, "repository_url": 12},
