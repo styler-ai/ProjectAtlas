@@ -1582,8 +1582,11 @@ def mutate_native_relationship_and_revalidate(
         )
     publish_pending_statuses(repo, candidates)
     mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
+    post_mutation_snapshot = refresh_snapshot_graph_failures(
+        repo, issue_map, release_graphs, snapshot
+    )
     failures = finalize_implementation_statuses(
-        repo, root, issue_map, release_graphs, snapshot, candidates
+        repo, root, issue_map, release_graphs, post_mutation_snapshot, candidates
     )
     if failures:
         raise SystemExit(
@@ -1968,6 +1971,28 @@ def finalize_implementation_statuses(
         except SystemExit as error:
             failures.append(f"PR #{candidate.number}: {error}")
     return failures
+
+
+def refresh_snapshot_graph_failures(
+    repo: str,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+    snapshot: IssueOpsSnapshot,
+) -> IssueOpsSnapshot:
+    """Refresh each preselected graph once after a native relationship mutation."""
+
+    refreshed = {
+        milestone: tuple(
+            release_graph_failures(repo, release_graphs, issue_map, {milestone})
+        )
+        for milestone in sorted(snapshot.graph_failures)
+    }
+    return IssueOpsSnapshot(
+        pull_requests=snapshot.pull_requests,
+        issue_payloads=snapshot.issue_payloads,
+        graph_failures=refreshed,
+        selection_failures=snapshot.selection_failures,
+    )
 
 
 def publish_implementation_status_for_pr(
@@ -3688,7 +3713,11 @@ Mitigations:
             milestones: set[str] | None = None,
         ) -> list[str]:
             assert milestones == {"v0.5.0-00"}
-            return ["#492 is missing native sub-issue relation(s): #339"]
+            return (
+                []
+                if 339 in relationship_sub_issues
+                else ["#492 is missing native sub-issue relation(s): #339"]
+            )
 
         globals()["gh_json"] = relationship_gh_json
         globals()["gh_api_json"] = relationship_gh_api_json

@@ -8555,6 +8555,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "prepare_implementation_status_candidates",
         "publish_pending_statuses",
         "finalize_implementation_statuses",
+        "refresh_snapshot_graph_failures",
         "commit_status",
         "implementation_reference_failures",
         "publish_implementation_status_for_pr",
