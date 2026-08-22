@@ -1500,6 +1500,25 @@ def graph_for_issue(
     return matches[0] if matches else None
 
 
+def target_graph_failures(
+    issue: dict[str, object], graphs: dict[str, ReleaseGraph]
+) -> tuple[ReleaseGraph | None, list[str]]:
+    """Select the declaring graph before reconciling its declared milestone."""
+
+    number = positive_issue(issue.get("number"), "issue number")
+    graph = graph_for_issue(graphs, number)
+    if graph is None:
+        return None, []
+    milestone = issue.get("milestone")
+    live_title = milestone.get("title") if isinstance(milestone, dict) else None
+    if live_title != graph.milestone:
+        return graph, [
+            f"#{number} is declared in release graph {graph.milestone} but its live "
+            f"milestone is {live_title or 'unset'}"
+        ]
+    return graph, []
+
+
 def implementation_issue_failures(
     repo: str, issue: dict[str, object], graphs: dict[str, ReleaseGraph]
 ) -> list[str]:
@@ -2099,6 +2118,23 @@ Mitigations:
     }
     valid_graphs = parse_release_graphs(valid_graph_payload, Path("issue-map.json"), graph_owners)
     assert valid_graphs["v1.2.3-00"].blocked_by[12] == (10, 11)
+    declared_issue = {"number": 10, "milestone": {"title": "v1.2.3-00"}}
+    assert target_graph_failures(declared_issue, valid_graphs) == (
+        valid_graphs["v1.2.3-00"],
+        [],
+    )
+    wrong_milestone_issue = {"number": 10, "milestone": {"title": "v9.9.9-00"}}
+    wrong_milestone_graph, wrong_milestone_failures = target_graph_failures(
+        wrong_milestone_issue, valid_graphs
+    )
+    assert wrong_milestone_graph == valid_graphs["v1.2.3-00"]
+    assert any("declared in release graph v1.2.3-00" in failure for failure in wrong_milestone_failures)
+    unset_milestone_graph, unset_milestone_failures = target_graph_failures(
+        {"number": 10}, valid_graphs
+    )
+    assert unset_milestone_graph == valid_graphs["v1.2.3-00"]
+    assert any("live milestone is unset" in failure for failure in unset_milestone_failures)
+    assert target_graph_failures({"number": 99}, valid_graphs) == (None, [])
     graph_failure({"schema_version": 2, "changes": {}, "release_graphs": None}, "must be an object")
     graph_failure({"schema_version": 2, "changes": {}, "release_graphs": []}, "must be an object")
     graph_failure({"schema_version": 2, "changes": {}, "release_graphs": "invalid"}, "must be an object")
@@ -2490,8 +2526,13 @@ def main() -> None:
     release_graphs = load_release_graphs(args.issue_map, issue_map)
     issue_number = args.planned_issue or args.implementation_issue
     target_issue: dict[str, object] | None = None
+    target_graph: ReleaseGraph | None = None
     if issue_number is not None:
         target_issue = issue_payload(args.repo, issue_number)
+        target_graph, target_failures = target_graph_failures(
+            target_issue, release_graphs
+        )
+        failures.extend(target_failures)
     if not args.skip_openspec:
         failures.extend(
             check_openspec_tasks(
@@ -2514,7 +2555,9 @@ def main() -> None:
             implementation_issue_failures(args.repo, target_issue, release_graphs)
         )
     graph_milestones = set(args.milestone)
-    if not graph_milestones and target_issue is not None:
+    if target_graph is not None:
+        graph_milestones.add(target_graph.milestone)
+    elif not graph_milestones and target_issue is not None:
         milestone = target_issue.get("milestone")
         if isinstance(milestone, dict) and isinstance(milestone.get("title"), str):
             graph_milestones.add(milestone["title"])

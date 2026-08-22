@@ -80,6 +80,26 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json
 
+      - name: Implementation blocker check
+        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          closing_issues="$(gh pr view "$PR_NUMBER" --json closingIssuesReferences --jq '.closingIssuesReferences[]?.number')"
+          if [[ -z "$closing_issues" ]]; then
+            echo "No GitHub-native closing issue references; treating this as a planning PR."
+            exit 0
+          fi
+          while IFS= read -r issue_number; do
+            [[ -z "$issue_number" ]] && continue
+            python3 .github/scripts/issue-checklists.py \
+              --repo "$GITHUB_REPOSITORY" \
+              --root . \
+              --issue-map openspec/issue-map.json \
+              --implementation-issue "$issue_number"
+          done <<< "$closing_issues"
+
       - name: Manual-only full benchmark policy
         run: python3 .github/scripts/verify-manual-benchmark-policy.py
 

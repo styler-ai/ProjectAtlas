@@ -8543,6 +8543,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "len(meaningful) > 1",
         "ARCHITECTURE_ACCEPTANCE_TASK",
         "planned_issue_failures",
+        "target_graph_failures",
+        "implementation_issue_failures",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
         "planned_issue=args.planned_issue",
@@ -8684,6 +8686,24 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             "ordinary pull requests must not require full milestone completion",
         )
         .into());
+    }
+    let implementation_step = ci
+        .split("- name: Implementation blocker check")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("ordinary implementation blocker step is missing"))?;
+    for required in [
+        "closingIssuesReferences",
+        "--implementation-issue \"$issue_number\"",
+        "No GitHub-native closing issue references; treating this as a planning PR.",
+        "github.event.pull_request.user.login != 'dependabot[bot]'",
+    ] {
+        if !implementation_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "ordinary implementation blocker step is missing native merge-boundary behavior {required:?}"
+            ))
+            .into());
+        }
     }
     if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
