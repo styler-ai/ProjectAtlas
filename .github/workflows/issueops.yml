@@ -2,7 +2,7 @@ name: 00-IssueOps
 
 on:
   issues:
-    types: [opened, edited, reopened, labeled, unlabeled, milestoned]
+    types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
   workflow_dispatch:
     inputs:
       issue:
@@ -37,3 +37,36 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json \
             --planned-issue "$ISSUE_NUMBER"
+
+  implementation-gate-revalidation:
+    name: implementation-gate-revalidation
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' &&
+      (github.event.action == 'edited' || github.event.action == 'reopened' ||
+      github.event.action == 'closed' || github.event.action == 'milestoned' ||
+      github.event.action == 'demilestoned'))
+    permissions:
+      actions: write
+      contents: read
+      issues: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Revalidate affected implementation PR gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue-map openspec/issue-map.json \
+            --enforce-closed-issue-blockers "$ISSUE_NUMBER"
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue-map openspec/issue-map.json \
+            --rerun-implementation-gates-for-issue "$ISSUE_NUMBER"

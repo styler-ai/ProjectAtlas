@@ -8545,6 +8545,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "planned_issue_failures",
         "target_graph_failures",
         "native_relation_issue_number",
+        "implementation_prs_for_issue",
+        "implementation_gate_run",
+        "rerun_implementation_gates",
+        "enforce_closed_issue_blockers",
+        "gh\", \"run\", \"cancel",
         "implementation_issue_failures",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
@@ -8808,11 +8813,15 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "types: [opened, edited, reopened, labeled, unlabeled, milestoned]",
+        "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
         "--planned-issue \"$ISSUE_NUMBER\"",
+        "--rerun-implementation-gates-for-issue \"$ISSUE_NUMBER\"",
+        "implementation-gate-revalidation",
+        "--enforce-closed-issue-blockers \"$ISSUE_NUMBER\"",
         "timeout-minutes: 5",
         "contents: read",
-        "issues: read",
+        "issues: write",
+        "actions: write",
     ] {
         if !issueops_workflow.contains(required) {
             return Err(io::Error::other(format!(
