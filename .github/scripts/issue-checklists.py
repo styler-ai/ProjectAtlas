@@ -143,9 +143,19 @@ class IssueOpsSnapshot:
     selection_failures: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ImplementationStatusCandidate:
+    """One validated PR head prepared for a two-phase status refresh."""
+
+    pull_request: dict[str, object]
+    number: int
+    expected_sha: str
+
+
 MAX_OPEN_PULL_REQUESTS = 1000
 NATIVE_RELATION_KINDS = {"blocked_by", "sub_issue"}
 NATIVE_RELATION_OPERATIONS = {"add", "remove"}
+MAX_AFFECTED_IMPLEMENTATION_PRS = 32
 
 
 def run(args: list[str]) -> str:
@@ -1551,7 +1561,6 @@ def mutate_native_relationship_and_revalidate(
 ) -> None:
     """Mutate one authorized edge, then run the shared affected-PR revalidation."""
 
-    mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
     relationship_issues = tuple(
         sorted(
             {
@@ -1562,14 +1571,25 @@ def mutate_native_relationship_and_revalidate(
             }
         )
     )
-    publish_implementation_statuses_for_issue(
-        repo,
-        issue,
-        root,
-        issue_map,
-        release_graphs,
-        additional_issues=relationship_issues,
+    snapshot, affected = build_issueops_snapshot(
+        repo, issue, issue_map, release_graphs, relationship_issues
     )
+    candidates, candidate_failures = prepare_implementation_status_candidates(affected)
+    if snapshot.selection_failures or candidate_failures:
+        failures = list(snapshot.selection_failures) + candidate_failures
+        raise SystemExit(
+            "relationship dispatch preflight failed:\n" + "\n".join(failures)
+        )
+    publish_pending_statuses(repo, candidates)
+    mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
+    failures = finalize_implementation_statuses(
+        repo, root, issue_map, release_graphs, snapshot, candidates
+    )
+    if failures:
+        raise SystemExit(
+            "affected implementation status publication failed:\n"
+            + "\n".join(failures)
+        )
 
 
 def open_pull_requests_snapshot(repo: str) -> tuple[dict[str, object], ...]:
@@ -1655,6 +1675,11 @@ def build_issueops_snapshot(
     affected, selection_failures = affected_implementation_prs(
         repo, issue, pull_requests, release_graphs, additional_issues
     )
+    if len(affected) > MAX_AFFECTED_IMPLEMENTATION_PRS:
+        raise SystemExit(
+            "affected implementation PR snapshot exceeded the bounded limit of "
+            f"{MAX_AFFECTED_IMPLEMENTATION_PRS}; refusing to mutate or publish incomplete statuses"
+        )
     trigger_issues = (issue, *additional_issues)
     graph_milestones = {
         graph.milestone
@@ -1839,6 +1864,112 @@ def implementation_reference_failures(
     return failures
 
 
+def prepare_implementation_status_candidates(
+    pull_requests: list[dict[str, object]],
+) -> tuple[list[ImplementationStatusCandidate], list[str]]:
+    """Validate every selected PR head before publishing any pending status."""
+
+    candidates: list[ImplementationStatusCandidate] = []
+    failures: list[str] = []
+    seen: set[int] = set()
+    for pull_request in pull_requests:
+        number_value = pull_request.get("number", "unknown")
+        try:
+            number = positive_issue(number_value, "pull request number")
+            if number in seen:
+                raise SystemExit(f"duplicate selected pull request #{number}")
+            seen.add(number)
+            expected_sha = pull_request.get("headRefOid")
+            if not isinstance(expected_sha, str) or re.fullmatch(
+                r"[0-9a-fA-F]{40,64}", expected_sha
+            ) is None:
+                raise SystemExit(
+                    f"GitHub pull request #{number} is missing an exact head commit"
+                )
+            candidates.append(
+                ImplementationStatusCandidate(pull_request, number, expected_sha)
+            )
+        except SystemExit as error:
+            failures.append(f"PR #{number_value}: {error}")
+    return candidates, failures
+
+
+def verify_live_candidate_head(
+    repo: str, candidate: ImplementationStatusCandidate
+) -> None:
+    """Bind one candidate to its live head before a status publication."""
+
+    live_pull_request = gh_json(
+        [
+            "pr",
+            "view",
+            str(candidate.number),
+            "-R",
+            repo,
+            "--json",
+            "number,headRefOid",
+        ]
+    )
+    if not isinstance(live_pull_request, dict):
+        raise SystemExit(
+            f"GitHub pull request #{candidate.number} head read-back was not an object"
+        )
+    live_number = positive_issue(
+        live_pull_request.get("number"), "live pull request number"
+    )
+    live_sha = live_pull_request.get("headRefOid")
+    if live_number != candidate.number or live_sha != candidate.expected_sha:
+        raise SystemExit(
+            f"PR #{candidate.number} head changed before status publication: "
+            f"expected {candidate.expected_sha}, found {live_sha or 'missing'}"
+        )
+
+
+def publish_pending_statuses(
+    repo: str, candidates: list[ImplementationStatusCandidate]
+) -> None:
+    """Establish pending status for every candidate before expensive evaluation."""
+
+    for candidate in candidates:
+        verify_live_candidate_head(repo, candidate)
+    for candidate in candidates:
+        commit_status(
+            repo,
+            candidate.expected_sha,
+            "pending",
+            "Revalidating native implementation references",
+        )
+
+
+def finalize_implementation_statuses(
+    repo: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+    snapshot: IssueOpsSnapshot,
+    candidates: list[ImplementationStatusCandidate],
+) -> list[str]:
+    """Evaluate all candidates after mutation, retaining pending/failure on errors."""
+
+    failures: list[str] = []
+    for candidate in candidates:
+        try:
+            publish_implementation_status_for_pr(
+                repo,
+                candidate.number,
+                root,
+                issue_map,
+                release_graphs,
+                candidate.pull_request,
+                expected_pr_head_sha=candidate.expected_sha,
+                snapshot=snapshot,
+                skip_pending=True,
+            )
+        except SystemExit as error:
+            failures.append(f"PR #{candidate.number}: {error}")
+    return failures
+
+
 def publish_implementation_status_for_pr(
     repo: str,
     pull_request_number: int,
@@ -1848,6 +1979,7 @@ def publish_implementation_status_for_pr(
     pull_request: dict[str, object] | None = None,
     expected_pr_head_sha: str | None = None,
     snapshot: IssueOpsSnapshot | None = None,
+    skip_pending: bool = False,
 ) -> None:
     """Validate live native references and publish pending then final status."""
 
@@ -1882,7 +2014,8 @@ def publish_implementation_status_for_pr(
         raise SystemExit(
             f"GitHub pull request #{number} has malformed closing issue references"
         )
-    commit_status(repo, sha, "pending", "Revalidating native implementation references")
+    if not skip_pending:
+        commit_status(repo, sha, "pending", "Revalidating native implementation references")
     failures: list[str] = []
     author = pull_request.get("author")
     author_login = author.get("login") if isinstance(author, dict) else None
@@ -1958,23 +2091,16 @@ def publish_implementation_statuses_for_issue(
     snapshot, affected = build_issueops_snapshot(
         repo, issue, issue_map, release_graphs, additional_issues
     )
-    failures: list[str] = []
-    failures.extend(snapshot.selection_failures)
-    for pull_request in affected:
-        number = pull_request.get("number", "unknown")
-        try:
-            number = positive_issue(number, "pull request number")
-            publish_implementation_status_for_pr(
-                repo,
-                number,
-                root,
-                issue_map,
-                release_graphs,
-                pull_request,
-                snapshot=snapshot,
+    candidates, candidate_failures = prepare_implementation_status_candidates(affected)
+    failures: list[str] = list(snapshot.selection_failures)
+    failures.extend(candidate_failures)
+    if not candidate_failures:
+        publish_pending_statuses(repo, candidates)
+        failures.extend(
+            finalize_implementation_statuses(
+                repo, root, issue_map, release_graphs, snapshot, candidates
             )
-        except SystemExit as error:
-            failures.append(f"PR #{number}: {error}")
+        )
     if failures:
         raise SystemExit("affected implementation status publication failed:\n" + "\n".join(failures))
 
@@ -3137,16 +3263,25 @@ Mitigations:
         )
         status_issue_calls: list[int] = []
         saved_status_publisher = publish_implementation_status_for_pr
+        saved_commit_status = commit_status
         globals()["publish_implementation_status_for_pr"] = (
             lambda repo, number, root, issue_map, release_graphs, pull_request=None,
-            expected_pr_head_sha=None, snapshot=None: status_issue_calls.append(number)
+            expected_pr_head_sha=None, snapshot=None, skip_pending=False: status_issue_calls.append(
+                number
+            )
         )
-        globals()["gh_json"] = lambda args: [implementation_pr]
+        globals()["commit_status"] = lambda *args, **kwargs: None
+        globals()["gh_json"] = lambda args: (
+            [implementation_pr]
+            if args[:2] == ["pr", "list"]
+            else {"number": 494, "headRefOid": implementation_pr["headRefOid"]}
+        )
         publish_implementation_statuses_for_issue(
             "owner/repo", 10, Path("."), {}, dependent_graphs
         )
         assert status_issue_calls == [494]
         globals()["publish_implementation_status_for_pr"] = saved_status_publisher
+        globals()["commit_status"] = saved_commit_status
         try:
             implementation_prs_for_issue(
                 "owner/repo",
@@ -3299,25 +3434,45 @@ Mitigations:
             assert "itself" in str(error)
         else:
             raise AssertionError("self native relation was accepted")
-        mutation_revalidation: list[tuple[int, int]] = []
+        mutation_revalidation: list[tuple[str, object]] = []
         saved_mutation = mutate_native_relationship
-        saved_status_refresh = publish_implementation_statuses_for_issue
+        saved_snapshot_builder = build_issueops_snapshot
+        saved_candidate_builder = prepare_implementation_status_candidates
+        saved_pending_publisher = publish_pending_statuses
+        saved_status_finalizer = finalize_implementation_statuses
         globals()["mutate_native_relationship"] = (
             lambda repo, issue, related_issue, relation_kind, operation: mutation_revalidation.append(
-                (issue, related_issue)
+                ("mutate", (issue, related_issue))
             )
         )
-        globals()["publish_implementation_statuses_for_issue"] = (
-            lambda repo, issue, root, issue_map, release_graphs, additional_issues=(): mutation_revalidation.append(
-                (issue, issue, additional_issues)
+        globals()["build_issueops_snapshot"] = lambda *args, **kwargs: (
+            IssueOpsSnapshot((), {}, {}, ()), []
+        )
+        globals()["prepare_implementation_status_candidates"] = (
+            lambda affected: ([], [])
+        )
+        globals()["publish_pending_statuses"] = (
+            lambda repo, candidates: mutation_revalidation.append(("pending", candidates))
+        )
+        globals()["finalize_implementation_statuses"] = (
+            lambda repo, root, issue_map, release_graphs, snapshot, candidates: mutation_revalidation.append(
+                ("finalize", candidates)
             )
+            or []
         )
         mutate_native_relationship_and_revalidate(
             "owner/repo", 10, 11, "blocked_by", "add", Path("."), {}, {}
         )
-        assert mutation_revalidation == [(10, 11), (10, 10, ())]
+        assert [event for event, _ in mutation_revalidation] == [
+            "pending",
+            "mutate",
+            "finalize",
+        ]
         globals()["mutate_native_relationship"] = saved_mutation
-        globals()["publish_implementation_statuses_for_issue"] = saved_status_refresh
+        globals()["build_issueops_snapshot"] = saved_snapshot_builder
+        globals()["prepare_implementation_status_candidates"] = saved_candidate_builder
+        globals()["publish_pending_statuses"] = saved_pending_publisher
+        globals()["finalize_implementation_statuses"] = saved_status_finalizer
 
         globals()["gh_json"] = lambda args: [{}] * (MAX_OPEN_PULL_REQUESTS + 1)
         try:
@@ -3328,6 +3483,43 @@ Mitigations:
             raise AssertionError("truncated open-PR snapshot was accepted")
         globals()["gh_json"] = lambda args: [{}] * MAX_OPEN_PULL_REQUESTS
         assert len(open_pull_requests_snapshot("owner/repo")) == MAX_OPEN_PULL_REQUESTS
+        saved_open_snapshot = open_pull_requests_snapshot
+        selected_cap_prs = tuple(
+            {**implementation_pr, "number": 600 + index}
+            for index in range(MAX_AFFECTED_IMPLEMENTATION_PRS)
+        )
+        globals()["open_pull_requests_snapshot"] = lambda repo: selected_cap_prs
+        exact_selected_snapshot, exact_selected = build_issueops_snapshot(
+            "owner/repo", 10, {}, {}
+        )
+        assert len(exact_selected) == MAX_AFFECTED_IMPLEMENTATION_PRS
+        assert exact_selected_snapshot.selection_failures == ()
+        selected_cap_prs = tuple(
+            {**implementation_pr, "number": 700 + index}
+            for index in range(MAX_AFFECTED_IMPLEMENTATION_PRS + 1)
+        )
+        try:
+            build_issueops_snapshot("owner/repo", 10, {}, {})
+        except SystemExit as error:
+            assert "bounded limit of 32" in str(error)
+        else:
+            raise AssertionError("33 affected implementation PRs were accepted")
+        cap_mutations: list[tuple[object, ...]] = []
+        saved_cap_mutation = mutate_native_relationship
+        globals()["mutate_native_relationship"] = (
+            lambda *args: cap_mutations.append(args)
+        )
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo", 10, 11, "blocked_by", "add", Path("."), {}, {}
+            )
+        except SystemExit as error:
+            assert "bounded limit of 32" in str(error)
+        else:
+            raise AssertionError("over-cap relationship dispatch was accepted")
+        assert cap_mutations == []
+        globals()["mutate_native_relationship"] = saved_cap_mutation
+        globals()["open_pull_requests_snapshot"] = saved_open_snapshot
         malformed_refresh = {"number": 495, "closingIssuesReferences": None}
         affected, refresh_failures = affected_implementation_prs(
             "owner/repo",
@@ -3413,6 +3605,11 @@ Mitigations:
             ],
             "author": {"login": "atlas"},
         }
+        relationship_pr_two = {
+            **relationship_pr,
+            "number": 501,
+            "headRefOid": "e" * 40,
+        }
         behavior_saved = {
             name: globals()[name]
             for name in (
@@ -3425,20 +3622,40 @@ Mitigations:
                 "check_openspec_tasks",
                 "planned_issue_failures",
                 "release_graph_failures",
+                "build_issueops_snapshot",
+                "prepare_implementation_status_candidates",
+                "publish_pending_statuses",
+                "finalize_implementation_statuses",
+                "mutate_native_relationship",
             )
         }
         relationship_sub_issues = {339}
         status_api_calls: list[list[str]] = []
+        lifecycle_events: list[str] = []
 
         def relationship_gh_json(args: list[str]) -> object:
             if args[:2] == ["pr", "list"]:
-                return [relationship_pr]
+                return [relationship_pr, relationship_pr_two]
             if args[:2] == ["pr", "view"]:
-                return {"number": 500, "headRefOid": relationship_pr_sha}
+                number = int(args[2])
+                return {
+                    "number": number,
+                    "headRefOid": (
+                        relationship_pr_sha if number == 500 else relationship_pr_two["headRefOid"]
+                    ),
+                }
             raise AssertionError(f"unexpected relationship snapshot command: {args}")
 
         def relationship_gh_api_json(args: list[str]) -> object:
             status_api_calls.append(args)
+            lifecycle_events.append(
+                "status:"
+                + next(
+                    argument.split("=", 1)[1]
+                    for argument in args
+                    if argument.startswith("state=")
+                )
+            )
             return {}
 
         def relationship_run(args: list[str]) -> str:
@@ -3453,6 +3670,7 @@ Mitigations:
                 "-F",
                 "sub_issue_id=1339",
             ]
+            lifecycle_events.append("mutate")
             relationship_sub_issues.remove(339)
             return "{}"
 
@@ -3499,27 +3717,71 @@ Mitigations:
         else:
             raise AssertionError("relationship drift did not fail child implementation status")
         assert relationship_sub_issues == set()
-        assert len(status_api_calls) == 2
+        assert lifecycle_events == [
+            "status:pending",
+            "status:pending",
+            "mutate",
+            "status:failure",
+            "status:failure",
+        ]
+        assert len(status_api_calls) == 4
         status_states = [
             argument.split("=", 1)[1]
             for call in status_api_calls
             for argument in call
             if argument.startswith("state=")
         ]
-        assert status_states == ["pending", "failure"]
+        assert status_states == ["pending", "pending", "failure", "failure"]
         assert all(
             "context=issueops-implementation" in call
             for call in (" ".join(args) for args in status_api_calls)
         )
-        assert all(
-            f"statuses/{relationship_pr_sha}" in args[0] for args in status_api_calls
-        )
+        status_paths = [args[0] for args in status_api_calls]
+        assert status_paths == [
+            f"repos/owner/repo/statuses/{relationship_pr_sha}",
+            f"repos/owner/repo/statuses/{relationship_pr_two['headRefOid']}",
+            f"repos/owner/repo/statuses/{relationship_pr_sha}",
+            f"repos/owner/repo/statuses/{relationship_pr_two['headRefOid']}",
+        ]
         assert "#492 is missing native sub-issue relation(s): #339" in " ".join(
             argument
             for call in status_api_calls
             for argument in call
             if argument.startswith("description=")
         )
+        pending_failure_mutations: list[object] = []
+        globals()["build_issueops_snapshot"] = lambda *args, **kwargs: (
+            IssueOpsSnapshot((), {}, {}, ()), [relationship_pr]
+        )
+        globals()["prepare_implementation_status_candidates"] = lambda affected: (
+            [ImplementationStatusCandidate(relationship_pr, 500, relationship_pr_sha)],
+            [],
+        )
+        globals()["publish_pending_statuses"] = (
+            lambda repo, candidates: (_ for _ in ()).throw(
+                SystemExit("injected pending publication failure")
+            )
+        )
+        globals()["mutate_native_relationship"] = (
+            lambda *args: pending_failure_mutations.append(args)
+        )
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                492,
+                339,
+                "sub_issue",
+                "remove",
+                Path("."),
+                {},
+                relationship_graphs,
+            )
+        except SystemExit as error:
+            assert "injected pending publication failure" in str(error)
+        else:
+            raise AssertionError("pending failure did not abort relationship mutation")
+        assert pending_failure_mutations == []
+        assert len(status_api_calls) == 4
         for name, value in behavior_saved.items():
             globals()[name] = value
     finally:

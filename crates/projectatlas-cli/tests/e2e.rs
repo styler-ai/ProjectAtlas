@@ -8551,6 +8551,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "affected_implementation_prs",
         "mutate_native_relationship",
         "mutate_native_relationship_and_revalidate",
+        "MAX_AFFECTED_IMPLEMENTATION_PRS",
+        "prepare_implementation_status_candidates",
+        "publish_pending_statuses",
+        "finalize_implementation_statuses",
         "commit_status",
         "implementation_reference_failures",
         "publish_implementation_status_for_pr",
@@ -8864,7 +8868,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "issues: write",
         "pull-requests: read",
         "statuses: write",
-        "timeout-minutes: 5",
+        "timeout-minutes: 15",
     ] {
         if !issueops_revalidation.contains(required) {
             return Err(io::Error::other(format!(
