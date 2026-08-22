@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -1268,6 +1267,7 @@ def milestone_issues(repo: str, milestone: str) -> list[dict[str, object]]:
 
 
 GITHUB_API_VERSION = "2026-03-10"
+IMPLEMENTATION_STATUS_CONTEXT = "issueops-implementation"
 
 
 def native_relation_issue_number(
@@ -1460,42 +1460,152 @@ def implementation_prs_for_issue(
     return affected
 
 
-def implementation_gate_run(
-    pull_request: dict[str, object], runs: object
-) -> dict[str, object]:
-    """Choose the verify run for the PR's current head, failing closed on gaps."""
+def commit_status(
+    repo: str, sha: str, state: str, description: str
+) -> None:
+    """Publish one fail-closed GitHub commit status for an exact PR head."""
 
-    head_sha = pull_request.get("headRefOid")
-    if not isinstance(head_sha, str) or not head_sha:
-        raise SystemExit("GitHub pull request is missing its head commit")
-    if not isinstance(runs, list):
-        raise SystemExit("GitHub workflow-run response must be an array")
-    candidates: list[dict[str, object]] = []
-    for run_payload in runs:
-        if not isinstance(run_payload, dict):
-            raise SystemExit("GitHub workflow-run response contained a non-object")
-        if (
-            run_payload.get("workflowName") == "01-CI"
-            and run_payload.get("event") == "pull_request"
-            and run_payload.get("headSha") == head_sha
-        ):
-            positive_issue(run_payload.get("databaseId"), "workflow run id")
-            status = run_payload.get("status")
-            if not isinstance(status, str) or not status:
-                raise SystemExit("GitHub workflow run is missing its status")
-            candidates.append(run_payload)
-    if not candidates:
-        number = positive_issue(pull_request.get("number"), "pull request number")
-        raise SystemExit(
-            f"no current 01-CI verify run exists for pull request #{number}"
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", sha) is None:
+        raise SystemExit("GitHub pull request head is not an exact commit SHA")
+    if state not in {"pending", "success", "failure", "error"}:
+        raise SystemExit(f"invalid implementation status state: {state!r}")
+    if not description or len(description) > 140:
+        raise SystemExit("implementation status description must be 1..140 characters")
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            f"repos/{owner}/{name}/statuses/{sha}",
+            "--method",
+            "POST",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+            "-f",
+            f"state={state}",
+            "-f",
+            f"context={IMPLEMENTATION_STATUS_CONTEXT}",
+            "-f",
+            f"description={description}",
+        ]
+    )
+    if not isinstance(payload, dict):
+        raise SystemExit("GitHub commit status response must be an object")
+
+
+def implementation_reference_failures(
+    repo: str,
+    reference: object,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+) -> list[str]:
+    """Run the default-branch implementation checker for one native reference."""
+
+    number = native_relation_issue_number(repo, reference, "closing issue reference")
+    issue = issue_payload(repo, number)
+    target_graph, failures = target_graph_failures(issue, release_graphs)
+    failures.extend(check_openspec_tasks(repo, root, issue_map, planned_issue=number))
+    failures.extend(planned_issue_failures(issue, issue_map, root))
+    failures.extend(implementation_issue_failures(repo, issue, release_graphs))
+    graph_milestones: set[str] = set()
+    if target_graph is not None:
+        graph_milestones.add(target_graph.milestone)
+    else:
+        milestone = issue.get("milestone")
+        if isinstance(milestone, dict) and isinstance(milestone.get("title"), str):
+            graph_milestones.add(milestone["title"])
+    failures.extend(
+        release_graph_failures(
+            repo,
+            release_graphs,
+            issue_map,
+            graph_milestones or None,
         )
-    return max(candidates, key=lambda item: int(item["databaseId"]))
+    )
+    return failures
 
 
-def rerun_implementation_gates(
-    repo: str, issue: int, graphs: dict[str, ReleaseGraph] | None = None
-) -> list[int]:
-    """Rerun the existing required verify context for affected open PR heads."""
+def publish_implementation_status_for_pr(
+    repo: str,
+    pull_request_number: int,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+    pull_request: dict[str, object] | None = None,
+) -> None:
+    """Validate live native references and publish pending then final status."""
+
+    if pull_request is None:
+        pull_request = gh_json(
+            [
+                "pr",
+                "view",
+                str(positive_issue(pull_request_number, "pull request number")),
+                "-R",
+                repo,
+                "--json",
+                "number,headRefOid,closingIssuesReferences,author",
+            ]
+        )
+    if not isinstance(pull_request, dict):
+        raise SystemExit("GitHub pull-request response must be an object")
+    number = positive_issue(pull_request.get("number"), "pull request number")
+    if number != positive_issue(pull_request_number, "pull request number"):
+        raise SystemExit("GitHub pull-request response number did not match the request")
+    sha = pull_request.get("headRefOid")
+    if not isinstance(sha, str):
+        raise SystemExit(f"GitHub pull request #{number} is missing its head commit")
+    references = pull_request.get("closingIssuesReferences")
+    if not isinstance(references, list):
+        raise SystemExit(
+            f"GitHub pull request #{number} has malformed closing issue references"
+        )
+    commit_status(repo, sha, "pending", "Revalidating native implementation references")
+    failures: list[str] = []
+    author = pull_request.get("author")
+    author_login = author.get("login") if isinstance(author, dict) else None
+    if author_login == "dependabot[bot]":
+        description = "Dependabot dependency update uses the standard CI path"
+    elif not references:
+        description = "Planning PR has no native implementation closing reference"
+    else:
+        for reference in references:
+            try:
+                failures.extend(
+                    implementation_reference_failures(
+                        repo, reference, root, issue_map, release_graphs
+                    )
+                )
+            except SystemExit as error:
+                failures.append(str(error))
+            except Exception as error:
+                failures.append(f"implementation validation failed: {error}")
+        description = (
+            "Native implementation references passed"
+            if not failures
+            else "Native implementation references failed: " + clean(failures[0])
+        )[:140]
+    state = "success" if not failures else "failure"
+    try:
+        commit_status(repo, sha, state, description)
+    except SystemExit as error:
+        raise SystemExit(
+            f"unable to publish {IMPLEMENTATION_STATUS_CONTEXT} for PR #{number}: {error}"
+        ) from error
+    if failures:
+        raise SystemExit(
+            f"{IMPLEMENTATION_STATUS_CONTEXT} failed for PR #{number}:\n"
+            + "\n".join(f"- {failure}" for failure in failures)
+        )
+
+
+def publish_implementation_statuses_for_issue(
+    repo: str,
+    issue: int,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+) -> None:
+    """Refresh statuses for open PRs affected by one changed release issue."""
 
     pull_requests = gh_json(
         [
@@ -1508,100 +1618,21 @@ def rerun_implementation_gates(
             "--limit",
             "1000",
             "--json",
-            "number,headRefName,headRefOid,closingIssuesReferences",
+            "number,headRefOid,closingIssuesReferences,author",
         ]
     )
-    affected = implementation_prs_for_issue(repo, issue, pull_requests, graphs)
-    rerun_ids: list[int] = []
+    affected = implementation_prs_for_issue(repo, issue, pull_requests, release_graphs)
+    failures: list[str] = []
     for pull_request in affected:
         number = positive_issue(pull_request.get("number"), "pull request number")
-        branch = pull_request.get("headRefName")
-        if not isinstance(branch, str) or not branch:
-            raise SystemExit(f"GitHub pull request #{number} is missing its head branch")
-        runs = gh_json(
-            [
-                "run",
-                "list",
-                "--repo",
-                repo,
-                "--workflow",
-                "01-CI",
-                "--branch",
-                branch,
-                "--event",
-                "pull_request",
-                "--limit",
-                "50",
-                "--json",
-                "databaseId,headSha,status,event,workflowName",
-            ]
-        )
-        gate = implementation_gate_run(pull_request, runs)
-        status = gate["status"]
-        if status in {"queued", "in_progress", "waiting", "requested"}:
-            run_id = positive_issue(gate.get("databaseId"), "workflow run id")
-            cancel_error: SystemExit | None = None
-            try:
-                run(["gh", "run", "cancel", str(run_id), "--repo", repo])
-            except SystemExit as error:
-                # A run can finish between `run list` and `run cancel`.  Read its
-                # state before deciding whether this is that benign race or an
-                # authentication/network failure that must remain fatal.
-                cancel_error = error
-            for attempt in range(20):
-                try:
-                    status_payload = gh_json(
-                        [
-                            "run",
-                            "view",
-                            str(run_id),
-                            "--repo",
-                            repo,
-                            "--json",
-                            "status",
-                        ]
-                    )
-                except SystemExit as error:
-                    if cancel_error is None:
-                        raise
-                    raise SystemExit(
-                        f"unable to revalidate 01-CI verify run {run_id} after cancellation "
-                        f"failure ({cancel_error}): {error}"
-                    ) from error
-                if not isinstance(status_payload, dict):
-                    raise SystemExit("GitHub workflow status response must be an object")
-                status = status_payload.get("status")
-                if not isinstance(status, str) or not status:
-                    raise SystemExit("GitHub workflow status response is missing its status")
-                if status not in {"queued", "in_progress", "waiting", "requested"}:
-                    break
-                if attempt == 19:
-                    raise SystemExit(
-                        f"01-CI verify run {run_id} did not become rerunnable after cancellation"
-                    )
-                time.sleep(1)
-            if cancel_error is not None:
-                cancel_text = str(cancel_error).casefold()
-                if not (
-                    "already completed" in cancel_text
-                    or ("cancel" in cancel_text and "completed" in cancel_text)
-                    or "not in progress" in cancel_text
-                ):
-                    raise SystemExit(
-                        f"01-CI verify run {run_id} cancellation failed after status "
-                        f"revalidation: {cancel_error}"
-                    ) from cancel_error
-        run_id = positive_issue(gate.get("databaseId"), "workflow run id")
-        run(["gh", "run", "rerun", str(run_id), "--repo", repo])
-        rerun_ids.append(run_id)
-    if rerun_ids:
-        print(
-            "Reran 01-CI verify for implementation PR workflow runs: "
-            + ", ".join(str(run_id) for run_id in rerun_ids)
-        )
-    else:
-        print("No completed implementation PR verify run required revalidation")
-    return rerun_ids
+        try:
+            publish_implementation_status_for_pr(
+                repo, number, root, issue_map, release_graphs, pull_request
+            )
+        except SystemExit as error:
+            failures.append(f"PR #{number}: {error}")
+    if failures:
+        raise SystemExit("affected implementation status publication failed:\n" + "\n".join(failures))
 
 
 def enforce_closed_issue_blockers(
@@ -2711,8 +2742,7 @@ Mitigations:
         ) == []
         implementation_pr = {
             "number": 494,
-            "headRefName": "feat/implementation",
-            "headRefOid": "head-sha",
+            "headRefOid": "a" * 40,
             "closingIssuesReferences": [
                 {
                     "number": 10,
@@ -2753,6 +2783,18 @@ Mitigations:
                 }
             ], dependent_graphs
         )
+        status_issue_calls: list[int] = []
+        saved_status_publisher = publish_implementation_status_for_pr
+        globals()["publish_implementation_status_for_pr"] = (
+            lambda repo, number, root, issue_map, release_graphs, pull_request=None:
+            status_issue_calls.append(number)
+        )
+        globals()["gh_json"] = lambda args: [implementation_pr]
+        publish_implementation_statuses_for_issue(
+            "owner/repo", 10, Path("."), {}, dependent_graphs
+        )
+        assert status_issue_calls == [494]
+        globals()["publish_implementation_status_for_pr"] = saved_status_publisher
         try:
             implementation_prs_for_issue(
                 "owner/repo",
@@ -2769,105 +2811,79 @@ Mitigations:
         else:
             raise AssertionError("foreign implementation PR reference was accepted")
         assert implementation_prs_for_issue("owner/repo", 10, []) == []
-        completed_gate = {
-            "databaseId": 900,
-            "headSha": "head-sha",
-            "status": "completed",
-            "event": "pull_request",
-            "workflowName": "01-CI",
+        status_calls: list[list[str]] = []
+
+        def fake_status_gh_json(args: list[str]) -> object:
+            assert args[:2] == ["pr", "view"]
+            return implementation_pr
+
+        def fake_status_api(args: list[str]) -> object:
+            status_calls.append(args)
+            return {}
+
+        globals()["gh_json"] = fake_status_gh_json
+        globals()["gh_api_json"] = fake_status_api
+        publish_implementation_status_for_pr(
+            "owner/repo", 494, Path("."), {}, {}
+        )
+        status_states = [
+            argument.split("=", 1)[1]
+            for call in status_calls
+            for argument in call
+            if argument.startswith("state=")
+        ]
+        assert status_states == ["pending", "success"]
+        assert all(
+            IMPLEMENTATION_STATUS_CONTEXT in call for call in (" ".join(args) for args in status_calls)
+        )
+
+        status_pr = {**implementation_pr, "closingIssuesReferences": []}
+        status_calls.clear()
+        globals()["gh_json"] = lambda args: status_pr
+        publish_implementation_status_for_pr(
+            "owner/repo", 494, Path("."), {}, {}
+        )
+        status_states = [
+            argument.split("=", 1)[1]
+            for call in status_calls
+            for argument in call
+            if argument.startswith("state=")
+        ]
+        assert status_states == ["pending", "success"]
+
+        status_calls.clear()
+        foreign_status_pr = {
+            **implementation_pr,
+            "closingIssuesReferences": [foreign_closing_reference],
         }
-        assert implementation_gate_run(implementation_pr, [completed_gate]) == completed_gate
-        in_progress_gate = {**completed_gate, "status": "in_progress"}
-        assert implementation_gate_run(implementation_pr, [in_progress_gate]) == in_progress_gate
+
+        def fake_foreign_status_gh_json(args: list[str]) -> object:
+            assert args[:2] == ["pr", "view"]
+            return foreign_status_pr
+
+        globals()["gh_json"] = fake_foreign_status_gh_json
         try:
-            implementation_gate_run(implementation_pr, [])
+            publish_implementation_status_for_pr(
+                "owner/repo", 494, Path("."), {}, {}
+            )
         except SystemExit as error:
-            assert "no current 01-CI verify run" in str(error)
+            assert "exact owner/repo repository identity" in str(error)
         else:
-            raise AssertionError("missing current verify run was accepted")
-        rerun_commands: list[list[str]] = []
-
-        def fake_rerun_gh_json(args: list[str]) -> object:
-            if args[:2] == ["pr", "list"]:
-                return [implementation_pr]
-            return [completed_gate]
-
-        globals()["gh_json"] = fake_rerun_gh_json
-        globals()["run"] = lambda args: rerun_commands.append(args) or ""
-        assert rerun_implementation_gates("owner/repo", 10) == [900]
-        assert rerun_commands == [["gh", "run", "rerun", "900", "--repo", "owner/repo"]]
-
-        active_statuses = iter([{"status": "completed"}])
-
-        def fake_active_gh_json(args: list[str]) -> object:
-            if args[:2] == ["pr", "list"]:
-                return [implementation_pr]
-            if args[:2] == ["run", "list"]:
-                return [in_progress_gate]
-            return next(active_statuses)
-
-        globals()["gh_json"] = fake_active_gh_json
-        rerun_commands.clear()
-        assert rerun_implementation_gates("owner/repo", 10) == [900]
-        assert rerun_commands == [
-            ["gh", "run", "cancel", "900", "--repo", "owner/repo"],
-            ["gh", "run", "rerun", "900", "--repo", "owner/repo"],
+            raise AssertionError("foreign status reference was accepted")
+        status_states = [
+            argument.split("=", 1)[1]
+            for call in status_calls
+            for argument in call
+            if argument.startswith("state=")
         ]
-
-        cancel_race_statuses = iter([{"status": "completed"}])
-
-        def fake_cancel_race_gh_json(args: list[str]) -> object:
-            if args[:2] == ["pr", "list"]:
-                return [implementation_pr]
-            if args[:2] == ["run", "list"]:
-                return [in_progress_gate]
-            return next(cancel_race_statuses)
-
-        def fake_cancel_race_run(args: list[str]) -> str:
-            rerun_commands.append(args)
-            if args[2] == "cancel":
-                raise SystemExit("command failed: workflow run is already completed")
-            return ""
-
-        globals()["gh_json"] = fake_cancel_race_gh_json
-        globals()["run"] = fake_cancel_race_run
-        rerun_commands.clear()
-        assert rerun_implementation_gates("owner/repo", 10) == [900]
-        assert rerun_commands == [
-            ["gh", "run", "cancel", "900", "--repo", "owner/repo"],
-            ["gh", "run", "rerun", "900", "--repo", "owner/repo"],
-        ]
-
-        cancel_auth_statuses = iter([{"status": "completed"}])
-
-        def fake_cancel_auth_gh_json(args: list[str]) -> object:
-            if args[:2] == ["pr", "list"]:
-                return [implementation_pr]
-            if args[:2] == ["run", "list"]:
-                return [in_progress_gate]
-            return next(cancel_auth_statuses)
-
-        def fake_cancel_auth_run(args: list[str]) -> str:
-            rerun_commands.append(args)
-            raise SystemExit("command failed: authentication failed")
-
-        globals()["gh_json"] = fake_cancel_auth_gh_json
-        globals()["run"] = fake_cancel_auth_run
-        rerun_commands.clear()
-        try:
-            rerun_implementation_gates("owner/repo", 10)
-        except SystemExit as error:
-            assert "authentication failed" in str(error)
-        else:
-            raise AssertionError("cancellation authentication failure was swallowed")
-        assert rerun_commands == [["gh", "run", "cancel", "900", "--repo", "owner/repo"]]
-        globals()["run"] = lambda args: rerun_commands.append(args) or ""
+        assert status_states == ["pending", "failure"]
 
         globals()["issue_payload"] = lambda repo, issue: {
             "number": issue,
             "state": {10: "CLOSED", 11: "OPEN", 12: "CLOSED"}.get(issue, "CLOSED"),
         }
-        rerun_commands.clear()
+        rerun_commands: list[list[str]] = []
+        globals()["run"] = lambda args: rerun_commands.append(args) or ""
         assert enforce_closed_issue_blockers("owner/repo", 10, dependent_graphs) == []
         assert rerun_commands == []
         try:
@@ -3050,9 +3066,14 @@ def main() -> None:
         help="validate a JSON GitHub native closing issue reference and require its blockers to be closed",
     )
     parser.add_argument(
-        "--rerun-implementation-gates-for-issue",
+        "--publish-implementation-status-for-pr",
         type=int,
-        help="rerun the existing required verify context for affected open implementation PRs",
+        help="publish the current-policy implementation status for one PR head",
+    )
+    parser.add_argument(
+        "--publish-implementation-statuses-for-issue",
+        type=int,
+        help="publish current-policy implementation statuses for affected open PRs",
     )
     parser.add_argument(
         "--enforce-closed-issue-blockers",
@@ -3068,20 +3089,52 @@ def main() -> None:
         return
     if not args.repo:
         raise SystemExit("--repo is required unless --self-test is used")
+    status_modes = [
+        args.publish_implementation_status_for_pr,
+        args.publish_implementation_statuses_for_issue,
+    ]
+    if sum(value is not None for value in status_modes) > 1:
+        raise SystemExit("implementation status modes are mutually exclusive")
     if (
-        args.rerun_implementation_gates_for_issue is not None
+        any(value is not None for value in status_modes)
         or args.enforce_closed_issue_blockers is not None
     ):
         issue_map = load_issue_map(args.issue_map)
         release_graphs = load_release_graphs(args.issue_map, issue_map)
+        root = Path(args.root)
+        closure_error: SystemExit | None = None
         if args.enforce_closed_issue_blockers is not None:
-            enforce_closed_issue_blockers(
-                args.repo, args.enforce_closed_issue_blockers, release_graphs
-            )
-        if args.rerun_implementation_gates_for_issue is not None:
-            rerun_implementation_gates(
-                args.repo, args.rerun_implementation_gates_for_issue, release_graphs
-            )
+            try:
+                enforce_closed_issue_blockers(
+                    args.repo, args.enforce_closed_issue_blockers, release_graphs
+                )
+            except SystemExit as error:
+                # The issue was reopened before this error.  Publish status from
+                # the repaired live state before rejecting the triggering event.
+                closure_error = error
+        try:
+            if args.publish_implementation_status_for_pr is not None:
+                publish_implementation_status_for_pr(
+                    args.repo,
+                    args.publish_implementation_status_for_pr,
+                    root,
+                    issue_map,
+                    release_graphs,
+                )
+            if args.publish_implementation_statuses_for_issue is not None:
+                publish_implementation_statuses_for_issue(
+                    args.repo,
+                    args.publish_implementation_statuses_for_issue,
+                    root,
+                    issue_map,
+                    release_graphs,
+                )
+        except SystemExit as status_error:
+            if closure_error is not None:
+                raise SystemExit(f"{closure_error}\n{status_error}") from status_error
+            raise
+        if closure_error is not None:
+            raise closure_error
         return
 
     root = Path(args.root)

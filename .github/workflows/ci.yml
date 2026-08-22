@@ -22,6 +22,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  statuses: write
 
 env:
   RUSTUP_TOOLCHAIN: "1.93.1"
@@ -94,25 +95,17 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json
 
-      - name: Implementation blocker check
-        if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment') && github.event.pull_request.user.login != 'dependabot[bot]'
+      - name: Implementation merge-readiness status
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          closing_issues="$(gh pr view "$PR_NUMBER" --json closingIssuesReferences --jq '.closingIssuesReferences[]? | @json')"
-          if [[ -z "$closing_issues" ]]; then
-            echo "No GitHub-native closing issue references; treating this as a planning PR."
-            exit 0
-          fi
-          while IFS= read -r issue_reference; do
-            [[ -z "$issue_reference" ]] && continue
-            python3 .github/scripts/issue-checklists.py \
-              --repo "$GITHUB_REPOSITORY" \
-              --root . \
-              --issue-map openspec/issue-map.json \
-              --implementation-issue-reference "$issue_reference"
-          done <<< "$closing_issues"
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --publish-implementation-status-for-pr "$PR_NUMBER"
 
       - name: Manual-only full benchmark policy
         run: python3 .github/scripts/verify-manual-benchmark-policy.py

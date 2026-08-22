@@ -8546,10 +8546,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "target_graph_failures",
         "native_relation_issue_number",
         "implementation_prs_for_issue",
-        "implementation_gate_run",
-        "rerun_implementation_gates",
+        "commit_status",
+        "implementation_reference_failures",
+        "publish_implementation_status_for_pr",
+        "publish_implementation_statuses_for_issue",
+        "IMPLEMENTATION_STATUS_CONTEXT",
         "enforce_closed_issue_blockers",
-        "gh\", \"run\", \"cancel",
         "implementation_issue_failures",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
@@ -8560,6 +8562,18 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
                 "IssueOps is missing lean checklist behavior {required:?}"
+            ))
+            .into());
+        }
+    }
+    for obsolete in [
+        "implementation_gate_run",
+        "rerun_implementation_gates",
+        "gh run",
+    ] {
+        if issueops.contains(obsolete) {
+            return Err(io::Error::other(format!(
+                "IssueOps retains stale workflow-run implementation policy {obsolete:?}"
             ))
             .into());
         }
@@ -8645,6 +8659,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
+        "statuses: write",
     ] {
         if !ci.contains(required) {
             return Err(io::Error::other(format!(
@@ -8739,10 +8754,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     if ci.find("- name: Default branch delivery check")
-        >= ci.find("- name: Implementation blocker check")
+        >= ci.find("- name: Implementation merge-readiness status")
     {
         return Err(io::Error::other(
-            "default branch delivery must run before the Dependabot exemption and native blocker gate",
+            "default branch delivery must run before the Dependabot exemption and implementation status",
         )
         .into());
     }
@@ -8761,23 +8776,19 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     let implementation_step = ci
-        .split("- name: Implementation blocker check")
+        .split("- name: Implementation merge-readiness status")
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
-        .ok_or_else(|| io::Error::other("ordinary implementation blocker step is missing"))?;
+        .ok_or_else(|| io::Error::other("ordinary implementation status step is missing"))?;
     for required in [
-        "closingIssuesReferences",
-        "closingIssuesReferences[]? | @json",
-        "--implementation-issue-reference \"$issue_reference\"",
-        "No GitHub-native closing issue references; treating this as a planning PR.",
+        "--publish-implementation-status-for-pr \"$PR_NUMBER\"",
         "github.event_name == 'pull_request_review'",
         "github.event_name == 'pull_request_review_comment'",
-        "github.event.pull_request.user.login != 'dependabot[bot]'",
         "PR_NUMBER: ${{ github.event.pull_request.number }}",
     ] {
         if !implementation_step.contains(required) {
             return Err(io::Error::other(format!(
-                "ordinary implementation blocker step is missing native merge-boundary behavior {required:?}"
+                "ordinary implementation status step is missing native merge-boundary behavior {required:?}"
             ))
             .into());
         }
@@ -8815,18 +8826,30 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     for required in [
         "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
         "--planned-issue \"$ISSUE_NUMBER\"",
-        "--rerun-implementation-gates-for-issue \"$ISSUE_NUMBER\"",
-        "implementation-gate-revalidation",
+        "--publish-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
+        "implementation-status-revalidation",
         "--enforce-closed-issue-blockers \"$ISSUE_NUMBER\"",
         "github.event_name == 'issues'",
         "timeout-minutes: 5",
         "contents: read",
         "issues: write",
-        "actions: write",
+        "statuses: write",
     ] {
         if !issueops_workflow.contains(required) {
             return Err(io::Error::other(format!(
                 "issue-event IssueOps workflow is missing readiness guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for obsolete in [
+        "--rerun-implementation-gates-for-issue",
+        "actions: write",
+        "gh run cancel",
+    ] {
+        if issueops_workflow.contains(obsolete) {
+            return Err(io::Error::other(format!(
+                "issue-event IssueOps workflow retains obsolete stale-run mechanism {obsolete:?}"
             ))
             .into());
         }
