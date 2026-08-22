@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -155,7 +158,7 @@ class ImplementationStatusCandidate:
 MAX_OPEN_PULL_REQUESTS = 1000
 NATIVE_RELATION_KINDS = {"blocked_by", "sub_issue"}
 NATIVE_RELATION_OPERATIONS = {"add", "remove"}
-MAX_AFFECTED_IMPLEMENTATION_PRS = 32
+STATUS_WORKERS = 8
 
 
 def run(args: list[str]) -> str:
@@ -1580,7 +1583,12 @@ def mutate_native_relationship_and_revalidate(
         raise SystemExit(
             "relationship dispatch preflight failed:\n" + "\n".join(failures)
         )
-    publish_pending_statuses(repo, candidates)
+    pending_failures = publish_pending_statuses(repo, candidates)
+    if pending_failures:
+        raise SystemExit(
+            "relationship dispatch pending phase failed:\n"
+            + "\n".join(pending_failures)
+        )
     mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
     post_mutation_snapshot = refresh_snapshot_graph_failures(
         repo, issue_map, release_graphs, snapshot
@@ -1678,11 +1686,6 @@ def build_issueops_snapshot(
     affected, selection_failures = affected_implementation_prs(
         repo, issue, pull_requests, release_graphs, additional_issues
     )
-    if len(affected) > MAX_AFFECTED_IMPLEMENTATION_PRS:
-        raise SystemExit(
-            "affected implementation PR snapshot exceeded the bounded limit of "
-            f"{MAX_AFFECTED_IMPLEMENTATION_PRS}; refusing to mutate or publish incomplete statuses"
-        )
     trigger_issues = (issue, *additional_issues)
     graph_milestones = {
         graph.milestone
@@ -1928,20 +1931,45 @@ def verify_live_candidate_head(
         )
 
 
+def run_bounded_status_work(
+    candidates: list[ImplementationStatusCandidate],
+    worker: object,
+) -> list[str]:
+    """Drain bounded status work while retaining every candidate failure."""
+
+    failures: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=STATUS_WORKERS) as executor:
+        for offset in range(0, len(candidates), STATUS_WORKERS):
+            batch = candidates[offset : offset + STATUS_WORKERS]
+            futures = [executor.submit(worker, candidate) for candidate in batch]
+            for candidate, future in zip(batch, futures):
+                try:
+                    future.result()
+                except BaseException as error:
+                    detail = str(error).strip() or error.__class__.__name__
+                    failures.append(f"PR #{candidate.number}: {detail}")
+    return failures
+
+
 def publish_pending_statuses(
     repo: str, candidates: list[ImplementationStatusCandidate]
-) -> None:
+) -> list[str]:
     """Establish pending status for every candidate before expensive evaluation."""
 
-    for candidate in candidates:
-        verify_live_candidate_head(repo, candidate)
-    for candidate in candidates:
-        commit_status(
+    head_failures = run_bounded_status_work(
+        candidates, lambda candidate: verify_live_candidate_head(repo, candidate)
+    )
+    if head_failures:
+        return head_failures
+    return run_bounded_status_work(
+        candidates,
+        lambda candidate: commit_status(
             repo,
             candidate.expected_sha,
             "pending",
             "Revalidating native implementation references",
-        )
+        ),
+    )
 
 
 def finalize_implementation_statuses(
@@ -1954,23 +1982,20 @@ def finalize_implementation_statuses(
 ) -> list[str]:
     """Evaluate all candidates after mutation, retaining pending/failure on errors."""
 
-    failures: list[str] = []
-    for candidate in candidates:
-        try:
-            publish_implementation_status_for_pr(
-                repo,
-                candidate.number,
-                root,
-                issue_map,
-                release_graphs,
-                candidate.pull_request,
-                expected_pr_head_sha=candidate.expected_sha,
-                snapshot=snapshot,
-                skip_pending=True,
-            )
-        except SystemExit as error:
-            failures.append(f"PR #{candidate.number}: {error}")
-    return failures
+    def finalize(candidate: ImplementationStatusCandidate) -> None:
+        publish_implementation_status_for_pr(
+            repo,
+            candidate.number,
+            root,
+            issue_map,
+            release_graphs,
+            candidate.pull_request,
+            expected_pr_head_sha=candidate.expected_sha,
+            snapshot=snapshot,
+            skip_pending=True,
+        )
+
+    return run_bounded_status_work(candidates, finalize)
 
 
 def refresh_snapshot_graph_failures(
@@ -2119,8 +2144,9 @@ def publish_implementation_statuses_for_issue(
     candidates, candidate_failures = prepare_implementation_status_candidates(affected)
     failures: list[str] = list(snapshot.selection_failures)
     failures.extend(candidate_failures)
-    if not candidate_failures:
-        publish_pending_statuses(repo, candidates)
+    pending_failures = publish_pending_statuses(repo, candidates)
+    failures.extend(pending_failures)
+    if not pending_failures:
         failures.extend(
             finalize_implementation_statuses(
                 repo, root, issue_map, release_graphs, snapshot, candidates
@@ -3509,42 +3535,157 @@ Mitigations:
         globals()["gh_json"] = lambda args: [{}] * MAX_OPEN_PULL_REQUESTS
         assert len(open_pull_requests_snapshot("owner/repo")) == MAX_OPEN_PULL_REQUESTS
         saved_open_snapshot = open_pull_requests_snapshot
-        selected_cap_prs = tuple(
-            {**implementation_pr, "number": 600 + index}
-            for index in range(MAX_AFFECTED_IMPLEMENTATION_PRS)
+        selected_prs = tuple(
+            {
+                **implementation_pr,
+                "number": 600 + index,
+                "headRefOid": f"{index:040d}",
+            }
+            for index in range(33)
         )
-        globals()["open_pull_requests_snapshot"] = lambda repo: selected_cap_prs
+        globals()["open_pull_requests_snapshot"] = lambda repo: selected_prs
+        saved_selected_issue_payload = issue_payload
+        globals()["issue_payload"] = lambda repo, issue: {"number": issue}
         exact_selected_snapshot, exact_selected = build_issueops_snapshot(
             "owner/repo", 10, {}, {}
         )
-        assert len(exact_selected) == MAX_AFFECTED_IMPLEMENTATION_PRS
+        assert len(exact_selected) == 33
         assert exact_selected_snapshot.selection_failures == ()
-        selected_cap_prs = tuple(
-            {**implementation_pr, "number": 700 + index}
-            for index in range(MAX_AFFECTED_IMPLEMENTATION_PRS + 1)
-        )
-        try:
-            build_issueops_snapshot("owner/repo", 10, {}, {})
-        except SystemExit as error:
-            assert "bounded limit of 32" in str(error)
-        else:
-            raise AssertionError("33 affected implementation PRs were accepted")
-        cap_mutations: list[tuple[object, ...]] = []
-        saved_cap_mutation = mutate_native_relationship
-        globals()["mutate_native_relationship"] = (
-            lambda *args: cap_mutations.append(args)
-        )
-        try:
-            mutate_native_relationship_and_revalidate(
-                "owner/repo", 10, 11, "blocked_by", "add", Path("."), {}, {}
-            )
-        except SystemExit as error:
-            assert "bounded limit of 32" in str(error)
-        else:
-            raise AssertionError("over-cap relationship dispatch was accepted")
-        assert cap_mutations == []
-        globals()["mutate_native_relationship"] = saved_cap_mutation
+        globals()["issue_payload"] = saved_selected_issue_payload
         globals()["open_pull_requests_snapshot"] = saved_open_snapshot
+
+        worker_saved = {
+            name: globals()[name]
+            for name in (
+                "verify_live_candidate_head",
+                "commit_status",
+                "publish_implementation_status_for_pr",
+            )
+        }
+        active_workers = 0
+        maximum_active_workers = 0
+        worker_lock = threading.Lock()
+
+        def record_bounded_work() -> None:
+            nonlocal active_workers, maximum_active_workers
+            with worker_lock:
+                active_workers += 1
+                maximum_active_workers = max(maximum_active_workers, active_workers)
+            time.sleep(0.0001)
+            with worker_lock:
+                active_workers -= 1
+
+        pending_heads: list[int] = []
+        pending_statuses: list[int] = []
+        final_statuses: list[int] = []
+
+        def fake_worker_head(repo: str, candidate: ImplementationStatusCandidate) -> None:
+            record_bounded_work()
+            pending_heads.append(candidate.number)
+
+        def fake_worker_status(
+            repo: str, sha: str, state: str, description: str
+        ) -> None:
+            record_bounded_work()
+            assert state == "pending"
+            pending_statuses.append(1)
+
+        def fake_worker_final(
+            repo: str,
+            number: int,
+            root: Path,
+            issue_map: dict[str, tuple[Owner, ...]],
+            release_graphs: dict[str, ReleaseGraph],
+            pull_request: dict[str, object] | None = None,
+            expected_pr_head_sha: str | None = None,
+            snapshot: IssueOpsSnapshot | None = None,
+            skip_pending: bool = False,
+        ) -> None:
+            record_bounded_work()
+            assert skip_pending
+            final_statuses.append(number)
+
+        globals()["verify_live_candidate_head"] = fake_worker_head
+        globals()["commit_status"] = fake_worker_status
+        globals()["publish_implementation_status_for_pr"] = fake_worker_final
+
+        def worker_candidates(count: int) -> list[ImplementationStatusCandidate]:
+            return [
+                ImplementationStatusCandidate(
+                    {"number": 800 + index, "headRefOid": f"{index:040d}"},
+                    800 + index,
+                    f"{index:040d}",
+                )
+                for index in range(count)
+            ]
+
+        thirty_three_candidates, selected_candidate_failures = (
+            prepare_implementation_status_candidates(exact_selected)
+        )
+        assert selected_candidate_failures == []
+        assert publish_pending_statuses("owner/repo", thirty_three_candidates) == []
+        assert finalize_implementation_statuses(
+            "owner/repo", Path("."), {}, {}, exact_selected_snapshot, thirty_three_candidates
+        ) == []
+        assert len(pending_heads) == 33
+        assert len(pending_statuses) == 33
+        assert len(final_statuses) == 33
+        assert sorted(pending_heads) == sorted(
+            candidate.number for candidate in thirty_three_candidates
+        )
+        assert sorted(final_statuses) == sorted(
+            candidate.number for candidate in thirty_three_candidates
+        )
+        assert maximum_active_workers <= STATUS_WORKERS
+
+        pending_heads.clear()
+        pending_statuses.clear()
+        final_statuses.clear()
+        thousand_candidates = worker_candidates(MAX_OPEN_PULL_REQUESTS)
+        assert publish_pending_statuses("owner/repo", thousand_candidates) == []
+        assert finalize_implementation_statuses(
+            "owner/repo", Path("."), {}, {}, exact_selected_snapshot, thousand_candidates
+        ) == []
+        assert len(pending_heads) == MAX_OPEN_PULL_REQUESTS
+        assert len(pending_statuses) == MAX_OPEN_PULL_REQUESTS
+        assert len(final_statuses) == MAX_OPEN_PULL_REQUESTS
+        assert maximum_active_workers <= STATUS_WORKERS
+
+        failure_candidates = worker_candidates(4)
+        pending_attempts: list[int] = []
+
+        def failing_worker_status(
+            repo: str, sha: str, state: str, description: str
+        ) -> None:
+            pending_attempts.append(int(sha[-3:]))
+            if pending_attempts[-1] == 1:
+                raise SystemExit("injected pending worker failure")
+
+        globals()["commit_status"] = failing_worker_status
+        pending_failures = publish_pending_statuses("owner/repo", failure_candidates)
+        assert len(pending_attempts) == len(failure_candidates)
+        assert any("injected pending worker failure" in failure for failure in pending_failures)
+
+        final_attempts: list[int] = []
+
+        def failing_worker_final(*args: object, **kwargs: object) -> None:
+            number = int(args[1])
+            final_attempts.append(number)
+            if number == 801:
+                raise SystemExit("injected final worker failure")
+
+        globals()["commit_status"] = saved_commit_status
+        globals()["publish_implementation_status_for_pr"] = failing_worker_final
+        final_failures = finalize_implementation_statuses(
+            "owner/repo", Path("."), {}, {}, exact_selected_snapshot, failure_candidates
+        )
+        assert sorted(final_attempts) == sorted(
+            candidate.number for candidate in failure_candidates
+        )
+        assert any("injected final worker failure" in failure for failure in final_failures)
+        for name, value in worker_saved.items():
+            globals()[name] = value
+
         malformed_refresh = {"number": 495, "closingIssuesReferences": None}
         affected, refresh_failures = affected_implementation_prs(
             "owner/repo",
@@ -3766,12 +3907,12 @@ Mitigations:
             for call in (" ".join(args) for args in status_api_calls)
         )
         status_paths = [args[0] for args in status_api_calls]
-        assert status_paths == [
+        assert sorted(status_paths) == sorted([
             f"repos/owner/repo/statuses/{relationship_pr_sha}",
             f"repos/owner/repo/statuses/{relationship_pr_two['headRefOid']}",
             f"repos/owner/repo/statuses/{relationship_pr_sha}",
             f"repos/owner/repo/statuses/{relationship_pr_two['headRefOid']}",
-        ]
+        ])
         assert "#492 is missing native sub-issue relation(s): #339" in " ".join(
             argument
             for call in status_api_calls
