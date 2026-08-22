@@ -43,12 +43,12 @@ jobs:
         run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
         with:
           tool: cargo-deny@0.20.2
 
       - name: Issue reference check
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
