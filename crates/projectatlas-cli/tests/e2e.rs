@@ -8818,6 +8818,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--rerun-implementation-gates-for-issue \"$ISSUE_NUMBER\"",
         "implementation-gate-revalidation",
         "--enforce-closed-issue-blockers \"$ISSUE_NUMBER\"",
+        "github.event_name == 'issues'",
         "timeout-minutes: 5",
         "contents: read",
         "issues: write",

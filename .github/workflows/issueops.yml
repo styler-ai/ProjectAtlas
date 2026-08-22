@@ -42,10 +42,7 @@ jobs:
     name: implementation-gate-revalidation
     if: >
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issues' &&
-      (github.event.action == 'edited' || github.event.action == 'reopened' ||
-      github.event.action == 'closed' || github.event.action == 'milestoned' ||
-      github.event.action == 'demilestoned'))
+      github.event_name == 'issues'
     permissions:
       actions: write
       contents: read

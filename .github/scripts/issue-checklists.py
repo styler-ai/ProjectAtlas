@@ -1540,19 +1540,34 @@ def rerun_implementation_gates(
         status = gate["status"]
         if status in {"queued", "in_progress", "waiting", "requested"}:
             run_id = positive_issue(gate.get("databaseId"), "workflow run id")
-            run(["gh", "run", "cancel", str(run_id), "--repo", repo])
+            cancel_error: SystemExit | None = None
+            try:
+                run(["gh", "run", "cancel", str(run_id), "--repo", repo])
+            except SystemExit as error:
+                # A run can finish between `run list` and `run cancel`.  Read its
+                # state before deciding whether this is that benign race or an
+                # authentication/network failure that must remain fatal.
+                cancel_error = error
             for attempt in range(20):
-                status_payload = gh_json(
-                    [
-                        "run",
-                        "view",
-                        str(run_id),
-                        "--repo",
-                        repo,
-                        "--json",
-                        "status",
-                    ]
-                )
+                try:
+                    status_payload = gh_json(
+                        [
+                            "run",
+                            "view",
+                            str(run_id),
+                            "--repo",
+                            repo,
+                            "--json",
+                            "status",
+                        ]
+                    )
+                except SystemExit as error:
+                    if cancel_error is None:
+                        raise
+                    raise SystemExit(
+                        f"unable to revalidate 01-CI verify run {run_id} after cancellation "
+                        f"failure ({cancel_error}): {error}"
+                    ) from error
                 if not isinstance(status_payload, dict):
                     raise SystemExit("GitHub workflow status response must be an object")
                 status = status_payload.get("status")
@@ -1565,6 +1580,17 @@ def rerun_implementation_gates(
                         f"01-CI verify run {run_id} did not become rerunnable after cancellation"
                     )
                 time.sleep(1)
+            if cancel_error is not None:
+                cancel_text = str(cancel_error).casefold()
+                if not (
+                    "already completed" in cancel_text
+                    or ("cancel" in cancel_text and "completed" in cancel_text)
+                    or "not in progress" in cancel_text
+                ):
+                    raise SystemExit(
+                        f"01-CI verify run {run_id} cancellation failed after status "
+                        f"revalidation: {cancel_error}"
+                    ) from cancel_error
         run_id = positive_issue(gate.get("databaseId"), "workflow run id")
         run(["gh", "run", "rerun", str(run_id), "--repo", repo])
         rerun_ids.append(run_id)
@@ -2787,6 +2813,55 @@ Mitigations:
             ["gh", "run", "cancel", "900", "--repo", "owner/repo"],
             ["gh", "run", "rerun", "900", "--repo", "owner/repo"],
         ]
+
+        cancel_race_statuses = iter([{"status": "completed"}])
+
+        def fake_cancel_race_gh_json(args: list[str]) -> object:
+            if args[:2] == ["pr", "list"]:
+                return [implementation_pr]
+            if args[:2] == ["run", "list"]:
+                return [in_progress_gate]
+            return next(cancel_race_statuses)
+
+        def fake_cancel_race_run(args: list[str]) -> str:
+            rerun_commands.append(args)
+            if args[2] == "cancel":
+                raise SystemExit("command failed: workflow run is already completed")
+            return ""
+
+        globals()["gh_json"] = fake_cancel_race_gh_json
+        globals()["run"] = fake_cancel_race_run
+        rerun_commands.clear()
+        assert rerun_implementation_gates("owner/repo", 10) == [900]
+        assert rerun_commands == [
+            ["gh", "run", "cancel", "900", "--repo", "owner/repo"],
+            ["gh", "run", "rerun", "900", "--repo", "owner/repo"],
+        ]
+
+        cancel_auth_statuses = iter([{"status": "completed"}])
+
+        def fake_cancel_auth_gh_json(args: list[str]) -> object:
+            if args[:2] == ["pr", "list"]:
+                return [implementation_pr]
+            if args[:2] == ["run", "list"]:
+                return [in_progress_gate]
+            return next(cancel_auth_statuses)
+
+        def fake_cancel_auth_run(args: list[str]) -> str:
+            rerun_commands.append(args)
+            raise SystemExit("command failed: authentication failed")
+
+        globals()["gh_json"] = fake_cancel_auth_gh_json
+        globals()["run"] = fake_cancel_auth_run
+        rerun_commands.clear()
+        try:
+            rerun_implementation_gates("owner/repo", 10)
+        except SystemExit as error:
+            assert "authentication failed" in str(error)
+        else:
+            raise AssertionError("cancellation authentication failure was swallowed")
+        assert rerun_commands == [["gh", "run", "cancel", "900", "--repo", "owner/repo"]]
+        globals()["run"] = lambda args: rerun_commands.append(args) or ""
 
         globals()["issue_payload"] = lambda repo, issue: {
             "number": issue,
