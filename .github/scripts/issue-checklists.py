@@ -1497,8 +1497,14 @@ def mutate_native_relationship(
         related_id = native_issue_id(repo, related_issue, "related issue")
         owner, name = repo_parts(repo)
         if relation_kind == "blocked_by":
-            path = f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by"
-            field = "issue_id"
+            if desired:
+                path = f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by"
+                field = "issue_id"
+            else:
+                path = (
+                    f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by/{related_id}"
+                )
+                field = None
         else:
             path = (
                 f"repos/{owner}/{name}/issues/{issue}/sub_issues"
@@ -1513,19 +1519,18 @@ def mutate_native_relationship(
                         f"related issue #{related_issue} already has native parent #{parent}"
                     )
         method = "POST" if desired else "DELETE"
-        run(
-            [
-                "gh",
-                "api",
-                path,
-                "--method",
-                method,
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                "-F",
-                f"{field}={related_id}",
-            ]
-        )
+        request = [
+            "gh",
+            "api",
+            path,
+            "--method",
+            method,
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ]
+        if field is not None:
+            request.extend(["-F", f"{field}={related_id}"])
+        run(request)
     actual = read_relation(repo, issue)
     if (related_issue in actual) != desired:
         raise SystemExit(
@@ -1547,8 +1552,23 @@ def mutate_native_relationship_and_revalidate(
     """Mutate one authorized edge, then run the shared affected-PR revalidation."""
 
     mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
+    relationship_issues = tuple(
+        sorted(
+            {
+                candidate
+                for graph in release_graphs.values()
+                if issue in graph.blocked_by or related_issue in graph.blocked_by
+                for candidate in graph.blocked_by
+            }
+        )
+    )
     publish_implementation_statuses_for_issue(
-        repo, issue, root, issue_map, release_graphs
+        repo,
+        issue,
+        root,
+        issue_map,
+        release_graphs,
+        additional_issues=relationship_issues,
     )
 
 
@@ -1586,11 +1606,15 @@ def affected_implementation_prs(
     issue: int,
     pull_requests: tuple[dict[str, object], ...],
     graphs: dict[str, ReleaseGraph],
+    additional_issues: tuple[int, ...] = (),
 ) -> tuple[list[dict[str, object]], list[str]]:
     """Select affected PRs while isolating malformed entries as failures."""
 
-    issue = positive_issue(issue, "issue number")
-    impacted = {issue}
+    impacted = {positive_issue(issue, "issue number")}
+    impacted.update(
+        positive_issue(candidate, "additional issue number")
+        for candidate in additional_issues
+    )
     changed = True
     while changed:
         changed = False
@@ -1623,17 +1647,22 @@ def build_issueops_snapshot(
     issue: int,
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
+    additional_issues: tuple[int, ...] = (),
 ) -> tuple[IssueOpsSnapshot, list[dict[str, object]]]:
     """Build one bounded immutable issue/graph/PR snapshot for a trigger."""
 
     pull_requests = open_pull_requests_snapshot(repo)
     affected, selection_failures = affected_implementation_prs(
-        repo, issue, pull_requests, release_graphs
+        repo, issue, pull_requests, release_graphs, additional_issues
     )
+    trigger_issues = (issue, *additional_issues)
     graph_milestones = {
         graph.milestone
         for graph in release_graphs.values()
-        if positive_issue(issue, "issue number") in graph.blocked_by
+        if any(
+            positive_issue(candidate, "trigger issue number") in graph.blocked_by
+            for candidate in trigger_issues
+        )
     }
     for pull_request in affected:
         references = pull_request.get("closingIssuesReferences", [])
@@ -1922,11 +1951,12 @@ def publish_implementation_statuses_for_issue(
     root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
+    additional_issues: tuple[int, ...] = (),
 ) -> None:
     """Refresh every affected PR from one bounded immutable live snapshot."""
 
     snapshot, affected = build_issueops_snapshot(
-        repo, issue, issue_map, release_graphs
+        repo, issue, issue_map, release_graphs, additional_issues
     )
     failures: list[str] = []
     failures.extend(snapshot.selection_failures)
@@ -3215,6 +3245,50 @@ Mitigations:
         mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "remove")
         assert sum("POST" in call for call in mutation_calls) == 2
         assert sum("DELETE" in call for call in mutation_calls) == 2
+        assert mutation_calls == [
+            [
+                "gh",
+                "api",
+                "repos/owner/repo/issues/10/dependencies/blocked_by",
+                "--method",
+                "POST",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                "-F",
+                "issue_id=1011",
+            ],
+            [
+                "gh",
+                "api",
+                "repos/owner/repo/issues/10/dependencies/blocked_by/1011",
+                "--method",
+                "DELETE",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+            ],
+            [
+                "gh",
+                "api",
+                "repos/owner/repo/issues/10/sub_issues",
+                "--method",
+                "POST",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                "-F",
+                "sub_issue_id=1011",
+            ],
+            [
+                "gh",
+                "api",
+                "repos/owner/repo/issues/10/sub_issue",
+                "--method",
+                "DELETE",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                "-F",
+                "sub_issue_id=1011",
+            ],
+        ]
         assert all(
             any(GITHUB_API_VERSION in argument for argument in call)
             for call in mutation_calls
@@ -3234,14 +3308,14 @@ Mitigations:
             )
         )
         globals()["publish_implementation_statuses_for_issue"] = (
-            lambda repo, issue, root, issue_map, release_graphs: mutation_revalidation.append(
-                (issue, issue)
+            lambda repo, issue, root, issue_map, release_graphs, additional_issues=(): mutation_revalidation.append(
+                (issue, issue, additional_issues)
             )
         )
         mutate_native_relationship_and_revalidate(
             "owner/repo", 10, 11, "blocked_by", "add", Path("."), {}, {}
         )
-        assert mutation_revalidation == [(10, 11), (10, 10)]
+        assert mutation_revalidation == [(10, 11), (10, 10, ())]
         globals()["mutate_native_relationship"] = saved_mutation
         globals()["publish_implementation_statuses_for_issue"] = saved_status_refresh
 
@@ -3321,6 +3395,133 @@ Mitigations:
         else:
             raise AssertionError("early-closed release root was accepted")
         assert rerun_commands == [["gh", "issue", "reopen", "12", "--repo", "owner/repo"]]
+
+        relationship_graphs = {
+            "v0.5.0-00": ReleaseGraph(
+                "v0.5.0-00", 492, {339: (), 492: (339,)}
+            )
+        }
+        relationship_pr_sha = "d" * 40
+        relationship_pr = {
+            "number": 500,
+            "headRefOid": relationship_pr_sha,
+            "closingIssuesReferences": [
+                {
+                    "number": 339,
+                    "repository": {"name": "repo", "owner": {"login": "owner"}},
+                }
+            ],
+            "author": {"login": "atlas"},
+        }
+        behavior_saved = {
+            name: globals()[name]
+            for name in (
+                "gh_json",
+                "gh_api_json",
+                "run",
+                "issue_payload",
+                "native_sub_issues",
+                "native_issue_id",
+                "check_openspec_tasks",
+                "planned_issue_failures",
+                "release_graph_failures",
+            )
+        }
+        relationship_sub_issues = {339}
+        status_api_calls: list[list[str]] = []
+
+        def relationship_gh_json(args: list[str]) -> object:
+            if args[:2] == ["pr", "list"]:
+                return [relationship_pr]
+            if args[:2] == ["pr", "view"]:
+                return {"number": 500, "headRefOid": relationship_pr_sha}
+            raise AssertionError(f"unexpected relationship snapshot command: {args}")
+
+        def relationship_gh_api_json(args: list[str]) -> object:
+            status_api_calls.append(args)
+            return {}
+
+        def relationship_run(args: list[str]) -> str:
+            assert args == [
+                "gh",
+                "api",
+                "repos/owner/repo/issues/492/sub_issue",
+                "--method",
+                "DELETE",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                "-F",
+                "sub_issue_id=1339",
+            ]
+            relationship_sub_issues.remove(339)
+            return "{}"
+
+        def relationship_issue_payload(repo: str, issue: int) -> dict[str, object]:
+            return {
+                "number": issue,
+                "state": "CLOSED",
+                "milestone": {"title": "v0.5.0-00"},
+            }
+
+        def relationship_graph_failures(
+            repo: str,
+            graphs: dict[str, ReleaseGraph],
+            issue_map: dict[str, tuple[Owner, ...]],
+            milestones: set[str] | None = None,
+        ) -> list[str]:
+            assert milestones == {"v0.5.0-00"}
+            return ["#492 is missing native sub-issue relation(s): #339"]
+
+        globals()["gh_json"] = relationship_gh_json
+        globals()["gh_api_json"] = relationship_gh_api_json
+        globals()["run"] = relationship_run
+        globals()["issue_payload"] = relationship_issue_payload
+        globals()["native_sub_issues"] = (
+            lambda repo, issue: set(relationship_sub_issues)
+        )
+        globals()["native_issue_id"] = lambda repo, issue, label: issue + 1000
+        globals()["check_openspec_tasks"] = lambda *args, **kwargs: []
+        globals()["planned_issue_failures"] = lambda *args, **kwargs: []
+        globals()["release_graph_failures"] = relationship_graph_failures
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                492,
+                339,
+                "sub_issue",
+                "remove",
+                Path("."),
+                {},
+                relationship_graphs,
+            )
+        except SystemExit as error:
+            assert "affected implementation status publication failed" in str(error)
+        else:
+            raise AssertionError("relationship drift did not fail child implementation status")
+        assert relationship_sub_issues == set()
+        assert len(status_api_calls) == 2
+        status_states = [
+            argument.split("=", 1)[1]
+            for call in status_api_calls
+            for argument in call
+            if argument.startswith("state=")
+        ]
+        assert status_states == ["pending", "failure"]
+        assert all(
+            "context=issueops-implementation" in call
+            for call in (" ".join(args) for args in status_api_calls)
+        )
+        assert all(
+            f"statuses/{relationship_pr_sha}" in args[0] for args in status_api_calls
+        )
+        assert "#492 is missing native sub-issue relation(s): #339" in " ".join(
+            argument
+            for call in status_api_calls
+            for argument in call
+            if argument.startswith("description=")
+        )
+        for name, value in behavior_saved.items():
+            globals()[name] = value
     finally:
         globals()["milestone_issues"] = saved_milestone_issues
         globals()["native_blocked_by"] = saved_native_blocked_by
