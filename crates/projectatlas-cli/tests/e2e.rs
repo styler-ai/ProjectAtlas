@@ -8687,6 +8687,14 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary checkout step is missing"))?;
+    if !ci.contains(
+        "pull_request:\n    branches: [main, dev]\n    types: [opened, edited, synchronize, reopened]",
+    ) {
+        return Err(io::Error::other(
+            "pull_request CI must rerun on body edits while retaining the ordinary activity types",
+        )
+        .into());
+    }
     if !checkout_step.contains(
         "ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}",
     )
@@ -8754,7 +8762,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .ok_or_else(|| io::Error::other("ordinary implementation blocker step is missing"))?;
     for required in [
         "closingIssuesReferences",
-        "--implementation-issue \"$issue_number\"",
+        "closingIssuesReferences[]? | @json",
+        "--implementation-issue-reference \"$issue_reference\"",
         "No GitHub-native closing issue references; treating this as a planning PR.",
         "github.event_name == 'pull_request_review'",
         "github.event_name == 'pull_request_review_comment'",

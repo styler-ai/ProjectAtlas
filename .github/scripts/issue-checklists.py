@@ -1301,6 +1301,21 @@ def native_relation_issue_number(
             if not isinstance(full_name, str):
                 raise SystemExit(f"GitHub returned {label} with malformed repository identity")
             identities.append(full_name.casefold() == expected_full_name)
+        repository_name = repository.get("name")
+        repository_owner = repository.get("owner")
+        if repository_name is not None or repository_owner is not None:
+            if not isinstance(repository_name, str) or not isinstance(repository_owner, dict):
+                raise SystemExit(
+                    f"GitHub returned {label} with malformed repository identity"
+                )
+            owner_login = repository_owner.get("login")
+            if not isinstance(owner_login, str):
+                raise SystemExit(
+                    f"GitHub returned {label} with malformed repository identity"
+                )
+            identities.append(
+                f"{owner_login}/{repository_name}".casefold() == expected_full_name
+            )
     if not identities or not all(identities):
         raise SystemExit(
             f"GitHub returned {label} without the exact {repo} repository identity"
@@ -2320,6 +2335,16 @@ Mitigations:
         globals()["gh_api_json"] = fake_gh_api_json
         assert native_blocked_by("owner/repo", 10) == {11}
         assert native_sub_issues("owner/repo", 12) == {10, 11}
+        local_closing_reference = {
+            "number": 11,
+            "repository": {"name": "repo", "owner": {"login": "owner"}},
+        }
+        assert (
+            native_relation_issue_number(
+                "owner/repo", local_closing_reference, "closing issue reference"
+            )
+            == 11
+        )
 
         class FakeProcess:
             def __init__(self, payload: object) -> None:
@@ -2335,6 +2360,10 @@ Mitigations:
         foreign_identity = {
             "repository_url": "https://api.github.com/repos/foreign/repo",
             "number": 11,
+        }
+        foreign_closing_reference = {
+            "number": 11,
+            "repository": {"name": "repo", "owner": {"login": "foreign"}},
         }
         conflicting_identity = {
             **local_identity,
@@ -2360,10 +2389,22 @@ Mitigations:
             assert "exact owner/repo repository identity" in str(error)
         else:
             raise AssertionError("conflicting native identities were accepted")
+        try:
+            native_relation_issue_number(
+                "owner/repo", foreign_closing_reference, "closing issue reference"
+            )
+        except SystemExit as error:
+            assert "exact owner/repo repository identity" in str(error)
+        else:
+            raise AssertionError("foreign closing issue reference was accepted")
         for malformed in (
             {"number": 11},
             {"number": 11, "repository_url": 12},
             {"number": 11, "repository": {"full_name": 12}},
+            {
+                "number": 11,
+                "repository": {"name": "repo", "owner": {"login": 12}},
+            },
         ):
             try:
                 native_relation_issue_number("owner/repo", malformed, "native relation")
@@ -2630,6 +2671,10 @@ def main() -> None:
         type=int,
         help="require every direct release-graph blocker to be closed",
     )
+    issue_mode.add_argument(
+        "--implementation-issue-reference",
+        help="validate a JSON GitHub native closing issue reference and require its blockers to be closed",
+    )
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -2644,7 +2689,18 @@ def main() -> None:
     failures: list[str] = []
     issue_map = load_issue_map(args.issue_map)
     release_graphs = load_release_graphs(args.issue_map, issue_map)
-    issue_number = args.planned_issue or args.implementation_issue
+    implementation_issue = args.implementation_issue
+    if args.implementation_issue_reference is not None:
+        try:
+            implementation_reference = json.loads(args.implementation_issue_reference)
+        except json.JSONDecodeError as error:
+            raise SystemExit(
+                f"GitHub closing issue reference was not valid JSON: {error}"
+            ) from error
+        implementation_issue = native_relation_issue_number(
+            args.repo, implementation_reference, "closing issue reference"
+        )
+    issue_number = args.planned_issue or implementation_issue
     target_issue: dict[str, object] | None = None
     target_graph: ReleaseGraph | None = None
     if issue_number is not None:
@@ -2661,7 +2717,7 @@ def main() -> None:
                 issue_map,
                 planned_issue=args.planned_issue
                 if args.planned_issue is not None
-                else args.implementation_issue,
+                else implementation_issue,
             )
         )
     if target_issue is not None:
@@ -2670,7 +2726,7 @@ def main() -> None:
                 target_issue, issue_map, root
             )
         )
-    if args.implementation_issue is not None and target_issue is not None:
+    if implementation_issue is not None and target_issue is not None:
         failures.extend(
             implementation_issue_failures(args.repo, target_issue, release_graphs)
         )
