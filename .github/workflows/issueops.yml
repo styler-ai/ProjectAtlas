@@ -61,11 +61,12 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'issues'
-    # Native concurrency has one running plus one pending slot, not a lossless queue.
+    # Native concurrency supersedes stale publishers; its pending slot is not a lossless queue.
+    # A canceled relationship dispatch is visibly non-successful, cannot claim mutation/readback, and is safe to retry.
     # Every surviving publisher reconciles all declared release-graph PRs.
     concurrency:
       group: issueops-implementation-revalidation-${{ github.repository }}
-      cancel-in-progress: false
+      cancel-in-progress: true
     permissions:
       contents: read
       issues: write

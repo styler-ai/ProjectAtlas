@@ -3870,11 +3870,13 @@ Mitigations:
             coalesced_final_numbers.append(number)
 
         globals()["publish_implementation_status_for_pr"] = coalesced_final
-        coalesced_issue_events = (310, 339, 314)
-        assert coalesced_issue_events[-1] == 314
+        # GitHub-native concurrency cancels stale A before it can finalize; this
+        # local half proves surviving C still refreshes B's disjoint PR.
+        coalesced_issue_events = {"A": 310, "B": 339, "C": 314}
+        assert coalesced_issue_events["C"] == 314
         publish_implementation_statuses_for_issue(
             "owner/repo",
-            coalesced_issue_events[-1],
+            coalesced_issue_events["C"],
             Path("."),
             {},
             coalesced_graphs,
