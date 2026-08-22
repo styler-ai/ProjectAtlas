@@ -133,6 +133,21 @@ class ReleaseGraph:
     blocked_by: dict[int, tuple[int, ...]]
 
 
+@dataclass(frozen=True)
+class IssueOpsSnapshot:
+    """One bounded live snapshot shared by all affected PR evaluations."""
+
+    pull_requests: tuple[dict[str, object], ...]
+    issue_payloads: dict[int, dict[str, object]]
+    graph_failures: dict[str, tuple[str, ...]]
+    selection_failures: tuple[str, ...]
+
+
+MAX_OPEN_PULL_REQUESTS = 1000
+NATIVE_RELATION_KINDS = {"blocked_by", "sub_issue"}
+NATIVE_RELATION_OPERATIONS = {"add", "remove"}
+
+
 def run(args: list[str]) -> str:
     """Run one fixed command without a shell."""
 
@@ -1166,6 +1181,7 @@ def check_openspec_tasks(
     root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
     planned_issue: int | None = None,
+    issue_payloads: dict[int, dict[str, object]] | None = None,
 ) -> list[str]:
     failures: list[str] = []
     for change, owners in sorted(issue_map.items()):
@@ -1177,7 +1193,11 @@ def check_openspec_tasks(
         for owner, expected in owner_slices(path, tasks, owners):
             if planned_issue is not None and owner.issue != planned_issue:
                 continue
-            payload = issue_payload(repo, owner.issue)
+            payload = (
+                issue_payloads[owner.issue]
+                if issue_payloads is not None and owner.issue in issue_payloads
+                else issue_payload(repo, owner.issue)
+            )
             remote = issue_checklist_tasks(payload)
             print(
                 f"#{owner.issue} {change}: local {len(expected)} / "
@@ -1422,6 +1442,248 @@ def native_parent_issue(repo: str, issue: int) -> int | None:
     return native_relation_issue_number(repo, payload, "parent issue number")
 
 
+def native_issue_id(repo: str, issue: int, label: str) -> int:
+    """Read one repository-local issue id for a native relation mutation."""
+
+    issue = positive_issue(issue, "issue number")
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            f"repos/{owner}/{name}/issues/{issue}",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ]
+    )
+    if not isinstance(payload, dict):
+        raise SystemExit(f"GitHub returned {label} as a non-object")
+    returned_number = native_relation_issue_number(repo, payload, label)
+    if returned_number != issue:
+        raise SystemExit(
+            f"GitHub returned {label} #{returned_number}, expected repository-local issue #{issue}"
+        )
+    return positive_issue(payload.get("id"), f"{label} id")
+
+
+def mutate_native_relationship(
+    repo: str,
+    issue: int,
+    related_issue: int,
+    relation_kind: str,
+    operation: str,
+) -> None:
+    """Apply one idempotent native edge and require an exact read-back."""
+
+    issue = positive_issue(issue, "issue number")
+    related_issue = positive_issue(related_issue, "related issue number")
+    if issue == related_issue:
+        raise SystemExit("native relationship cannot relate an issue to itself")
+    if relation_kind not in NATIVE_RELATION_KINDS:
+        raise SystemExit(
+            f"native relation kind must be one of {sorted(NATIVE_RELATION_KINDS)}, "
+            f"got {relation_kind!r}"
+        )
+    if operation not in NATIVE_RELATION_OPERATIONS:
+        raise SystemExit(
+            f"native relation operation must be one of {sorted(NATIVE_RELATION_OPERATIONS)}, "
+            f"got {operation!r}"
+        )
+    read_relation = native_blocked_by if relation_kind == "blocked_by" else native_sub_issues
+    current = read_relation(repo, issue)
+    desired = operation == "add"
+    present = related_issue in current
+    if desired != present:
+        related_id = native_issue_id(repo, related_issue, "related issue")
+        owner, name = repo_parts(repo)
+        if relation_kind == "blocked_by":
+            path = f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by"
+            field = "issue_id"
+        else:
+            path = (
+                f"repos/{owner}/{name}/issues/{issue}/sub_issues"
+                if desired
+                else f"repos/{owner}/{name}/issues/{issue}/sub_issue"
+            )
+            field = "sub_issue_id"
+            if desired:
+                parent = native_parent_issue(repo, related_issue)
+                if parent is not None and parent != issue:
+                    raise SystemExit(
+                        f"related issue #{related_issue} already has native parent #{parent}"
+                    )
+        method = "POST" if desired else "DELETE"
+        run(
+            [
+                "gh",
+                "api",
+                path,
+                "--method",
+                method,
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                "-F",
+                f"{field}={related_id}",
+            ]
+        )
+    actual = read_relation(repo, issue)
+    if (related_issue in actual) != desired:
+        raise SystemExit(
+            f"native {relation_kind} {operation} read-back did not produce the requested edge "
+            f"#{issue} -> #{related_issue}"
+        )
+
+
+def mutate_native_relationship_and_revalidate(
+    repo: str,
+    issue: int,
+    related_issue: int,
+    relation_kind: str,
+    operation: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+) -> None:
+    """Mutate one authorized edge, then run the shared affected-PR revalidation."""
+
+    mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
+    publish_implementation_statuses_for_issue(
+        repo, issue, root, issue_map, release_graphs
+    )
+
+
+def open_pull_requests_snapshot(repo: str) -> tuple[dict[str, object], ...]:
+    """Read one bounded open-PR snapshot and reject truncation at the cap."""
+
+    pull_requests = gh_json(
+        [
+            "pr",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(MAX_OPEN_PULL_REQUESTS + 1),
+            "--json",
+            "number,headRefOid,closingIssuesReferences,author",
+        ]
+    )
+    if not isinstance(pull_requests, list):
+        raise SystemExit("GitHub open pull-request response must be an array")
+    if len(pull_requests) > MAX_OPEN_PULL_REQUESTS:
+        raise SystemExit(
+            "open pull-request snapshot exceeded the bounded limit; "
+            "refusing to publish incomplete affected statuses"
+        )
+    if not all(isinstance(item, dict) for item in pull_requests):
+        raise SystemExit("GitHub open pull-request response contained a non-object")
+    return tuple(pull_requests)
+
+
+def affected_implementation_prs(
+    repo: str,
+    issue: int,
+    pull_requests: tuple[dict[str, object], ...],
+    graphs: dict[str, ReleaseGraph],
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Select affected PRs while isolating malformed entries as failures."""
+
+    issue = positive_issue(issue, "issue number")
+    impacted = {issue}
+    changed = True
+    while changed:
+        changed = False
+        for graph in graphs.values():
+            for candidate, blockers in graph.blocked_by.items():
+                if candidate not in impacted and impacted.intersection(blockers):
+                    impacted.add(candidate)
+                    changed = True
+    affected: list[dict[str, object]] = []
+    failures: list[str] = []
+    for pull_request in pull_requests:
+        number = pull_request.get("number", "unknown")
+        try:
+            references = pull_request.get("closingIssuesReferences")
+            if not isinstance(references, list):
+                raise SystemExit("malformed closing references")
+            if any(
+                native_relation_issue_number(repo, reference, "closing issue reference")
+                in impacted
+                for reference in references
+            ):
+                affected.append(pull_request)
+        except BaseException as error:
+            failures.append(f"PR #{number}: {error}")
+    return affected, failures
+
+
+def build_issueops_snapshot(
+    repo: str,
+    issue: int,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+) -> tuple[IssueOpsSnapshot, list[dict[str, object]]]:
+    """Build one bounded immutable issue/graph/PR snapshot for a trigger."""
+
+    pull_requests = open_pull_requests_snapshot(repo)
+    affected, selection_failures = affected_implementation_prs(
+        repo, issue, pull_requests, release_graphs
+    )
+    graph_milestones = {
+        graph.milestone
+        for graph in release_graphs.values()
+        if positive_issue(issue, "issue number") in graph.blocked_by
+    }
+    for pull_request in affected:
+        references = pull_request.get("closingIssuesReferences", [])
+        if isinstance(references, list):
+            for reference in references:
+                try:
+                    reference_number = native_relation_issue_number(
+                        repo, reference, "closing issue reference"
+                    )
+                except BaseException:
+                    continue
+                graph = graph_for_issue(release_graphs, reference_number)
+                if graph is not None:
+                    graph_milestones.add(graph.milestone)
+    relevant_graphs = {
+        milestone: graph
+        for milestone, graph in release_graphs.items()
+        if milestone in graph_milestones
+    }
+    issue_numbers = {positive_issue(issue, "issue number")}
+    for graph in relevant_graphs.values():
+        issue_numbers.update(graph.blocked_by)
+    for pull_request in affected:
+        references = pull_request.get("closingIssuesReferences", [])
+        if isinstance(references, list):
+            for reference in references:
+                try:
+                    issue_numbers.add(
+                        native_relation_issue_number(repo, reference, "closing issue reference")
+                    )
+                except BaseException:
+                    pass
+    issue_payloads = {
+        number: issue_payload(repo, number) for number in sorted(issue_numbers)
+    }
+    graph_failures = {
+        milestone: tuple(
+            release_graph_failures(repo, relevant_graphs, issue_map, {milestone})
+        )
+        for milestone in sorted(relevant_graphs)
+    }
+    snapshot = IssueOpsSnapshot(
+        pull_requests=pull_requests,
+        issue_payloads=issue_payloads,
+        graph_failures=graph_failures,
+        selection_failures=tuple(selection_failures),
+    )
+    return snapshot, affected
+
+
 def implementation_prs_for_issue(
     repo: str,
     issue: int,
@@ -1497,15 +1759,35 @@ def implementation_reference_failures(
     root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
+    snapshot: IssueOpsSnapshot | None = None,
 ) -> list[str]:
     """Run the default-branch implementation checker for one native reference."""
 
     number = native_relation_issue_number(repo, reference, "closing issue reference")
-    issue = issue_payload(repo, number)
+    issue = (
+        snapshot.issue_payloads[number]
+        if snapshot is not None and number in snapshot.issue_payloads
+        else issue_payload(repo, number)
+    )
     target_graph, failures = target_graph_failures(issue, release_graphs)
-    failures.extend(check_openspec_tasks(repo, root, issue_map, planned_issue=number))
+    failures.extend(
+        check_openspec_tasks(
+            repo,
+            root,
+            issue_map,
+            planned_issue=number,
+            issue_payloads=snapshot.issue_payloads if snapshot is not None else None,
+        )
+    )
     failures.extend(planned_issue_failures(issue, issue_map, root))
-    failures.extend(implementation_issue_failures(repo, issue, release_graphs))
+    failures.extend(
+        implementation_issue_failures(
+            repo,
+            issue,
+            release_graphs,
+            issue_payloads=snapshot.issue_payloads if snapshot is not None else None,
+        )
+    )
     graph_milestones: set[str] = set()
     if target_graph is not None:
         graph_milestones.add(target_graph.milestone)
@@ -1513,14 +1795,18 @@ def implementation_reference_failures(
         milestone = issue.get("milestone")
         if isinstance(milestone, dict) and isinstance(milestone.get("title"), str):
             graph_milestones.add(milestone["title"])
-    failures.extend(
-        release_graph_failures(
-            repo,
-            release_graphs,
-            issue_map,
-            graph_milestones or None,
+    if snapshot is not None:
+        for milestone in sorted(graph_milestones):
+            failures.extend(snapshot.graph_failures.get(milestone, ()))
+    else:
+        failures.extend(
+            release_graph_failures(
+                repo,
+                release_graphs,
+                issue_map,
+                graph_milestones or None,
+            )
         )
-    )
     return failures
 
 
@@ -1531,6 +1817,8 @@ def publish_implementation_status_for_pr(
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
     pull_request: dict[str, object] | None = None,
+    expected_pr_head_sha: str | None = None,
+    snapshot: IssueOpsSnapshot | None = None,
 ) -> None:
     """Validate live native references and publish pending then final status."""
 
@@ -1554,6 +1842,12 @@ def publish_implementation_status_for_pr(
     sha = pull_request.get("headRefOid")
     if not isinstance(sha, str):
         raise SystemExit(f"GitHub pull request #{number} is missing its head commit")
+    expected_sha = expected_pr_head_sha or sha
+    if sha != expected_sha:
+        raise SystemExit(
+            f"PR #{number} head changed before status publication: expected {expected_sha}, "
+            f"found {sha}"
+        )
     references = pull_request.get("closingIssuesReferences")
     if not isinstance(references, list):
         raise SystemExit(
@@ -1572,7 +1866,12 @@ def publish_implementation_status_for_pr(
             try:
                 failures.extend(
                     implementation_reference_failures(
-                        repo, reference, root, issue_map, release_graphs
+                        repo,
+                        reference,
+                        root,
+                        issue_map,
+                        release_graphs,
+                        snapshot,
                     )
                 )
             except SystemExit as error:
@@ -1584,9 +1883,28 @@ def publish_implementation_status_for_pr(
             if not failures
             else "Native implementation references failed: " + clean(failures[0])
         )[:140]
+    live_pull_request = gh_json(
+        [
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            repo,
+            "--json",
+            "number,headRefOid",
+        ]
+    )
+    if not isinstance(live_pull_request, dict):
+        raise SystemExit(f"GitHub pull request #{number} head read-back was not an object")
+    live_sha = live_pull_request.get("headRefOid")
+    if live_sha != expected_sha:
+        raise SystemExit(
+            f"PR #{number} head changed before status publication: expected {expected_sha}, "
+            f"found {live_sha or 'missing'}"
+        )
     state = "success" if not failures else "failure"
     try:
-        commit_status(repo, sha, state, description)
+        commit_status(repo, expected_sha, state, description)
     except SystemExit as error:
         raise SystemExit(
             f"unable to publish {IMPLEMENTATION_STATUS_CONTEXT} for PR #{number}: {error}"
@@ -1605,29 +1923,25 @@ def publish_implementation_statuses_for_issue(
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
 ) -> None:
-    """Refresh statuses for open PRs affected by one changed release issue."""
+    """Refresh every affected PR from one bounded immutable live snapshot."""
 
-    pull_requests = gh_json(
-        [
-            "pr",
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "open",
-            "--limit",
-            "1000",
-            "--json",
-            "number,headRefOid,closingIssuesReferences,author",
-        ]
+    snapshot, affected = build_issueops_snapshot(
+        repo, issue, issue_map, release_graphs
     )
-    affected = implementation_prs_for_issue(repo, issue, pull_requests, release_graphs)
     failures: list[str] = []
+    failures.extend(snapshot.selection_failures)
     for pull_request in affected:
-        number = positive_issue(pull_request.get("number"), "pull request number")
+        number = pull_request.get("number", "unknown")
         try:
+            number = positive_issue(number, "pull request number")
             publish_implementation_status_for_pr(
-                repo, number, root, issue_map, release_graphs, pull_request
+                repo,
+                number,
+                root,
+                issue_map,
+                release_graphs,
+                pull_request,
+                snapshot=snapshot,
             )
         except SystemExit as error:
             failures.append(f"PR #{number}: {error}")
@@ -1806,7 +2120,10 @@ def target_graph_failures(
 
 
 def implementation_issue_failures(
-    repo: str, issue: dict[str, object], graphs: dict[str, ReleaseGraph]
+    repo: str,
+    issue: dict[str, object],
+    graphs: dict[str, ReleaseGraph],
+    issue_payloads: dict[int, dict[str, object]] | None = None,
 ) -> list[str]:
     """Require every declared direct blocker of an issue to be closed."""
 
@@ -1817,7 +2134,11 @@ def implementation_issue_failures(
     failures: list[str] = []
     for blocker in graph.blocked_by[number]:
         try:
-            blocker_issue = issue_payload(repo, blocker)
+            blocker_issue = (
+                issue_payloads[blocker]
+                if issue_payloads is not None and blocker in issue_payloads
+                else issue_payload(repo, blocker)
+            )
         except BaseException as error:
             failures.append(_live_graph_failure(f"reading blocker #{blocker}", error))
             continue
@@ -2543,6 +2864,7 @@ Mitigations:
     saved_native_blocked_by = globals()["native_blocked_by"]
     saved_native_sub_issues = globals()["native_sub_issues"]
     saved_native_parent_issue = globals()["native_parent_issue"]
+    saved_native_issue_id = globals()["native_issue_id"]
     saved_issue_payload = globals()["issue_payload"]
     saved_gh_json = globals()["gh_json"]
     saved_run = globals()["run"]
@@ -2786,8 +3108,8 @@ Mitigations:
         status_issue_calls: list[int] = []
         saved_status_publisher = publish_implementation_status_for_pr
         globals()["publish_implementation_status_for_pr"] = (
-            lambda repo, number, root, issue_map, release_graphs, pull_request=None:
-            status_issue_calls.append(number)
+            lambda repo, number, root, issue_map, release_graphs, pull_request=None,
+            expected_pr_head_sha=None, snapshot=None: status_issue_calls.append(number)
         )
         globals()["gh_json"] = lambda args: [implementation_pr]
         publish_implementation_statuses_for_issue(
@@ -2836,6 +3158,111 @@ Mitigations:
         assert all(
             IMPLEMENTATION_STATUS_CONTEXT in call for call in (" ".join(args) for args in status_calls)
         )
+
+        status_calls.clear()
+        changed_heads = iter(
+            [implementation_pr, {**implementation_pr, "headRefOid": "b" * 40}]
+        )
+        globals()["gh_json"] = lambda args: next(changed_heads)
+        try:
+            publish_implementation_status_for_pr(
+                "owner/repo",
+                494,
+                Path("."),
+                {},
+                {},
+                expected_pr_head_sha="a" * 40,
+            )
+        except SystemExit as error:
+            assert "head changed before status publication" in str(error)
+        else:
+            raise AssertionError("changed PR head was accepted")
+        status_states = [
+            argument.split("=", 1)[1]
+            for call in status_calls
+            for argument in call
+            if argument.startswith("state=")
+        ]
+        assert status_states == ["pending"]
+
+        mutation_calls: list[list[str]] = []
+        blocked_edges: set[int] = set()
+        sub_issue_edges: set[int] = set()
+        globals()["native_blocked_by"] = lambda repo, issue: set(blocked_edges)
+        globals()["native_sub_issues"] = lambda repo, issue: set(sub_issue_edges)
+        globals()["native_parent_issue"] = lambda repo, issue: None
+        globals()["native_issue_id"] = lambda repo, issue, label: issue + 1000
+
+        def fake_mutation_run(args: list[str]) -> str:
+            mutation_calls.append(args)
+            if "POST" in args:
+                if "blocked_by" in args[2]:
+                    blocked_edges.add(11)
+                else:
+                    sub_issue_edges.add(11)
+            elif "DELETE" in args:
+                if "blocked_by" in args[2]:
+                    blocked_edges.discard(11)
+                else:
+                    sub_issue_edges.discard(11)
+            return "{}"
+
+        globals()["run"] = fake_mutation_run
+        mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add")
+        mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add")
+        mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "remove")
+        mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "add")
+        mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "remove")
+        assert sum("POST" in call for call in mutation_calls) == 2
+        assert sum("DELETE" in call for call in mutation_calls) == 2
+        assert all(
+            any(GITHUB_API_VERSION in argument for argument in call)
+            for call in mutation_calls
+        )
+        try:
+            mutate_native_relationship("owner/repo", 10, 10, "blocked_by", "add")
+        except SystemExit as error:
+            assert "itself" in str(error)
+        else:
+            raise AssertionError("self native relation was accepted")
+        mutation_revalidation: list[tuple[int, int]] = []
+        saved_mutation = mutate_native_relationship
+        saved_status_refresh = publish_implementation_statuses_for_issue
+        globals()["mutate_native_relationship"] = (
+            lambda repo, issue, related_issue, relation_kind, operation: mutation_revalidation.append(
+                (issue, related_issue)
+            )
+        )
+        globals()["publish_implementation_statuses_for_issue"] = (
+            lambda repo, issue, root, issue_map, release_graphs: mutation_revalidation.append(
+                (issue, issue)
+            )
+        )
+        mutate_native_relationship_and_revalidate(
+            "owner/repo", 10, 11, "blocked_by", "add", Path("."), {}, {}
+        )
+        assert mutation_revalidation == [(10, 11), (10, 10)]
+        globals()["mutate_native_relationship"] = saved_mutation
+        globals()["publish_implementation_statuses_for_issue"] = saved_status_refresh
+
+        globals()["gh_json"] = lambda args: [{}] * (MAX_OPEN_PULL_REQUESTS + 1)
+        try:
+            open_pull_requests_snapshot("owner/repo")
+        except SystemExit as error:
+            assert "bounded limit" in str(error)
+        else:
+            raise AssertionError("truncated open-PR snapshot was accepted")
+        globals()["gh_json"] = lambda args: [{}] * MAX_OPEN_PULL_REQUESTS
+        assert len(open_pull_requests_snapshot("owner/repo")) == MAX_OPEN_PULL_REQUESTS
+        malformed_refresh = {"number": 495, "closingIssuesReferences": None}
+        affected, refresh_failures = affected_implementation_prs(
+            "owner/repo",
+            10,
+            (implementation_pr, malformed_refresh),
+            dependent_graphs,
+        )
+        assert affected == [implementation_pr]
+        assert any("PR #495" in failure for failure in refresh_failures)
 
         status_pr = {**implementation_pr, "closingIssuesReferences": []}
         status_calls.clear()
@@ -2899,6 +3326,7 @@ Mitigations:
         globals()["native_blocked_by"] = saved_native_blocked_by
         globals()["native_sub_issues"] = saved_native_sub_issues
         globals()["native_parent_issue"] = saved_native_parent_issue
+        globals()["native_issue_id"] = saved_native_issue_id
         globals()["issue_payload"] = saved_issue_payload
         globals()["gh_json"] = saved_gh_json
         globals()["run"] = saved_run
@@ -3071,10 +3499,23 @@ def main() -> None:
         help="publish the current-policy implementation status for one PR head",
     )
     parser.add_argument(
+        "--expected-pr-head-sha",
+        help="immutable PR head SHA from the triggering pull-request event",
+    )
+    parser.add_argument(
         "--publish-implementation-statuses-for-issue",
         type=int,
         help="publish current-policy implementation statuses for affected open PRs",
     )
+    parser.add_argument(
+        "--mutate-native-relationship",
+        action="store_true",
+        help="apply one authorized native relationship and revalidate affected PRs",
+    )
+    parser.add_argument("--native-relationship-kind")
+    parser.add_argument("--native-relationship-operation")
+    parser.add_argument("--native-relationship-issue", type=int)
+    parser.add_argument("--native-related-issue", type=int)
     parser.add_argument(
         "--enforce-closed-issue-blockers",
         type=int,
@@ -3093,8 +3534,38 @@ def main() -> None:
         args.publish_implementation_status_for_pr,
         args.publish_implementation_statuses_for_issue,
     ]
+    if args.mutate_native_relationship and (
+        any(value is not None for value in status_modes)
+        or args.enforce_closed_issue_blockers is not None
+    ):
+        raise SystemExit(
+            "native relationship mutation cannot be combined with another status mode"
+        )
     if sum(value is not None for value in status_modes) > 1:
         raise SystemExit("implementation status modes are mutually exclusive")
+    if args.mutate_native_relationship:
+        if (
+            args.native_relationship_kind is None
+            or args.native_relationship_operation is None
+            or args.native_relationship_issue is None
+            or args.native_related_issue is None
+        ):
+            raise SystemExit(
+                "native relationship mutation requires kind, operation, issue, and related issue"
+            )
+        issue_map = load_issue_map(args.issue_map)
+        release_graphs = load_release_graphs(args.issue_map, issue_map)
+        mutate_native_relationship_and_revalidate(
+            args.repo,
+            args.native_relationship_issue,
+            args.native_related_issue,
+            args.native_relationship_kind,
+            args.native_relationship_operation,
+            Path(args.root),
+            issue_map,
+            release_graphs,
+        )
+        return
     if (
         any(value is not None for value in status_modes)
         or args.enforce_closed_issue_blockers is not None
@@ -3120,6 +3591,7 @@ def main() -> None:
                     root,
                     issue_map,
                     release_graphs,
+                    expected_pr_head_sha=args.expected_pr_head_sha,
                 )
             if args.publish_implementation_statuses_for_issue is not None:
                 publish_implementation_statuses_for_issue(

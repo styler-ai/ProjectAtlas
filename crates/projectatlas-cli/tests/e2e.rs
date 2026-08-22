@@ -8546,6 +8546,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "target_graph_failures",
         "native_relation_issue_number",
         "implementation_prs_for_issue",
+        "IssueOpsSnapshot",
+        "open_pull_requests_snapshot",
+        "affected_implementation_prs",
+        "mutate_native_relationship",
+        "mutate_native_relationship_and_revalidate",
         "commit_status",
         "implementation_reference_failures",
         "publish_implementation_status_for_pr",
@@ -8724,10 +8729,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
-    for rejected in [
-        "github.event.pull_request.head.sha",
-        "github.event.pull_request.merge_commit_sha",
-    ] {
+    for rejected in ["github.event.pull_request.merge_commit_sha"] {
         if ci.contains(rejected) {
             return Err(io::Error::other(format!(
                 "PR-derived CI must not trust stale payload checkout identity {rejected:?}"
@@ -8782,6 +8784,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .ok_or_else(|| io::Error::other("ordinary implementation status step is missing"))?;
     for required in [
         "--publish-implementation-status-for-pr \"$PR_NUMBER\"",
+        "--expected-pr-head-sha \"$EXPECTED_PR_HEAD_SHA\"",
+        "EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
         "github.event_name == 'pull_request_review'",
         "github.event_name == 'pull_request_review_comment'",
         "PR_NUMBER: ${{ github.event.pull_request.number }}",
@@ -8825,6 +8829,17 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
+        "relation_kind:",
+        "relation_operation:",
+        "related_issue:",
+        "options: [none, blocked_by, sub_issue]",
+        "options: [none, add, remove]",
+        "inputs.relation_kind == 'none'",
+        "--mutate-native-relationship",
+        "--native-relationship-kind \"$RELATION_KIND\"",
+        "--native-relationship-operation \"$RELATION_OPERATION\"",
+        "--native-relationship-issue \"$ISSUE_NUMBER\"",
+        "--native-related-issue \"$RELATED_ISSUE\"",
         "--planned-issue \"$ISSUE_NUMBER\"",
         "--publish-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
         "implementation-status-revalidation",
@@ -8838,6 +8853,22 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !issueops_workflow.contains(required) {
             return Err(io::Error::other(format!(
                 "issue-event IssueOps workflow is missing readiness guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    let issueops_revalidation =
+        workflow_job_block(&issueops_workflow, "implementation-status-revalidation")?;
+    for required in [
+        "contents: read",
+        "issues: write",
+        "pull-requests: read",
+        "statuses: write",
+        "timeout-minutes: 5",
+    ] {
+        if !issueops_revalidation.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps relationship dispatcher is missing least permission or timeout {required:?}"
             ))
             .into());
         }

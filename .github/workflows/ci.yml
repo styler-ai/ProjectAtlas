@@ -100,12 +100,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
             --root . \
             --issue-map openspec/issue-map.json \
-            --publish-implementation-status-for-pr "$PR_NUMBER"
+            --publish-implementation-status-for-pr "$PR_NUMBER" \
+            --expected-pr-head-sha "$EXPECTED_PR_HEAD_SHA"
 
       - name: Manual-only full benchmark policy
         run: python3 .github/scripts/verify-manual-benchmark-policy.py
