@@ -147,6 +147,7 @@ MAX_MILESTONES = 256
 MAX_MILESTONE_ISSUES = 256
 MAX_NATIVE_RELATIONS = 256
 MAX_PULL_REQUEST_REFERENCES = 32
+MAX_REPOSITORY_COLLABORATORS = 1
 MAX_CHECKS = 256
 MAX_REVIEWS = 100
 
@@ -1992,6 +1993,63 @@ def merge_authorization_policy(repo: str, branch: str) -> None:
     """Prove the live repository gate is installed before arming auto-merge."""
 
     owner, name = repo_parts(repo)
+    repository = gh_api_json(
+        [
+            f"repos/{owner}/{name}",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ]
+    )
+    if not isinstance(repository, dict):
+        raise SystemExit("repository identity response was malformed")
+    repository_name = repository.get("name")
+    repository_full_name = repository.get("full_name")
+    repository_owner = repository.get("owner")
+    if (
+        not isinstance(repository_name, str)
+        or repository_name.casefold() != name.casefold()
+        or not isinstance(repository_full_name, str)
+        or repository_full_name.casefold() != f"{owner}/{name}".casefold()
+        or not isinstance(repository_owner, dict)
+    ):
+        raise SystemExit("repository identity response was malformed")
+    owner_login = repository_owner.get("login")
+    if not isinstance(owner_login, str) or not owner_login:
+        raise SystemExit("repository owner identity was missing or malformed")
+    if repository_owner.get("type") != "User":
+        raise SystemExit("merge authorization requires a personal User repository owner")
+    if owner_login.casefold() != owner.casefold():
+        raise SystemExit("repository owner did not match the addressed repository")
+    collaborators = bounded_api_collection(
+        [
+            f"repos/{owner_login}/{repository_name}/collaborators",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+            "-F",
+            "affiliation=all",
+        ],
+        MAX_REPOSITORY_COLLABORATORS,
+        "repository collaborators",
+    )
+    if len(collaborators) != 1:
+        raise SystemExit(
+            "merge authorization requires exactly the personal repository owner as collaborator"
+        )
+    collaborator = collaborators[0]
+    permissions = collaborator.get("permissions")
+    if (
+        collaborator.get("login") != owner_login
+        or collaborator.get("type") != "User"
+        or not isinstance(permissions, dict)
+        or permissions.get("admin") is not True
+    ):
+        raise SystemExit(
+            "repository collaborators must contain only the matching personal owner with admin access"
+        )
     protection = gh_api_json(
         [
             f"repos/{owner}/{name}/branches/{branch}/protection",
@@ -2022,8 +2080,8 @@ def merge_authorization_policy(repo: str, branch: str) -> None:
         for check in checks
     ):
         raise SystemExit("branch protection does not require the merge authorization check")
-    repository = gh_json(["repo", "view", repo, "--json", "allowAutoMerge"])
-    if not isinstance(repository, dict) or repository.get("allowAutoMerge") is not True:
+    repository_view = gh_json(["repo", "view", repo, "--json", "allowAutoMerge"])
+    if not isinstance(repository_view, dict) or repository_view.get("allowAutoMerge") is not True:
         raise SystemExit("repository auto-merge is not enabled")
 
 
@@ -3513,10 +3571,23 @@ Mitigations:
     def fake_merge_gh_json(args: list[str]) -> object:
         nonlocal current_merge_head, merge_state, merge_mode
         if args[0] == "repo":
-            return {
+            repository = {
                 "defaultBranchRef": {"name": "main"},
                 "allowAutoMerge": merge_mode != "no-auto-merge",
+                "name": "repo",
+                "full_name": "owner/repo",
             }
+            if merge_mode == "missing-owner":
+                return repository
+            repository["owner"] = (
+                "owner"
+                if merge_mode == "malformed-owner"
+                else {
+                    "login": "other" if merge_mode == "owner-mismatch" else "owner",
+                    "type": "Organization" if merge_mode == "org-owner" else "User",
+                }
+            )
+            return repository
         if args[0] != "pr":
             raise AssertionError(f"unexpected merge gh call: {args}")
         fields = args[-1] if "--json" in args else ""
@@ -3553,6 +3624,22 @@ Mitigations:
             )
             merge_statuses.append((state, context, args[2]))
             return {}
+        if joined.startswith("repos/owner/repo --method GET"):
+            if merge_mode == "malformed-repository":
+                return []
+            repository = {
+                "name": "repo",
+                "full_name": "owner/repo",
+                "owner": {
+                    "login": "other" if merge_mode == "owner-mismatch" else "owner",
+                    "type": "Organization" if merge_mode == "org-owner" else "User",
+                },
+            }
+            if merge_mode == "missing-owner":
+                repository.pop("owner")
+            elif merge_mode == "malformed-owner":
+                repository["owner"] = "owner"
+            return repository
         if "/git/ref/heads/main" in joined:
             return {"object": {"sha": "b" * 40}}
         if "/branches/main/protection" in joined and "required_status_checks/contexts" not in joined:
@@ -3589,6 +3676,15 @@ Mitigations:
             }
         if "/reviews" in joined:
             return [{"state": "CHANGES_REQUESTED"}] if merge_mode == "review-failure" else []
+        if "/collaborators" in joined:
+            owner = {"login": "owner", "type": "User", "permissions": {"admin": True}}
+            if merge_mode == "malformed-collaborators":
+                return [{"login": "owner", "type": "User"}]
+            if merge_mode == "collaborator-owner-mismatch":
+                owner["login"] = "other"
+            if merge_mode in {"extra-collaborator", "collaborator-truncation"}:
+                return [owner, {"login": "extra", "type": "User", "permissions": {"push": True}}]
+            return [owner]
         if args[0] == "graphql":
             query = next(argument for argument in args if argument.startswith("query="))
             if "reviewThreads" in query:
@@ -3706,6 +3802,15 @@ Mitigations:
             "non-strict",
             "malformed-protection",
             "no-auto-merge",
+            "missing-owner",
+            "malformed-repository",
+            "malformed-owner",
+            "org-owner",
+            "owner-mismatch",
+            "extra-collaborator",
+            "collaborator-owner-mismatch",
+            "malformed-collaborators",
+            "collaborator-truncation",
         ):
             merge_mode = policy_failure
             merge_state = "OPEN"

@@ -8553,6 +8553,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "MAX_MILESTONE_ISSUES",
         "MAX_NATIVE_RELATIONS",
         "MAX_PULL_REQUEST_REFERENCES",
+        "MAX_REPOSITORY_COLLABORATORS",
         "MAX_CHECKS",
         "MAX_REVIEWS",
         "pull_request_reviews",
@@ -8564,6 +8565,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "merge_outcome",
         "merge_readiness_failures",
         "merge_authorization_policy",
+        "repository identity response was malformed",
+        "repository_owner",
+        "personal User repository owner",
+        "owner_login.casefold() != owner.casefold()",
+        "repository collaborators",
+        "affiliation=all",
+        "permissions.get(\"admin\") is not True",
         "GITHUB_ACTIONS_APP_ID",
         "allowAutoMerge",
         "required_status_checks",
@@ -8666,6 +8674,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "docs/*.md#user-content-heading` view on `main",
         "OpenSpec tasks:",
         "commit/SHA permalink evidence",
+        "personal `User` owner",
+        "affiliation=all",
+        "cap+1",
+        "first hosted merge dispatch",
     ] {
         if !workflow_docs.contains(required) {
             return Err(io::Error::other(format!(

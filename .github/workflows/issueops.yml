@@ -30,6 +30,8 @@ on:
   # pr merge is prohibited by repository policy; the Sol release owner performs
   # the final audit and submits this dispatch. Owner-level branch-protection
   # changes remain an external administrative bypass outside repository code.
+  # The merge job also proves the Actions token can read repository identity and
+  # the complete affiliation=all collaborator set before arming auto-merge.
 
 permissions:
   contents: read
