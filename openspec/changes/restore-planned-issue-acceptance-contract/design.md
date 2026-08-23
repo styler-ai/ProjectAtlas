@@ -4,7 +4,7 @@ ProjectAtlas currently has two issue-writing authorities that disagree. The bug,
 
 The audit of the twenty-six live v0.5.0 issue bodies plus candidate drafts #497, #498, and #499 found fourteen strong, eleven adequate, and four needing explanatory enrichment. Every audited packet lacked the canonical acceptance section, although the latest #497/#498/#499 drafts had already added ignored acceptance sections. #308 is the semantic benchmark because it carries actor, current state, consequence, intended outcome, ownership, compatibility, and causal delivery order continuously from prose through tasks; its length is not a target.
 
-Sol owns specification authorship, issue prose, migration, semantic acceptance, and GitHub state. Luna owns the later objective checker, self-test, form and guidance integration, and no semantic judgment. The current lane writes only OpenSpec, issue-map, release-planning, architecture, and ignored issue-body drafts; it does not implement checker, workflow, Rust, or database behavior and does not mutate GitHub.
+Sol owns specification authorship, issue prose, migration, semantic acceptance, and GitHub state. Primary Sol also owns the personal global `issue-spec-writing` skill and has already completed its cross-project semantic contract. Luna owns only the later repository checker, self-test, issue forms, repository guidance, and any version-matched ProjectAtlas plugin files proven necessary by an ownership review; Luna may verify compatibility with the global skill but never mutates it and owns no semantic judgment. The current lane writes only OpenSpec, issue-map, release-planning, architecture, and ignored issue-body drafts; it does not implement checker, workflow, Rust, or database behavior and does not mutate GitHub.
 
 ## Goals / Non-Goals
 
@@ -70,7 +70,7 @@ No implementation handoff occurs until that issue's body, OpenSpec, diagram mean
 
 ### Guidance ownership stays at the narrow owning surface
 
-The global `issue-spec-writing` skill owns the cross-project semantic definitions: `Why` actor/current/consequence/outcome, `What Changes` observable behavior plus ownership, truthful release role, diagram-boundary prose, and the eight-question Sol audit. Repository `AGENTS.md`, issue forms, and checker-facing guidance own ProjectAtlas's exact planned order and objective structural rules. If version-matched ProjectAtlas agent guidance must mention the workflow, Luna updates only `plugins/projectatlas/skills/projectatlas/SKILL.md` and its generated/package mirrors; repository-root guidance is not duplicated into another plugin framework or model-specific rule.
+The primary Sol-owned personal global `issue-spec-writing` skill now carries the cross-project semantic definitions: `Why` actor/current trigger/consequence/outcome, `What Changes` observable before-to-after behavior plus the smallest owner, conditional reproduced-bug facts versus truthful proof-gap hardening, the canonical acceptance order, and all eight Sol audit questions without a score, LLM gate, or ledger. This completed global source is read-only to Luna. Repository `AGENTS.md`, issue forms, and checker-facing guidance own ProjectAtlas's exact structural rules. If version-matched ProjectAtlas agent guidance must mention the workflow, Luna updates only `plugins/projectatlas/skills/projectatlas/SKILL.md` and its generated/package mirrors; repository-root guidance is not duplicated into another plugin framework or model-specific rule.
 
 ## Risks / Trade-offs
 
@@ -78,15 +78,18 @@ The global `issue-spec-writing` skill owns the cross-project semantic definition
 - [Migration changes task text or checked state] -> Generate each draft from the exact live body or latest candidate draft, change only required explanation/acceptance/graph facts, and compare the final task slice byte-for-byte with its authoritative local OpenSpec owner.
 - [Acceptance becomes another implementation checklist] -> Enforce ordinary bullets only and reject checkboxes, task IDs, and receipts.
 - [Type-specific context makes planned bodies sprawl] -> Consolidate only applicable sanitized facts into `Why` and `What Changes`; do not retain empty raw fields.
+- [Repository implementation overwrites the completed personal global semantic contract] -> Keep primary Sol as the only global skill mutation owner; Luna reads it for compatibility and changes only repository or proven necessary version-matched plugin surfaces.
 - [#500 serializes the release] -> Keep `blocked_by: []`, add no #500-to-product edges, and use the existing per-issue readiness gate for the shared contract.
+- [#500 completion depends on the shared readiness task that itself waits for #500] -> Keep #500 publication/readback and final architecture review inside #500, complete #500, and only then let primary Sol synchronize the independent shared task.
 - [Release acceptance trusts an earlier semantic pass] -> Require a fresh full-set Sol reconciliation at candidate and stable readback in addition to objective IssueOps.
 
 ## Migration Plan
 
-1. Publish this OpenSpec change, the twenty-nine-child map, the release-readiness semantic contract, the two architecture views, and exact ignored drafts through a non-closing planning pull request; keep shared task 1.4 unchecked.
-2. Luna implements the smallest objective checker/self-test and necessary form, repository guidance, global skill source, and version-matched plugin guidance integration; existing gates remain authoritative.
+1. Publish this OpenSpec change, the twenty-nine-child map, the release-readiness semantic contract, the two architecture views, and exact ignored drafts through a non-closing planning pull request; retain the completed primary Sol-owned personal global skill as read-only authority and keep the independent shared task unchecked.
+2. Luna implements the smallest objective repository checker/self-test and necessary repository issue-form, repository-guidance, and conditionally required version-matched plugin integration; it verifies but does not mutate the personal global skill, and existing gates remain authoritative.
 3. Sol semantically reconciles and publishes the exact thirty drafts (#500 plus twenty-nine migrated packets), assigns #500 to `v0.5.0-00`, activates #492 parent/blocker truth, and reads every body, task mirror, diagram, milestone, and native relation back from exact `main`.
-4. Only after the full migration, structural gate, Sol audit, exact published readback, and #500 completion succeed may shared `complete-v050-release-readiness` task 1.4 be checked. Then perform the final architecture review.
+4. Review the final Luna implementation against the focused diagrams and update either side until they agree, completing #500's final task only after that review passes.
+5. After every #500 task is complete and #500 itself completes, primary Sol independently synchronizes shared `complete-v050-release-readiness` task 1.4; no #500 task checks or depends on that shared task.
 
 Any partial or raced hosted mutation fails closed. The ignored drafts remain the repair source until exact readback agrees; no issue becomes ready and no implementation handoff proceeds from partial migration state.
 

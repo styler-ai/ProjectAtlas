@@ -58,6 +58,10 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 - **WHEN** an issue such as #497 has a semantically reconciled candidate packet but the #500 objective mechanism and section order it requires are not accepted on published `main`
 - **THEN** the existing readiness gate blocks handoff without adding a native #500 product dependency edge
 
+#### Scenario: #500 completes before the shared readiness task is synchronized
+- **WHEN** #500 finishes exact publication/readback, semantic reconciliation, and its final implementation-versus-diagram review
+- **THEN** #500 may complete without checking or depending on shared release-readiness task 1.4, after which primary Sol independently synchronizes that shared task
+
 #### Scenario: Candidate-only evidence is presented as published
 - **WHEN** a planned, implementation, merge-authorization, milestone, or release check resolves an artifact only from a candidate, stale, or dirty checkout
 - **THEN** readiness fails until a planning pull request lands and the exact live default-branch artifact is read back successfully

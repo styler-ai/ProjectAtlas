@@ -9,7 +9,7 @@ ProjectAtlas issue forms still require observable acceptance criteria and type-s
 - Preserve concise applicable intake context: bugs retain enough trigger, environment, actual, and expected behavior to reproduce or truthfully identify proof-gap hardening; improvements retain the affected actor or surface and the before-to-after agent workflow.
 - Extend IssueOps only with objective section, ordering, bullet-count, and forbidden-content checks while preserving the existing task, diagram, pre-mortem, release-graph, and publication gates.
 - Require Sol semantic reconciliation before readiness, handoff, candidate acceptance, and stable acceptance; IssueOps proves structure and synchronization, not comprehension.
-- Migrate the complete v0.5.0 issue set, add #500 as the twenty-ninth direct #492 child with no product blocker edges, and keep shared planning task 1.4 incomplete until the exact published migration, graph activation, semantic review, and readback finish.
+- Migrate the complete v0.5.0 issue set, add #500 as the twenty-ninth direct #492 child with no product blocker edges, complete #500 without depending on the independent shared planning task, and let primary Sol synchronize that shared task only after #500 itself completes following exact publication, graph activation, semantic review, and readback.
 
 ## Capabilities
 
@@ -23,7 +23,8 @@ None. The v0.5 release-readiness change is synchronized in place because it is s
 
 ## Impact
 
-- Later Luna implementation updates `.github/scripts/issue-checklists.py`, its self-test, repository issue forms or guidance where needed, and the version-matched ProjectAtlas plugin guidance; no Rust product or database behavior changes.
+- Primary Sol has completed the personal global `issue-spec-writing` contract and remains its sole mutation owner; this repository change reads it as authoritative and does not edit it.
+- Later Luna implementation updates `.github/scripts/issue-checklists.py`, its self-test, repository issue forms or repository guidance where needed, and the version-matched ProjectAtlas plugin guidance only if ownership review requires it; Luna may verify but never mutates the personal global skill, and no Rust product or database behavior changes.
 - Sol owns the specification, exact issue-body migration, issue map, native hierarchy and milestone activation, semantic audit, publication, and readback.
 - `openspec/changes/complete-v050-release-readiness`, `openspec/issue-map.json`, and `docs/v050-release-architecture.md` gain the release-wide contract and twenty-nine-child truth.
 - The change remains backlog until its tracked planning artifacts are published and read back from exact `main`; per-issue implementation handoff remains forbidden until that issue's body, OpenSpec, architecture meaning, and acceptance criteria are semantically reconciled.

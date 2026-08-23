@@ -71,7 +71,7 @@ Before readiness, implementation handoff, candidate acceptance, and stable accep
 - **THEN** handoff waits through the readiness gate without misrepresenting #500 as a native product dependency
 
 ### Requirement: The complete v0.5 set is migrated and reread semantically
-Sol SHALL migrate issue #500 plus the twenty-nine accepted/current-candidate v0.5.0 bodies from exact live bodies or the latest candidate drafts, preserving authoritative task text and checked state while applying only required explanatory, acceptance, graph, and campaign corrections. #492 candidate and stable gates SHALL freshly reconcile every accepted issue's explanation, behavior/capability, acceptance, release role, non-goals/failures, diagram meaning, and task mirror in addition to objective IssueOps and published-main readback.
+Sol SHALL migrate issue #500 plus the twenty-nine accepted/current-candidate v0.5.0 bodies from exact live bodies or the latest candidate drafts, preserving authoritative task text and checked state while applying only required explanatory, acceptance, graph, and campaign corrections. #500 publication task 1.3 SHALL end after exact body/native-graph publication and readback plus the fresh semantic reconciliation; #500 task 1.4 SHALL own the final implementation-versus-diagram review. Only after all #500 tasks and #500 itself are complete SHALL primary Sol independently synchronize shared `complete-v050-release-readiness` task 1.4. No #500 task SHALL check or depend on that shared task. #492 candidate and stable gates SHALL freshly reconcile every accepted issue's explanation, behavior/capability, acceptance, release role, non-goals/failures, diagram meaning, and task mirror in addition to objective IssueOps and published-main readback.
 
 #### Scenario: Candidate semantic readback
 - **WHEN** the exact RC input is evaluated
@@ -83,10 +83,18 @@ Sol SHALL migrate issue #500 plus the twenty-nine accepted/current-candidate v0.
 
 #### Scenario: Migration is partial or raced
 - **WHEN** any body, task mirror, acceptance section, milestone, parent, blocker, diagram, or published-main identity is missing, stale, or inconsistent
-- **THEN** shared planning task 1.4 remains unchecked and no affected readiness, handoff, candidate, or stable transition proceeds
+- **THEN** the independent shared planning task remains unchecked and no affected readiness, handoff, candidate, or stable transition proceeds
+
+#### Scenario: #500 publication and shared synchronization do not form a cycle
+- **WHEN** exact publication/readback and semantic reconciliation complete #500 task 1.3
+- **THEN** #500 proceeds to its own final implementation-versus-diagram review while the independent shared task remains unchecked until every #500 task and #500 itself are complete
 
 ### Requirement: Guidance has one cross-project semantic owner
-The global `issue-spec-writing` guidance SHALL define `Why` as actor/current state/consequence/outcome, `What Changes` as observable behavior plus ownership, truthful release-role and diagram-boundary prose, and the eight-question Sol audit. ProjectAtlas repository guidance and issue forms SHALL carry its exact planned order and objective constraints. Any version-matched ProjectAtlas plugin update SHALL be limited to `plugins/projectatlas/skills/projectatlas/SKILL.md` and its generated/package mirrors and SHALL NOT duplicate the contract into repository-root model folklore or a new guidance framework.
+The primary Sol-owned personal global `issue-spec-writing` guidance SHALL remain the cross-project semantic owner for `Why` actor/current trigger/consequence/outcome, `What Changes` observable before-to-after behavior plus the smallest owner, conditional reproduced-bug facts versus truthful proof-gap hardening, the canonical acceptance order, diagram-boundary prose, and the eight-question Sol audit without a score, LLM gate, or ledger. Primary Sol has completed that global contract. Luna SHALL treat it as read-only compatibility authority and SHALL own only the repository checker/self-test, ProjectAtlas issue forms and repository guidance, and any version-matched ProjectAtlas plugin update proven necessary by ownership review. Such plugin updates SHALL be limited to `plugins/projectatlas/skills/projectatlas/SKILL.md` and its generated/package mirrors and SHALL NOT duplicate the contract into repository-root model folklore or a new guidance framework.
+
+#### Scenario: Repository implementation consumes the completed global contract
+- **WHEN** Luna implements the ProjectAtlas checker, forms, repository guidance, or a proven necessary version-matched plugin update
+- **THEN** it verifies compatibility against the exact primary Sol-owned personal global skill without mutating that global source
 
 #### Scenario: Global and ProjectAtlas guidance agree
 - **WHEN** an agent plans a ProjectAtlas issue after the guidance integration lands

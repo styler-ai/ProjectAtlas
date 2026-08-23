@@ -36,7 +36,7 @@ A candidate checkout is the authority for proposed OpenSpec structure, issue mir
 
 Sol separately reconciles eight semantic questions: actor/current state/consequence/outcome; observable change and smallest owner; capability truth; release role and genuine dependencies; positive/negative/compatibility/no-change acceptance; non-goals and failure mitigations; diagram meaning and rendered truth; and exact task ownership/text/state. This audit runs before readiness and handoff and is repeated across every accepted packet at candidate and stable readback. It is not a score, LLM CI gate, evidence ledger, or second checklist.
 
-#500 is the twenty-ninth direct child of #492 with `blocked_by: []`. The restored shared mechanism is an operational readiness prerequisite, not a native product dependency: #497 may start only after its own packet passes and the shared mechanism/order is accepted, but no #500-to-#497 or #500-to-product blocker edge is declared.
+#500 is the twenty-ninth direct child of #492 with `blocked_by: []`. The restored shared mechanism is an operational readiness prerequisite, not a native product dependency: #497 may start only after its own packet passes and the shared mechanism/order is accepted, but no #500-to-#497 or #500-to-product blocker edge is declared. #500 completes its own publication/readback and final implementation-versus-diagram review without checking or depending on shared release-readiness task 1.4; only after #500 itself completes does primary Sol synchronize that independent shared task.
 
 ### IssueOps derives transitions before mutation and repairs reverse drift
 
