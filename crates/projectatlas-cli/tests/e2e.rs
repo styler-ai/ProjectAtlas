@@ -122,6 +122,10 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
 const OPENSPEC_DIR_NAME: &str = "openspec";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
+const MERMAID_NPM_CI: &str = "npm ci --ignore-scripts --prefix .github/mermaid-parser";
+const MERMAID_NPM_AUDIT: &str =
+    "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser";
+const ISSUE_CHECKLISTS_SELF_TEST: &str = "python3 .github/scripts/issue-checklists.py --self-test";
 const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
 const AUTO_RELEASE_WORKFLOW_FILE_NAME: &str = "03-auto-release.yml";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
@@ -8914,6 +8918,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for job in [
+        "implementation-status-validation",
         "issue-state-repair",
         "merge-authorization-invalidation",
         "relationship-mutation",
@@ -9030,7 +9035,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "group: issueops-mutations-${{ github.repository }}",
-        "queue: max",
+        "cancel-in-progress: false",
         "issues: write",
         "--mutate-native-relationship",
         "--request-id \"$REQUEST_ID\"",
@@ -9044,7 +9049,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "group: issueops-mutations-${{ github.repository }}",
-        "queue: max",
+        "cancel-in-progress: false",
         "checks: read",
         "pull-requests: write",
         "statuses: write",
@@ -9062,6 +9067,114 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
+    let self_test_jobs = [
+        "planned-issue",
+        "issue-state-repair",
+        "merge-authorization-invalidation",
+        "implementation-status-validation",
+    ];
+    let validate_self_test_setup =
+        |job: &str, block: &str, has_self_test: bool| -> Result<(), io::Error> {
+            let mutation_job = matches!(job, "relationship-mutation" | "merge-authorization");
+            if mutation_job && has_self_test {
+                return Err(io::Error::other(format!(
+                    "IssueOps {job} mutation route must remain self-test-free"
+                )));
+            }
+            if has_self_test {
+                let ci_position = block.find(MERMAID_NPM_CI).ok_or_else(|| {
+                    io::Error::other(format!(
+                        "IssueOps {job} self-test route is missing locked Mermaid npm ci"
+                    ))
+                })?;
+                let audit_position = block.find(MERMAID_NPM_AUDIT).ok_or_else(|| {
+                    io::Error::other(format!(
+                        "IssueOps {job} self-test route is missing locked Mermaid npm audit"
+                    ))
+                })?;
+                let self_test_position =
+                    block.find(ISSUE_CHECKLISTS_SELF_TEST).ok_or_else(|| {
+                        io::Error::other(format!(
+                            "IssueOps {job} self-test route is missing its Python self-test"
+                        ))
+                    })?;
+                if !(ci_position < audit_position && audit_position < self_test_position) {
+                    return Err(io::Error::other(format!(
+                        "IssueOps {job} must run Mermaid npm ci, npm audit, then Python self-test"
+                    )));
+                }
+            } else if mutation_job
+                && (block.contains(MERMAID_NPM_CI) || block.contains(MERMAID_NPM_AUDIT))
+            {
+                return Err(io::Error::other(format!(
+                    "IssueOps {job} mutation route must not carry Mermaid self-test setup"
+                )));
+            }
+            Ok(())
+        };
+    for job in [
+        "planned-issue",
+        "issue-state-repair",
+        "merge-authorization-invalidation",
+        "implementation-status-validation",
+        "relationship-mutation",
+        "merge-authorization",
+    ] {
+        let runs = workflow_job_runs(&issueops_workflow, job)?;
+        let has_self_test = runs.iter().any(|run| run.contains("--self-test"));
+        let block = workflow_job_block(&issueops_workflow, job)?;
+        validate_self_test_setup(job, &block, has_self_test)?;
+    }
+    let swapped_setup_fixture = format!(
+        "fixture:\n  run: |\n    {MERMAID_NPM_AUDIT}\n    {MERMAID_NPM_CI}\n    {ISSUE_CHECKLISTS_SELF_TEST}"
+    );
+    if validate_self_test_setup("fixture", &swapped_setup_fixture, true).is_ok() {
+        return Err(io::Error::other(
+            "IssueOps workflow contract accepted swapped Mermaid setup order",
+        )
+        .into());
+    }
+    let mutation_self_test_fixture = format!(
+        "  relationship-mutation:\n    run: |\n      {MERMAID_NPM_CI}\n      {MERMAID_NPM_AUDIT}\n      {ISSUE_CHECKLISTS_SELF_TEST}"
+    );
+    if validate_self_test_setup("relationship-mutation", &mutation_self_test_fixture, true).is_ok()
+    {
+        return Err(io::Error::other(
+            "IssueOps workflow contract accepted a self-test in a mutation route",
+        )
+        .into());
+    }
+    for job in ["relationship-mutation", "merge-authorization"] {
+        for setup in [MERMAID_NPM_CI, MERMAID_NPM_AUDIT] {
+            let mutation_setup_fixture = format!("  {job}:\n    run: |\n      {setup}");
+            if validate_self_test_setup(job, &mutation_setup_fixture, false).is_ok() {
+                return Err(io::Error::other(format!(
+                    "IssueOps workflow contract accepted Mermaid setup in non-self-test {job}"
+                ))
+                .into());
+            }
+        }
+    }
+    for job in self_test_jobs {
+        let runs = workflow_job_runs(&issueops_workflow, job)?;
+        if !runs.iter().any(|run| run.contains("--self-test")) {
+            return Err(io::Error::other(format!(
+                "IssueOps {job} is missing its expected Python self-test route"
+            ))
+            .into());
+        }
+    }
+    for job in ["relationship-mutation", "merge-authorization"] {
+        let block = workflow_job_block(&issueops_workflow, job)?;
+        for unsupported in ["queue:", "cancel-in-progress: true"] {
+            if block.contains(unsupported) {
+                return Err(io::Error::other(format!(
+                    "IssueOps {job} uses unsupported or unsafe concurrency setting {unsupported:?}"
+                ))
+                .into());
+            }
+        }
+    }
     for obsolete in [
         "--rerun-implementation-gates-for-issue",
         "MAX_ACTIVE_IMPLEMENTATION_PRS",
@@ -9073,7 +9186,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "actions: write",
         "gh run cancel",
         "cancel-in-progress: true",
-        "cancel-in-progress: false",
         "gh pr merge",
         "pulls/merge",
     ] {

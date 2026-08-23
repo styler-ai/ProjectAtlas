@@ -21,6 +21,10 @@ on:
   # A 204 dispatch response is admission only; dispatch admission is not run success.
   # Locate the run by its request_id, require
   # a successful conclusion, and read back the native relationship or merged PR.
+  # The mutation group never cancels a running POST/readback/status sequence,
+  # but GitHub keeps at most one pending run: a newer dispatch can replace an
+  # older pending run before it starts. Clients must retry when their request
+  # run is cancelled or missing; dispatch admission is never silent delivery.
   # Examples:
   # gh api repos/OWNER/REPO/dispatches --method POST -f event_type=issueops_relationship \
   #   -f client_payload='{"request_id":"rel-20260823-001","relation_kind":"sub_issue","operation":"remove","issue_number":492,"related_issue_number":339}'
@@ -84,6 +88,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
           python3 .github/scripts/issue-checklists.py --self-test
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
@@ -113,6 +119,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
           python3 .github/scripts/issue-checklists.py --self-test
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
@@ -143,6 +151,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
           python3 .github/scripts/issue-checklists.py --self-test
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
@@ -156,7 +166,7 @@ jobs:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'issueops_relationship'
     concurrency:
       group: issueops-mutations-${{ github.repository }}
-      queue: max
+      cancel-in-progress: false
     permissions:
       contents: read
       issues: write
@@ -199,7 +209,7 @@ jobs:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'issueops_merge'
     concurrency:
       group: issueops-mutations-${{ github.repository }}
-      queue: max
+      cancel-in-progress: false
     permissions:
       contents: read
       issues: read
