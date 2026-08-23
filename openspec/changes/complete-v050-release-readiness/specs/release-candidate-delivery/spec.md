@@ -12,12 +12,17 @@
 - **THEN** #492 cannot freeze or publish an RC candidate
 
 #### Scenario: Release-governance issues remain open at RC
-- **WHEN** every implementation-bearing child is closed and #499 has exact `candidate_ready` evidence for the frozen candidate
-- **THEN** RC publication MAY proceed while #499 and unparented release owner #492 intentionally remain open
+- **WHEN** trusted release-version classification selects prerelease, every implementation-bearing milestone issue is closed and complete, the active release graph identifies #492 as its unparented release root and #499 as its sole campaign, and #499 has exact `candidate_ready` revision/inventory/config/audit evidence for the frozen candidate
+- **THEN** the prerelease milestone gate MAY permit exactly #492 and #499 to remain open for RC publication
+- **AND** both open packets and native roles remain exact without treating their later stable/closure work as complete
+
+#### Scenario: Another issue is open at RC
+- **WHEN** the milestone contains any other open issue, either governance role differs from the active graph, the campaign stage is not exact `candidate_ready` for the release input, or the graph/packet readback is stale or mismatched
+- **THEN** the prerelease milestone gate fails closed without accepting a caller-supplied allowlist
 
 #### Scenario: A child is incomplete at stable
 - **WHEN** any child including #499 remains open, or any final mapped task, proof, review, or stage evidence is incomplete
-- **THEN** #492 cannot publish stable or close
+- **THEN** the existing stable milestone gate requires every mapped milestone issue closed with every mapped task checked, and #492 cannot publish stable or close
 
 ### Requirement: Lean CI and the dependency campaign remain release gates
 Pull requests SHALL run the smallest contract-complete existing proof selected by the single #497 affected-contract planner, with human and Dependabot parity, ordinary additions/modifications eligible for known-impact union, and every rename/deletion plus unknown/shared/planner-owning input failing closed to complete proof. Default-branch, scheduled, candidate, and release boundaries SHALL run complete proof. Each release SHALL declare at most one active Dependabot campaign issue; v0.5.0 SHALL declare #499 and use its same body region for exact candidate-ready and stable-ready evidence.
@@ -32,15 +37,15 @@ Pull requests SHALL run the smallest contract-complete existing proof selected b
 - **THEN** the complete repository proof executes without treating pull-request not-applicable state as release evidence
 
 #### Scenario: Dependabot campaign is incomplete
-- **WHEN** #499 has a pending, provisional, or failed PR/audit record applicable to the checkpoint, a missing exact campaign relationship, incomplete review/thread/protected-context/applicable-Sol-authorization readback, or stale/malformed stage evidence
+- **WHEN** #499 has a pending or provisional PR/finding record, a failed/canceled/uncertain hosted audit run, no matching current final `clean|findings` campaign audit record, a missing exact campaign relationship, incomplete review/thread/protected-context/applicable-Sol-authorization readback, or stale/malformed stage evidence
 - **THEN** candidate-ready or stable-ready fails closed
 
 #### Scenario: Dependabot campaign is candidate-ready
-- **WHEN** the pre-RC audit completes successfully, every finding and candidate-snapshot record is finally accepted, deferred, declined, or superseded for the exact candidate, and revision/inventory/config/audit identities match at publication preflight
+- **WHEN** the pre-RC audit completes successfully as `clean` or `findings`, every unlinked pre-PR finding is finally deferred, declined, or superseded, every linked finding points to a finally dispositioned real PR, `accepted` is used only for a finding linked to a finally accepted real PR, every candidate-snapshot PR record is final, and revision/inventory/config/audit/hosted-run identities match at publication preflight
 - **THEN** #499 records `candidate_ready` and RC1 may publish while #499/#492 remain open
 
 #### Scenario: Dependabot campaign is stable-ready
-- **WHEN** RC1 is accepted, the later pre-stable audit completes successfully, every pre-PR finding is finally deferred/declined/superseded or linked to a finally dispositioned real PR, every newly observed/full-window PR record is final, and the exact stage/full-union readback matches
+- **WHEN** RC1 is accepted, the later pre-stable audit completes successfully with a matching current final campaign audit record, every unlinked finding is finally deferred/declined/superseded, every linked finding points to a finally dispositioned real PR, `accepted` is used only for a finding linked to a finally accepted real PR, every newly observed/full-window PR record is final, and the exact stage/full-union readback matches
 - **THEN** #499 records `stable_ready`, may close, and may unblock stable #492 acceptance without per-PR issues or weaker proof
 
 ### Requirement: Accepted issue evidence is published before implementation
@@ -127,7 +132,7 @@ IssueOps SHALL derive a bounded transition plan from the declared release graph 
 - **THEN** IssueOps selects the graph from the issue map, reports targeted milestone drift, and does not skip validation because the event payload milestone is null
 
 ### Requirement: Release input is exact and complete
-#492 SHALL freeze one exact RC `main` revision only after the complete twenty-nine-child hierarchy is exact; every implementation-bearing child other than #499 is closed successfully; every applicable task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete; the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source, restored issue contract, and architecture target; the fresh full-set Sol semantic reconciliation agrees; and #499 has exact `candidate_ready` evidence. #499 and #492 SHALL remain open at RC publication. Stable acceptance SHALL require later exact `stable_ready`, #499 closure, every child closed, and a repeated fresh full-set semantic and objective published-main readback. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
+#492 SHALL freeze one exact RC `main` revision only after the complete twenty-nine-child hierarchy is exact; every implementation-bearing child other than #499 is closed successfully; every applicable task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete; the fresh full-set Sol semantic reconciliation agrees; and #499 has exact `candidate_ready` evidence. The release workflow SHALL select its milestone gate from trusted release-version classification. For a prerelease, the gate SHALL derive #492/#499 from the active graph's release-root/campaign roles, permit exactly those two issues open, require every other milestone issue closed and complete, and bind the campaign's exact candidate revision/inventory/config/audit/hosted-run record to the release input. It SHALL NOT accept an arbitrary open-issue allowlist or represent the two governance issues' later work as complete. Stable SHALL preserve the existing all-mapped-milestone-issues-closed and all-mapped-tasks-checked gate. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
 
 #### Scenario: Evidence-led no-change issue
 - **WHEN** a measurement or reproduction task proves existing behavior already satisfies its contract
@@ -187,6 +192,8 @@ Before RC or stable publication, the release gate SHALL install `v0.4.5`, create
 
 ### Requirement: v0.5.0 begins with an independently read-back prerelease
 With explicit authorization, `v0.5.0-rc1` SHALL publish as a non-draft prerelease from the exact accepted revision only after every implementation-bearing child is closed and #499's exact candidate-ready record matches publication preflight. Independent readback SHALL verify tag/revision, metadata, assets, checksums/integrity records, installers, npm, runtime/plugin/skill/MCP/CLI/host identity, and acceptance results. #499 and #492 SHALL remain open for the stable window, and v0.4.5 SHALL remain Latest.
+
+The RC release workflow SHALL invoke the prerelease-aware milestone gate above. Stable publication SHALL continue to invoke the existing all-closed milestone gate; the prerelease exception SHALL NOT be reused for stable.
 
 #### Scenario: Missing or mismatched release artifact
 - **WHEN** any required tuple/asset/digest/version/readback is absent or inconsistent

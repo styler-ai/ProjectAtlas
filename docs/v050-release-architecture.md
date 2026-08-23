@@ -466,23 +466,24 @@ flowchart TB
 
 ## Dependency audit and two-stage release checkpoints
 
-The same trusted default-branch workflow runs the audit once before RC and again after the accepted RC but before stable. Both executions translate the current Dependabot configuration without loss, keep the issues-write token outside every updater/proxy boundary, and require bounded sanitized output plus certain container cleanup before reconciliation. A would-be update without a hosted PR becomes a separate pre-PR finding with audit/update identity only; exact PR identity appears only after authenticated hosted readback and linkage. The single campaign body region advances from `collecting` to an exact `candidate_ready` snapshot and later to `stable_ready`; it is not a second graph or database.
+The same trusted default-branch workflow runs the audit once before RC and again after the accepted RC but before stable. Both executions translate the current Dependabot configuration without loss, keep the issues-write token outside every updater/proxy boundary, and allow campaign reconciliation only after bounded sanitized output and certain container cleanup. A failed, canceled, or uncertain hosted run receives no issues-write token and performs no campaign mutation; its hosted conclusion plus a missing or stale matching final campaign audit record blocks until a fresh successful audit/reconciliation. A would-be update without a hosted PR becomes a separate pre-PR finding with audit/update identity only. An unlinked finding may be deferred, declined, or superseded but never accepted; accepted requires exact linkage to a finally accepted real PR. The single campaign body region advances from `collecting` to exact `candidate_ready` and later `stable_ready`; it is not a second graph or database.
 
 ```mermaid
 flowchart TB
     Config[Default .github/dependabot.yml] --> Audit["Pre-RC or pre-stable audit: lossless, token-isolated, bounded, and cleaned up"]
     Dispatch[Trusted gh workflow run] --> Audit
-    Audit -- failed or uncertain --> Block([Applicable checkpoint blocked])
+    Audit -- failed or uncertain --> HostedFailure["Hosted run fails: no issue-write token or campaign mutation"]
+    HostedFailure --> Block([Applicable checkpoint blocked until a fresh successful audit and reconciliation])
     Audit -- clean --> AuditFinal[Successful audit with no unresolved new finding]
     Audit -- findings --> Finding["Separate pre-PR finding: audit and update identity only; no PR fields"]
     Finding --> Resolution{"Finding resolution"}
     Resolution -- deferred, declined, or superseded --> AuditFinal
     Resolution -- matching hosted PR appears --> Readback["Authenticated readback creates the complete real PR record and link"]
-    Readback --> PRFinal{"Linked PR finally dispositioned?"}
+    Readback --> PRFinal{"Linked PR finally dispositioned; accepted only when PR is finally accepted?"}
     PRFinal -- No --> Block
     PRFinal -- Yes --> AuditFinal
     Resolution -- pending or provisional --> Block
-    AuditFinal --> Gate{"Audit successful and every applicable PR/finding record final?"}
+    AuditFinal --> Gate{"Successful hosted run, current final audit record, and every PR/finding final?"}
     PRRecords[All applicable hosted PR records finally dispositioned] --> Gate
     Gate -- No --> Block
     Gate -- Yes --> Snapshot["Exact checkpoint snapshot: revision, PR/finding union, config, audit, and tool identities"]
@@ -550,14 +551,16 @@ stateDiagram-v2
   SurfaceInventory --> InstalledProof: safely execute every supported route
   InstalledProof --> CandidateBuild: package exact main revision
   CandidateBuild --> UpdateProof: update exercised v0.4.5 installation and database
-  UpdateProof --> RC1: hard gate passes while campaign and release issues stay open
+  UpdateProof --> RCMilestoneGate: trusted prerelease classification, only graph-derived issues 492 and 499 open, exact candidate-ready binding
+  RCMilestoneGate --> RC1: prerelease gate passes while campaign and release issues stay open
+  RCMilestoneGate --> Remediation: extra open issue, role drift, or candidate evidence mismatch
   UpdateProof --> Remediation: update or migration blocker
   RC1 --> HostedReadback: independently verify tag, assets, runtime, and Latest
   HostedReadback --> Remediation: confirmed blocker
   Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
   HostedReadback --> StableCampaign: accepted candidate then continue intake and run pre-stable audit
   StableCampaign --> StableSemanticReadback: campaign stable-ready, campaign issue closed, every child closed
-  StableSemanticReadback --> StableBuild: repeat full-set Sol semantic reconciliation and objective published-main readback
+  StableSemanticReadback --> StableBuild: all-closed milestone gate plus repeated semantic and published-main readback
   StableBuild --> StableReadback: repeat installs and hosted identity
   StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified
   FinalState --> [*]
