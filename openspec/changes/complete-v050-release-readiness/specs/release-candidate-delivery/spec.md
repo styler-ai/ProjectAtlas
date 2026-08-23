@@ -39,15 +39,27 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 - **THEN** authorization fails and cannot arm or preserve a merge decision based on the earlier snapshot
 
 ### Requirement: Native relationship changes are prevalidated and reverse drift is repaired
-IssueOps SHALL derive a bounded transition plan from the declared release graph and current native state before any relationship mutation. The requested relation kind, orientation, issue, related issue, and operation SHALL match exactly one missing-or-extra transition toward the declaration. Post-mutation readback and complete graph reconciliation SHALL remain mandatory. Issue events SHALL repair invalid closed state in both blocker directions within the declared graph and SHALL validate a declared issue even when a `demilestoned` event removed its live milestone.
+IssueOps SHALL derive a bounded transition plan from the declared release graph and current native state before any relationship mutation or zero-mutation success. The requested relation kind, orientation, issue, related issue, and operation SHALL match exactly one graph-owned missing-or-extra transition toward the declaration. For `blocked_by`, the source SHALL belong to exactly one release graph; for `sub_issue`, the source SHALL be exactly one graph's release issue. Post-mutation readback and complete graph reconciliation SHALL remain mandatory. Issue events SHALL repair invalid closed state in both blocker directions within the declared graph and SHALL validate a declared issue even when a `demilestoned` event removed its live milestone.
 
 #### Scenario: A relationship request does not match the declared transition
 - **WHEN** the requested tuple is unknown, ambiguous, reversed, graph-widening, or does not repair one exact missing-or-extra relation
 - **THEN** IssueOps rejects it before any GitHub mutation and does not rely on rollback after reconciliation failure
 
+#### Scenario: An unowned relationship appears already satisfied
+- **WHEN** an add or removal addresses an existing or absent native relation but its `blocked_by` source belongs to no graph or multiple graphs, or its `sub_issue` source is not exactly one graph's release issue
+- **THEN** IssueOps rejects the request before mutation instead of admitting a zero-mutation result from native state alone
+
 #### Scenario: A blocker reopens
 - **WHEN** a declared blocker becomes open while one or more graph-bounded reverse dependents are closed
-- **THEN** IssueOps derives reverse direct-blocker adjacency, reopens or fails every invalid closed dependent through a bounded queue, and invalidates affected implementation or merge readiness
+- **THEN** IssueOps derives reverse direct-blocker adjacency, reopens or fails every invalid closed dependent through a bounded queue, and invalidates every exactly reread affected pull request by prioritizing protected merge-authorization revocation and auto-merge safety before attempting the implementation context, continuing across both contexts and all targets while aggregating failures
+
+#### Scenario: An affected pull request reference or head is unsafe
+- **WHEN** a closing reference names another repository despite reusing an issue number, or the pull request's exact head or complete closing references change between selection and a status or auto-merge operation
+- **THEN** IssueOps rejects the foreign reference, rereads before mutation, skips or retries the raced target within bounds, and fails closed without mutating stale state
+
+#### Scenario: Invalidation calls fail
+- **WHEN** one status or auto-merge safety call fails while later exact targets or the other status context remain attemptable
+- **THEN** IssueOps continues bounded invalidation attempts and reports aggregated failures; complete API failure remains fail-closed and does not claim successful remote revocation
 
 #### Scenario: A declared issue is demilestoned
 - **WHEN** an issue event removes the live milestone from an issue still owned by a release graph
