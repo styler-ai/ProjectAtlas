@@ -4189,6 +4189,60 @@ Mitigations:
         globals()["run"] = saved_run
         globals()["release_graph_failures"] = saved_release_graph_failures
         subprocess.run = saved_subprocess_run
+
+    entry_snapshot = PublishedSnapshot("main", "e" * 40)
+    entry_capture: dict[str, object] = {}
+    saved_entry_argv = sys.argv[:]
+    saved_entry_load_issue_map = globals()["load_issue_map"]
+    saved_entry_load_release_graphs = globals()["load_release_graphs"]
+    saved_entry_mutation = globals()["mutate_native_relationship_and_revalidate"]
+
+    def fake_entry_snapshot(repo: str, root: Path) -> PublishedSnapshot:
+        entry_capture["repo"] = repo
+        entry_capture["root"] = root
+        return entry_snapshot
+
+    def fake_entry_mutation(*args: object, **kwargs: object) -> None:
+        entry_capture["snapshot"] = kwargs.get("published_snapshot")
+        entry_capture["mutation_root"] = kwargs.get("root")
+
+    globals()["require_published_snapshot"] = fake_entry_snapshot
+    globals()["load_issue_map"] = lambda path: {}
+    globals()["load_release_graphs"] = lambda path, issue_map: {}
+    globals()["mutate_native_relationship_and_revalidate"] = fake_entry_mutation
+    sys.argv = [
+        "issue-checklists.py",
+        "--repo",
+        "owner/repo",
+        "--root",
+        str(self_test_root),
+        "--issue-map",
+        str(self_test_root / "openspec/issue-map.json"),
+        "--mutate-native-relationship",
+        "--native-relationship-kind",
+        "blocked_by",
+        "--native-relationship-operation",
+        "add",
+        "--native-relationship-issue",
+        "10",
+        "--native-related-issue",
+        "11",
+        "--request-id",
+        "rel-entry-01",
+    ]
+    try:
+        main()
+    finally:
+        sys.argv = saved_entry_argv
+        globals()["require_published_snapshot"] = saved_published_snapshot
+        globals()["load_issue_map"] = saved_entry_load_issue_map
+        globals()["load_release_graphs"] = saved_entry_load_release_graphs
+        globals()["mutate_native_relationship_and_revalidate"] = saved_entry_mutation
+    assert entry_capture["repo"] == "owner/repo"
+    assert entry_capture["root"] == self_test_root
+    assert entry_capture["mutation_root"] == self_test_root
+    assert entry_capture["snapshot"] is entry_snapshot
+
     assert milestone_issue_failures(
         "v1.0.0-00",
         [{"number": 1, "state": "closed"}, {"number": 3, "state": "open"}],
@@ -5120,7 +5174,8 @@ def main() -> None:
                 args.native_relationship_issue,
                 args.native_related_issue,
             )
-            require_published_snapshot(args.repo, Path(args.root))
+            root = Path(args.root)
+            published_snapshot = require_published_snapshot(args.repo, root)
             issue_map = load_issue_map(args.issue_map)
             release_graphs = load_release_graphs(args.issue_map, issue_map)
             mutate_native_relationship_and_revalidate(
@@ -5132,7 +5187,7 @@ def main() -> None:
                 issue_map,
                 release_graphs,
                 request_id,
-                root=Path(args.root),
+                root=root,
                 published_snapshot=published_snapshot,
             )
         except BaseException:
