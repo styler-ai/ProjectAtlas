@@ -4,11 +4,15 @@ run-name: >-
   00-IssueOps /
   ${{ github.event_name == 'repository_dispatch'
       && format('relationship {0}', github.event.client_payload.request_id)
+      || github.event_name == 'pull_request'
+      && format('PR #{0}', github.event.pull_request.number)
       || format('issue #{0}', github.event.issue.number) }}
 
 on:
   issues:
     types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
+  pull_request:
+    types: [opened, closed, reopened]
   repository_dispatch:
     types: [issueops_relationship]
   # Relationship clients use authenticated gh api repos/OWNER/REPO/dispatches
@@ -57,10 +61,11 @@ jobs:
     name: implementation-status-invalidation
     if: >
       github.event_name == 'issues' ||
+      github.event_name == 'pull_request' ||
       github.event_name == 'repository_dispatch'
     permissions:
       contents: read
-      issues: read
+      issues: write
       pull-requests: read
       statuses: write
     runs-on: ubuntu-latest
@@ -75,7 +80,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || github.event.client_payload.issue_number }}
         run: |
           python3 .github/scripts/issue-checklists.py --self-test
           python3 .github/scripts/issue-checklists.py \
@@ -83,13 +88,15 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json \
             --invalidate-implementation-statuses-for-issue "$ISSUE_NUMBER" \
-            --reconcile-all-release-graphs
+            --reconcile-all-release-graphs \
+            --enforce-implementation-admission
 
   implementation-status-revalidation:
     name: implementation-status-revalidation
     needs: implementation-status-invalidation
     if: >
       github.event_name == 'issues' ||
+      github.event_name == 'pull_request' ||
       github.event_name == 'repository_dispatch'
     # Native concurrency serializes publishers with a bounded pending queue; it is not correctness.
     # A queued relationship dispatch has not mutated; capacity cancellation is visibly retryable.
@@ -121,7 +128,8 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || github.event.client_payload.issue_number }}
+          ENFORCE_CLOSED_ISSUE: ${{ github.event_name == 'issues' && github.event.issue.number || '' }}
           REQUEST_ID: ${{ github.event.client_payload.request_id || '' }}
           RELATION_KIND: ${{ github.event.client_payload.relation_kind || 'none' }}
           RELATION_OPERATION: ${{ github.event.client_payload.operation || 'none' }}
@@ -131,17 +139,7 @@ jobs:
             echo "repository_dispatch requires a valid 8-64 character request_id" >&2
             exit 1
           fi
-          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" && "$RELATION_KIND" == "none" ]]; then
-            echo "repository_dispatch requires an authorized native relationship payload" >&2
-            exit 1
-          fi
-          if [[ "$RELATION_KIND" == "none" && "$RELATION_OPERATION" != "none" ]] || \
-             [[ "$RELATION_KIND" != "none" && "$RELATION_OPERATION" == "none" ]] || \
-             [[ "$RELATION_KIND" != "none" && -z "$RELATED_ISSUE" ]]; then
-            echo "relation kind, operation, and related issue must be supplied together" >&2
-            exit 1
-          fi
-          if [[ "$RELATION_KIND" != "none" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" ]]; then
             python3 .github/scripts/issue-checklists.py \
               --repo "$GITHUB_REPOSITORY" \
               --root . \
@@ -152,14 +150,20 @@ jobs:
               --native-relationship-issue "$ISSUE_NUMBER" \
               --native-related-issue "$RELATED_ISSUE" \
               --request-id "$REQUEST_ID" \
+              --enforce-implementation-admission \
               --run-id "$GITHUB_RUN_ID"
             exit 0
           fi
-          python3 .github/scripts/issue-checklists.py \
-            --repo "$GITHUB_REPOSITORY" \
-            --root . \
-            --issue-map openspec/issue-map.json \
-            --publish-implementation-statuses-for-issue "$ISSUE_NUMBER" \
-            --reconcile-all-release-graphs \
-            --enforce-closed-issue-blockers "$ISSUE_NUMBER" \
+          status_args=(
+            --repo "$GITHUB_REPOSITORY"
+            --root .
+            --issue-map openspec/issue-map.json
+            --publish-implementation-statuses-for-issue "$ISSUE_NUMBER"
+            --reconcile-all-release-graphs
+            --enforce-implementation-admission
             --run-id "$GITHUB_RUN_ID"
+          )
+          if [[ -n "$ENFORCE_CLOSED_ISSUE" ]]; then
+            status_args+=(--enforce-closed-issue-blockers "$ENFORCE_CLOSED_ISSUE")
+          fi
+          python3 .github/scripts/issue-checklists.py "${status_args[@]}"

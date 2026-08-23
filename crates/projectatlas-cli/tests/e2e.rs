@@ -8552,6 +8552,17 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "newer_issueops_run_exists",
         "validate_request_id",
         "relationship_outcome",
+        "validate_native_relationship_request",
+        "MAX_ACTIVE_IMPLEMENTATION_PRS",
+        "ImplementationAdmission",
+        "ISSUEOPS_ADMISSION_LABEL",
+        "reconcile_admission_labels",
+        "implementation_pr_requires_admission",
+        "issueops_request_budget",
+        "MAX_GRAPH_REQUESTS_PER_EVENT",
+        "MAX_STATUS_WRITES_PER_EVENT",
+        "MAX_CONTENT_WRITES_PER_MINUTE",
+        "publish_admission_failure_statuses",
         "invalidate_implementation_statuses_for_issue",
         "ISSUEOPS_WORKFLOW_PATH",
         "open_pull_requests_snapshot",
@@ -8867,14 +8878,21 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--native-relationship-issue \"$ISSUE_NUMBER\"",
         "--native-related-issue \"$RELATED_ISSUE\"",
         "--request-id \"$REQUEST_ID\"",
+        "--enforce-implementation-admission",
         "--planned-issue \"$ISSUE_NUMBER\"",
         "--publish-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
         "--invalidate-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
         "--reconcile-all-release-graphs",
         "implementation-status-revalidation",
         "implementation-status-invalidation",
-        "--enforce-closed-issue-blockers \"$ISSUE_NUMBER\"",
+        "pull_request:",
+        "types: [opened, closed, reopened]",
+        "repository_dispatch:",
+        "run-name:",
+        "status_args+=(--enforce-closed-issue-blockers \"$ENFORCE_CLOSED_ISSUE\")",
         "github.event_name == 'issues'",
+        "github.event_name == 'pull_request'",
+        "github.event_name == 'repository_dispatch'",
         "timeout-minutes: 5",
         "contents: read",
         "issues: write",
@@ -8896,7 +8914,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--invalidate-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
         "--reconcile-all-release-graphs",
         "contents: read",
-        "issues: read",
+        "issues: write",
         "pull-requests: read",
         "statuses: write",
         "timeout-minutes: 10",
@@ -8915,6 +8933,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "if: ${{ !cancelled() }}",
         "--reconcile-all-release-graphs",
         "--run-id \"$GITHUB_RUN_ID\"",
+        "--enforce-implementation-admission",
         "ref: ${{ github.event.repository.default_branch }}",
         "contents: read",
         "issues: write",
@@ -8949,6 +8968,17 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             "IssueOps relationship authority must not use workflow_dispatch",
         )
         .into());
+    }
+    for rejected in [
+        "relation kind, operation, and related issue must be supplied together",
+        "repository_dispatch requires an authorized native relationship payload",
+    ] {
+        if issueops_workflow.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "IssueOps shell must defer relationship validation to Python {rejected:?}"
+            ))
+            .into());
+        }
     }
     let prepublish_input = release
         .split("      prepublish_only:")
