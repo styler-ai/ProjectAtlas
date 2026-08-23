@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -172,6 +173,7 @@ NATIVE_RELATION_OPERATIONS = {"add", "remove"}
 STATUS_WORKERS = 8
 ISSUEOPS_WORKFLOW_PATH = ".github/workflows/issueops.yml"
 ISSUEOPS_EVENTS = {"issues", "repository_dispatch"}
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$")
 
 
 def run(args: list[str]) -> str:
@@ -239,6 +241,30 @@ def newer_issueops_run_exists(repo: str, current_run_id: int) -> bool:
 
 def clean(text: str) -> str:
     return " ".join((text or "").replace("\r", "").split())
+
+
+def validate_request_id(value: object) -> str:
+    """Validate an operator correlation token without treating it as authority."""
+
+    if not isinstance(value, str) or REQUEST_ID_RE.fullmatch(value) is None:
+        raise SystemExit(
+            "repository_dispatch request_id must be 8-64 ASCII letters, digits, "
+            "periods, underscores, or hyphens, beginning with a letter or digit"
+        )
+    return value
+
+
+def relationship_outcome(request_id: str, outcome: str) -> str:
+    """Encode one parseable relationship-dispatch lifecycle outcome."""
+
+    request_id = validate_request_id(request_id)
+    if outcome not in {"applied", "already-satisfied", "failed"}:
+        raise SystemExit(f"unknown relationship dispatch outcome {outcome!r}")
+    return json.dumps(
+        {"event": "issueops_relationship", "outcome": outcome, "request_id": request_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def visible_markdown(text: str) -> str:
@@ -1535,7 +1561,7 @@ def mutate_native_relationship(
     related_issue: int,
     relation_kind: str,
     operation: str,
-) -> None:
+) -> bool:
     """Apply one idempotent native edge and require an exact read-back."""
 
     issue = positive_issue(issue, "issue number")
@@ -1556,7 +1582,8 @@ def mutate_native_relationship(
     current = read_relation(repo, issue)
     desired = operation == "add"
     present = related_issue in current
-    if desired != present:
+    changed = desired != present
+    if changed:
         related_id = native_issue_id(repo, related_issue, "related issue")
         owner, name = repo_parts(repo)
         if relation_kind == "blocked_by":
@@ -1600,6 +1627,7 @@ def mutate_native_relationship(
             f"native {relation_kind} {operation} read-back did not produce the requested edge "
             f"#{issue} -> #{related_issue}"
         )
+    return changed
 
 
 def mutate_native_relationship_and_revalidate(
@@ -1612,6 +1640,7 @@ def mutate_native_relationship_and_revalidate(
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
     run_id: int | None = None,
+    request_id: str | None = None,
 ) -> None:
     """Mutate one authorized edge, then reconcile every declared release graph."""
 
@@ -1634,7 +1663,7 @@ def mutate_native_relationship_and_revalidate(
             "relationship dispatch pending phase failed:\n"
             + "\n".join(pending_failures)
         )
-    mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
+    changed = mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
     post_mutation_snapshot = refresh_snapshot_graph_failures(
         repo, issue_map, release_graphs, snapshot
     )
@@ -1651,6 +1680,12 @@ def mutate_native_relationship_and_revalidate(
         raise SystemExit(
             "affected implementation status publication failed:\n"
             + "\n".join(failures)
+        )
+    if request_id is not None:
+        print(
+            relationship_outcome(
+                request_id, "applied" if changed else "already-satisfied"
+            )
         )
 
 
@@ -1999,7 +2034,9 @@ def verify_live_candidate_head(
 
 def run_bounded_status_work(
     candidates: list[ImplementationStatusCandidate],
-    worker: object,
+    worker: Callable[[ImplementationStatusCandidate], None],
+    batch_precondition: Callable[[list[ImplementationStatusCandidate]], str | None]
+    | None = None,
 ) -> list[str]:
     """Drain bounded status work while retaining every candidate failure."""
 
@@ -2007,6 +2044,18 @@ def run_bounded_status_work(
     with concurrent.futures.ThreadPoolExecutor(max_workers=STATUS_WORKERS) as executor:
         for offset in range(0, len(candidates), STATUS_WORKERS):
             batch = candidates[offset : offset + STATUS_WORKERS]
+            if batch_precondition is not None:
+                try:
+                    precondition_failure = batch_precondition(batch)
+                except BaseException as error:
+                    detail = str(error).strip() or error.__class__.__name__
+                    failures.append(
+                        f"PR #{batch[0].number}: status batch precondition failed: {detail}"
+                    )
+                    break
+                if precondition_failure is not None:
+                    failures.append(precondition_failure)
+                    break
             futures = [executor.submit(worker, candidate) for candidate in batch]
             for candidate, future in zip(batch, futures):
                 try:
@@ -2082,15 +2131,24 @@ def finalize_implementation_statuses(
 ) -> list[str]:
     """Evaluate all candidates after mutation, retaining pending/failure on errors."""
 
-    if run_id is not None and candidates:
+    def generation_precondition(
+        batch: list[ImplementationStatusCandidate],
+    ) -> str | None:
+        if run_id is None:
+            return None
         try:
             if newer_issueops_run_exists(repo, run_id):
-                return [
-                    f"IssueOps workflow run {run_id} was superseded before final status batch"
-                ]
+                return (
+                    f"IssueOps workflow run {run_id} was superseded before final status "
+                    f"batch starting at PR #{batch[0].number}"
+                )
         except BaseException as error:
             detail = str(error).strip() or error.__class__.__name__
-            return [f"IssueOps generation check failed before final status batch: {detail}"]
+            return (
+                f"PR #{batch[0].number}: IssueOps generation check failed before final "
+                f"status batch: {detail}"
+            )
+        return None
 
     def finalize(candidate: ImplementationStatusCandidate) -> None:
         publish_implementation_status_for_pr(
@@ -2107,7 +2165,11 @@ def finalize_implementation_statuses(
             generation_checked=run_id is not None,
         )
 
-    return run_bounded_status_work(candidates, finalize)
+    return run_bounded_status_work(
+        candidates,
+        finalize,
+        batch_precondition=generation_precondition if run_id is not None else None,
+    )
 
 
 def refresh_snapshot_graph_failures(
@@ -3660,11 +3722,14 @@ Mitigations:
             return "{}"
 
         globals()["run"] = fake_mutation_run
-        mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add")
-        mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add")
-        mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "remove")
-        mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "add")
-        mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "remove")
+        mutation_results = [
+            mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add"),
+            mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add"),
+            mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "remove"),
+            mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "add"),
+            mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "remove"),
+        ]
+        assert mutation_results == [True, False, True, True, True]
         assert sum("POST" in call for call in mutation_calls) == 2
         assert sum("DELETE" in call for call in mutation_calls) == 2
         assert mutation_calls == [
@@ -3715,6 +3780,19 @@ Mitigations:
             any(GITHUB_API_VERSION in argument for argument in call)
             for call in mutation_calls
         )
+        request_id = validate_request_id("rel-20260823-001")
+        assert json.loads(relationship_outcome(request_id, "applied"))["outcome"] == "applied"
+        assert (
+            json.loads(relationship_outcome(request_id, "already-satisfied"))["outcome"]
+            == "already-satisfied"
+        )
+        for invalid_request_id in ("", "short", "bad space", "x" * 65, "-leading-8"):
+            try:
+                validate_request_id(invalid_request_id)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("invalid relationship request_id was accepted")
         try:
             mutate_native_relationship("owner/repo", 10, 10, "blocked_by", "add")
         except SystemExit as error:
@@ -3876,13 +3954,10 @@ Mitigations:
         )
         assert maximum_active_workers <= STATUS_WORKERS
 
-        generation_guard_calls = [0]
+        generation_guard_calls: list[int] = []
         saved_generation_guard = newer_issueops_run_exists
         globals()["newer_issueops_run_exists"] = (
-            lambda repo, run_id: generation_guard_calls.__setitem__(
-                0, generation_guard_calls[0] + 1
-            )
-            or False
+            lambda repo, run_id: generation_guard_calls.append(run_id) or False
         )
         final_statuses.clear()
         assert finalize_implementation_statuses(
@@ -3894,7 +3969,47 @@ Mitigations:
             thirty_three_candidates,
             run_id=100,
         ) == []
-        assert generation_guard_calls == [1]
+        assert generation_guard_calls == [100] * 5
+
+        cross_batch_candidates = worker_candidates(9)
+        cross_batch_generation = iter([False, True])
+        generation_guard_calls.clear()
+        globals()["newer_issueops_run_exists"] = (
+            lambda repo, run_id: generation_guard_calls.append(run_id)
+            or next(cross_batch_generation)
+        )
+        final_statuses.clear()
+        cross_batch_failures = finalize_implementation_statuses(
+            "owner/repo",
+            Path("."),
+            {},
+            {},
+            exact_selected_snapshot,
+            cross_batch_candidates,
+            run_id=100,
+        )
+        assert generation_guard_calls == [100, 100]
+        assert len(final_statuses) == STATUS_WORKERS
+        assert any("superseded before final status batch" in failure for failure in cross_batch_failures)
+
+        def failing_generation_guard(repo: str, run_id: int) -> bool:
+            raise SystemExit("injected generation API failure")
+
+        globals()["newer_issueops_run_exists"] = failing_generation_guard
+        generation_guard_calls.clear()
+        final_statuses.clear()
+        generation_failures = finalize_implementation_statuses(
+            "owner/repo",
+            Path("."),
+            {},
+            {},
+            exact_selected_snapshot,
+            worker_candidates(9),
+            run_id=100,
+        )
+        assert generation_guard_calls == []
+        assert final_statuses == []
+        assert any("generation check failed before final status batch" in failure for failure in generation_failures)
         globals()["newer_issueops_run_exists"] = saved_generation_guard
 
         pending_heads.clear()
@@ -4640,6 +4755,10 @@ def main() -> None:
     parser.add_argument("--native-relationship-issue", type=int)
     parser.add_argument("--native-related-issue", type=int)
     parser.add_argument(
+        "--request-id",
+        help="validated repository_dispatch correlation token for relationship outcomes",
+    )
+    parser.add_argument(
         "--enforce-closed-issue-blockers",
         type=int,
         help="reopen a declared issue that closed before its direct blockers",
@@ -4656,6 +4775,7 @@ def main() -> None:
         raise SystemExit("--repo is required unless --self-test is used")
     if args.run_id is not None and args.run_id <= 0:
         raise SystemExit("--run-id must be a positive IssueOps workflow run id")
+    request_id = validate_request_id(args.request_id) if args.request_id is not None else None
     status_modes = [
         args.publish_implementation_status_for_pr,
         args.publish_implementation_statuses_for_issue,
@@ -4671,6 +4791,10 @@ def main() -> None:
     if sum(value is not None for value in status_modes) > 1:
         raise SystemExit("implementation status modes are mutually exclusive")
     if args.mutate_native_relationship:
+        if request_id is None:
+            raise SystemExit(
+                "native relationship mutation requires a validated --request-id"
+            )
         if (
             args.native_relationship_kind is None
             or args.native_relationship_operation is None
@@ -4682,17 +4806,22 @@ def main() -> None:
             )
         issue_map = load_issue_map(args.issue_map)
         release_graphs = load_release_graphs(args.issue_map, issue_map)
-        mutate_native_relationship_and_revalidate(
-            args.repo,
-            args.native_relationship_issue,
-            args.native_related_issue,
-            args.native_relationship_kind,
-            args.native_relationship_operation,
-            Path(args.root),
-            issue_map,
-            release_graphs,
-            run_id=args.run_id,
-        )
+        try:
+            mutate_native_relationship_and_revalidate(
+                args.repo,
+                args.native_relationship_issue,
+                args.native_related_issue,
+                args.native_relationship_kind,
+                args.native_relationship_operation,
+                Path(args.root),
+                issue_map,
+                release_graphs,
+                run_id=args.run_id,
+                request_id=request_id,
+            )
+        except BaseException:
+            print(relationship_outcome(request_id, "failed"), file=sys.stderr)
+            raise
         return
     if (
         any(value is not None for value in status_modes)

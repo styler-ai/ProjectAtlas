@@ -1,13 +1,28 @@
 name: 00-IssueOps
 
+run-name: >-
+  00-IssueOps /
+  ${{ github.event_name == 'repository_dispatch'
+      && format('relationship {0}', github.event.client_payload.request_id)
+      || format('issue #{0}', github.event.issue.number) }}
+
 on:
   issues:
     types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
   repository_dispatch:
     types: [issueops_relationship]
   # Relationship clients use authenticated gh api repos/OWNER/REPO/dispatches
-  # --method POST -f event_type=issueops_relationship -f client_payload='...';
-  # dispatch admission is not run success; require the resulting run/read-back.
+  # --method POST -f event_type=issueops_relationship -f client_payload='...'.
+  # Generate a unique 8-64 character ASCII request_id and include it in the
+  # payload, for example:
+  # gh api repos/OWNER/REPO/dispatches --method POST -f event_type=issueops_relationship \
+  #   -f client_payload='{"request_id":"rel-20260823-001","relation_kind":"sub_issue","operation":"remove","issue_number":492,"related_issue_number":339}'
+  # The 204 dispatch response is admission only.
+  # dispatch admission is not run success: locate the run by its
+  # `relationship <request_id>` name, require a successful conclusion, and
+  # read back the native relation. Reuse the same request_id for an idempotent
+  # retry after cancellation/failure; a canceled or overflowed run applied no
+  # authoritative outcome unless the native read-back proves otherwise.
 
 permissions:
   contents: read
@@ -107,10 +122,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          REQUEST_ID: ${{ github.event.client_payload.request_id || '' }}
           RELATION_KIND: ${{ github.event.client_payload.relation_kind || 'none' }}
           RELATION_OPERATION: ${{ github.event.client_payload.operation || 'none' }}
           RELATED_ISSUE: ${{ github.event.client_payload.related_issue_number || '' }}
         run: |
+          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" && ! "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$ ]]; then
+            echo "repository_dispatch requires a valid 8-64 character request_id" >&2
+            exit 1
+          fi
           if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" && "$RELATION_KIND" == "none" ]]; then
             echo "repository_dispatch requires an authorized native relationship payload" >&2
             exit 1
@@ -131,6 +151,7 @@ jobs:
               --native-relationship-operation "$RELATION_OPERATION" \
               --native-relationship-issue "$ISSUE_NUMBER" \
               --native-related-issue "$RELATED_ISSUE" \
+              --request-id "$REQUEST_ID" \
               --run-id "$GITHUB_RUN_ID"
             exit 0
           fi
