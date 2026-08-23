@@ -70,8 +70,24 @@ Before readiness, implementation handoff, candidate acceptance, and stable accep
 - **WHEN** #497 is otherwise ready before the #500 structural mechanism and order are accepted
 - **THEN** handoff waits through the readiness gate without misrepresenting #500 as a native product dependency
 
+### Requirement: Candidate graph staging does not become live authority
+The planning change SHALL keep #497-#500 task ownership mapped under `openspec/issue-map.json.changes`, as required for every immediate OpenSpec `tasks.md`, while keeping authoritative `release_graphs.v0.5.0-00` aligned with the current hosted twenty-five-child v0.5 graph. Task mapping alone SHALL NOT assign milestone membership, hierarchy, blockers, or release readiness. One tracked change-local candidate manifest SHALL contain only #499's future campaign declaration and the complete twenty-nine-child replacement graph. IssueOps SHALL ignore the candidate manifest for live reconciliation. Sol SHALL publish and read back the exact bodies, apply and read back the authorized hosted milestone/native relationship bootstrap, and only then promote the exact future graph into the authoritative issue map through a narrow publication. No readiness, handoff, merge authorization, or release transition SHALL proceed while hosted and authoritative graph state differ, and the candidate manifest SHALL be removed when promotion completes.
+
+#### Scenario: Planning artifacts are published before hosted bootstrap
+- **WHEN** the non-closing planning pull request is evaluated while #497-#500 remain Intake-only, unmilestoned, and without native release relationships
+- **THEN** the active release graph continues to validate the current hosted graph while the task mappings remain ownership-only
+- **AND** the candidate manifest preserves the exact future graph and campaign declaration without activating live relationship checks
+
+#### Scenario: Hosted bootstrap is partial or raced
+- **WHEN** any candidate body, milestone, parent, blocker, mapping, graph node, or published revision is missing, stale, or mismatched during controlled reconciliation
+- **THEN** IssueOps and semantic readiness remain fail-closed and no downstream transition proceeds
+
+#### Scenario: Candidate graph is promoted
+- **WHEN** every exact body and hosted milestone/native relationship matches the accepted candidate manifest
+- **THEN** a narrow publication replaces `openspec/issue-map.json.release_graphs.v0.5.0-00` with its campaign declaration and replacement graph, removes the candidate manifest, and requires exact published-main plus hosted readback before readiness
+
 ### Requirement: The complete v0.5 set is migrated and reread semantically
-Sol SHALL migrate issue #500 plus the twenty-nine accepted/current-candidate v0.5.0 bodies from exact live bodies or the latest candidate drafts, preserving authoritative task text and checked state while applying only required explanatory, acceptance, graph, and campaign corrections. #500 publication task 1.3 SHALL end after exact body/native-graph publication and readback plus the fresh semantic reconciliation; #500 task 1.4 SHALL own the final implementation-versus-diagram review. Only after all #500 tasks and #500 itself are complete SHALL primary Sol independently synchronize shared `complete-v050-release-readiness` task 1.4. No #500 task SHALL check or depend on that shared task. #492 candidate and stable gates SHALL freshly reconcile every accepted issue's explanation, behavior/capability, acceptance, release role, non-goals/failures, diagram meaning, and task mirror in addition to objective IssueOps and published-main readback.
+Sol SHALL migrate issue #500 plus the twenty-nine accepted/current-candidate v0.5.0 bodies from exact live bodies or the latest candidate drafts, preserving authoritative task text and checked state while applying only required explanatory, acceptance, graph, and campaign corrections. #500 publication task 1.3 SHALL end after exact body publication, hosted graph bootstrap, candidate-manifest promotion, authoritative/native readback, and fresh semantic reconciliation; #500 task 1.4 SHALL own the final implementation-versus-diagram review. Only after all #500 tasks and #500 itself are complete SHALL primary Sol independently synchronize shared `complete-v050-release-readiness` task 1.4. No #500 task SHALL check or depend on that shared task. #492 candidate and stable gates SHALL freshly reconcile every accepted issue's explanation, behavior/capability, acceptance, release role, non-goals/failures, diagram meaning, and task mirror in addition to objective IssueOps and published-main readback.
 
 #### Scenario: Candidate semantic readback
 - **WHEN** the exact RC input is evaluated
@@ -86,7 +102,7 @@ Sol SHALL migrate issue #500 plus the twenty-nine accepted/current-candidate v0.
 - **THEN** the independent shared planning task remains unchecked and no affected readiness, handoff, candidate, or stable transition proceeds
 
 #### Scenario: #500 publication and shared synchronization do not form a cycle
-- **WHEN** exact publication/readback and semantic reconciliation complete #500 task 1.3
+- **WHEN** exact body/hosted publication, candidate-manifest promotion/readback, and semantic reconciliation complete #500 task 1.3
 - **THEN** #500 proceeds to its own final implementation-versus-diagram review while the independent shared task remains unchecked until every #500 task and #500 itself are complete
 
 ### Requirement: Guidance has one cross-project semantic owner

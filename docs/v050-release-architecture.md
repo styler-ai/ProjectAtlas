@@ -1,6 +1,6 @@
 # v0.5.0 release architecture
 
-Each mapped v0.5.0 issue owns one focused view below. The release graph in `openspec/issue-map.json` owns hierarchy and implementation order; #492 owns acceptance only and closes after every child issue.
+Each active or candidate v0.5.0 issue owns one focused view below. `openspec/issue-map.json` maps candidate OpenSpec task ownership, but its `release_graphs` section owns only the current live hierarchy and implementation order. The #500 change-local candidate manifest is a deterministic future-graph promotion source, not graph authority; it becomes authoritative only after exact body and hosted relationship bootstrap, narrow graph promotion, and published-main readback. #492 owns acceptance only and closes after every child issue.
 
 ## PHP language-guidance evidence flow
 
@@ -356,19 +356,24 @@ flowchart TB
 
 ## Planned-issue specification and delivery flow
 
-Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet, owns semantic acceptance and every GitHub state transition, and hands implementation to Luna only after exact published evidence and native release facts agree. Candidate validation can repair the packet but cannot authorize readiness.
+Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet, owns semantic acceptance and every GitHub state transition, and hands implementation to Luna only after exact published evidence, the promoted release graph, and native release facts agree. Candidate validation and the candidate graph manifest can repair or stage the packet but cannot authorize readiness.
 
 ```mermaid
 flowchart TB
     Intake["Issue-form intake: acceptance plus applicable reproduction or agent workflow"] --> SolSpec["Sol specification: body, OpenSpec, diagram meaning, and release role"]
     SolSpec --> CandidateReview{"Candidate eight-question semantic review passes?"}
-    CandidateReview -- No --> SolSpec
-    CandidateReview -- Yes --> PlanningPR[Non-closing planning publication]
-    PlanningPR --> PublishedReadback{"Exact main body, task mirror, and diagram readback agree?"}
-    PublishedReadback -- No --> SolSpec
-    PublishedReadback -- Yes --> NativeState["Sol applies milestone, parent, and genuine blocker relationships"]
-    NativeState --> Readiness{"Objective IssueOps and semantic review both pass?"}
-    Readiness -- No --> SolSpec
+    CandidateReview -- No --> Blocked(["Fail closed; Sol repairs the packet from accepted sources"])
+    CandidateReview -- Yes --> PlanningPR["Non-closing planning publication: specs, diagrams, drafts, mapped task ownership, and candidate graph; active release graph stays live"]
+    PlanningPR --> PlanningReadback{"Exact main planning artifacts and candidate graph agree?"}
+    PlanningReadback -- No --> Blocked
+    PlanningReadback -- Yes --> BodyPublication["Sol publishes and reads back exact issue bodies"]
+    BodyPublication --> NativeState["Sol applies and reads back milestone, parent, and genuine blocker relationships"]
+    NativeState --> Promotion["Promote exact future graph and campaign declaration; remove candidate manifest"]
+    Promotion --> PublishedReadback{"Exact main body, task mirror, diagram, active release graph, and hosted graph agree?"}
+    PublishedReadback -- No --> Blocked
+    Blocked --> SolSpec
+    PublishedReadback -- Yes --> Readiness{"Objective IssueOps and semantic review both pass?"}
+    Readiness -- No --> Blocked
     Readiness -- Yes --> Luna[Luna implementation handoff]
 ```
 
@@ -449,34 +454,32 @@ flowchart TB
 
 ## Dependency audit and two-stage release checkpoints
 
-The same trusted default-branch workflow runs the audit once before RC and again after the accepted RC but before stable. Both executions translate the current Dependabot configuration without loss, keep the issues-write token outside every updater/proxy boundary, and require bounded sanitized output plus certain container cleanup before reconciliation. The single campaign body region advances from `collecting` to an exact `candidate_ready` snapshot and later to `stable_ready`; it is not a second graph or database.
+The same trusted default-branch workflow runs the audit once before RC and again after the accepted RC but before stable. Both executions translate the current Dependabot configuration without loss, keep the issues-write token outside every updater/proxy boundary, and require bounded sanitized output plus certain container cleanup before reconciliation. A would-be update without a hosted PR becomes a separate pre-PR finding with audit/update identity only; exact PR identity appears only after authenticated hosted readback and linkage. The single campaign body region advances from `collecting` to an exact `candidate_ready` snapshot and later to `stable_ready`; it is not a second graph or database.
 
 ```mermaid
 flowchart TB
-    Config[Default .github/dependabot.yml] --> AuditContract[Lossless translation; token-free sequential updater/proxy; bounded sanitized output; verified cleanup; then issues-write reconciliation]
-    PreRC[gh workflow run before RC] --> PreRCAudit[Run pre-RC audit]
-    AuditContract --> PreRCAudit
-    PreRCAudit -- failed or uncertain cleanup --> Block([Applicable checkpoint blocked])
-    CandidateRecords[Every candidate-window record has a final disposition] --> CandidateInventory[Campaign body region at candidate cutoff]
-    PreRCAudit -- clean or bounded findings --> CandidateInventory
-    CandidateInventory --> CandidateGate{Audit successful and snapshot final for exact candidate?}
-    CandidateGate -- No --> Block
-    CandidateGate -- Yes --> CandidateReady[candidate_ready bound to exact RC revision and inventory]
+    Config[Default .github/dependabot.yml] --> Audit["Pre-RC or pre-stable audit: lossless, token-isolated, bounded, and cleaned up"]
+    Dispatch[Trusted gh workflow run] --> Audit
+    Audit -- failed or uncertain --> Block([Applicable checkpoint blocked])
+    Audit -- clean --> AuditFinal[Successful audit with no unresolved new finding]
+    Audit -- findings --> Finding["Separate pre-PR finding: audit and update identity only; no PR fields"]
+    Finding --> Resolution{"Finding resolution"}
+    Resolution -- deferred, declined, or superseded --> AuditFinal
+    Resolution -- matching hosted PR appears --> Readback["Authenticated readback creates the complete real PR record and link"]
+    Readback --> PRFinal{"Linked PR finally dispositioned?"}
+    PRFinal -- No --> Block
+    PRFinal -- Yes --> AuditFinal
+    Resolution -- pending or provisional --> Block
+    AuditFinal --> Gate{"Audit successful and every applicable PR/finding record final?"}
+    PRRecords[All applicable hosted PR records finally dispositioned] --> Gate
+    Gate -- No --> Block
+    Gate -- Yes --> Snapshot["Exact checkpoint snapshot: revision, PR/finding union, config, audit, and tool identities"]
+    Snapshot --> Stage{"Which exact checkpoint is final?"}
+    Stage -- pre-RC --> CandidateReady[candidate_ready bound to exact RC revision and inventory]
     CandidateReady --> RC1([Publish and accept RC1 while issues 499 and 492 stay open])
-
-    RC1 --> StableWindow[Continue weekly intake through stable window]
-    StableWindow --> LaterRecords[Finally disposition every new full-window record]
-    CandidateInventory --> StableInventory[Same body region retains candidate history and later records]
-    LaterRecords --> StableInventory
-    RC1 --> PreStable[gh workflow run after accepted RC and before stable]
-    AuditContract --> StableAudit[Run pre-stable audit]
-    PreStable --> StableAudit
-    StableAudit -- clean or bounded findings --> StableInventory
-    StableAudit -- failed or uncertain cleanup --> Block
-    StableInventory --> StableGate
-    StableGate{Audit successful and full-window snapshot final?}
-    StableGate -- No --> Block
-    StableGate -- Yes --> StableReady[stable_ready exact full-window readback]
+    RC1 --> StableWindow["Continue weekly intake; retain candidate history and later records"]
+    StableWindow --> Audit
+    Stage -- pre-stable --> StableReady[stable_ready exact full-window readback]
     StableReady --> Close499[Close campaign issue 499]
     Close499 --> Release([Stable issue 492 acceptance may begin])
 ```

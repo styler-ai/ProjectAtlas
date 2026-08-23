@@ -13,7 +13,7 @@ Sol owns specification authorship, issue prose, migration, semantic acceptance, 
 - Restore one lean canonical planned-issue contract with observable acceptance between release scope and non-goals.
 - Preserve enough applicable bug or improvement intake context for another contributor to understand and verify the issue without private discovery context.
 - Mechanize only objective structure while assigning comprehension and reconciliation explicitly to Sol.
-- Migrate all twenty-nine accepted/current-candidate v0.5.0 packets and add #500 as the twenty-ninth non-release child without inventing product dependency edges.
+- Migrate all twenty-nine accepted/current-candidate v0.5.0 packets, map their OpenSpec task ownership, and stage #500 as the twenty-ninth non-release child without activating unpublished release-graph nodes or inventing product dependency edges.
 - Make per-issue readiness, implementation handoff, RC acceptance, and stable acceptance depend on semantically reconciled published issue evidence.
 
 **Non-Goals:**
@@ -64,6 +64,14 @@ No implementation handoff occurs until that issue's body, OpenSpec, diagram mean
 
 #497 may proceed only after its own packet passes the restored contract and the shared checker/order mechanism required by #500 is accepted. This is an IssueOps readiness prerequisite, not a native product dependency, so #497 remains dependency-free in the v0.5 graph.
 
+### Candidate graph data is not live authority
+
+`openspec/issue-map.json.changes` continues to map #497-#500 to their candidate OpenSpec tasks because the repository schema requires every immediate `tasks.md` change to have one owning issue. That mapping declares task ownership only; it does not assign milestone membership, hierarchy, blockers, or release readiness. The planning pull request therefore leaves authoritative `release_graphs.v0.5.0-00` at the current hosted twenty-five children. The change-local `candidate-issue-map.json` is the single deterministic promotion source for #499's future campaign declaration and the complete twenty-nine-child replacement graph. The live IssueOps checker does not read that candidate artifact, and candidate validation cannot authorize readiness or relationships.
+
+After the planning artifacts are accepted on `main`, Sol publishes and reads back all thirty exact bodies, then performs the authorized milestone and native relationship bootstrap from the accepted candidate manifest. During that bounded hosted transition the old active graph is expected to fail closed; no handoff, merge authorization, or release transition may proceed. Only after hosted state exactly matches the candidate does a narrow publication replace `openspec/issue-map.json.release_graphs.v0.5.0-00` with the manifest's #499 campaign declaration and v0.5 graph; exact published-`main` and hosted readback then remove the fail-closed condition. The manifest is removed as part of promotion so it never becomes a second active graph.
+
+Publishing the future graph first was rejected because the existing checker correctly treats every active declaration as immediately authoritative. Weakening or teaching the live reconciler to overlook candidate nodes was rejected because it would make real graph drift indistinguishable from staging.
+
 ### Release acceptance repeats semantic reconciliation over the full set
 
 #492 candidate and stable gates perform a fresh Sol reconciliation over every accepted issue's explanation, behavior/capability, acceptance, release role, non-goals/failures, diagram meaning, and task mirror. IssueOps independently proves objective structure and synchronization. Candidate acceptance still requires #499 `candidate_ready`; stable acceptance still requires #499 `stable_ready` and closure. The full hierarchy contains twenty-nine children after #500 is added.
@@ -81,17 +89,18 @@ The primary Sol-owned personal global `issue-spec-writing` skill now carries the
 - [Repository implementation overwrites the completed personal global semantic contract] -> Keep primary Sol as the only global skill mutation owner; Luna reads it for compatibility and changes only repository or proven necessary version-matched plugin surfaces.
 - [#500 serializes the release] -> Keep `blocked_by: []`, add no #500-to-product edges, and use the existing per-issue readiness gate for the shared contract.
 - [#500 completion depends on the shared readiness task that itself waits for #500] -> Keep #500 publication/readback and final architecture review inside #500, complete #500, and only then let primary Sol synchronize the independent shared task.
+- [Candidate release-graph nodes activate live relationship checks before their native state exists] -> Keep task ownership mapped, stage only the future graph and campaign declaration in the one change-local promotion manifest, preserve the active release graph as exact hosted truth, and promote only after body and hosted graph readback match.
 - [Release acceptance trusts an earlier semantic pass] -> Require a fresh full-set Sol reconciliation at candidate and stable readback in addition to objective IssueOps.
 
 ## Migration Plan
 
-1. Publish this OpenSpec change, the twenty-nine-child map, the release-readiness semantic contract, the two architecture views, and exact ignored drafts through a non-closing planning pull request; retain the completed primary Sol-owned personal global skill as read-only authority and keep the independent shared task unchecked.
+1. Publish this OpenSpec change, the non-authoritative candidate release-graph promotion manifest, the release-readiness semantic contract, the focused architecture views, and exact ignored drafts through a non-closing planning pull request while task ownership remains mapped and the authoritative release graph remains aligned with current live GitHub state; retain the completed primary Sol-owned personal global skill as read-only authority and keep the independent shared task unchecked.
 2. Luna implements the smallest objective repository checker/self-test and necessary repository issue-form, repository-guidance, and conditionally required version-matched plugin integration; it verifies but does not mutate the personal global skill, and existing gates remain authoritative.
-3. Sol semantically reconciles and publishes the exact thirty drafts (#500 plus twenty-nine migrated packets), assigns #500 to `v0.5.0-00`, activates #492 parent/blocker truth, and reads every body, task mirror, diagram, milestone, and native relation back from exact `main`.
+3. Sol semantically reconciles and publishes the exact thirty drafts (#500 plus twenty-nine migrated packets), applies and reads back the authorized milestone and native parent/blocker bootstrap from the accepted manifest, promotes that exact future graph and campaign declaration into the authoritative issue map through a narrow publication, and then rereads every body, task mirror, diagram, task mapping, release graph, milestone, and native relation from exact `main` and GitHub.
 4. Review the final Luna implementation against the focused diagrams and update either side until they agree, completing #500's final task only after that review passes.
 5. After every #500 task is complete and #500 itself completes, primary Sol independently synchronizes shared `complete-v050-release-readiness` task 1.4; no #500 task checks or depends on that shared task.
 
-Any partial or raced hosted mutation fails closed. The ignored drafts remain the repair source until exact readback agrees; no issue becomes ready and no implementation handoff proceeds from partial migration state.
+Any partial or raced body, hosted, or manifest-promotion mutation fails closed. The ignored drafts and candidate manifest remain the repair sources until authoritative map and hosted readback agree; no issue becomes ready and no implementation handoff proceeds from partial migration state.
 
 ## Open Questions
 

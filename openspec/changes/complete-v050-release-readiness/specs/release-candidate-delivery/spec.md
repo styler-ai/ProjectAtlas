@@ -40,7 +40,7 @@ Pull requests SHALL run the smallest contract-complete existing proof selected b
 - **THEN** #499 records `candidate_ready` and RC1 may publish while #499/#492 remain open
 
 #### Scenario: Dependabot campaign is stable-ready
-- **WHEN** RC1 is accepted, the later pre-stable audit completes successfully, every finding and every newly observed/full-window record is final, and the exact stage/full-union readback matches
+- **WHEN** RC1 is accepted, the later pre-stable audit completes successfully, every pre-PR finding is finally deferred/declined/superseded or linked to a finally dispositioned real PR, every newly observed/full-window PR record is final, and the exact stage/full-union readback matches
 - **THEN** #499 records `stable_ready`, may close, and may unblock stable #492 acceptance without per-PR issues or weaker proof
 
 ### Requirement: Accepted issue evidence is published before implementation
@@ -48,7 +48,15 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 
 #### Scenario: A planning slice publishes new evidence
 - **WHEN** a planning pull request has no native closing issue and its candidate OpenSpec and Mermaid checks pass
-- **THEN** it may publish the proposed specification, issue migration, and architecture artifacts without claiming that an implementation issue is ready
+- **THEN** it may publish the proposed specification, issue migration, architecture artifacts, required candidate task-ownership mappings, and one non-authoritative future release-graph promotion manifest without activating unpublished graph nodes or claiming that a mapped implementation issue is ready
+
+#### Scenario: Candidate graph is promoted after hosted bootstrap
+- **WHEN** exact candidate bodies are published and read back and Sol applies the authorized milestone/native relationship bootstrap from the accepted manifest
+- **THEN** a narrow publication replaces `openspec/issue-map.json.release_graphs.v0.5.0-00` with the exact #499 campaign declaration and replacement graph, removes the manifest, and requires exact published-main plus hosted reconciliation before readiness
+
+#### Scenario: Candidate and authoritative graph state differ
+- **WHEN** a body, mapping, milestone, parent, blocker, graph node, or published revision is missing, stale, raced, or mismatched during bootstrap or promotion
+- **THEN** IssueOps remains fail-closed and no readiness, handoff, merge authorization, or release transition proceeds
 
 #### Scenario: IssueOps passes but the packet is not comprehensible
 - **WHEN** an issue has the required sections, acceptance bullet shape, exact tasks, and valid diagrams but Sol cannot answer one or more semantic review questions from the packet

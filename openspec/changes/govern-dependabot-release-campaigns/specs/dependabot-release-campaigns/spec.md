@@ -49,6 +49,26 @@ The same machine-owned region SHALL record exactly one stage from `collecting`, 
 - **THEN** the record remains non-final
 - **AND** no historical review or authorization is inferred
 
+### Requirement: Pre-PR audit findings have a separate identity and promotion path
+A successful CLI audit that reports a would-be update before a hosted pull request exists SHALL create or refresh a separate pre-PR finding record. That record SHALL bind a stable finding ID, audit run, ecosystem, directory, dependency, update/operation summary, first-seen and last-seen time, current state, and any authorized repository-technical disposition. It SHALL NOT contain or synthesize a PR number, author, base, head, milestone, campaign relationship, review, or protected-check identity.
+
+When hosted Dependabot later creates a matching pull request, automation SHALL first read back its real repository, PR number, exact author, base, exact head, body, milestone, and campaign relationship; SHALL create or update the independently complete PR record; and SHALL link the finding to that real record. The finding SHALL remain blocking until it is explicitly `deferred`, `declined`, or `superseded`, or is linked to a PR record that reaches final `accepted`, `deferred`, `declined`, or `superseded` disposition. `accepted` SHALL NOT be assigned to an unlinked pre-PR finding, and linkage alone SHALL NOT finalize a pending or provisional PR.
+
+#### Scenario: Audit finds an update before hosted Dependabot opens a PR
+- **WHEN** a complete audit reports a would-be update and no matching hosted pull request can be read back
+- **THEN** the campaign records a pending pre-PR finding with audit/update identity only
+- **AND** no hosted PR field is fabricated
+
+#### Scenario: Hosted pull request later appears
+- **WHEN** authenticated readback finds a matching Dependabot pull request
+- **THEN** the campaign creates or updates the full PR record from hosted identity and links the prior finding to it
+- **AND** readiness still waits for the PR record's final disposition
+
+#### Scenario: No hosted pull request appears
+- **WHEN** an authorized reconciliation determines that an unlinked finding is deferred, declined, or superseded
+- **THEN** it records that final state with a repository-technical rationale and exact successor when applicable
+- **AND** an unlinked finding is never recorded as accepted
+
 ### Requirement: Campaign automation and CI planning remain separate
 Campaign automation SHALL own intake, exact campaign relationship, inventory/disposition state, audit ingestion, and release reconciliation. `verify-affected-repository-contracts` SHALL exclusively own build, test, and quality selection. Neither capability SHALL duplicate the other's planner or mutable state.
 
@@ -161,7 +181,7 @@ The audit checkout SHALL use `persist-credentials: false`. The issues-write toke
 - **AND** the audit records failed
 
 ### Requirement: Audit outcomes feed the campaign inventory
-Each audit SHALL emit exactly `clean`, `findings`, or `failed` with exact configuration, repository revision, stage, and tool/image identity into the same machine-owned campaign region. `clean` and `findings` are successful complete executions; findings SHALL create or refresh pending records. `failed` SHALL block the applicable readiness checkpoint. `clean` SHALL record successful absence of new operations but SHALL NOT finalize another pending or provisional record.
+Each audit SHALL emit exactly `clean`, `findings`, or `failed` with exact configuration, repository revision, stage, and tool/image identity into the same machine-owned campaign region. `clean` and `findings` are successful complete executions; findings SHALL create or refresh pending pre-PR finding records unless an exact real PR link already exists. `failed` SHALL block the applicable readiness checkpoint. `clean` SHALL record successful absence of new operations but SHALL NOT finalize another pending or provisional PR or finding record.
 
 #### Scenario: Clean audit
 - **WHEN** every configured entry completes and reports no would-be update operation
@@ -169,17 +189,17 @@ Each audit SHALL emit exactly `clean`, `findings`, or `failed` with exact config
 
 #### Scenario: Audit findings
 - **WHEN** one or more would-be update operations are reported
-- **THEN** the campaign records findings and creates or refreshes pending inventory items for reconciliation
+- **THEN** the campaign records findings and creates or refreshes separate pending pre-PR finding records for reconciliation without fabricated PR identity
 
 #### Scenario: Failed audit
 - **WHEN** any audit entry, schema/sanitization check, bound, or cleanup fails or does not complete certainly
 - **THEN** the campaign records failed and release acceptance remains blocked
 
 ### Requirement: Candidate-ready and stable-ready are separate release checkpoints
-`candidate_ready` SHALL bind one exact RC candidate revision to a successful final pre-RC audit and the final full-union inventory reconciled through that checkpoint. It MAY permit `v0.5.0-rc1` publication only while #499 and #492 remain open. After independent RC acceptance, newly created or updated records SHALL return the campaign to `collecting`. `stable_ready` SHALL require a later successful pre-stable audit on accepted current `main`, final disposition of every audit finding and every record newly observed since candidate readiness, and exact full-window readback; only then MAY #499 close and unblock stable #492 acceptance.
+`candidate_ready` SHALL bind one exact RC candidate revision to a successful final pre-RC audit and the final full-union PR/finding inventory reconciled through that checkpoint. It MAY permit `v0.5.0-rc1` publication only while #499 and #492 remain open. After independent RC acceptance, newly created or updated PR or finding records SHALL return the campaign to `collecting`. `stable_ready` SHALL require a later successful pre-stable audit on accepted current `main`, final resolution of every audit finding and every PR record newly observed since candidate readiness, and exact full-window readback; only then MAY #499 close and unblock stable #492 acceptance.
 
 #### Scenario: RC candidate checkpoint succeeds
-- **WHEN** the pre-RC audit is complete as clean or findings, every resulting finding and inventory record is final for the exact candidate snapshot, and the publication preflight rereads matching revision/inventory/config/audit identities with no intervening event
+- **WHEN** the pre-RC audit is complete as clean or findings, every PR record is final and every finding is finally deferred/declined/superseded or linked to a finally dispositioned real PR for the exact candidate snapshot, and the publication preflight rereads matching revision/inventory/config/audit identities with no intervening event
 - **THEN** the campaign records `candidate_ready`
 - **AND** RC1 may publish while #499 and #492 remain open for the stable window
 
@@ -194,7 +214,7 @@ Each audit SHALL emit exactly `clean`, `findings`, or `failed` with exact config
 - **AND** the new record must be final before stable readiness
 
 #### Scenario: Stable checkpoint succeeds
-- **WHEN** an accepted RC exists, the later pre-stable audit is complete as clean or findings, every resulting finding and every newly observed release-window record is final, and the exact full inventory readback matches
+- **WHEN** an accepted RC exists, the later pre-stable audit is complete as clean or findings, every resulting finding is finally resolved, every newly observed release-window PR record is final, and the exact full inventory readback matches
 - **THEN** the campaign records `stable_ready`
 - **AND** #499 may close so stable #492 acceptance can begin
 
