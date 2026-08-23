@@ -8592,6 +8592,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "MERGE_AUTHORIZATION_STATUS_CONTEXT",
         "mutate_native_relationship",
         "mutate_native_relationship_and_revalidate",
+        "validate_declared_native_transition",
+        "reverse_declared_dependents",
+        "repair_reopened_blocker",
+        "invalidate_issue_readiness",
         "commit_status",
         "implementation_reference_failures",
         "publish_implementation_status_for_pr",
@@ -8913,6 +8917,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "timeout-minutes: 5",
         "contents: read",
         "issues: write",
+        "pull-requests: read",
         "statuses: write",
     ] {
         if !issueops_workflow.contains(required) {
@@ -8967,6 +8972,18 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
+    let planned_issue_job = workflow_job_block(&issueops_workflow, "planned-issue")?;
+    for required in [
+        "github.event.issue.milestone != null || github.event.action == 'demilestoned'",
+        "--planned-issue \"$ISSUE_NUMBER\"",
+    ] {
+        if !planned_issue_job.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps planned-issue job is missing targeted demilestone guard {required:?}"
+            ))
+            .into());
+        }
+    }
     let relationship_job = workflow_job_block(&issueops_workflow, "relationship-mutation")?;
     let merge_job = workflow_job_block(&issueops_workflow, "merge-authorization")?;
     let invalidation_job =
@@ -8995,7 +9012,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     let repair_job = workflow_job_block(&issueops_workflow, "issue-state-repair")?;
-    for required in ["issues: write", "--enforce-closed-issue-blockers"] {
+    for required in [
+        "issues: write",
+        "pull-requests: read",
+        "statuses: write",
+        "--enforce-closed-issue-blockers",
+    ] {
         if !repair_job.contains(required) {
             return Err(io::Error::other(format!(
                 "IssueOps issue repair job is missing blocker repair guard {required:?}"

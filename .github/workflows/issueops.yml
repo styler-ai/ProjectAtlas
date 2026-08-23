@@ -45,7 +45,8 @@ jobs:
   planned-issue:
     name: planned-issue-readiness
     if: >
-      (github.event_name == 'issues' && github.event.issue.milestone != null)
+      (github.event_name == 'issues'
+      && (github.event.issue.milestone != null || github.event.action == 'demilestoned'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -74,6 +75,8 @@ jobs:
     permissions:
       contents: read
       issues: write
+      pull-requests: read
+      statuses: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

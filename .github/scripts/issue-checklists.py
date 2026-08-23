@@ -156,6 +156,7 @@ MAX_MILESTONES = 256
 MAX_MILESTONE_ISSUES = 256
 MAX_NATIVE_RELATIONS = 256
 MAX_PULL_REQUEST_REFERENCES = 32
+MAX_REPAIR_DEPENDENTS = 256
 MAX_REPOSITORY_COLLABORATORS = 1
 MAX_CHECKS = 256
 MAX_REVIEWS = 100
@@ -1613,6 +1614,14 @@ def mutate_native_relationship_and_revalidate(
 ) -> None:
     """Mutate one edge, then validate the complete declared release graph."""
 
+    validate_declared_native_transition(
+        repo,
+        issue,
+        related_issue,
+        relation_kind,
+        operation,
+        release_graphs,
+    )
     changed = mutate_native_relationship(
         repo, issue, related_issue, relation_kind, operation
     )
@@ -1772,6 +1781,76 @@ def target_graph_failures(
             f"milestone is {live_title or 'unset'}"
         ]
     return graph, []
+
+
+def declared_native_relations(
+    graphs: dict[str, ReleaseGraph], relation_kind: str, issue: int
+) -> set[int]:
+    """Return the declared native relation targets for one graph-owned issue."""
+
+    if relation_kind == "blocked_by":
+        return {
+            blocker
+            for graph in graphs.values()
+            for blocker in graph.blocked_by.get(issue, ())
+        }
+    if relation_kind == "sub_issue":
+        return {
+            child
+            for graph in graphs.values()
+            if graph.release_issue == issue
+            for child in graph.blocked_by
+            if child != graph.release_issue
+        }
+    raise SystemExit(f"native relation kind is invalid: {relation_kind!r}")
+
+
+def validate_declared_native_transition(
+    repo: str,
+    issue: int,
+    related_issue: int,
+    relation_kind: str,
+    operation: str,
+    release_graphs: dict[str, ReleaseGraph],
+) -> None:
+    """Reject graph-widening or graph-erasing mutations before their POST/DELETE."""
+
+    declared = declared_native_relations(release_graphs, relation_kind, issue)
+    read_relation = native_blocked_by if relation_kind == "blocked_by" else native_sub_issues
+    current = read_relation(repo, issue)
+    present = related_issue in current
+    if operation == "add":
+        if related_issue not in declared:
+            raise SystemExit(
+                f"native {relation_kind} add for #{issue} -> #{related_issue} is not declared"
+            )
+        return
+    if related_issue in declared:
+        raise SystemExit(
+            f"native {relation_kind} remove for #{issue} -> #{related_issue} would erase a declared relation"
+        )
+    if not present:
+        raise SystemExit(
+            f"native {relation_kind} remove for #{issue} -> #{related_issue} has no declared drift"
+        )
+
+
+def reverse_declared_dependents(
+    graphs: dict[str, ReleaseGraph], blocker: int
+) -> list[int]:
+    """Derive bounded direct dependents from the declared release graphs only."""
+
+    dependents = sorted(
+        issue
+        for graph in graphs.values()
+        for issue, blockers in graph.blocked_by.items()
+        if blocker in blockers
+    )
+    if len(dependents) > MAX_REPAIR_DEPENDENTS:
+        raise SystemExit(
+            "reverse release-graph dependents exceeded the bounded repair limit"
+        )
+    return dependents
 
 
 def commit_status(repo: str, sha: str, state: str, description: str, context: str = IMPLEMENTATION_STATUS_CONTEXT) -> None:
@@ -2523,18 +2602,105 @@ def implementation_issue_failures(
     return failures
 
 
+def invalidate_issue_readiness(repo: str, issue: int) -> None:
+    """Invalidate bounded open PR readiness statuses linked to one affected issue."""
+
+    pull_requests = gh_json(
+        [
+            "pr",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--search",
+            f"#{issue} in:body",
+            "--limit",
+            str(MAX_REPAIR_DEPENDENTS + 1),
+            "--json",
+            "number,headRefOid,closingIssuesReferences",
+        ]
+    )
+    if not isinstance(pull_requests, list):
+        raise SystemExit("GitHub affected PR response was malformed")
+    if len(pull_requests) > MAX_REPAIR_DEPENDENTS:
+        raise SystemExit("GitHub affected PR response exceeded the bounded repair limit")
+    for pull_request in pull_requests:
+        if not isinstance(pull_request, dict):
+            raise SystemExit("GitHub affected PR response contained a non-object")
+        number = positive_issue(pull_request.get("number"), "affected pull request number")
+        head = pull_request.get("headRefOid")
+        references = pull_request.get("closingIssuesReferences")
+        if re.fullmatch(r"[0-9a-fA-F]{40}", head or "") is None:
+            raise SystemExit(f"affected PR #{number} did not expose an exact head SHA")
+        if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
+            raise SystemExit(f"affected PR #{number} references were malformed or unbounded")
+        if not any(
+            isinstance(reference, dict) and reference.get("number") == issue
+            for reference in references
+        ):
+            continue
+        commit_status(
+            repo,
+            head,
+            "failure",
+            "Implementation readiness invalidated by an open declared blocker",
+            IMPLEMENTATION_STATUS_CONTEXT,
+        )
+        commit_status(
+            repo,
+            head,
+            "failure",
+            "Merge authorization invalidated by an open declared blocker",
+            MERGE_AUTHORIZATION_STATUS_CONTEXT,
+        )
+
+
+def repair_reopened_blocker(
+    repo: str, blocker: int, graphs: dict[str, ReleaseGraph]
+) -> None:
+    """Repair graph-bounded closed dependents after a blocker becomes open."""
+
+    queue = [blocker]
+    seen = {blocker}
+    while queue:
+        current_blocker = queue.pop(0)
+        for dependent in reverse_declared_dependents(graphs, current_blocker):
+            if dependent in seen:
+                continue
+            seen.add(dependent)
+            if len(seen) > MAX_REPAIR_DEPENDENTS:
+                raise SystemExit("reverse release-graph repair exceeded the bounded limit")
+            dependent_issue = issue_payload(repo, dependent)
+            state = str(dependent_issue.get("state", "")).upper()
+            if state == "CLOSED":
+                run(["gh", "issue", "reopen", str(dependent), "--repo", repo])
+            elif state != "OPEN":
+                raise SystemExit(
+                    f"dependent #{dependent} has an invalid state {state or 'UNKNOWN'}"
+                )
+            invalidate_issue_readiness(repo, dependent)
+            queue.append(dependent)
+
+
 def enforce_closed_issue_blockers(
     repo: str, issue_number: int, graphs: dict[str, ReleaseGraph]
 ) -> None:
     """Repair a closed declared issue when a direct blocker is still open."""
 
     issue = issue_payload(repo, positive_issue(issue_number, "issue number"))
-    if str(issue.get("state", "")).upper() != "CLOSED":
+    state = str(issue.get("state", "")).upper()
+    if state == "OPEN":
+        repair_reopened_blocker(repo, issue_number, graphs)
+        return
+    if state != "CLOSED":
         return
     failures = implementation_issue_failures(repo, issue, graphs)
     if not failures:
         return
     run(["gh", "issue", "reopen", str(issue_number), "--repo", repo])
+    invalidate_issue_readiness(repo, issue_number)
+    repair_reopened_blocker(repo, issue_number, graphs)
     raise SystemExit(
         "closed issue was reopened because blocker enforcement failed:\n"
         + "\n".join(f"- {failure}" for failure in failures)
@@ -3251,6 +3417,9 @@ Mitigations:
     saved_native_sub_issues = globals()["native_sub_issues"]
     saved_native_parent_issue = globals()["native_parent_issue"]
     saved_issue_payload = globals()["issue_payload"]
+    saved_release_graph_failures = globals()["release_graph_failures"]
+    saved_gh_json = globals()["gh_json"]
+    saved_commit_status = globals()["commit_status"]
     saved_gh_api_json = globals()["gh_api_json"]
     saved_run = globals()["run"]
     saved_subprocess_run = subprocess.run
@@ -3346,6 +3515,65 @@ Mitigations:
         assert native_mutation_calls[-1][4] == "DELETE"
         assert native_mutation_calls[-1][-2:] == ["-F", "sub_issue_id=1100"]
         globals()["native_parent_issue"] = saved_native_parent_issue
+
+        globals()["release_graph_failures"] = lambda *args, **kwargs: []
+        native_mutation_calls.clear()
+        native_mutation_state["blocked_by"] = set()
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                10,
+                99,
+                "blocked_by",
+                "add",
+                graph_owners,
+                valid_graphs,
+                "rel-invalid-add",
+            )
+        except SystemExit as error:
+            assert "is not declared" in str(error)
+            assert native_mutation_calls == []
+        else:
+            raise AssertionError("undeclared native add was admitted")
+        native_mutation_state["blocked_by"] = {11}
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                10,
+                11,
+                "blocked_by",
+                "remove",
+                graph_owners,
+                valid_graphs,
+                "rel-invalid-remove",
+            )
+        except SystemExit as error:
+            assert "erase a declared relation" in str(error)
+            assert native_mutation_calls == []
+        else:
+            raise AssertionError("declared native removal was admitted")
+        native_mutation_state["blocked_by"] = set()
+        native_mutation_state["sub_issue"] = set()
+        globals()["release_graph_failures"] = lambda *args, **kwargs: [
+            "unrelated declared drift"
+        ]
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                10,
+                11,
+                "blocked_by",
+                "add",
+                graph_owners,
+                valid_graphs,
+                "rel-valid-with-drift",
+            )
+        except SystemExit as error:
+            assert "reconciliation failed" in str(error)
+            assert native_mutation_calls[-1][4] == "POST"
+        else:
+            raise AssertionError("reconciliation drift was masked after valid mutation")
+        globals()["release_graph_failures"] = saved_release_graph_failures
 
         foreign_identity = {
             "repository_url": "https://api.github.com/repos/foreign/repo",
@@ -3473,6 +3701,7 @@ Mitigations:
             "state": "OPEN" if issue == 10 else "CLOSED",
         }
         globals()["run"] = lambda args: repair_commands.append(args) or ""
+        globals()["gh_json"] = lambda args: []
         try:
             enforce_closed_issue_blockers("owner/repo", 12, valid_graphs)
         except SystemExit as error:
@@ -3480,14 +3709,44 @@ Mitigations:
             assert repair_commands == [["gh", "issue", "reopen", "12", "--repo", "owner/repo"]]
         else:
             raise AssertionError("closed issue with an open blocker was not repaired")
+        repair_commands.clear()
+        globals()["issue_payload"] = lambda repo, issue: {
+            "number": issue,
+            "state": {10: "CLOSED", 11: "OPEN", 12: "CLOSED"}.get(issue, "CLOSED"),
+        }
+        enforce_closed_issue_blockers("owner/repo", 11, valid_graphs)
+        assert repair_commands == [
+            ["gh", "issue", "reopen", "10", "--repo", "owner/repo"],
+            ["gh", "issue", "reopen", "12", "--repo", "owner/repo"],
+        ]
+        affected_statuses: list[tuple[str, str]] = []
+        globals()["gh_json"] = lambda args: [
+            {
+                "number": 494,
+                "headRefOid": "a" * 40,
+                "closingIssuesReferences": [{"number": 10}],
+            }
+        ]
+        globals()["commit_status"] = (
+            lambda repo, sha, state, description, context=IMPLEMENTATION_STATUS_CONTEXT:
+            affected_statuses.append((state, context))
+        )
+        invalidate_issue_readiness("owner/repo", 10)
+        assert affected_statuses == [
+            ("failure", IMPLEMENTATION_STATUS_CONTEXT),
+            ("failure", MERGE_AUTHORIZATION_STATUS_CONTEXT),
+        ]
     finally:
         globals()["milestone_issues"] = saved_milestone_issues
         globals()["native_blocked_by"] = saved_native_blocked_by
         globals()["native_sub_issues"] = saved_native_sub_issues
         globals()["native_parent_issue"] = saved_native_parent_issue
         globals()["issue_payload"] = saved_issue_payload
+        globals()["gh_json"] = saved_gh_json
+        globals()["commit_status"] = saved_commit_status
         globals()["gh_api_json"] = saved_gh_api_json
         globals()["run"] = saved_run
+        globals()["release_graph_failures"] = saved_release_graph_failures
         subprocess.run = saved_subprocess_run
     assert milestone_issue_failures(
         "v1.0.0-00",
@@ -3655,18 +3914,55 @@ Mitigations:
 
     saved_guard_git_output = globals()["git_output"]
     saved_guard_gh_json = globals()["gh_json"]
+    saved_guard_gh_api_json = globals()["gh_api_json"]
     saved_guard_default_branch_head = globals()["default_branch_head"]
     guard_mode = "clean"
     guard_sha = "e" * 40
+
+    with tempfile.TemporaryDirectory() as temporary:
+        git_fixture = Path(temporary)
+        subprocess.run(
+            ["git", "init", "-q"], cwd=git_fixture, check=True, timeout=30
+        )
+        (git_fixture / "tracked.md").write_text("published\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(git_fixture), "add", "tracked.md"],
+            check=True,
+            timeout=30,
+        )
+        git_environment = os.environ.copy()
+        git_environment.update(
+            {
+                "GIT_AUTHOR_NAME": "ProjectAtlas self-test",
+                "GIT_AUTHOR_EMAIL": "self-test@example.invalid",
+                "GIT_COMMITTER_NAME": "ProjectAtlas self-test",
+                "GIT_COMMITTER_EMAIL": "self-test@example.invalid",
+            }
+        )
+        subprocess.run(
+            ["git", "-C", str(git_fixture), "commit", "-qm", "fixture"],
+            check=True,
+            timeout=30,
+            env=git_environment,
+        )
+        (git_fixture / ".projectatlas").mkdir()
+        (git_fixture / ".projectatlas" / "issue-manage-worktree-atlas-continuity.md").write_text(
+            "local note\n", encoding="utf-8"
+        )
+        assert saved_guard_git_output(
+            git_fixture, ["status", "--porcelain=v1", "--untracked-files=no"]
+        ) == ""
 
     def fake_guard_git_output(root: Path, args: list[str]) -> str:
         if guard_mode == "git-failure":
             raise SystemExit("published readiness Git inspection failed: fixture")
         if args == ["rev-parse", "--show-toplevel"]:
-            return str(self_test_root)
+            return str(self_test_root / "other") if guard_mode == "root-mismatch" else str(self_test_root)
         if args == ["status", "--porcelain=v1", "--untracked-files=no"]:
             return " M tracked.md" if guard_mode == "tracked-dirty" else ""
         if args == ["rev-parse", "HEAD"]:
+            if guard_mode == "head-malformed":
+                return "not-a-sha"
             return "d" * 40 if guard_mode == "stale" else guard_sha
         raise AssertionError(f"unexpected published Git fixture command: {args}")
 
@@ -3692,6 +3988,8 @@ Mitigations:
             "owner/repo", self_test_root
         ) == PublishedSnapshot("main", guard_sha)
         for failure_mode, expected in (
+            ("root-mismatch", "addressed Git checkout"),
+            ("head-malformed", "HEAD was malformed"),
             ("stale", "does not equal live default branch"),
             ("tracked-dirty", "tracked modifications"),
             ("default-missing", "identity was malformed"),
@@ -3714,6 +4012,59 @@ Mitigations:
         globals()["git_output"] = saved_guard_git_output
         globals()["gh_json"] = saved_guard_gh_json
         globals()["default_branch_head"] = saved_guard_default_branch_head
+        globals()["gh_api_json"] = saved_guard_gh_api_json
+
+    saved_git_subprocess_run = subprocess.run
+    try:
+        for failure, expected in (
+            (
+                lambda: (_ for _ in ()).throw(
+                    subprocess.TimeoutExpired(["git"], 120)
+                ),
+                "Git inspection failed",
+            ),
+            (
+                lambda: (_ for _ in ()).throw(OSError("fixture OS failure")),
+                "Git inspection failed",
+            ),
+        ):
+            subprocess.run = lambda *args, _failure=failure, **kwargs: _failure()
+            try:
+                saved_guard_git_output(self_test_root, ["rev-parse", "HEAD"])
+            except SystemExit as error:
+                assert expected in str(error)
+            else:
+                raise AssertionError("Git exception did not fail published readiness")
+
+        class FailedGitProcess:
+            returncode = 1
+            stdout = ""
+            stderr = "fixture process failure"
+
+        subprocess.run = lambda *args, **kwargs: FailedGitProcess()
+        try:
+            saved_guard_git_output(self_test_root, ["rev-parse", "HEAD"])
+        except SystemExit as error:
+            assert "fixture process failure" in str(error)
+        else:
+            raise AssertionError("Git process failure did not fail published readiness")
+    finally:
+        subprocess.run = saved_git_subprocess_run
+
+    malformed_refs = [
+        [],
+        {"object": {}},
+        {"object": {"sha": "malformed"}},
+    ]
+    for malformed_ref in malformed_refs:
+        globals()["gh_api_json"] = lambda args, payload=malformed_ref: payload
+        try:
+            default_branch_head("owner/repo", "main")
+        except SystemExit as error:
+            assert "default branch ref" in str(error)
+        else:
+            raise AssertionError("malformed default branch ref was accepted")
+    globals()["gh_api_json"] = saved_guard_gh_api_json
 
     saved_planning_gh_json = globals()["gh_json"]
     saved_planning_gh_api_json = globals()["gh_api_json"]
@@ -3772,6 +4123,7 @@ Mitigations:
     enable_calls = 0
     disable_calls = 0
     merge_graph_calls = 0
+    default_branch_reads = 0
 
     def fake_merge_gh_json(args: list[str]) -> object:
         nonlocal current_merge_head, merge_state, merge_mode
@@ -3814,7 +4166,7 @@ Mitigations:
         }
 
     def fake_merge_gh_api(args: list[str]) -> object:
-        nonlocal merge_state, merge_graph_calls, merge_mode, current_merge_head, enable_calls, disable_calls
+        nonlocal merge_state, merge_graph_calls, merge_mode, current_merge_head, enable_calls, disable_calls, default_branch_reads
         joined = " ".join(args)
         if "/statuses/" in joined and "commits/" not in joined:
             state = next(
@@ -3846,6 +4198,11 @@ Mitigations:
                 repository["owner"] = "owner"
             return repository
         if "/git/ref/heads/main" in joined:
+            default_branch_reads += 1
+            if merge_mode == "published-drift-preflight":
+                return {"object": {"sha": "d" * 40}}
+            if merge_mode == "published-drift-final" and default_branch_reads >= 2:
+                return {"object": {"sha": "d" * 40}}
             return {"object": {"sha": "b" * 40}}
         if "/branches/main/protection" in joined and "required_status_checks/contexts" not in joined:
             if merge_mode == "malformed-protection":
@@ -4003,6 +4360,28 @@ Mitigations:
                 state == "failure" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
                 for state, context, _ in dispositions
             )
+        for failure_mode in ("published-drift-preflight", "published-drift-final"):
+            merge_mode = failure_mode
+            merge_state = "OPEN"
+            current_merge_head = merge_sha
+            default_branch_reads = 0
+            before_enable = enable_calls
+            before = len(merge_statuses)
+            try:
+                authorize_merge(
+                    "owner/repo", 494, merge_sha, Path("."), {}, {},
+                    f"merge-{failure_mode}", "owner", "owner"
+                )
+            except SystemExit as error:
+                assert "default branch changed" in str(error)
+            else:
+                raise AssertionError(f"merge {failure_mode} was incorrectly authorized")
+            assert any(
+                state == "failure" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+                for state, context, _ in merge_statuses[before:]
+            )
+            if failure_mode == "published-drift-preflight":
+                assert enable_calls == before_enable
         assert disable_calls >= 2
         for policy_failure in (
             "missing-merge-context",
