@@ -11,7 +11,7 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 - Make every issue packet implementation-decidable with one owner, exact dependencies, positive/negative/failure/compatibility/platform proof, and one truthful architecture view.
 - Preserve strict identity, freshness, typed errors, exact source evidence, bounded output, one-generation publication, authored state, and platform security.
 - Keep independent graph lanes parallel while requiring accepted predecessors on `main` before dependent implementation/merge.
-- Finish with complete installed CLI/MCP/host/public-surface execution, holistic packaged E2E, RC remediation, stable readback, and #492 closes-last truth.
+- Finish with complete installed CLI/MCP/host/public-surface execution, a hard-gated in-place v0.4.5 database update, holistic packaged E2E, RC remediation, stable readback, and #492 closes-last truth.
 
 **Non-goals:**
 
@@ -64,7 +64,7 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 
 ### Release acceptance composes rather than repairs
 
-#492 freezes one exact revision only after every child and required review is complete. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. Confirmed defects return to owners and invalidate the candidate. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
+#492 freezes one exact revision only after every child and required review is complete. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization. Confirmed defects return to owners and invalidate the candidate. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
 
 ## Risks / Trade-offs
 
@@ -72,7 +72,7 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 - Parser/document inputs could exceed resources or invent evidence. Mitigation: single typed authorities, pinned/audited dependencies, pre-mutation refusal, exact locators, hard admission/output bounds, and typed incomplete state.
 - Measurement issues could optimize fixtures instead of products. Mitigation: frozen representative shapes, plans/profiles, material thresholds, and valid no-change closure.
 - Refactors could change contracts while moving code. Mitigation: accepted move maps, intermediate runnable owners, inventory comparison, and compatibility/fault/platform proof.
-- Release proof could mutate ambient state or hide a route. Mitigation: isolated fixtures, independent inventories, behavior execution, cleanup, and defect return.
+- Release proof could mutate ambient state, hide a route, or publish despite a broken v0.4.5 database update. Mitigation: isolated fixtures, independent inventories, behavior execution, an explicit pre-publication update gate with injected failure/retry/rollback, cleanup, and defect return.
 
 ## Migration Plan
 

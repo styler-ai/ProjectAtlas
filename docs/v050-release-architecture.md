@@ -362,7 +362,9 @@ stateDiagram-v2
   ExactRevision --> SurfaceInventory: freeze complete CLI and MCP inventory
   SurfaceInventory --> InstalledProof: safely execute every supported route
   InstalledProof --> CandidateBuild: package exact main revision
-  CandidateBuild --> RC1: explicit authorization and prerelease publication
+  CandidateBuild --> UpdateProof: update exercised v0.4.5 installation and database
+  UpdateProof --> RC1: state, migration, failure, retry, and rollback hard gate passes
+  UpdateProof --> Remediation: update or migration blocker
   RC1 --> HostedReadback: independently verify tag, assets, runtime, and Latest
   HostedReadback --> Remediation: confirmed blocker
   Remediation --> ExactRevision: return defect to owning child issue and restart proof

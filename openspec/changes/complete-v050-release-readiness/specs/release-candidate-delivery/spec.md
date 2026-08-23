@@ -44,6 +44,17 @@ One clean E2E SHALL compose binary/npm/plugin/host installation, init/database, 
 - **WHEN** developer state could satisfy a route accidentally
 - **THEN** the harness proves the packaged path and isolated selected database are used or fails
 
+### Requirement: Updating from v0.4.5 is a publication hard gate
+Before RC or stable publication, the release gate SHALL install `v0.4.5`, create and exercise a real project database with durable authored and runtime state, update that same installation and database to the exact candidate on every supported platform, and prove schema/runtime/plugin/skill/MCP/CLI/host convergence. Publication SHALL fail when migration, state preservation, interrupted-update recovery, safe retry, or compatible rollback/refusal behavior is incomplete.
+
+#### Scenario: Supported in-place update
+- **WHEN** an exercised `v0.4.5` installation and database update to the exact candidate
+- **THEN** project identity, authored purposes, telemetry, registered worktrees, selected roots, current generation, and source evidence remain correct without destructive reinitialization
+
+#### Scenario: Update or migration is interrupted
+- **WHEN** installer activation or database migration fails at an injected boundary
+- **THEN** no partial candidate becomes active, the prior state remains usable or fails closed without corruption, repair/retry succeeds, and unrelated host or project state is unchanged
+
 ### Requirement: Confirmed defects return to owning issues
 #492 SHALL classify each candidate observation. A confirmed defect SHALL return to an existing or new sanitized v0.5 IssueOps/OpenSpec owner for implementation, tests, and review; #492 SHALL NOT patch it.
 
