@@ -20,7 +20,7 @@ Non-goals:
 - Reusing a plan across a different base/head, changed impact contract, workflow identity, platform, toolchain, or pull-request event.
 - Making partial pull-request proof sufficient for default-branch, scheduled, candidate, or release acceptance.
 
-This specification remains candidate-only backlog planning until the planning pull request lands on `main`, the exact published OpenSpec and architecture evidence is read back, and #497 enters the v0.5.0 release graph.
+The reviewed exact #497 body may be published while the planning pull request remains open solely so normal unfiltered IssueOps/CI can validate the real packet. That temporary body-to-`main` architecture-link gap authorizes no readiness or implementation. This specification remains candidate-only backlog planning until the planning artifacts and later objective repository mechanism are accepted on `main`, the exact published evidence is read back, and the separately promoted authoritative graph admits #497 after hosted bootstrap.
 
 ## Capabilities
 

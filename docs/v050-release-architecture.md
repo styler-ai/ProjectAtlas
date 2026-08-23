@@ -356,25 +356,37 @@ flowchart TB
 
 ## Planned-issue specification and delivery flow
 
-Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet, owns semantic acceptance and every GitHub state transition, and hands implementation to Luna only after exact published evidence, the promoted release graph, and native release facts agree. Candidate validation and the candidate graph manifest can repair or stage the packet but cannot authorize readiness.
+Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet and owns semantic acceptance plus every GitHub state transition. Exact-head independent Sol and hosted Codex review precede a controlled thirty-body bootstrap while the planning PR remains open and the authoritative graph remains at the live twenty-five-child state. The temporary body-to-`main` architecture-link gap exists only to make normal unfiltered IssueOps/CI executable and authorizes no readiness. After the planning artifacts merge, Luna lands the objective repository integration; Sol then bootstraps hosted relationships and promotes the accepted graph atomically through a separate narrow PR before any product handoff.
 
 ```mermaid
 flowchart TB
     Intake["Issue-form intake: acceptance plus applicable reproduction or agent workflow"] --> SolSpec["Sol specification: body, OpenSpec, diagram meaning, and release role"]
     SolSpec --> CandidateReview{"Candidate eight-question semantic review passes?"}
-    CandidateReview -- No --> Blocked(["Fail closed; Sol repairs the packet from accepted sources"])
-    CandidateReview -- Yes --> PlanningPR["Non-closing planning publication: specs, diagrams, drafts, mapped task ownership, and candidate graph; active release graph stays live"]
-    PlanningPR --> PlanningReadback{"Exact main planning artifacts and candidate graph agree?"}
-    PlanningReadback -- No --> Blocked
-    PlanningReadback -- Yes --> BodyPublication["Sol publishes and reads back exact issue bodies"]
-    BodyPublication --> NativeState["Sol applies and reads back milestone, parent, and genuine blocker relationships"]
-    NativeState --> Promotion["Promote exact future graph and campaign declaration; remove candidate manifest"]
-    Promotion --> PublishedReadback{"Exact main body, task mirror, diagram, active release graph, and hosted graph agree?"}
-    PublishedReadback -- No --> Blocked
-    Blocked --> SolSpec
-    PublishedReadback -- Yes --> Readiness{"Objective IssueOps and semantic review both pass?"}
-    Readiness -- No --> Blocked
-    Readiness -- Yes --> Luna[Luna implementation handoff]
+    CandidateReview -- No --> CandidateBlocked(["No publication: Sol repairs the candidate packet"])
+    CandidateReview -- Yes --> PlanningPR["Open planning PR: specs, diagrams, drafts, task mappings, and candidate graph; active graph stays live at 25 children"]
+    PlanningPR --> ExactHeadReview{"Independent Sol and new hosted Codex reviews accept the exact head?"}
+    ExactHeadReview -- No --> ReviewBlocked(["No mutation: correct and rereview the exact PR head"])
+    ExactHeadReview -- Yes --> BodyPublication["Primary Sol publishes and reads back exact 30 bodies while the PR remains open"]
+    BodyPublication --> LinkGap["Temporary body-to-main architecture-link gap: no readiness"]
+    LinkGap --> PlanningCI{"Normal unfiltered IssueOps and CI green?"}
+    PlanningCI -- No --> PlanningBlocked(["No merge or readiness: repair the packet and repeat exact-head review"])
+    PlanningCI -- Yes --> PlanningMerge["Primary Sol merges and reads back exact planning main"]
+    PlanningMerge --> ObjectiveImplementation["Luna implements the objective repository checker, forms, and guidance contract"]
+    ObjectiveImplementation --> ObjectiveReadback{"Accepted review and exact implementation-main readback?"}
+    ObjectiveReadback -- No --> ImplementationBlocked(["No graph bootstrap: Luna repairs the repository integration"])
+    ObjectiveReadback -- Yes --> NativeState["Primary Sol applies and reads back the hosted milestone and 29-child native graph"]
+    NativeState --> HostedReadback{"Complete hosted state matches the accepted manifest?"}
+    HostedReadback -- No --> HostedBlocked(["No promotion or readiness: Sol repairs partial hosted state"])
+    HostedReadback -- Yes --> Promotion["Separate narrow PR atomically promotes the graph and campaign and removes the manifest"]
+    Promotion --> PublishedReadback{"Exact merged main, live IssueOps, and hosted graph agree?"}
+    PublishedReadback -- No --> PromotionBlocked(["No readiness: Sol repairs and rereads promotion state"])
+    PublishedReadback -- Yes --> SemanticReadback{"Fresh eight-question Sol reconciliation passes?"}
+    SemanticReadback -- No --> SemanticBlocked(["No handoff: Sol repairs packet meaning"])
+    SemanticReadback -- Yes --> FinalReview["Finish #500 implementation-versus-diagram review"]
+    FinalReview --> Complete500["Complete #500, then independently synchronize shared task 1.4"]
+    Complete500 --> Readiness{"Each issue's exact published packet is ready?"}
+    Readiness -- No --> IssueBlocked(["No product handoff: repair that issue's packet"])
+    Readiness -- Yes --> ProductHandoff["Luna product implementation handoff"]
 ```
 
 ## Structural IssueOps and semantic Sol ownership

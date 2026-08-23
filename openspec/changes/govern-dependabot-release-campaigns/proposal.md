@@ -22,7 +22,7 @@ Non-goals:
 - Automatic merge, a broad bot exemption, weaker review/check gates, release from a non-final stage, or use of the retrospective path for any post-contract pull request.
 - Parallel audit fan-out, arbitrary configuration beyond `.github/dependabot.yml`, or another `workflow_run` handoff framework.
 
-This specification remains candidate-only backlog planning until the planning pull request lands and its exact published evidence is read back. #498 becomes implementable after #497 is accepted on `main`; #499 waits for accepted #498 and exact Rust #482 on `main`.
+The reviewed exact #498/#499 bodies may be published while the planning pull request remains open solely so normal unfiltered IssueOps/CI can validate the real packets. That temporary body-to-`main` architecture-link gap authorizes no readiness, native relationship, or implementation. This specification remains candidate-only backlog planning until the planning artifacts and later objective repository mechanism are accepted on `main`, exact evidence is read back, and the separately promoted authoritative graph agrees with hosted bootstrap. #498 becomes implementable after #497 is accepted on `main`; #499 waits for accepted #498 and exact Rust #482 on `main`.
 
 ## Capabilities
 

@@ -47,15 +47,24 @@ Pull requests SHALL run the smallest contract-complete existing proof selected b
 Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped OpenSpec task source, restored acceptance-oriented issue body, and every architecture URL, heading, and Mermaid block from an exact clean checkout of the live default-branch revision. Before readiness or implementation handoff, Sol SHALL reconcile the issue's actor/current state/consequence/outcome, observable behavior and owning boundary, capability truth, release role and genuine dependencies, two-to-five-bullet positive/negative/compatibility/no-change acceptance as applicable, non-goals and failures, diagram meaning and rendered truth, and exact task ownership/text/state. Candidate-local validation SHALL remain required for proposed artifacts but SHALL NOT authorize readiness, milestone assignment, native release relationships, implementation handoff, merge, or release.
 
 #### Scenario: A planning slice publishes new evidence
-- **WHEN** a planning pull request has no native closing issue and its candidate OpenSpec and Mermaid checks pass
-- **THEN** it may publish the proposed specification, issue migration, architecture artifacts, required candidate task-ownership mappings, and one non-authoritative future release-graph promotion manifest without activating unpublished graph nodes or claiming that a mapped implementation issue is ready
+- **WHEN** a planning pull request has no native closing issue, its candidate OpenSpec and Mermaid checks pass, and independent Sol plus a new hosted Codex review accept its corrected exact head
+- **THEN** primary Sol may publish and read back the thirty exact bodies from the reviewed drafts while the PR remains open, required task mappings remain ownership-only, and the authoritative/live graph remains at twenty-five children
+- **AND** the temporary body-to-main architecture-link gap authorizes no readiness or implementation handoff
+
+#### Scenario: Body bootstrap makes normal planning CI pass
+- **WHEN** the reviewed thirty bodies exactly mirror their candidate tasks while the planning PR remains open
+- **THEN** normal unfiltered IssueOps/CI passes before primary Sol authorizes the planning merge and reads back exact `main`
+
+#### Scenario: Repository implementation precedes native graph activation
+- **WHEN** the planning artifacts are exact on `main` but Luna's objective checker/forms/guidance implementation has not yet landed, received review, and been read back
+- **THEN** primary Sol does not apply milestone/native relationships and no issue becomes ready
 
 #### Scenario: Candidate graph is promoted after hosted bootstrap
-- **WHEN** exact candidate bodies are published and read back and Sol applies the authorized milestone/native relationship bootstrap from the accepted manifest
-- **THEN** a narrow publication replaces `openspec/issue-map.json.release_graphs.v0.5.0-00` with the exact #499 campaign declaration and replacement graph, removes the manifest, and requires exact published-main plus hosted reconciliation before readiness
+- **WHEN** the accepted Luna implementation is on `main`, exact bodies are read back, and primary Sol applies and reads the complete hosted milestone/native relationship bootstrap from the accepted manifest
+- **THEN** a separate narrow PR atomically replaces only `openspec/issue-map.json.release_graphs.v0.5.0-00` with the exact #499 campaign declaration and replacement graph, removes the manifest, and requires exact merged-main plus live IssueOps/hosted reconciliation before readiness
 
 #### Scenario: Candidate and authoritative graph state differ
-- **WHEN** a body, mapping, milestone, parent, blocker, graph node, or published revision is missing, stale, raced, or mismatched during bootstrap or promotion
+- **WHEN** a required review, body, planning/implementation revision, mapping, milestone, parent, blocker, graph node, manifest removal, or published revision is missing, stale, raced, or mismatched during bootstrap or promotion
 - **THEN** IssueOps remains fail-closed and no readiness, handoff, merge authorization, or release transition proceeds
 
 #### Scenario: IssueOps passes but the packet is not comprehensible
