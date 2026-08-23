@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: #492 is the feature-free v0.5 release hierarchy root
-#492 SHALL have no native parent and SHALL be the sole direct parent of every other accepted `v0.5.0-00` issue. It SHALL be directly blocked by every child and SHALL implement no feature or bug.
+#492 SHALL have no native parent and SHALL be the sole direct parent of all twenty-nine other accepted `v0.5.0-00` issues, including dependency-free acceptance-contract owner #500. It SHALL be directly blocked by every child and SHALL implement no feature or bug. #500 SHALL NOT become a native blocker of product issues whose implementation does not consume a genuine #500 product boundary.
 
 #### Scenario: Milestone progress is inspected
 - **WHEN** the native hierarchy is read
@@ -44,11 +44,19 @@ Pull requests SHALL run the smallest contract-complete existing proof selected b
 - **THEN** #499 records `stable_ready`, may close, and may unblock stable #492 acceptance without per-PR issues or weaker proof
 
 ### Requirement: Accepted issue evidence is published before implementation
-Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped OpenSpec task source and every architecture URL, heading, and Mermaid block from an exact clean checkout of the live default-branch revision. Candidate-local validation SHALL remain required for proposed artifacts but SHALL NOT authorize readiness, milestone assignment, native release relationships, implementation handoff, merge, or release.
+Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped OpenSpec task source, restored acceptance-oriented issue body, and every architecture URL, heading, and Mermaid block from an exact clean checkout of the live default-branch revision. Before readiness or implementation handoff, Sol SHALL reconcile the issue's actor/current state/consequence/outcome, observable behavior and owning boundary, capability truth, release role and genuine dependencies, two-to-five-bullet positive/negative/compatibility/no-change acceptance as applicable, non-goals and failures, diagram meaning and rendered truth, and exact task ownership/text/state. Candidate-local validation SHALL remain required for proposed artifacts but SHALL NOT authorize readiness, milestone assignment, native release relationships, implementation handoff, merge, or release.
 
 #### Scenario: A planning slice publishes new evidence
 - **WHEN** a planning pull request has no native closing issue and its candidate OpenSpec and Mermaid checks pass
-- **THEN** it may publish the proposed specification and architecture artifacts without claiming that an implementation issue is ready
+- **THEN** it may publish the proposed specification, issue migration, and architecture artifacts without claiming that an implementation issue is ready
+
+#### Scenario: IssueOps passes but the packet is not comprehensible
+- **WHEN** an issue has the required sections, acceptance bullet shape, exact tasks, and valid diagrams but Sol cannot answer one or more semantic review questions from the packet
+- **THEN** the issue remains unready and implementation handoff is forbidden without asking IssueOps to score prose
+
+#### Scenario: The shared acceptance mechanism is not accepted
+- **WHEN** an issue such as #497 has a semantically reconciled candidate packet but the #500 objective mechanism and section order it requires are not accepted on published `main`
+- **THEN** the existing readiness gate blocks handoff without adding a native #500 product dependency edge
 
 #### Scenario: Candidate-only evidence is presented as published
 - **WHEN** a planned, implementation, merge-authorization, milestone, or release check resolves an artifact only from a candidate, stale, or dirty checkout
@@ -98,7 +106,7 @@ IssueOps SHALL derive a bounded transition plan from the declared release graph 
 - **THEN** IssueOps selects the graph from the issue map, reports targeted milestone drift, and does not skip validation because the event payload milestone is null
 
 ### Requirement: Release input is exact and complete
-#492 SHALL freeze one exact RC `main` revision only after every implementation-bearing child other than #499 is closed successfully; every applicable task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete; the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source and architecture target; and #499 has exact `candidate_ready` evidence. #499 and #492 SHALL remain open at RC publication. Stable acceptance SHALL require later exact `stable_ready`, #499 closure, and every child closed. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
+#492 SHALL freeze one exact RC `main` revision only after the complete twenty-nine-child hierarchy is exact; every implementation-bearing child other than #499 is closed successfully; every applicable task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete; the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source, restored issue contract, and architecture target; the fresh full-set Sol semantic reconciliation agrees; and #499 has exact `candidate_ready` evidence. #499 and #492 SHALL remain open at RC publication. Stable acceptance SHALL require later exact `stable_ready`, #499 closure, every child closed, and a repeated fresh full-set semantic and objective published-main readback. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
 
 #### Scenario: Evidence-led no-change issue
 - **WHEN** a measurement or reproduction task proves existing behavior already satisfies its contract
@@ -109,7 +117,7 @@ IssueOps SHALL derive a bounded transition plan from the declared release graph 
 - **THEN** the complete public-surface and holistic proof restarts for the new exact input
 
 #### Scenario: Published issue evidence drifts
-- **WHEN** a mapped task source, architecture document, heading, Mermaid block, issue mirror, or default-branch identity is missing or inconsistent
+- **WHEN** a mapped task source, acceptance-oriented issue body, architecture document, heading, Mermaid block, issue mirror, semantic audit answer, or default-branch identity is missing or inconsistent
 - **THEN** #492 stops acceptance, returns the gap to its specification owner, and performs no feature or bug repair
 
 ### Requirement: Every installed CLI and MCP route executes
@@ -164,7 +172,7 @@ With explicit authorization, `v0.5.0-rc1` SHALL publish as a non-draft prereleas
 - **THEN** RC acceptance fails and stable promotion is blocked
 
 ### Requirement: Stable promotion repeats complete proof and closes last
-After an accepted candidate and explicit authorization, stable v0.5.0 SHALL require the post-accepted-RC pre-stable audit, exact stable-ready full-window reconciliation, #499 closure, and therefore every child closed before repeating installed and hosted proof and becoming Latest. #492 SHALL remain open until downstream pins and final IssueOps/OpenSpec/review/milestone/workflow state agree and SHALL close last.
+After an accepted candidate and explicit authorization, stable v0.5.0 SHALL require the post-accepted-RC pre-stable audit, exact stable-ready full-window reconciliation, #499 closure, and therefore every child closed before repeating the full-set Sol semantic reconciliation, objective published-main IssueOps readback, installed proof, and hosted proof and becoming Latest. #492 SHALL remain open until downstream pins and final issue explanation/acceptance, diagram, task, IssueOps/OpenSpec/review/milestone/workflow state agree and SHALL close last.
 
 #### Scenario: Stable promotion
 - **WHEN** #499 is closed from exact stable-ready evidence, no child blocker remains, and stable artifacts pass the complete proof

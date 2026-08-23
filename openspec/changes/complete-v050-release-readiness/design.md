@@ -8,7 +8,7 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 
 **Goals:**
 
-- Make every issue packet implementation-decidable with one owner, exact dependencies, positive/negative/failure/compatibility/platform proof, and one truthful architecture view.
+- Make every issue packet implementation-decidable with one owner, exact dependencies, concise actor/current-state/outcome context, two to five observable acceptance truths, positive/negative/failure/compatibility/platform proof, and one truthful architecture view.
 - Require exact published-default-branch OpenSpec and architecture evidence before an issue becomes ready, enters a release, or reaches implementation.
 - Preserve strict identity, freshness, typed errors, exact source evidence, bounded output, one-generation publication, authored state, and platform security.
 - Keep independent graph lanes parallel while requiring accepted predecessors on `main` before dependent implementation/merge.
@@ -29,6 +29,14 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 ### Candidate specification proof does not authorize readiness
 
 A candidate checkout is the authority for proposed OpenSpec structure, issue mirrors, Markdown headings, locked-parser Mermaid syntax, rendered communication, and semantic review. It is not publication proof for a durable `/blob/main/` issue link. Sol first lands those artifacts through a planning PR without a native closing issue, then reads them from an exact clean checkout of the live default-branch revision. The snapshot admits only the addressed Git top-level root with a well-formed local HEAD equal to the well-formed live default-branch ref SHA and no tracked changes; ignored untracked notes remain outside tracked publication identity. Root mismatch, malformed local or remote identity, Git timeout/process/OS failure, or default-branch movement before final merge authorization fails closed. Only that stable published snapshot may authorize `status:ready`, a release milestone, native parent/blocker relationships, or Luna implementation handoff. Planned-issue, implementation-reference, merge-authorization, milestone, and release paths fail closed on candidate-only, stale, dirty, missing, or malformed evidence. This preserves the documentation bootstrap without allowing a candidate worktree to impersonate published state.
+
+### Planned issue acceptance is objective plus semantic
+
+#500 restores the canonical planned order to `Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Acceptance Criteria`, `Non-Goals`, `Pre-Mortem`, then exactly one OpenSpec task section. Acceptance is two to five ordinary behavior bullets, never task checkboxes, OpenSpec task IDs, or receipts. IssueOps checks only the visible section, order, bullet bounds, and forbidden task syntax while preserving every existing task, diagram, pre-mortem, graph, and publication gate.
+
+Sol separately reconciles eight semantic questions: actor/current state/consequence/outcome; observable change and smallest owner; capability truth; release role and genuine dependencies; positive/negative/compatibility/no-change acceptance; non-goals and failure mitigations; diagram meaning and rendered truth; and exact task ownership/text/state. This audit runs before readiness and handoff and is repeated across every accepted packet at candidate and stable readback. It is not a score, LLM CI gate, evidence ledger, or second checklist.
+
+#500 is the twenty-ninth direct child of #492 with `blocked_by: []`. The restored shared mechanism is an operational readiness prerequisite, not a native product dependency: #497 may start only after its own packet passes and the shared mechanism/order is accepted, but no #500-to-#497 or #500-to-product blocker edge is declared.
 
 ### IssueOps derives transitions before mutation and repairs reverse drift
 
@@ -88,9 +96,9 @@ The same #499 region records `collecting`, exact `candidate_ready`, or exact `st
 
 ### Release acceptance composes rather than repairs
 
-#492 freezes one exact RC revision only after every implementation-bearing feature, bug, and maintenance child—including #497 and #498—is complete and closed, every required review is complete, the exact live default branch resolves every accepted issue's mapped OpenSpec task source and architecture URL/heading/Mermaid, and sole release-governance child #499 is exact `candidate_ready`. The only issues intentionally open at RC publication are #499 and unparented release owner #492. #492 derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization.
+#492 freezes one exact RC revision only after every implementation-bearing feature, bug, and maintenance child—including #497, #498, and #500—is complete and closed, every required review is complete, the exact live default branch resolves every accepted issue's mapped OpenSpec task source and architecture URL/heading/Mermaid, every accepted issue passes a fresh eight-question Sol semantic reconciliation, and sole release-governance child #499 is exact `candidate_ready`. The only issues intentionally open at RC publication are #499 and unparented release owner #492. #492 derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization.
 
-RC1 publishes and is independently read back while #499 stays open for weekly intake. Stable proof cannot begin until the post-accepted-RC pre-stable audit and full-window reconciliation make #499 exact `stable_ready`, #499 closes, and every child is therefore closed. Confirmed defects, including missing or stale published issue evidence, return to their specification or implementation owner and invalidate the applicable checkpoint; #492 does not repair them. v0.4.5 stays Latest until stable proof, and #492 closes last only after stable hosted readback.
+RC1 publishes and is independently read back while #499 stays open for weekly intake. Stable proof cannot begin until the post-accepted-RC pre-stable audit and full-window reconciliation make #499 exact `stable_ready`, #499 closes, every child is therefore closed, and the fresh full-set Sol semantic reconciliation still agrees with objective IssueOps and published-main readback. Confirmed defects, including weak, missing, or stale published issue evidence, return to their specification or implementation owner and invalidate the applicable checkpoint; #492 does not repair them. v0.4.5 stays Latest until stable proof, and #492 closes last only after stable hosted readback.
 
 ## Risks / Trade-offs
 
@@ -99,30 +107,32 @@ RC1 publishes and is independently read back while #499 stays open for weekly in
 - Measurement issues could optimize fixtures instead of products. Mitigation: frozen representative shapes, plans/profiles, material thresholds, and valid no-change closure.
 - Refactors could change contracts while moving code. Mitigation: accepted move maps, intermediate runnable owners, inventory comparison, and compatibility/fault/platform proof.
 - Candidate-local specifications could be mistaken for durable issue evidence. Mitigation: publish through a non-closing planning PR, bind readiness and release gates to an exact clean live-default-branch snapshot, and read every mapped task source and architecture target back.
+- Mechanically valid issue prose could still leave product intent implicit. Mitigation: restore observable acceptance structurally and require Sol's eight-question semantic reconciliation before handoff, candidate acceptance, and stable acceptance.
 - Release proof could mutate ambient state, hide a route, or publish despite a broken v0.4.5 database update. Mitigation: isolated fixtures, independent inventories, behavior execution, an explicit pre-publication update gate with injected failure/retry/rollback, cleanup, and defect return.
 
 ## Migration Plan
 
 Parallel delivery waves derived from the exact graph:
 
-Before wave 1, the planning PR publishes the shared OpenSpec and architecture sources, the exact live default branch passes the published-readiness gate, and every accepted issue link/task mirror is read back. No Luna implementation worktree starts from candidate-only specification evidence.
+Before wave 1, the planning PR publishes the shared OpenSpec and architecture sources, the exact live default branch passes the published-readiness gate, and every accepted issue explanation, acceptance section, link, diagram meaning, and task mirror is semantically reconciled and read back. No Luna implementation worktree starts from candidate-only or structurally valid but semantically unreconciled specification evidence.
 
-1. Operational priority lands #497 first without inventing blocker edges for independent product issues.
-2. After #497, #482 and #498 may proceed in parallel with independent #372 and #489; #498 is graph-blocked by #497 while #482 remains dependency-free.
-3. After #482: #476, #480, #481, and #483 may proceed independently.
-4. #484 follows #481; #486 follows #482/#483; #487 follows #481/#476/#480.
-5. #488 follows #487.
-6. #477 follows #476/#488; #342, #358, and #465 follow #476/#480/#488; #491 follows #487.
-7. #339 follows #477; #384 follows #358/#477; #464 follows #358; #456 follows #358/#465/#477/#484; #485 follows #481/#482/#483/#484/#486; #388 and #390 follow #491.
-8. #490 follows #339/#342/#358/#384/#464/#465/#485/#489/#491; #499 follows #482/#498 and delivers #453, #454, then #455 without serializing independent lanes.
-9. After every implementation-bearing child is closed, #499 reaches `candidate_ready`; #492 runs full candidate proof and publishes/read-backs RC1 while #499/#492 remain open.
-10. After accepted RC1, #499 continues intake, reaches `stable_ready`, and closes; #492 then runs stable proof and closes last.
+1. Operational readiness lands #500's shared objective mechanism/order and exact issue-packet migration without adding native blocker edges to product issues.
+2. After #497's own packet passes the restored contract and #500's required shared mechanism/order is accepted, operational priority lands #497 first among implementation lanes.
+3. After #497, #482 and #498 may proceed in parallel with independent #372 and #489; #498 is graph-blocked by #497 while #482 remains dependency-free.
+4. After #482: #476, #480, #481, and #483 may proceed independently.
+5. #484 follows #481; #486 follows #482/#483; #487 follows #481/#476/#480.
+6. #488 follows #487.
+7. #477 follows #476/#488; #342, #358, and #465 follow #476/#480/#488; #491 follows #487.
+8. #339 follows #477; #384 follows #358/#477; #464 follows #358; #456 follows #358/#465/#477/#484; #485 follows #481/#482/#483/#484/#486; #388 and #390 follow #491.
+9. #490 follows #339/#342/#358/#384/#464/#465/#485/#489/#491; #499 follows #482/#498 and delivers #453, #454, then #455 without serializing independent lanes.
+10. After every implementation-bearing child is closed, every accepted packet passes fresh semantic and objective readback, and #499 reaches `candidate_ready`, #492 runs full candidate proof and publishes/read-backs RC1 while #499/#492 remain open.
+11. After accepted RC1, #499 continues intake, reaches `stable_ready`, and closes; #492 repeats the complete semantic/objective/installed/hosted proof and closes last.
 
 Each dependent worktree refreshes/rebases onto accepted predecessors on `main` and reruns affected proof. Independent, disjoint lanes remain parallel.
 
 ## Dependencies / Cross-Issue Impact
 
-The authoritative direct blockers are exactly those in `openspec/issue-map.json.release_graphs.v0.5.0-00`. #492 is the hierarchy root and release-acceptance issue, not an implementation predecessor. #310/#314 remain v0.6 children of separate release owner #493.
+The authoritative direct blockers are exactly those in `openspec/issue-map.json.release_graphs.v0.5.0-00`. #492 is the hierarchy root and release-acceptance issue, not an implementation predecessor. #500 is a dependency-free direct child whose shared acceptance mechanism is ordered through published readiness rather than fake product edges. #310/#314 remain v0.6 children of separate release owner #493.
 
 Database-first transitions apply to #481, #484, #476 when a coverage gap is proven, #480, #465 when extraction state needs a delta, and #456 only if the baseline wins. Other issues preserve database/schema identity and prove continuity.
 

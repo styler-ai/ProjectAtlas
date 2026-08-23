@@ -1,0 +1,35 @@
+## Why
+
+ProjectAtlas issue forms still require observable acceptance criteria and type-specific problem context, but the canonical planned-issue checker omits acceptance and accepts headings whose prose does not explain the actor, current failure, intended behavior, ownership, or release role. The drift lets a mechanically valid packet reach implementation while its product intent still has to be reconstructed from OpenSpec tasks.
+
+## What Changes
+
+- Restore one canonical planned-issue order: `Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Acceptance Criteria`, `Non-Goals`, `Pre-Mortem`, then exactly one OpenSpec task section.
+- Define acceptance criteria as two to five plain observable behavior bullets, never task checkboxes, OpenSpec task IDs, evidence receipts, or a second implementation checklist.
+- Preserve concise applicable intake context: bugs retain enough trigger, environment, actual, and expected behavior to reproduce or truthfully identify proof-gap hardening; improvements retain the affected actor or surface and the before-to-after agent workflow.
+- Extend IssueOps only with objective section, ordering, bullet-count, and forbidden-content checks while preserving the existing task, diagram, pre-mortem, release-graph, and publication gates.
+- Require Sol semantic reconciliation before readiness, handoff, candidate acceptance, and stable acceptance; IssueOps proves structure and synchronization, not comprehension.
+- Migrate the complete v0.5.0 issue set, add #500 as the twenty-ninth direct #492 child with no product blocker edges, and keep shared planning task 1.4 incomplete until the exact published migration, graph activation, semantic review, and readback finish.
+
+## Capabilities
+
+### New Capabilities
+
+- `planned-issue-acceptance-contract`: Canonical explanatory, behavioral-acceptance, structural validation, semantic-review, migration, and release-readback rules for planned ProjectAtlas issues.
+
+### Modified Capabilities
+
+None. The v0.5 release-readiness change is synchronized in place because it is still active and owns the release-wide publication and acceptance contract.
+
+## Impact
+
+- Later Luna implementation updates `.github/scripts/issue-checklists.py`, its self-test, repository issue forms or guidance where needed, and the version-matched ProjectAtlas plugin guidance; no Rust product or database behavior changes.
+- Sol owns the specification, exact issue-body migration, issue map, native hierarchy and milestone activation, semantic audit, publication, and readback.
+- `openspec/changes/complete-v050-release-readiness`, `openspec/issue-map.json`, and `docs/v050-release-architecture.md` gain the release-wide contract and twenty-nine-child truth.
+- The change remains backlog until its tracked planning artifacts are published and read back from exact `main`; per-issue implementation handoff remains forbidden until that issue's body, OpenSpec, architecture meaning, and acceptance criteria are semantically reconciled.
+
+## Non-Goals
+
+- No word counts, keyword or jargon rules, semantic score, LLM CI gate, proof ledger, per-body task IDs, or duplicate checklist.
+- No fabricated reproduction evidence, forced raw intake fields where inapplicable, or broad blocker edges from #500 to product issues.
+- No Rust crate, runtime, MCP, CLI, schema, migration, query, transaction, or SQLite change.

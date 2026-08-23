@@ -354,6 +354,42 @@ flowchart TB
   uninstall --> clean[Remove only managed artifact]
 ```
 
+## Planned-issue specification and delivery flow
+
+Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet, owns semantic acceptance and every GitHub state transition, and hands implementation to Luna only after exact published evidence and native release facts agree. Candidate validation can repair the packet but cannot authorize readiness.
+
+```mermaid
+flowchart TB
+    Intake["Issue-form intake: acceptance plus applicable reproduction or agent workflow"] --> SolSpec["Sol specification: body, OpenSpec, diagram meaning, and release role"]
+    SolSpec --> CandidateReview{"Candidate eight-question semantic review passes?"}
+    CandidateReview -- No --> SolSpec
+    CandidateReview -- Yes --> PlanningPR[Non-closing planning publication]
+    PlanningPR --> PublishedReadback{"Exact main body, task mirror, and diagram readback agree?"}
+    PublishedReadback -- No --> SolSpec
+    PublishedReadback -- Yes --> NativeState["Sol applies milestone, parent, and genuine blocker relationships"]
+    NativeState --> Readiness{"Objective IssueOps and semantic review both pass?"}
+    Readiness -- No --> SolSpec
+    Readiness -- Yes --> Luna[Luna implementation handoff]
+```
+
+## Structural IssueOps and semantic Sol ownership
+
+IssueOps owns deterministic structure and synchronization; Sol owns comprehension. Neither lane substitutes for the other, and no LLM or prose score runs in CI. A packet reaches readiness only after both lanes pass against the same published body, OpenSpec, diagrams, and release graph.
+
+```mermaid
+flowchart TB
+    Packet[Published planned-issue packet]
+    Packet --> Structural{"IssueOps structure valid?"}
+    Structural -- No --> StructuralBlocked([Readiness and handoff remain blocked])
+    StructuralBlocked --> StructuralRepair["Sol repairs packet structure; Luna corrects the objective gate only if its result is wrong"]
+    StructuralRepair --> Packet
+    Structural -- Yes --> Semantic{"Sol eight-question meaning review passes?"}
+    Semantic -- No --> SemanticBlocked([Readiness and handoff remain blocked])
+    SemanticBlocked --> SemanticRepair["Sol-owned repair: actor, behavior, capability, release role, acceptance, failures, diagram meaning, or task fit"]
+    SemanticRepair --> Packet
+    Semantic -- Yes --> Ready([Sol may authorize the next transition])
+```
+
 ## Lean affected-contract planning and stable-context aggregation
 
 Pull-request optimization selects existing proof; it never deletes proof. One closed contract and one standard-library planner serve human and Dependabot pull requests. Only ordinary additions and modifications may union known impacts. Every rename or deletion, plus unknown, shared, or planner-owning input, selects full proof even when every observed path is classified. Every shared or release boundary starts in full-proof mode, and stable required contexts accept only current plan-bound evidence.
@@ -447,10 +483,17 @@ flowchart TB
 
 ## CI and dependency campaign sequencing
 
-#497 lands first as the shared lean-CI operational priority without becoming a fake graph blocker for #482 or other independent product issues. #498 genuinely depends on #497; #482 remains dependency-free. #499 waits for both accepted results, then owns the ordered high-impact update campaign while all other disjoint release lanes continue independently.
+#500 first restores the shared acceptance structure and packet-readiness mechanism without becoming a native blocker of #497, #482, or other product issues. After #497's own packet passes that contract and the required #500 mechanism/order is accepted, #497 lands as the first implementation operational priority. #498 genuinely depends on #497; #482 remains dependency-free. #499 waits for both accepted results, then owns the ordered high-impact update campaign while all other disjoint release lanes continue independently.
 
 ```mermaid
 flowchart TB
+    subgraph Readiness[Shared readiness - no native #500 product edge]
+        Contract500[#500 acceptance mechanism and issue-packet migration]
+        Packet497[#497 body, OpenSpec, diagram, and acceptance reconciled]
+        Gate497{Shared mechanism and #497 packet accepted?}
+        Contract500 -. readiness prerequisite, not blocked_by .-> Gate497
+        Packet497 --> Gate497
+    end
     subgraph Priority[Operational priority only - no #497 to #482 blocker]
         CI497[#497 lean affected CI lands first]
     end
@@ -458,10 +501,12 @@ flowchart TB
         Auto498[#498 campaign automation]
         Rust482[#482 exact Rust 1.98.0]
     end
+    Gate497 -- Yes --> CI497
+    Gate497 -- No --> Stop([Handoff blocked])
     CI497 -- Genuine blocker for #498 --> Auto498
     Auto498 --> Ready{#498 and #482 accepted on main?}
     Rust482 --> Ready
-    Ready -- No --> Stop([#499 handoff blocked])
+    Ready -- No --> Stop
     Ready -- Yes --> Campaign499[#499 sole v0.5.0 campaign]
     Campaign499 --> PR453[#453 object: Rust and parser]
     PR453 --> PR454[#454 rusqlite: Rust, database, SQLite]
@@ -480,10 +525,12 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-  [*] --> PublishedIssueReadback: read exact main OpenSpec and architecture targets
-  PublishedIssueReadback --> PublicationRepair: mapped task, document, heading, or Mermaid is missing or stale
+  [*] --> PublishedIssueReadback: read exact main issue bodies, acceptance, OpenSpec, and architecture targets
+  PublishedIssueReadback --> PublicationRepair: body, task, document, heading, or Mermaid is missing or stale
   PublicationRepair --> PublishedIssueReadback: planning PR publishes corrected evidence
-  PublishedIssueReadback --> ExactRevision: implementation children closed and campaign candidate-ready
+  PublishedIssueReadback --> SemanticRepair: eight-question Sol reconciliation fails
+  SemanticRepair --> PublishedIssueReadback: specification owner repairs the packet
+  PublishedIssueReadback --> ExactRevision: twenty-nine-child graph exact, implementation children closed, semantic audit passes, campaign candidate-ready
   ExactRevision --> SurfaceInventory: freeze complete CLI and MCP inventory
   SurfaceInventory --> InstalledProof: safely execute every supported route
   InstalledProof --> CandidateBuild: package exact main revision
@@ -494,7 +541,8 @@ stateDiagram-v2
   HostedReadback --> Remediation: confirmed blocker
   Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
   HostedReadback --> StableCampaign: accepted candidate then continue intake and run pre-stable audit
-  StableCampaign --> StableBuild: campaign stable-ready, campaign issue closed, every child closed
+  StableCampaign --> StableSemanticReadback: campaign stable-ready, campaign issue closed, every child closed
+  StableSemanticReadback --> StableBuild: repeat full-set Sol semantic reconciliation and objective published-main readback
   StableBuild --> StableReadback: repeat installs and hosted identity
   StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified
   FinalState --> [*]
