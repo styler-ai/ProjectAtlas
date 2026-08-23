@@ -1,14 +1,41 @@
 name: 00-IssueOps
 
+run-name: >-
+  00-IssueOps /
+  ${{ github.event_name == 'repository_dispatch' && github.event.action == 'issueops_merge'
+      && format('merge {0} pr-{1}', github.event.client_payload.request_id, github.event.client_payload.pr_number)
+      || github.event_name == 'repository_dispatch'
+      && format('relationship {0}', github.event.client_payload.request_id)
+      || github.event_name == 'pull_request_target'
+      && format('PR #{0}', github.event.pull_request.number)
+      || format('issue #{0}', github.event.issue.number) }}
+
 on:
   issues:
-    types: [opened, edited, reopened, labeled, unlabeled, milestoned]
-  workflow_dispatch:
-    inputs:
-      issue:
-        description: "Open issue number to validate for release-milestone readiness"
-        required: true
-        type: number
+    types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, milestoned, demilestoned]
+  repository_dispatch:
+    types: [issueops_relationship, issueops_merge]
+  # Relationship and merge clients use authenticated default-branch dispatches.
+  # A 204 dispatch response is admission only; dispatch admission is not run success.
+  # Locate the run by its request_id, require
+  # a successful conclusion, and read back the native relationship or merged PR.
+  # The mutation group never cancels a running POST/readback/status sequence,
+  # but GitHub keeps at most one pending run: a newer dispatch can replace an
+  # older pending run before it starts. Clients must retry when their request
+  # run is cancelled or missing; dispatch admission is never silent delivery.
+  # Examples:
+  # gh api repos/OWNER/REPO/dispatches --method POST -f event_type=issueops_relationship \
+  #   -f client_payload='{"request_id":"rel-20260823-001","relation_kind":"sub_issue","operation":"remove","issue_number":492,"related_issue_number":339}'
+  # gh api repos/OWNER/REPO/dispatches --method POST -f event_type=issueops_merge \
+  #   -f client_payload='{"request_id":"merge-20260823-001","pr_number":494,"expected_head":"0123456789012345678901234567890123456789"}'
+  # The merge route is the only repository-code authorization path. Normal gh
+  # pr merge is prohibited by repository policy; the Sol release owner performs
+  # the final audit and submits this dispatch. Owner-level branch-protection
+  # changes remain an external administrative bypass outside repository code.
+  # The merge job also proves the Actions token can read repository identity and
+  # the complete affiliation=all collaborator set before arming auto-merge.
 
 permissions:
   contents: read
@@ -17,17 +44,21 @@ permissions:
 jobs:
   planned-issue:
     name: planned-issue-readiness
-    if: github.event_name == 'workflow_dispatch' || github.event.issue.milestone != null
+    if: >
+      (github.event_name == 'issues'
+      && (github.event.issue.milestone != null || github.event.action == 'demilestoned'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout
+      - name: Checkout trusted default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Validate IssueOps contract
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           npm ci --ignore-scripts --prefix .github/mermaid-parser
           npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
@@ -37,3 +68,186 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json \
             --planned-issue "$ISSUE_NUMBER"
+
+  issue-state-repair:
+    name: issueops-closed-blocker-repair
+    if: github.event_name == 'issues'
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Repair closed issue with an open direct blocker
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --enforce-closed-issue-blockers "$ISSUE_NUMBER"
+
+  merge-authorization-invalidation:
+    name: merge-authorization-invalidation
+    if: github.event_name == 'pull_request_target'
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Revoke one-shot merge authorization
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --revoke-merge-authorization-for-pr "$PR_NUMBER" \
+            --expected-pr-head-sha "$EXPECTED_PR_HEAD_SHA"
+
+  implementation-status-validation:
+    name: issueops-implementation-validation
+    if: github.event_name == 'pull_request_target'
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Publish implementation readiness
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --publish-implementation-status-for-pr "$PR_NUMBER" \
+            --expected-pr-head-sha "$EXPECTED_PR_HEAD_SHA"
+
+  relationship-mutation:
+    name: issueops-relationship-mutation
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'issueops_relationship'
+    concurrency:
+      group: issueops-mutations-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Apply and reconcile native relationship
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.client_payload.issue_number || '' }}
+          RELATED_ISSUE: ${{ github.event.client_payload.related_issue_number || '' }}
+          RELATION_KIND: ${{ github.event.client_payload.relation_kind || '' }}
+          RELATION_OPERATION: ${{ github.event.client_payload.operation || '' }}
+          REQUEST_ID: ${{ github.event.client_payload.request_id || '' }}
+        run: |
+          if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$ ]]; then
+            echo "repository_dispatch requires a valid 8-64 character request_id" >&2
+            exit 1
+          fi
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --mutate-native-relationship \
+            --native-relationship-kind "$RELATION_KIND" \
+            --native-relationship-operation "$RELATION_OPERATION" \
+            --native-relationship-issue "$ISSUE_NUMBER" \
+            --native-related-issue "$RELATED_ISSUE" \
+            --request-id "$REQUEST_ID"
+
+  merge-authorization:
+    name: issueops-merge-authorization
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'issueops_merge'
+    concurrency:
+      group: issueops-mutations-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: write
+      checks: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Authorize and read back merge
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ID: ${{ github.event.client_payload.request_id || '' }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number || '' }}
+          EXPECTED_HEAD: ${{ github.event.client_payload.expected_head || '' }}
+          DISPATCH_ACTOR: ${{ github.actor }}
+          EVENT_SENDER: ${{ github.event.sender.login || '' }}
+        run: |
+          if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$ ]]; then
+            echo "repository_dispatch requires a valid 8-64 character request_id" >&2
+            exit 1
+          fi
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --authorize-merge \
+            --merge-pr-number "$PR_NUMBER" \
+            --merge-expected-head "$EXPECTED_HEAD" \
+            --request-id "$REQUEST_ID" \
+            --dispatch-actor "$DISPATCH_ACTOR" \
+            --event-sender "$EVENT_SENDER"

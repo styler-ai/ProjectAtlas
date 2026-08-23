@@ -11,6 +11,7 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+    types: [opened, edited, synchronize, reopened, milestoned, demilestoned]
   pull_request_review:
     types: [submitted, edited, dismissed]
   pull_request_review_comment:
@@ -32,6 +33,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
 
       - name: Setup Rust
         run: |
@@ -47,8 +50,19 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
 
+      - name: Default branch delivery check
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'push'
+        env:
+          TARGET_BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ "$TARGET_BRANCH" != "$DEFAULT_BRANCH" ]]; then
+            echo "ProjectAtlas delivery is restricted to the repository default branch ($DEFAULT_BRANCH); received $TARGET_BRANCH." >&2
+            exit 1
+          fi
+
       - name: Issue reference check
-        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+        if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment') && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -67,7 +81,7 @@ jobs:
           fi
 
       - name: Issue checklist check
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

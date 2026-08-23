@@ -1,5 +1,46 @@
 {
   "schema_version": 2,
+  "release_graphs": {
+    "v0.5.0-00": {
+      "release_issue": 492,
+      "issues": {
+        "339": { "blocked_by": [477] },
+        "342": { "blocked_by": [476, 480, 488] },
+        "358": { "blocked_by": [476, 480, 488] },
+        "372": { "blocked_by": [] },
+        "384": { "blocked_by": [358, 477] },
+        "388": { "blocked_by": [491] },
+        "390": { "blocked_by": [491] },
+        "456": { "blocked_by": [358, 465, 477, 484] },
+        "464": { "blocked_by": [358] },
+        "465": { "blocked_by": [476, 480, 488] },
+        "476": { "blocked_by": [482] },
+        "477": { "blocked_by": [476, 488] },
+        "480": { "blocked_by": [482] },
+        "481": { "blocked_by": [482] },
+        "482": { "blocked_by": [] },
+        "483": { "blocked_by": [482] },
+        "484": { "blocked_by": [481] },
+        "485": { "blocked_by": [481, 482, 483, 484, 486] },
+        "486": { "blocked_by": [482, 483] },
+        "487": { "blocked_by": [481, 476, 480] },
+        "488": { "blocked_by": [487] },
+        "489": { "blocked_by": [] },
+        "490": { "blocked_by": [339, 342, 358, 384, 464, 465, 485, 489, 491] },
+        "491": { "blocked_by": [487] },
+        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495] },
+        "495": { "blocked_by": [] }
+      }
+    },
+    "v0.6.0-00": {
+      "release_issue": 493,
+      "issues": {
+        "310": { "blocked_by": [] },
+        "314": { "blocked_by": [310] },
+        "493": { "blocked_by": [310, 314] }
+      }
+    }
+  },
   "changes": {
     "accept-compiler-config-utf8-bom": 408,
     "admit-purpose-mutations-through-freshness": 463,
@@ -35,6 +76,48 @@
           "issue": 435,
           "first_task": "4.1",
           "last_task": "4.3"
+        }
+      ]
+    },
+    "complete-v050-release-readiness": {
+      "contract": "checklist-v1",
+      "primary_issue": 481,
+      "owners": [
+        { "issue": 481, "first_task": "1.1", "last_task": "2.4" },
+        { "issue": 339, "first_task": "3.1", "last_task": "3.4" },
+        { "issue": 342, "first_task": "4.1", "last_task": "4.4" },
+        { "issue": 358, "first_task": "5.1", "last_task": "5.4" },
+        { "issue": 372, "first_task": "6.1", "last_task": "6.4" },
+        { "issue": 384, "first_task": "7.1", "last_task": "7.4" },
+        { "issue": 388, "first_task": "8.1", "last_task": "8.4" },
+        { "issue": 390, "first_task": "9.1", "last_task": "9.4" },
+        { "issue": 456, "first_task": "10.1", "last_task": "10.4" },
+        { "issue": 464, "first_task": "11.1", "last_task": "11.4" },
+        { "issue": 465, "first_task": "12.1", "last_task": "12.4" },
+        { "issue": 476, "first_task": "13.1", "last_task": "13.4" },
+        { "issue": 477, "first_task": "14.1", "last_task": "14.4" },
+        { "issue": 480, "first_task": "15.1", "last_task": "15.4" },
+        { "issue": 482, "first_task": "16.1", "last_task": "16.4" },
+        { "issue": 483, "first_task": "17.1", "last_task": "17.4" },
+        { "issue": 484, "first_task": "18.1", "last_task": "18.4" },
+        { "issue": 485, "first_task": "19.1", "last_task": "19.4" },
+        { "issue": 486, "first_task": "20.1", "last_task": "20.4" },
+        { "issue": 487, "first_task": "21.1", "last_task": "21.4" },
+        { "issue": 488, "first_task": "22.1", "last_task": "22.4" },
+        { "issue": 489, "first_task": "23.1", "last_task": "23.4" },
+        { "issue": 490, "first_task": "24.1", "last_task": "24.4" },
+        { "issue": 491, "first_task": "25.1", "last_task": "25.4" },
+        { "issue": 492, "first_task": "26.1", "last_task": "26.7" }
+      ]
+    },
+    "complete-v060-release-acceptance": {
+      "contract": "checklist-v1",
+      "primary_issue": 493,
+      "owners": [
+        {
+          "issue": 493,
+          "first_task": "1.1",
+          "last_task": "2.7"
         }
       ]
     },
@@ -76,6 +159,17 @@
     "prefer-worktree-guidance-before-database-preflight": 412,
     "preserve-indexing-across-invalid-symbol-identities": 467,
     "publish-rustdoc-readme-links": 300,
+    "rationalize-agent-tool-surface": {
+      "contract": "checklist-v1",
+      "primary_issue": 310,
+      "owners": [
+        {
+          "issue": 310,
+          "first_task": "1.1",
+          "last_task": "4.4"
+        }
+      ]
+    },
     "recognize-btrfs-subvolume-database-placement": 469,
     "reject-incompatible-schema-before-write": 410,
     "release-candidates-and-pr-cleanup": 448,
