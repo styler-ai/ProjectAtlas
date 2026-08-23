@@ -2052,9 +2052,11 @@ def revoke_merge_authorization_for_pr(
             auto_merge_request.get("id"), str
         ):
             failures.append(f"PR #{number} auto-merge identity was malformed")
+        elif not isinstance(details.get("id"), str) or not details["id"]:
+            failures.append(f"PR #{number} pull-request node identity was malformed")
         else:
             try:
-                disable_auto_merge(repo, auto_merge_request["id"])
+                disable_auto_merge(repo, details["id"])
             except BaseException as error:
                 failures.append(f"PR #{number} auto-merge revocation failed: {error}")
     try:
@@ -2437,12 +2439,12 @@ def merge_readiness_failures(
     author = details.get("author")
     if not isinstance(author, dict) or not isinstance(author.get("login"), str):
         failures.append("merge PR author identity was malformed")
-    reviews = pull_request_reviews(repo, number)
-    if any(
-        isinstance(review, dict) and review.get("state") == "CHANGES_REQUESTED"
-        for review in reviews
-    ):
-        failures.append("merge PR has unresolved changes requested")
+    review_decision = details.get("reviewDecision")
+    if state == "OPEN" and review_decision != "APPROVED":
+        failures.append(
+            "merge PR review decision is not APPROVED: "
+            + (review_decision if isinstance(review_decision, str) else "missing")
+        )
     failures.extend(unresolved_review_failures(repo, number))
     base_sha = default_branch_head(repo, branch)
     if base_sha.casefold() != published_snapshot.sha.casefold():
@@ -3893,6 +3895,7 @@ Mitigations:
         ]
         affected_statuses: list[tuple[int, str]] = []
         disable_calls: list[str] = []
+        disable_failures: set[str] = set()
         status_failures: set[tuple[int, str]] = set()
         invalidation_mode = "normal"
 
@@ -3942,9 +3945,13 @@ Mitigations:
 
         globals()["gh_json"] = fake_invalidation_gh_json
         globals()["commit_status"] = fake_invalidation_status
-        globals()["disable_auto_merge"] = (
-            lambda repo, node_id: disable_calls.append(node_id)
-        )
+
+        def fake_disable_auto_merge(repo: str, node_id: str) -> None:
+            disable_calls.append(node_id)
+            if node_id in disable_failures:
+                raise RuntimeError(f"simulated auto-merge disable failure for {node_id}")
+
+        globals()["disable_auto_merge"] = fake_disable_auto_merge
         invalidate_issue_readiness("owner/repo", 10)
         assert affected_statuses == [
             (494, MERGE_AUTHORIZATION_STATUS_CONTEXT),
@@ -3952,7 +3959,22 @@ Mitigations:
             (495, MERGE_AUTHORIZATION_STATUS_CONTEXT),
             (495, IMPLEMENTATION_STATUS_CONTEXT),
         ]
-        assert disable_calls == ["AUTO_494"]
+        assert disable_calls == ["PR_494"]
+        affected_statuses.clear()
+        disable_failures = {"PR_494"}
+        try:
+            invalidate_issue_readiness("owner/repo", 10)
+        except SystemExit as error:
+            assert "merge authorization invalidation failed" in str(error)
+        else:
+            raise AssertionError("auto-merge disable failure was masked")
+        assert affected_statuses == [
+            (494, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (494, IMPLEMENTATION_STATUS_CONTEXT),
+            (495, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (495, IMPLEMENTATION_STATUS_CONTEXT),
+        ]
+        disable_failures.clear()
         affected_statuses.clear()
         status_failures = {(494, MERGE_AUTHORIZATION_STATUS_CONTEXT)}
         try:
@@ -4447,7 +4469,10 @@ Mitigations:
             "id": "PR_node_494",
             "author": {"login": "owner"},
             "closingIssuesReferences": [],
-            "reviewDecision": "APPROVED",
+            "reviewDecision": {
+                "review-failure": "CHANGES_REQUESTED",
+                "review-no-decision": None,
+            }.get(merge_mode, "APPROVED"),
             "reviews": [],
         }
 
@@ -4523,7 +4548,11 @@ Mitigations:
                 ]
             }
         if "/reviews" in joined:
-            return [{"state": "CHANGES_REQUESTED"}] if merge_mode == "review-failure" else []
+            return (
+                [{"state": "CHANGES_REQUESTED"}]
+                if merge_mode in {"review-failure", "review-history-approved"}
+                else []
+            )
         if "/collaborators" in joined:
             owner = {"login": "owner", "type": "User", "permissions": {"admin": True}}
             if merge_mode == "malformed-collaborators":
@@ -4685,6 +4714,7 @@ Mitigations:
             "collaborator-owner-mismatch",
             "malformed-collaborators",
             "collaborator-truncation",
+            "review-no-decision",
         ):
             merge_mode = policy_failure
             merge_state = "OPEN"
@@ -4771,6 +4801,13 @@ Mitigations:
             state == "success" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
             for state, context, _ in merge_statuses[before:]
         )
+        merge_mode = "review-history-approved"
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        assert authorize_merge(
+            "owner/repo", 494, merge_sha, Path("."), {}, {},
+            "merge-review-history-approved", "owner", "owner"
+        ) == "applied"
         merge_mode = "success"
         merge_state = "OPEN"
         current_merge_head = merge_sha
