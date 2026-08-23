@@ -1552,6 +1552,8 @@ def mutate_native_relationship(
     related_issue: int,
     relation_kind: str,
     operation: str,
+    root: Path | None = None,
+    published_snapshot: PublishedSnapshot | None = None,
 ) -> bool:
     issue, related_issue = validate_native_relationship_request(
         relation_kind, operation, issue, related_issue
@@ -1593,6 +1595,14 @@ def mutate_native_relationship(
         ]
         if field is not None:
             request.extend(["-F", f"{field}={related_id}"])
+        if root is not None:
+            if published_snapshot is None:
+                raise SystemExit("relationship mutation is missing its published snapshot")
+            current_snapshot = require_published_snapshot(repo, root)
+            if current_snapshot != published_snapshot:
+                raise SystemExit(
+                    "published snapshot moved before native relationship mutation"
+                )
         run(request)
     actual = read_relation(repo, issue)
     if (related_issue in actual) != desired:
@@ -1611,6 +1621,8 @@ def mutate_native_relationship_and_revalidate(
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
     request_id: str,
+    root: Path | None = None,
+    published_snapshot: PublishedSnapshot | None = None,
 ) -> None:
     """Mutate one edge, then validate the complete declared release graph."""
 
@@ -1622,12 +1634,52 @@ def mutate_native_relationship_and_revalidate(
         operation,
         release_graphs,
     )
+    if root is not None:
+        if published_snapshot is None:
+            raise SystemExit("relationship mutation is missing its published snapshot")
+        current_snapshot = require_published_snapshot(repo, root)
+        if current_snapshot != published_snapshot:
+            raise SystemExit(
+                "published snapshot moved before native relationship preflight"
+            )
     changed = mutate_native_relationship(
-        repo, issue, related_issue, relation_kind, operation
+        repo,
+        issue,
+        related_issue,
+        relation_kind,
+        operation,
+        root=root,
+        published_snapshot=published_snapshot,
     )
+    if root is not None:
+        try:
+            current_snapshot = require_published_snapshot(repo, root)
+        except BaseException as error:
+            raise SystemExit(
+                "native relationship mutation completed remote read-back but its "
+                f"published snapshot could not be revalidated: {error}"
+            ) from error
+        if current_snapshot != published_snapshot:
+            raise SystemExit(
+                "native relationship mutation completed remote read-back but the "
+                "published snapshot moved; no success outcome was emitted"
+            )
     failures = release_graph_failures(repo, release_graphs, issue_map)
     if failures:
         raise SystemExit("relationship graph reconciliation failed:\n" + "\n".join(failures))
+    if root is not None:
+        try:
+            current_snapshot = require_published_snapshot(repo, root)
+        except BaseException as error:
+            raise SystemExit(
+                "native relationship graph was reconciled but its published snapshot "
+                f"could not be revalidated: {error}"
+            ) from error
+        if current_snapshot != published_snapshot:
+            raise SystemExit(
+                "native relationship graph was reconciled against a moved published "
+                "snapshot; no success outcome was emitted"
+            )
     print(relationship_outcome(request_id, "applied" if changed else "already-satisfied"))
 
 
@@ -2371,7 +2423,7 @@ def unresolved_review_failures(repo: str, number: int) -> list[str]:
         raise SystemExit("GitHub review-thread response was malformed")
     if not isinstance(nodes, list) or not isinstance(has_next, bool):
         raise SystemExit("GitHub review-thread collection was malformed")
-    if has_next or len(nodes) >= MAX_REVIEWS:
+    if has_next or len(nodes) > MAX_REVIEWS:
         raise SystemExit("GitHub review-thread collection exceeded the bounded limit")
     return ["unresolved review thread remains"] if any(
         not isinstance(node, dict) or node.get("isResolved") is not True for node in nodes
@@ -3552,6 +3604,7 @@ Mitigations:
     saved_gh_json = globals()["gh_json"]
     saved_commit_status = globals()["commit_status"]
     saved_disable_auto_merge = globals()["disable_auto_merge"]
+    saved_published_snapshot = globals()["require_published_snapshot"]
     saved_gh_api_json = globals()["gh_api_json"]
     saved_run = globals()["run"]
     saved_subprocess_run = subprocess.run
@@ -3748,6 +3801,91 @@ Mitigations:
         else:
             raise AssertionError("reconciliation drift was masked after valid mutation")
         globals()["release_graph_failures"] = saved_release_graph_failures
+
+        relationship_snapshot = PublishedSnapshot("main", "b" * 40)
+        relationship_snapshot_mode = "stable"
+        relationship_snapshot_calls = 0
+
+        def fake_relationship_snapshot(repo: str, root: Path) -> PublishedSnapshot:
+            nonlocal relationship_snapshot_calls
+            relationship_snapshot_calls += 1
+            if relationship_snapshot_mode == "before-preflight":
+                return PublishedSnapshot("main", "d" * 40)
+            if relationship_snapshot_mode == "before-write" and relationship_snapshot_calls >= 2:
+                return PublishedSnapshot("main", "d" * 40)
+            if relationship_snapshot_mode == "after-write" and relationship_snapshot_calls >= 3:
+                return PublishedSnapshot("main", "d" * 40)
+            return relationship_snapshot
+
+        globals()["require_published_snapshot"] = fake_relationship_snapshot
+        native_mutation_state["blocked_by"] = set()
+        native_mutation_state["sub_issue"] = set()
+        native_mutation_calls.clear()
+        relationship_snapshot_mode = "before-preflight"
+        relationship_snapshot_calls = 0
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                10,
+                11,
+                "blocked_by",
+                "add",
+                graph_owners,
+                valid_graphs,
+                "rel-snapshot-before-preflight",
+                root=self_test_root,
+                published_snapshot=relationship_snapshot,
+            )
+        except SystemExit as error:
+            assert "before native relationship preflight" in str(error)
+        else:
+            raise AssertionError("moved snapshot before preflight was accepted")
+        assert native_mutation_calls == []
+
+        relationship_snapshot_mode = "before-write"
+        relationship_snapshot_calls = 0
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                10,
+                11,
+                "blocked_by",
+                "add",
+                graph_owners,
+                valid_graphs,
+                "rel-snapshot-before-write",
+                root=self_test_root,
+                published_snapshot=relationship_snapshot,
+            )
+        except SystemExit as error:
+            assert "before native relationship mutation" in str(error)
+        else:
+            raise AssertionError("moved snapshot before write was accepted")
+        assert native_mutation_calls == []
+
+        relationship_snapshot_mode = "after-write"
+        relationship_snapshot_calls = 0
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                10,
+                11,
+                "blocked_by",
+                "add",
+                graph_owners,
+                valid_graphs,
+                "rel-snapshot-after-write",
+                root=self_test_root,
+                published_snapshot=relationship_snapshot,
+            )
+        except SystemExit as error:
+            assert "remote read-back" in str(error)
+            assert "no success outcome" in str(error)
+        else:
+            raise AssertionError("moved snapshot after write was reported as success")
+        assert len(native_mutation_calls) == 1
+        assert native_mutation_calls[0][4] == "POST"
+        assert native_mutation_state["blocked_by"] == {11}
 
         foreign_identity = {
             "repository_url": "https://api.github.com/repos/foreign/repo",
@@ -4046,6 +4184,7 @@ Mitigations:
         globals()["gh_json"] = saved_gh_json
         globals()["commit_status"] = saved_commit_status
         globals()["disable_auto_merge"] = saved_disable_auto_merge
+        globals()["require_published_snapshot"] = saved_published_snapshot
         globals()["gh_api_json"] = saved_gh_api_json
         globals()["run"] = saved_run
         globals()["release_graph_failures"] = saved_release_graph_failures
@@ -4432,6 +4571,7 @@ Mitigations:
     disable_calls = 0
     merge_graph_calls = 0
     default_branch_reads = 0
+    review_thread_mode = "empty"
 
     def fake_merge_gh_json(args: list[str]) -> object:
         nonlocal current_merge_head, merge_state, merge_mode
@@ -4477,7 +4617,7 @@ Mitigations:
         }
 
     def fake_merge_gh_api(args: list[str]) -> object:
-        nonlocal merge_state, merge_graph_calls, merge_mode, current_merge_head, enable_calls, disable_calls, default_branch_reads
+        nonlocal merge_state, merge_graph_calls, merge_mode, current_merge_head, enable_calls, disable_calls, default_branch_reads, review_thread_mode
         joined = " ".join(args)
         if "/statuses/" in joined and "commits/" not in joined:
             state = next(
@@ -4565,13 +4705,25 @@ Mitigations:
         if args[0] == "graphql":
             query = next(argument for argument in args if argument.startswith("query="))
             if "reviewThreads" in query:
+                if review_thread_mode == "malformed":
+                    return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [], "pageInfo": {}}}}}}
+                if review_thread_mode == "malformed-nodes":
+                    return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": {}, "pageInfo": {"hasNextPage": False}}}}}}
+                count = {
+                    "below": MAX_REVIEWS - 1,
+                    "exact": MAX_REVIEWS,
+                    "exact-truncated": MAX_REVIEWS,
+                    "overflow": MAX_REVIEWS + 1,
+                }.get(review_thread_mode, 0)
                 return {
                     "data": {
                         "repository": {
                             "pullRequest": {
                                 "reviewThreads": {
-                                    "nodes": [],
-                                    "pageInfo": {"hasNextPage": False},
+                                    "nodes": [{"isResolved": True}] * count,
+                                    "pageInfo": {
+                                        "hasNextPage": review_thread_mode == "exact-truncated"
+                                    },
                                 }
                             }
                         }
@@ -4610,6 +4762,18 @@ Mitigations:
     )
     time.sleep = lambda _: None
     try:
+        for mode in ("below", "exact"):
+            review_thread_mode = mode
+            assert unresolved_review_failures("owner/repo", 494) == []
+        for mode in ("exact-truncated", "overflow", "malformed", "malformed-nodes"):
+            review_thread_mode = mode
+            try:
+                unresolved_review_failures("owner/repo", 494)
+            except SystemExit as error:
+                assert "review-thread" in str(error) or "bounded" in str(error)
+            else:
+                raise AssertionError(f"review-thread pagination mode {mode} was accepted")
+        review_thread_mode = "empty"
         assert authorize_merge(
             "owner/repo",
             494,
@@ -4968,6 +5132,8 @@ def main() -> None:
                 issue_map,
                 release_graphs,
                 request_id,
+                root=Path(args.root),
+                published_snapshot=published_snapshot,
             )
         except BaseException:
             print(relationship_outcome(request_id, "failed"))
