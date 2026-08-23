@@ -9,6 +9,7 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 **Goals:**
 
 - Make every issue packet implementation-decidable with one owner, exact dependencies, positive/negative/failure/compatibility/platform proof, and one truthful architecture view.
+- Require exact published-default-branch OpenSpec and architecture evidence before an issue becomes ready, enters a release, or reaches implementation.
 - Preserve strict identity, freshness, typed errors, exact source evidence, bounded output, one-generation publication, authored state, and platform security.
 - Keep independent graph lanes parallel while requiring accepted predecessors on `main` before dependent implementation/merge.
 - Finish with complete installed CLI/MCP/host/public-surface execution, a hard-gated in-place v0.4.5 database update, holistic packaged E2E, RC remediation, stable readback, and #492 closes-last truth.
@@ -23,6 +24,10 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 ### Release hierarchy communicates scope; blockers control order
 
 #492 is the sole native parent of all other `v0.5.0-00` issues and has no parent. Every non-release issue appears once as its direct sub-issue. `release_graphs.v0.5.0-00.issues[*].blocked_by` is the execution authority; no separate children array duplicates hierarchy. #492 is directly blocked by every child, implements no feature/bug, and closes last.
+
+### Candidate specification proof does not authorize readiness
+
+A candidate checkout is the authority for proposed OpenSpec structure, issue mirrors, Markdown headings, locked-parser Mermaid syntax, rendered communication, and semantic review. It is not publication proof for a durable `/blob/main/` issue link. Sol first lands those artifacts through a planning PR without a native closing issue, then reads them from an exact clean checkout of the live default-branch revision. Only that published snapshot may authorize `status:ready`, a release milestone, native parent/blocker relationships, or Luna implementation handoff. Planned-issue, implementation-reference, merge-authorization, milestone, and release paths fail closed on candidate-only, stale, dirty, missing, or malformed evidence. This preserves the documentation bootstrap without allowing a candidate worktree to impersonate published state.
 
 ### Native identity is one typed value and codec
 
@@ -64,7 +69,7 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 
 ### Release acceptance composes rather than repairs
 
-#492 freezes one exact revision only after every child and required review is complete. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization. Confirmed defects return to owners and invalidate the candidate. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
+#492 freezes one exact revision only after every child and required review is complete and the exact live default branch resolves every accepted issue's mapped OpenSpec task source and architecture URL, heading, and Mermaid. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization. Confirmed defects, including missing or stale published issue evidence, return to their specification or implementation owner and invalidate the candidate; #492 does not repair them. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
 
 ## Risks / Trade-offs
 
@@ -72,11 +77,14 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 - Parser/document inputs could exceed resources or invent evidence. Mitigation: single typed authorities, pinned/audited dependencies, pre-mutation refusal, exact locators, hard admission/output bounds, and typed incomplete state.
 - Measurement issues could optimize fixtures instead of products. Mitigation: frozen representative shapes, plans/profiles, material thresholds, and valid no-change closure.
 - Refactors could change contracts while moving code. Mitigation: accepted move maps, intermediate runnable owners, inventory comparison, and compatibility/fault/platform proof.
+- Candidate-local specifications could be mistaken for durable issue evidence. Mitigation: publish through a non-closing planning PR, bind readiness and release gates to an exact clean live-default-branch snapshot, and read every mapped task source and architecture target back.
 - Release proof could mutate ambient state, hide a route, or publish despite a broken v0.4.5 database update. Mitigation: isolated fixtures, independent inventories, behavior execution, an explicit pre-publication update gate with injected failure/retry/rollback, cleanup, and defect return.
 
 ## Migration Plan
 
 Parallel delivery waves derived from the exact graph:
+
+Before wave 1, the planning PR publishes the shared OpenSpec and architecture sources, the exact live default branch passes the published-readiness gate, and every accepted issue link/task mirror is read back. No Luna implementation worktree starts from candidate-only specification evidence.
 
 1. Independent foundations: #482, #372, and #489.
 2. After #482: #476, #480, #481, and #483 may proceed independently.

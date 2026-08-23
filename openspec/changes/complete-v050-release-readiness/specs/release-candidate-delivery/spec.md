@@ -11,8 +11,19 @@
 - **WHEN** any child issue, mapped task, required proof, or review remains open
 - **THEN** #492 cannot freeze, publish, promote, or close
 
+### Requirement: Accepted issue evidence is published before implementation
+Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped OpenSpec task source and every architecture URL, heading, and Mermaid block from an exact clean checkout of the live default-branch revision. Candidate-local validation SHALL remain required for proposed artifacts but SHALL NOT authorize readiness, milestone assignment, native release relationships, implementation handoff, merge, or release.
+
+#### Scenario: A planning slice publishes new evidence
+- **WHEN** a planning pull request has no native closing issue and its candidate OpenSpec and Mermaid checks pass
+- **THEN** it may publish the proposed specification and architecture artifacts without claiming that an implementation issue is ready
+
+#### Scenario: Candidate-only evidence is presented as published
+- **WHEN** a planned, implementation, merge-authorization, milestone, or release check resolves an artifact only from a candidate, stale, or dirty checkout
+- **THEN** readiness fails until a planning pull request lands and the exact live default-branch artifact is read back successfully
+
 ### Requirement: Release input is exact and complete
-#492 SHALL freeze one exact `main` revision only after every accepted child, task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
+#492 SHALL freeze one exact `main` revision only after every accepted child, task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete and the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source and architecture target. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
 
 #### Scenario: Evidence-led no-change issue
 - **WHEN** a measurement or reproduction task proves existing behavior already satisfies its contract
@@ -21,6 +32,10 @@
 #### Scenario: Revision or artifact changes
 - **WHEN** any candidate input changes after proof
 - **THEN** the complete public-surface and holistic proof restarts for the new exact input
+
+#### Scenario: Published issue evidence drifts
+- **WHEN** a mapped task source, architecture document, heading, Mermaid block, issue mirror, or default-branch identity is missing or inconsistent
+- **THEN** #492 stops acceptance, returns the gap to its specification owner, and performs no feature or bug repair
 
 ### Requirement: Every installed CLI and MCP route executes
 The release gate SHALL derive and reconcile the complete installed CLI command/nested-command and MCP tool inventory, including unchanged routes, and SHALL safely execute each supported route on every supported platform.

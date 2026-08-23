@@ -358,7 +358,10 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-  [*] --> ExactRevision: every other accepted issue closed and reviewed
+  [*] --> PublishedIssueReadback: read exact main OpenSpec and architecture targets
+  PublishedIssueReadback --> PublicationRepair: mapped task, document, heading, or Mermaid is missing or stale
+  PublicationRepair --> PublishedIssueReadback: planning PR publishes corrected evidence
+  PublishedIssueReadback --> ExactRevision: published milestone gate and every required review pass
   ExactRevision --> SurfaceInventory: freeze complete CLI and MCP inventory
   SurfaceInventory --> InstalledProof: safely execute every supported route
   InstalledProof --> CandidateBuild: package exact main revision
@@ -367,7 +370,7 @@ stateDiagram-v2
   UpdateProof --> Remediation: update or migration blocker
   RC1 --> HostedReadback: independently verify tag, assets, runtime, and Latest
   HostedReadback --> Remediation: confirmed blocker
-  Remediation --> ExactRevision: return defect to owning child issue and restart proof
+  Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
   HostedReadback --> StableBuild: accepted candidate and no blocker
   StableBuild --> StableReadback: repeat installs and hosted identity
   StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified

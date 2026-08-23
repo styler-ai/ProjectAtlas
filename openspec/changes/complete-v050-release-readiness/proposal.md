@@ -12,7 +12,8 @@ ProjectAtlas v0.5.0 needs one coherent non-visual release campaign that repairs 
 - Make entrypoint reachability request-owned and non-persistent; replace weak-component communities with deterministic bounded weighted label-propagation v1; measure reverse-caller, graph-resource, and released-main-baseline proposals before accepting either a measured change or reproducible no-change result.
 - Verify npm as a thin exact-native-runtime adapter, consume generated Claude Code/OpenCode configuration through real isolated host readers, and add one collision-safe `atlas` shim while preserving `projectatlas`, `health-check`, and administrative `health resolve`.
 - Narrow release timeout work to the reported GitHub Actions step; split tests/modules only through accepted responsibility maps; remove the named oversized raw benchmark artifact and reuse the existing two-arm evaluation harness.
-- Make #492 reconcile and safely execute every installed CLI command/nested command and MCP tool—including unchanged routes—run the holistic packaged product E2E, publish/read back RC1, return defects to owners, repeat proof for stable, and close last.
+- Separate candidate-local specification validation from published readiness: a planning PR may publish OpenSpec and architecture artifacts without closing an implementation issue, but `status:ready`, release planning, native relationships, implementation handoff, merge, and release require exact clean live-default-branch readback.
+- Make #492 read back every accepted issue's published OpenSpec task source and architecture URL/heading/Mermaid before freezing a candidate, reconcile and safely execute every installed CLI command/nested command and MCP tool—including unchanged routes—run the holistic packaged product E2E, publish/read back RC1, return defects to owners, repeat proof for stable, and close last.
 
 Non-goals:
 
@@ -41,4 +42,4 @@ None. Existing token-impact reporting, graph authority, database ownership, CLI/
 - Existing seven Rust crates, with concrete typed ownership rather than new architecture layers.
 - Project-local SQLite keys, constraints, migrations, plans, transactions, WAL/concurrency, rollback/recovery, and authored/derived-state preservation where explicitly owned.
 - Windows, Linux, macOS x64/arm64 runtime, installer, npm, plugin, generated host, CLI/MCP, parser, database, workflow, evaluation, and release boundaries.
-- OpenSpec/IssueOps mapping, native GitHub hierarchy and dependency graph, version-matched guidance, issue-specific Mermaid documentation, and final hosted release state.
+- OpenSpec/IssueOps mapping, candidate-versus-published readiness, native GitHub hierarchy and dependency graph, version-matched guidance, issue-specific Mermaid documentation, and final hosted release state.
