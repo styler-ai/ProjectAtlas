@@ -8545,47 +8545,45 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "planned_issue_failures",
         "target_graph_failures",
         "native_relation_issue_number",
-        "implementation_prs_for_issue",
-        "IssueOpsSnapshot",
-        "CandidateHeadChanged",
-        "reconcile_all_release_graphs",
-        "newer_issueops_run_exists",
+        "bounded_api_collection",
+        "bounded_api_values",
+        "bounded_api_object_collection",
+        "MAX_COLLECTION_PAGES",
+        "MAX_MILESTONES",
+        "MAX_MILESTONE_ISSUES",
+        "MAX_NATIVE_RELATIONS",
+        "MAX_PULL_REQUEST_REFERENCES",
+        "MAX_CHECKS",
+        "MAX_REVIEWS",
+        "pull_request_reviews",
         "validate_request_id",
-        "relationship_outcome",
+        "validate_merge_request",
         "validate_native_relationship_request",
-        "MAX_ACTIVE_IMPLEMENTATION_PRS",
-        "ImplementationAdmission",
-        "ISSUEOPS_ADMISSION_LABEL",
-        "reconcile_admission_labels",
-        "implementation_pr_requires_admission",
-        "issueops_request_budget",
-        "MAX_GRAPH_REQUESTS_PER_EVENT",
-        "MAX_STATUS_WRITES_PER_EVENT",
-        "MAX_CONTENT_WRITES_PER_MINUTE",
-        "publish_admission_failure_statuses",
-        "invalidate_implementation_statuses_for_issue",
+        "dispatch_outcome",
+        "relationship_outcome",
+        "merge_outcome",
+        "merge_readiness_failures",
+        "GITHUB_ACTIONS_APP_ID",
+        "enable_auto_merge",
+        "disable_auto_merge",
+        "expectedHeadOid",
+        "autoMergeRequest",
+        "mergeCommit",
+        "reviewThreads",
+        "15368",
+        "wait_for_merged_pr",
+        "authorize_merge",
         "ISSUEOPS_WORKFLOW_PATH",
-        "open_pull_requests_snapshot",
-        "affected_implementation_prs",
+        "MERGE_AUTHORIZATION_STATUS_CONTEXT",
         "mutate_native_relationship",
         "mutate_native_relationship_and_revalidate",
-        "STATUS_WORKERS",
-        "run_bounded_status_work",
-        "batch_precondition",
-        "ThreadPoolExecutor",
-        "max_workers=STATUS_WORKERS",
-        "prepare_implementation_status_candidates",
-        "publish_pending_statuses",
-        "finalize_implementation_statuses",
-        "refresh_snapshot_graph_failures",
-        "final_snapshot",
         "commit_status",
         "implementation_reference_failures",
         "publish_implementation_status_for_pr",
-        "publish_implementation_statuses_for_issue",
         "IMPLEMENTATION_STATUS_CONTEXT",
-        "enforce_closed_issue_blockers",
+        "revoke_merge_authorization_for_pr",
         "implementation_issue_failures",
+        "enforce_closed_issue_blockers",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
         "planned_issue=args.planned_issue",
@@ -8604,6 +8602,17 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "rerun_implementation_gates",
         "gh run",
         "MAX_AFFECTED_IMPLEMENTATION_PRS",
+        "MAX_OPEN_PULL_REQUESTS",
+        "MAX_ACTIVE_IMPLEMENTATION_PRS",
+        "ISSUEOPS_ADMISSION_LABEL",
+        "IssueOpsSnapshot",
+        "ImplementationStatusCandidate",
+        "ImplementationAdmission",
+        "CandidateHeadChanged",
+        "newer_issueops_run_exists",
+        "run_bounded_status_work",
+        "publish_implementation_statuses_for_issue",
+        "invalidate_implementation_statuses_for_issue",
     ] {
         if issueops.contains(obsolete) {
             return Err(io::Error::other(format!(
@@ -8858,14 +8867,15 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "run-name:",
+        "format('merge {0} pr-{1}', github.event.client_payload.request_id, github.event.client_payload.pr_number)",
         "format('relationship {0}', github.event.client_payload.request_id)",
         "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
+        "types: [opened, edited, synchronize, reopened, enqueued]",
         "repository_dispatch:",
-        "types: [issueops_relationship]",
+        "types: [issueops_relationship, issueops_merge]",
         "gh api repos/OWNER/REPO/dispatches",
         "dispatch admission is not run success",
         "204 dispatch response is admission only",
-        "relationship <request_id>",
         "REQUEST_ID",
         "^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$",
         "client_payload.relation_kind",
@@ -8878,19 +8888,16 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--native-relationship-issue \"$ISSUE_NUMBER\"",
         "--native-related-issue \"$RELATED_ISSUE\"",
         "--request-id \"$REQUEST_ID\"",
-        "--enforce-implementation-admission",
-        "--planned-issue \"$ISSUE_NUMBER\"",
-        "--publish-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
-        "--invalidate-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
-        "--reconcile-all-release-graphs",
-        "implementation-status-revalidation",
-        "implementation-status-invalidation",
-        "pull_request:",
-        "types: [opened, closed, reopened]",
-        "repository_dispatch:",
-        "run-name:",
-        "status_args+=(--enforce-closed-issue-blockers \"$ENFORCE_CLOSED_ISSUE\")",
-        "github.event_name == 'issues'",
+        "--authorize-merge",
+        "--merge-pr-number \"$PR_NUMBER\"",
+        "--merge-expected-head \"$EXPECTED_HEAD\"",
+        "--dispatch-actor \"$DISPATCH_ACTOR\"",
+        "--event-sender \"$EVENT_SENDER\"",
+        "issue-state-repair",
+        "--enforce-closed-issue-blockers \"$ISSUE_NUMBER\"",
+        "merge-authorization-invalidation",
+        "relationship-mutation",
+        "merge-authorization",
         "github.event_name == 'pull_request'",
         "github.event_name == 'repository_dispatch'",
         "timeout-minutes: 5",
@@ -8905,56 +8912,116 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    let issueops_revalidation =
-        workflow_job_block(&issueops_workflow, "implementation-status-revalidation")?;
-    let issueops_invalidation =
-        workflow_job_block(&issueops_workflow, "implementation-status-invalidation")?;
-    for required in [
-        "ref: ${{ github.event.repository.default_branch }}",
-        "--invalidate-implementation-statuses-for-issue \"$ISSUE_NUMBER\"",
-        "--reconcile-all-release-graphs",
-        "contents: read",
-        "issues: write",
-        "pull-requests: read",
-        "statuses: write",
-        "timeout-minutes: 10",
+    for job in [
+        "issue-state-repair",
+        "merge-authorization-invalidation",
+        "relationship-mutation",
+        "merge-authorization",
     ] {
-        if !issueops_invalidation.contains(required) {
+        let block = workflow_job_block(&issueops_workflow, job)?;
+        let job_permission = if job == "issue-state-repair" {
+            "issues: write"
+        } else if job == "merge-authorization" {
+            "pull-requests: write"
+        } else {
+            "pull-requests: read"
+        };
+        for required in [
+            "ref: ${{ github.event.repository.default_branch }}",
+            "if: ${{ !cancelled() }}",
+            "contents: read",
+            job_permission,
+        ] {
+            if !block.contains(required) {
+                return Err(io::Error::other(format!(
+                    "IssueOps {job} job is missing trusted bounded guard {required:?}"
+                ))
+                .into());
+            }
+        }
+        if job == "issue-state-repair" || job == "merge-authorization-invalidation" {
+            if !block.contains("timeout-minutes: 10") {
+                return Err(io::Error::other(format!(
+                    "IssueOps {job} job must have a finite 10-minute timeout"
+                ))
+                .into());
+            }
+        } else if !block.contains("timeout-minutes: 30") {
             return Err(io::Error::other(format!(
-                "IssueOps invalidation job is missing fail-closed pending guard {required:?}"
+                "IssueOps {job} job must have a finite 30-minute timeout"
+            ))
+            .into());
+        }
+    }
+    let relationship_job = workflow_job_block(&issueops_workflow, "relationship-mutation")?;
+    let merge_job = workflow_job_block(&issueops_workflow, "merge-authorization")?;
+    let invalidation_job =
+        workflow_job_block(&issueops_workflow, "merge-authorization-invalidation")?;
+    let repair_job = workflow_job_block(&issueops_workflow, "issue-state-repair")?;
+    for required in ["issues: write", "--enforce-closed-issue-blockers"] {
+        if !repair_job.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps issue repair job is missing blocker repair guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in ["statuses: write", "--revoke-merge-authorization-for-pr"] {
+        if !invalidation_job.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps invalidation job is missing status revocation guard {required:?}"
             ))
             .into());
         }
     }
     for required in [
-        "concurrency:",
-        "group: issueops-implementation-revalidation-${{ github.repository }}",
+        "group: issueops-mutations-${{ github.repository }}",
         "queue: max",
-        "if: ${{ !cancelled() }}",
-        "--reconcile-all-release-graphs",
-        "--run-id \"$GITHUB_RUN_ID\"",
-        "--enforce-implementation-admission",
-        "ref: ${{ github.event.repository.default_branch }}",
-        "contents: read",
         "issues: write",
-        "pull-requests: read",
+        "--mutate-native-relationship",
+        "--request-id \"$REQUEST_ID\"",
+    ] {
+        if !relationship_job.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps relationship job is missing mutation guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "group: issueops-mutations-${{ github.repository }}",
+        "queue: max",
+        "checks: read",
+        "pull-requests: write",
         "statuses: write",
-        "actions: read",
+        "--authorize-merge",
+        "--merge-pr-number \"$PR_NUMBER\"",
+        "--merge-expected-head \"$EXPECTED_HEAD\"",
+        "--dispatch-actor \"$DISPATCH_ACTOR\"",
+        "--event-sender \"$EVENT_SENDER\"",
         "timeout-minutes: 30",
     ] {
-        if !issueops_revalidation.contains(required) {
+        if !merge_job.contains(required) {
             return Err(io::Error::other(format!(
-                "IssueOps relationship dispatcher is missing least permission or timeout {required:?}"
+                "IssueOps merge job is missing authorization guard {required:?}"
             ))
             .into());
         }
     }
     for obsolete in [
         "--rerun-implementation-gates-for-issue",
+        "MAX_ACTIVE_IMPLEMENTATION_PRS",
+        "issueops-admitted",
+        "issueops_request_budget",
+        "publish_implementation_statuses_for_issue",
+        "invalidate_implementation_statuses_for_issue",
+        "open_pull_requests_snapshot",
         "actions: write",
         "gh run cancel",
         "cancel-in-progress: true",
         "cancel-in-progress: false",
+        "gh pr merge",
+        "pulls/merge",
     ] {
         if issueops_workflow.contains(obsolete) {
             return Err(io::Error::other(format!(

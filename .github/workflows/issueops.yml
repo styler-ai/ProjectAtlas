@@ -2,7 +2,9 @@ name: 00-IssueOps
 
 run-name: >-
   00-IssueOps /
-  ${{ github.event_name == 'repository_dispatch'
+  ${{ github.event_name == 'repository_dispatch' && github.event.action == 'issueops_merge'
+      && format('merge {0} pr-{1}', github.event.client_payload.request_id, github.event.client_payload.pr_number)
+      || github.event_name == 'repository_dispatch'
       && format('relationship {0}', github.event.client_payload.request_id)
       || github.event_name == 'pull_request'
       && format('PR #{0}', github.event.pull_request.number)
@@ -12,21 +14,22 @@ on:
   issues:
     types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
   pull_request:
-    types: [opened, closed, reopened]
+    types: [opened, edited, synchronize, reopened, enqueued]
   repository_dispatch:
-    types: [issueops_relationship]
-  # Relationship clients use authenticated gh api repos/OWNER/REPO/dispatches
-  # --method POST -f event_type=issueops_relationship -f client_payload='...'.
-  # Generate a unique 8-64 character ASCII request_id and include it in the
-  # payload, for example:
+    types: [issueops_relationship, issueops_merge]
+  # Relationship and merge clients use authenticated default-branch dispatches.
+  # A 204 dispatch response is admission only; dispatch admission is not run success.
+  # Locate the run by its request_id, require
+  # a successful conclusion, and read back the native relationship or merged PR.
+  # Examples:
   # gh api repos/OWNER/REPO/dispatches --method POST -f event_type=issueops_relationship \
   #   -f client_payload='{"request_id":"rel-20260823-001","relation_kind":"sub_issue","operation":"remove","issue_number":492,"related_issue_number":339}'
-  # The 204 dispatch response is admission only.
-  # dispatch admission is not run success: locate the run by its
-  # `relationship <request_id>` name, require a successful conclusion, and
-  # read back the native relation. Reuse the same request_id for an idempotent
-  # retry after cancellation/failure; a canceled or overflowed run applied no
-  # authoritative outcome unless the native read-back proves otherwise.
+  # gh api repos/OWNER/REPO/dispatches --method POST -f event_type=issueops_merge \
+  #   -f client_payload='{"request_id":"merge-20260823-001","pr_number":494,"expected_head":"0123456789012345678901234567890123456789"}'
+  # The merge route is the only repository-code authorization path. Normal gh
+  # pr merge is prohibited by repository policy; the Sol release owner performs
+  # the final audit and submits this dispatch. Owner-level branch-protection
+  # changes remain an external administrative bypass outside repository code.
 
 permissions:
   contents: read
@@ -40,8 +43,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout
+      - name: Checkout trusted default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Validate IssueOps contract
         env:
@@ -57,15 +62,38 @@ jobs:
             --issue-map openspec/issue-map.json \
             --planned-issue "$ISSUE_NUMBER"
 
-  implementation-status-invalidation:
-    name: implementation-status-invalidation
-    if: >
-      github.event_name == 'issues' ||
-      github.event_name == 'pull_request' ||
-      github.event_name == 'repository_dispatch'
+  issue-state-repair:
+    name: issueops-closed-blocker-repair
+    if: github.event_name == 'issues'
     permissions:
       contents: read
       issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Repair closed issue with an open direct blocker
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --enforce-closed-issue-blockers "$ISSUE_NUMBER"
+
+  merge-authorization-invalidation:
+    name: merge-authorization-invalidation
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
       pull-requests: read
       statuses: write
     runs-on: ubuntu-latest
@@ -76,94 +104,105 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
 
-      - name: Invalidate implementation statuses
+      - name: Revoke one-shot merge authorization
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || github.event.client_payload.issue_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 .github/scripts/issue-checklists.py --self-test
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
             --root . \
             --issue-map openspec/issue-map.json \
-            --invalidate-implementation-statuses-for-issue "$ISSUE_NUMBER" \
-            --reconcile-all-release-graphs \
-            --enforce-implementation-admission
+            --revoke-merge-authorization-for-pr "$PR_NUMBER" \
+            --expected-pr-head-sha "$EXPECTED_PR_HEAD_SHA"
 
-  implementation-status-revalidation:
-    name: implementation-status-revalidation
-    needs: implementation-status-invalidation
-    if: >
-      github.event_name == 'issues' ||
-      github.event_name == 'pull_request' ||
-      github.event_name == 'repository_dispatch'
-    # Native concurrency serializes publishers with a bounded pending queue; it is not correctness.
-    # A queued relationship dispatch has not mutated; capacity cancellation is visibly retryable.
-    # Every queued publisher reconciles all declared release-graph PRs from live state.
+  relationship-mutation:
+    name: issueops-relationship-mutation
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'issueops_relationship'
     concurrency:
-      group: issueops-implementation-revalidation-${{ github.repository }}
+      group: issueops-mutations-${{ github.repository }}
       queue: max
     permissions:
       contents: read
       issues: write
       pull-requests: read
-      statuses: write
-      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Checkout trusted default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.repository.default_branch }}
 
-      - name: Prepare IssueOps parser
-        run: |
-          npm ci --ignore-scripts --prefix .github/mermaid-parser
-          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
-          python3 .github/scripts/issue-checklists.py --self-test
-
-      - name: Publish affected implementation statuses
+      - name: Apply and reconcile native relationship
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || github.event.client_payload.issue_number }}
-          ENFORCE_CLOSED_ISSUE: ${{ github.event_name == 'issues' && github.event.issue.number || '' }}
-          REQUEST_ID: ${{ github.event.client_payload.request_id || '' }}
-          RELATION_KIND: ${{ github.event.client_payload.relation_kind || 'none' }}
-          RELATION_OPERATION: ${{ github.event.client_payload.operation || 'none' }}
+          ISSUE_NUMBER: ${{ github.event.client_payload.issue_number || '' }}
           RELATED_ISSUE: ${{ github.event.client_payload.related_issue_number || '' }}
+          RELATION_KIND: ${{ github.event.client_payload.relation_kind || '' }}
+          RELATION_OPERATION: ${{ github.event.client_payload.operation || '' }}
+          REQUEST_ID: ${{ github.event.client_payload.request_id || '' }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" && ! "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$ ]]; then
+          if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$ ]]; then
             echo "repository_dispatch requires a valid 8-64 character request_id" >&2
             exit 1
           fi
-          if [[ "$GITHUB_EVENT_NAME" == "repository_dispatch" ]]; then
-            python3 .github/scripts/issue-checklists.py \
-              --repo "$GITHUB_REPOSITORY" \
-              --root . \
-              --issue-map openspec/issue-map.json \
-              --mutate-native-relationship \
-              --native-relationship-kind "$RELATION_KIND" \
-              --native-relationship-operation "$RELATION_OPERATION" \
-              --native-relationship-issue "$ISSUE_NUMBER" \
-              --native-related-issue "$RELATED_ISSUE" \
-              --request-id "$REQUEST_ID" \
-              --enforce-implementation-admission \
-              --run-id "$GITHUB_RUN_ID"
-            exit 0
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --mutate-native-relationship \
+            --native-relationship-kind "$RELATION_KIND" \
+            --native-relationship-operation "$RELATION_OPERATION" \
+            --native-relationship-issue "$ISSUE_NUMBER" \
+            --native-related-issue "$RELATED_ISSUE" \
+            --request-id "$REQUEST_ID"
+
+  merge-authorization:
+    name: issueops-merge-authorization
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'issueops_merge'
+    concurrency:
+      group: issueops-mutations-${{ github.repository }}
+      queue: max
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: write
+      checks: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Authorize and read back merge
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ID: ${{ github.event.client_payload.request_id || '' }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number || '' }}
+          EXPECTED_HEAD: ${{ github.event.client_payload.expected_head || '' }}
+          DISPATCH_ACTOR: ${{ github.actor }}
+          EVENT_SENDER: ${{ github.event.sender.login || '' }}
+        run: |
+          if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$ ]]; then
+            echo "repository_dispatch requires a valid 8-64 character request_id" >&2
+            exit 1
           fi
-          status_args=(
-            --repo "$GITHUB_REPOSITORY"
-            --root .
-            --issue-map openspec/issue-map.json
-            --publish-implementation-statuses-for-issue "$ISSUE_NUMBER"
-            --reconcile-all-release-graphs
-            --enforce-implementation-admission
-            --run-id "$GITHUB_RUN_ID"
-          )
-          if [[ -n "$ENFORCE_CLOSED_ISSUE" ]]; then
-            status_args+=(--enforce-closed-issue-blockers "$ENFORCE_CLOSED_ISSUE")
-          fi
-          python3 .github/scripts/issue-checklists.py "${status_args[@]}"
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --authorize-merge \
+            --merge-pr-number "$PR_NUMBER" \
+            --merge-expected-head "$EXPECTED_HEAD" \
+            --request-id "$REQUEST_ID" \
+            --dispatch-actor "$DISPATCH_ACTOR" \
+            --event-sender "$EVENT_SENDER"

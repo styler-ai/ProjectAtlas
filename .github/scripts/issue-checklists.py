@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 UNORDERED_LIST_MARKER_RE = r"[-*+]"
@@ -137,70 +134,21 @@ class ReleaseGraph:
     blocked_by: dict[int, tuple[int, ...]]
 
 
-@dataclass(frozen=True)
-class IssueOpsSnapshot:
-    """One bounded live snapshot shared by all affected PR evaluations."""
-
-    pull_requests: tuple[dict[str, object], ...]
-    issue_payloads: dict[int, dict[str, object]]
-    graph_failures: dict[str, tuple[str, ...]]
-    selection_failures: tuple[str, ...]
-    overflow_implementation_prs: tuple[dict[str, object], ...] = ()
-    evicted_implementation_prs: tuple[dict[str, object], ...] = ()
-    admission_ready: bool = True
-
-
-@dataclass(frozen=True)
-class ImplementationStatusCandidate:
-    """One validated PR head prepared for a two-phase status refresh."""
-
-    pull_request: dict[str, object]
-    number: int
-    expected_sha: str
-
-
-@dataclass(frozen=True)
-class ImplementationAdmission:
-    """One deterministic bounded set of active implementation PRs."""
-
-    admitted: tuple[dict[str, object], ...]
-    overflow: tuple[dict[str, object], ...]
-    evicted: tuple[dict[str, object], ...]
-    failures: tuple[str, ...]
-    ready: bool
-
-
-class CandidateHeadChanged(SystemExit):
-    """One selected PR changed heads after the immutable snapshot."""
-
-    def __init__(self, number: int, expected_sha: str, live_sha: str) -> None:
-        self.live_sha = live_sha
-        super().__init__(
-            f"PR #{number} head changed before status publication: "
-            f"expected {expected_sha}, found {live_sha}"
-        )
-
-
-MAX_OPEN_PULL_REQUESTS = 1000
-MAX_ACTIVE_IMPLEMENTATION_PRS = 16
 NATIVE_RELATION_KINDS = {"blocked_by", "sub_issue"}
 NATIVE_RELATION_OPERATIONS = {"add", "remove"}
-STATUS_WORKERS = 8
 ISSUEOPS_WORKFLOW_PATH = ".github/workflows/issueops.yml"
-ISSUEOPS_EVENTS = {"issues", "repository_dispatch"}
+IMPLEMENTATION_STATUS_CONTEXT = "issueops-implementation"
+MERGE_AUTHORIZATION_STATUS_CONTEXT = "issueops-merge-authorized"
+DISPATCH_RELATIONSHIP_EVENT = "issueops_relationship"
+DISPATCH_MERGE_EVENT = "issueops_merge"
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$")
-ISSUEOPS_ADMISSION_LABEL = "issueops-admitted"
-MAX_ADMISSION_LABEL_MUTATIONS = MAX_ACTIVE_IMPLEMENTATION_PRS
-MAX_ADMISSION_REPAIR_STATUS_WRITES = 1
-MAX_GRAPH_REQUESTS_PER_EVENT = 256
-MAX_STATUS_WRITES_PER_EVENT = (
-    (MAX_ACTIVE_IMPLEMENTATION_PRS * 3) + MAX_ADMISSION_REPAIR_STATUS_WRITES
-)
-MAX_GENERATION_READS_PER_EVENT = (
-    MAX_ACTIVE_IMPLEMENTATION_PRS + STATUS_WORKERS - 1
-) // STATUS_WORKERS
-MAX_CONTENT_WRITES_PER_MINUTE = 80
-MAX_GITHUB_REQUESTS_PER_HOUR = 1000
+MAX_COLLECTION_PAGES = 4
+MAX_MILESTONES = 256
+MAX_MILESTONE_ISSUES = 256
+MAX_NATIVE_RELATIONS = 256
+MAX_PULL_REQUEST_REFERENCES = 32
+MAX_CHECKS = 256
+MAX_REVIEWS = 100
 
 
 def run(args: list[str]) -> str:
@@ -229,50 +177,7 @@ def gh_api_json(args: list[str]) -> object:
     return json.loads(run(["gh", "api", *args]))
 
 
-def newer_issueops_run_exists(repo: str, current_run_id: int) -> bool:
-    """Reject success when a newer trusted IssueOps event generation exists."""
-
-    current_run_id = positive_issue(current_run_id, "IssueOps workflow run id")
-    owner, name = repo_parts(repo)
-    payload = gh_api_json(
-        [
-            f"repos/{owner}/{name}/actions/workflows/{Path(ISSUEOPS_WORKFLOW_PATH).name}/runs",
-            "--method",
-            "GET",
-            "-H",
-            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-            "-F",
-            "per_page=100",
-        ]
-    )
-    if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
-        raise SystemExit("GitHub IssueOps workflow-runs response was malformed")
-    current_seen = False
-    for item in payload["workflow_runs"]:
-        if not isinstance(item, dict):
-            raise SystemExit("GitHub IssueOps workflow-runs item was malformed")
-        if item.get("path") != ISSUEOPS_WORKFLOW_PATH:
-            raise SystemExit("GitHub IssueOps workflow-runs response had an unexpected path")
-        run_id = positive_issue(item.get("id"), "IssueOps workflow run id")
-        event = item.get("event")
-        if event not in ISSUEOPS_EVENTS:
-            continue
-        if run_id == current_run_id:
-            current_seen = True
-        if run_id > current_run_id:
-            return True
-    if not current_seen:
-        raise SystemExit("current IssueOps workflow run was missing from workflow-runs response")
-    return False
-
-
-def clean(text: str) -> str:
-    return " ".join((text or "").replace("\r", "").split())
-
-
 def validate_request_id(value: object) -> str:
-    """Validate an operator correlation token without treating it as authority."""
-
     if not isinstance(value, str) or REQUEST_ID_RE.fullmatch(value) is None:
         raise SystemExit(
             "repository_dispatch request_id must be 8-64 ASCII letters, digits, "
@@ -281,51 +186,64 @@ def validate_request_id(value: object) -> str:
     return value
 
 
+def validate_merge_request(
+    pull_request_number: object, expected_head: object
+) -> tuple[int, str]:
+    try:
+        number = positive_issue(int(pull_request_number), "merge pull request number")
+    except (TypeError, ValueError):
+        raise SystemExit("merge authorization requires a positive pull request number")
+    if not isinstance(expected_head, str) or re.fullmatch(
+        r"[0-9a-fA-F]{40}", expected_head
+    ) is None:
+        raise SystemExit("merge authorization requires an exact expected head SHA")
+    return number, expected_head
+
+
+def dispatch_outcome(event: str, request_id: str, outcome: str) -> str:
+    request_id = validate_request_id(request_id)
+    if outcome not in {"applied", "already-satisfied", "failed"}:
+        raise SystemExit(f"unknown {event} dispatch outcome {outcome!r}")
+    return json.dumps(
+        {"event": event, "outcome": outcome, "request_id": request_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def relationship_outcome(request_id: str, outcome: str) -> str:
+    return dispatch_outcome(DISPATCH_RELATIONSHIP_EVENT, request_id, outcome)
+
+
+def merge_outcome(request_id: str, outcome: str) -> str:
+    return dispatch_outcome(DISPATCH_MERGE_EVENT, request_id, outcome)
+
+
 def validate_native_relationship_request(
     relation_kind: object,
     operation: object,
     issue: object,
     related_issue: object,
 ) -> tuple[int, int]:
-    """Validate all relationship fields before any read, label, or write side effect."""
+    if relation_kind not in NATIVE_RELATION_KINDS:
+        raise SystemExit(f"native relation kind is invalid: {relation_kind!r}")
+    if operation not in NATIVE_RELATION_OPERATIONS:
+        raise SystemExit(f"native relation operation is invalid: {operation!r}")
 
-    if not isinstance(relation_kind, str) or relation_kind not in NATIVE_RELATION_KINDS:
-        raise SystemExit(
-            f"native relation kind must be one of {sorted(NATIVE_RELATION_KINDS)}, "
-            f"got {relation_kind!r}"
-        )
-    if not isinstance(operation, str) or operation not in NATIVE_RELATION_OPERATIONS:
-        raise SystemExit(
-            f"native relation operation must be one of {sorted(NATIVE_RELATION_OPERATIONS)}, "
-            f"got {operation!r}"
-        )
-    if issue is None or related_issue is None:
-        raise SystemExit(
-            "native relationship mutation requires kind, operation, issue, and related issue"
-        )
-    def relationship_issue_number(value: object, label: str) -> int:
+    def parse_number(value: object, label: str) -> int:
         if isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value):
             value = int(value)
         return positive_issue(value, label)
 
-    issue_number = relationship_issue_number(issue, "issue number")
-    related_number = relationship_issue_number(related_issue, "related issue number")
+    issue_number = parse_number(issue, "issue number")
+    related_number = parse_number(related_issue, "related issue number")
     if issue_number == related_number:
         raise SystemExit("native relationship cannot relate an issue to itself")
     return issue_number, related_number
 
 
-def relationship_outcome(request_id: str, outcome: str) -> str:
-    """Encode one parseable relationship-dispatch lifecycle outcome."""
-
-    request_id = validate_request_id(request_id)
-    if outcome not in {"applied", "already-satisfied", "failed"}:
-        raise SystemExit(f"unknown relationship dispatch outcome {outcome!r}")
-    return json.dumps(
-        {"event": "issueops_relationship", "outcome": outcome, "request_id": request_id},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+def clean(text: str) -> str:
+    return " ".join((text or "").replace("\r", "").split())
 
 
 def visible_markdown(text: str) -> str:
@@ -1331,7 +1249,6 @@ def check_openspec_tasks(
     root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
     planned_issue: int | None = None,
-    issue_payloads: dict[int, dict[str, object]] | None = None,
 ) -> list[str]:
     failures: list[str] = []
     for change, owners in sorted(issue_map.items()):
@@ -1343,11 +1260,7 @@ def check_openspec_tasks(
         for owner, expected in owner_slices(path, tasks, owners):
             if planned_issue is not None and owner.issue != planned_issue:
                 continue
-            payload = (
-                issue_payloads[owner.issue]
-                if issue_payloads is not None and owner.issue in issue_payloads
-                else issue_payload(repo, owner.issue)
-            )
+            payload = issue_payload(repo, owner.issue)
             remote = issue_checklist_tasks(payload)
             print(
                 f"#{owner.issue} {change}: local {len(expected)} / "
@@ -1375,23 +1288,56 @@ def repo_parts(repo: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def flatten_paginated_response(payload: object) -> list[dict[str, object]]:
-    if not isinstance(payload, list):
-        raise SystemExit("expected GitHub API pagination response to be a JSON list")
-    flattened = [item for page in payload for item in page] if all(
-        isinstance(page, list) for page in payload
-    ) else payload
-    if not all(isinstance(item, dict) for item in flattened):
-        raise SystemExit("expected GitHub API pagination items to be objects")
-    return flattened
+def bounded_api_collection(
+    args: list[str], cap: int, label: str
+) -> list[dict[str, object]]:
+    """Read a finite collection page-by-page and fail closed at cap+1."""
+
+    page_size = min(100, cap + 1)
+    collected: list[dict[str, object]] = []
+    for page in range(1, MAX_COLLECTION_PAGES + 1):
+        payload = gh_api_json(
+            [*args, "-F", f"per_page={page_size}", "-F", f"page={page}"]
+        )
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) for item in payload
+        ):
+            raise SystemExit(f"GitHub {label} page {page} was not an object list")
+        collected.extend(payload)
+        if len(collected) > cap:
+            raise SystemExit(f"GitHub {label} exceeded the bounded {cap}-item limit")
+        if len(payload) < page_size:
+            return collected
+    raise SystemExit(
+        f"GitHub {label} exceeded the bounded {MAX_COLLECTION_PAGES}-page limit"
+    )
+
+
+def bounded_api_values(args: list[str], cap: int, label: str) -> list[object]:
+    """Read a bounded collection whose API items are scalar values."""
+
+    page_size = min(100, cap + 1)
+    collected: list[object] = []
+    for page in range(1, MAX_COLLECTION_PAGES + 1):
+        payload = gh_api_json(
+            [*args, "-F", f"per_page={page_size}", "-F", f"page={page}"]
+        )
+        if not isinstance(payload, list):
+            raise SystemExit(f"GitHub {label} page {page} was malformed")
+        collected.extend(payload)
+        if len(collected) > cap:
+            raise SystemExit(f"GitHub {label} exceeded the bounded {cap}-item limit")
+        if len(payload) < page_size:
+            return collected
+    raise SystemExit(
+        f"GitHub {label} exceeded the bounded {MAX_COLLECTION_PAGES}-page limit"
+    )
 
 
 def milestone_number(repo: str, milestone: str) -> int | None:
     owner, name = repo_parts(repo)
-    payload = gh_api_json(
+    milestones = bounded_api_collection(
         [
-            "--paginate",
-            "--slurp",
             f"repos/{owner}/{name}/milestones",
             "--method",
             "GET",
@@ -1399,13 +1345,13 @@ def milestone_number(repo: str, milestone: str) -> int | None:
             f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
             "-F",
             "state=all",
-            "-F",
-            "per_page=100",
-        ]
+        ],
+        MAX_MILESTONES,
+        "milestones",
     )
     matches = [
         item
-        for item in flatten_paginated_response(payload)
+        for item in milestones
         if item.get("title") == milestone
     ]
     return positive_issue(matches[0].get("number"), "milestone number") if matches else None
@@ -1416,10 +1362,8 @@ def milestone_issues(repo: str, milestone: str) -> list[dict[str, object]]:
     if number is None:
         return []
     owner, name = repo_parts(repo)
-    payload = gh_api_json(
+    issues = bounded_api_collection(
         [
-            "--paginate",
-            "--slurp",
             f"repos/{owner}/{name}/issues",
             "--method",
             "GET",
@@ -1429,15 +1373,14 @@ def milestone_issues(repo: str, milestone: str) -> list[dict[str, object]]:
             "state=all",
             "-F",
             f"milestone={number}",
-            "-F",
-            "per_page=100",
-        ]
+        ],
+        MAX_MILESTONE_ISSUES,
+        f"milestone {milestone} issues",
     )
-    return [item for item in flatten_paginated_response(payload) if "pull_request" not in item]
+    return [item for item in issues if "pull_request" not in item]
 
 
 GITHUB_API_VERSION = "2026-03-10"
-IMPLEMENTATION_STATUS_CONTEXT = "issueops-implementation"
 
 
 def native_relation_issue_number(
@@ -1472,21 +1415,6 @@ def native_relation_issue_number(
             if not isinstance(full_name, str):
                 raise SystemExit(f"GitHub returned {label} with malformed repository identity")
             identities.append(full_name.casefold() == expected_full_name)
-        repository_name = repository.get("name")
-        repository_owner = repository.get("owner")
-        if repository_name is not None or repository_owner is not None:
-            if not isinstance(repository_name, str) or not isinstance(repository_owner, dict):
-                raise SystemExit(
-                    f"GitHub returned {label} with malformed repository identity"
-                )
-            owner_login = repository_owner.get("login")
-            if not isinstance(owner_login, str):
-                raise SystemExit(
-                    f"GitHub returned {label} with malformed repository identity"
-                )
-            identities.append(
-                f"{owner_login}/{repository_name}".casefold() == expected_full_name
-            )
     if not identities or not all(identities):
         raise SystemExit(
             f"GitHub returned {label} without the exact {repo} repository identity"
@@ -1498,20 +1426,17 @@ def native_blocked_by(repo: str, issue: int) -> set[int]:
     """Read GitHub's native blocked-by edges for one issue."""
 
     owner, name = repo_parts(repo)
-    payload = gh_api_json(
+    dependencies = bounded_api_collection(
         [
-            "--paginate",
-            "--slurp",
             f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by",
             "--method",
             "GET",
             "-H",
             f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-            "-F",
-            "per_page=100",
-        ]
+        ],
+        MAX_NATIVE_RELATIONS,
+        f"blocked-by relations for #{issue}",
     )
-    dependencies = flatten_paginated_response(payload)
     result: set[int] = set()
     for dependency in dependencies:
         number = native_relation_issue_number(repo, dependency, "blocked-by issue number")
@@ -1525,20 +1450,17 @@ def native_sub_issues(repo: str, issue: int) -> set[int]:
     """Read GitHub's native sub-issue children for one issue."""
 
     owner, name = repo_parts(repo)
-    payload = gh_api_json(
+    children = bounded_api_collection(
         [
-            "--paginate",
-            "--slurp",
             f"repos/{owner}/{name}/issues/{issue}/sub_issues",
             "--method",
             "GET",
             "-H",
             f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-            "-F",
-            "per_page=100",
-        ]
+        ],
+        MAX_NATIVE_RELATIONS,
+        f"sub-issues for #{issue}",
     )
-    children = flatten_paginated_response(payload)
     result: set[int] = set()
     for child in children:
         number = native_relation_issue_number(repo, child, "sub-issue number")
@@ -1593,13 +1515,10 @@ def native_parent_issue(repo: str, issue: int) -> int | None:
 
 
 def native_issue_id(repo: str, issue: int, label: str) -> int:
-    """Read one repository-local issue id for a native relation mutation."""
-
-    issue = positive_issue(issue, "issue number")
     owner, name = repo_parts(repo)
     payload = gh_api_json(
         [
-            f"repos/{owner}/{name}/issues/{issue}",
+            f"repos/{owner}/{name}/issues/{positive_issue(issue, 'issue number')}",
             "--method",
             "GET",
             "-H",
@@ -1611,7 +1530,7 @@ def native_issue_id(repo: str, issue: int, label: str) -> int:
     returned_number = native_relation_issue_number(repo, payload, label)
     if returned_number != issue:
         raise SystemExit(
-            f"GitHub returned {label} #{returned_number}, expected repository-local issue #{issue}"
+            f"GitHub returned {label} #{returned_number}, expected #{issue}"
         )
     return positive_issue(payload.get("id"), f"{label} id")
 
@@ -1623,8 +1542,6 @@ def mutate_native_relationship(
     relation_kind: str,
     operation: str,
 ) -> bool:
-    """Apply one idempotent native edge and require an exact read-back."""
-
     issue, related_issue = validate_native_relationship_request(
         relation_kind, operation, issue, related_issue
     )
@@ -1637,14 +1554,10 @@ def mutate_native_relationship(
         related_id = native_issue_id(repo, related_issue, "related issue")
         owner, name = repo_parts(repo)
         if relation_kind == "blocked_by":
-            if desired:
-                path = f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by"
-                field = "issue_id"
-            else:
-                path = (
-                    f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by/{related_id}"
-                )
-                field = None
+            path = f"repos/{owner}/{name}/issues/{issue}/dependencies/blocked_by"
+            if not desired:
+                path += f"/{related_id}"
+            field = "issue_id" if desired else None
         else:
             path = (
                 f"repos/{owner}/{name}/issues/{issue}/sub_issues"
@@ -1658,13 +1571,12 @@ def mutate_native_relationship(
                     raise SystemExit(
                         f"related issue #{related_issue} already has native parent #{parent}"
                     )
-        method = "POST" if desired else "DELETE"
         request = [
             "gh",
             "api",
             path,
             "--method",
-            method,
+            "POST" if desired else "DELETE",
             "-H",
             f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
         ]
@@ -1674,8 +1586,7 @@ def mutate_native_relationship(
     actual = read_relation(repo, issue)
     if (related_issue in actual) != desired:
         raise SystemExit(
-            f"native {relation_kind} {operation} read-back did not produce the requested edge "
-            f"#{issue} -> #{related_issue}"
+            f"native {relation_kind} {operation} read-back did not produce the requested edge"
         )
     return changed
 
@@ -1686,1148 +1597,19 @@ def mutate_native_relationship_and_revalidate(
     related_issue: int,
     relation_kind: str,
     operation: str,
-    root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
-    run_id: int | None = None,
-    request_id: str | None = None,
+    request_id: str,
 ) -> None:
-    """Mutate one authorized edge, then reconcile every declared release graph."""
+    """Mutate one edge, then validate the complete declared release graph."""
 
-    issue, related_issue = validate_native_relationship_request(
-        relation_kind, operation, issue, related_issue
+    changed = mutate_native_relationship(
+        repo, issue, related_issue, relation_kind, operation
     )
-    snapshot, affected = build_issueops_snapshot(
-        repo,
-        issue,
-        issue_map,
-        release_graphs,
-        reconcile_all_release_graphs=True,
-        enforce_admission=True,
-    )
-    candidates, candidate_failures = prepare_implementation_status_candidates(affected)
-    admission_failures = publish_admission_failure_statuses(
-        repo, snapshot.evicted_implementation_prs
-    )
-    if snapshot.selection_failures or candidate_failures or admission_failures:
-        failures = list(snapshot.selection_failures) + candidate_failures + admission_failures
-        raise SystemExit(
-            "relationship dispatch preflight failed:\n" + "\n".join(failures)
-        )
-    pending_failures = publish_pending_statuses(repo, candidates)
-    if pending_failures:
-        raise SystemExit(
-            "relationship dispatch pending phase failed:\n"
-            + "\n".join(pending_failures)
-        )
-    changed = mutate_native_relationship(repo, issue, related_issue, relation_kind, operation)
-    post_mutation_snapshot = refresh_snapshot_graph_failures(
-        repo, issue_map, release_graphs, snapshot
-    )
-    failures = finalize_implementation_statuses(
-        repo,
-        root,
-        issue_map,
-        release_graphs,
-        post_mutation_snapshot,
-        candidates,
-        run_id=run_id,
-    )
+    failures = release_graph_failures(repo, release_graphs, issue_map)
     if failures:
-        raise SystemExit(
-            "affected implementation status publication failed:\n"
-            + "\n".join(failures)
-        )
-    if request_id is not None:
-        print(
-            relationship_outcome(
-                request_id, "applied" if changed else "already-satisfied"
-            )
-        )
-
-
-def open_pull_requests_snapshot(repo: str) -> tuple[dict[str, object], ...]:
-    """Read one bounded open-PR snapshot and reject truncation at the cap."""
-
-    pull_requests = gh_json(
-        [
-            "pr",
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "open",
-            "--limit",
-            str(MAX_OPEN_PULL_REQUESTS + 1),
-            "--json",
-            "number,headRefOid,closingIssuesReferences,author,labels",
-        ]
-    )
-    if not isinstance(pull_requests, list):
-        raise SystemExit("GitHub open pull-request response must be an array")
-    if len(pull_requests) > MAX_OPEN_PULL_REQUESTS:
-        raise SystemExit(
-            "open pull-request snapshot exceeded the bounded limit; "
-            "refusing to publish incomplete affected statuses"
-        )
-    if not all(isinstance(item, dict) for item in pull_requests):
-        raise SystemExit("GitHub open pull-request response contained a non-object")
-    return tuple(pull_requests)
-
-
-def graph_request_budget(release_graphs: dict[str, ReleaseGraph]) -> int:
-    """Estimate the bounded graph/issue reads used by one global refresh."""
-
-    return sum(4 * len(graph.blocked_by) + 8 for graph in release_graphs.values())
-
-
-def issueops_request_budget(release_graphs: dict[str, ReleaseGraph]) -> dict[str, int]:
-    """Model one worst-case admitted refresh against GitHub request ceilings."""
-
-    label_writes = MAX_ADMISSION_LABEL_MUTATIONS + 1
-    status_writes = MAX_STATUS_WRITES_PER_EVENT
-    return {
-        "discovery_reads": 1,
-        "head_reads": (MAX_ACTIVE_IMPLEMENTATION_PRS * 2)
-        + MAX_ADMISSION_REPAIR_STATUS_WRITES,
-        "generation_reads": MAX_GENERATION_READS_PER_EVENT,
-        "graph_reads": min(graph_request_budget(release_graphs), MAX_GRAPH_REQUESTS_PER_EVENT),
-        "status_writes": status_writes,
-        "label_writes": label_writes,
-        "content_writes": status_writes + label_writes,
-        "request_total": (
-            1
-            + (MAX_ACTIVE_IMPLEMENTATION_PRS * 2)
-            + MAX_ADMISSION_REPAIR_STATUS_WRITES
-            + MAX_GENERATION_READS_PER_EVENT
-            + min(graph_request_budget(release_graphs), MAX_GRAPH_REQUESTS_PER_EVENT)
-            + status_writes
-            + label_writes
-        ),
-    }
-
-
-def implementation_prs_for_release_graphs(
-    repo: str,
-    pull_requests: tuple[dict[str, object], ...],
-    graphs: dict[str, ReleaseGraph],
-) -> tuple[list[dict[str, object]], list[str]]:
-    """Classify every open PR that closes an issue in a declared release graph."""
-
-    graph_issues = sorted(
-        {issue for graph in graphs.values() for issue in graph.blocked_by}
-    )
-    if not graph_issues:
-        return [], []
-    return affected_implementation_prs(
-        repo,
-        graph_issues[0],
-        pull_requests,
-        graphs,
-        tuple(graph_issues[1:]),
-    )
-
-
-def pull_request_has_admission_label(pull_request: dict[str, object]) -> bool:
-    """Return whether a PR carries the default-branch-owned admission marker."""
-
-    labels = pull_request.get("labels")
-    if not isinstance(labels, list):
-        return False
-    return any(
-        isinstance(label, dict) and label.get("name") == ISSUEOPS_ADMISSION_LABEL
-        for label in labels
-    )
-
-
-def ensure_admission_label(repo: str) -> None:
-    """Create the repository-owned admission label once, with pinned API calls."""
-
-    owner, name = repo_parts(repo)
-    label_path = (
-        f"repos/{owner}/{name}/labels/{quote(ISSUEOPS_ADMISSION_LABEL, safe='')}"
-    )
-    try:
-        label = gh_api_json(
-            [
-                label_path,
-                "--method",
-                "GET",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-            ]
-        )
-    except SystemExit as error:
-        if "404" not in str(error):
-            raise
-        label = gh_api_json(
-            [
-                f"repos/{owner}/{name}/labels",
-                "--method",
-                "POST",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                "-f",
-                f"name={ISSUEOPS_ADMISSION_LABEL}",
-                "-f",
-                "color=5319E7",
-                "-f",
-                "description=IssueOps status admission slot",
-            ]
-        )
-    if not isinstance(label, dict):
-        raise SystemExit("IssueOps admission label response must be an object")
-
-
-def reconcile_admission_labels(
-    repo: str, implementation_prs: list[dict[str, object]]
-) -> ImplementationAdmission:
-    """Maintain the bounded native admission marker from trusted default-branch code."""
-
-    ordered = sorted(
-        implementation_prs,
-        key=lambda pull_request: positive_issue(
-            pull_request.get("number"), "implementation pull request number"
-        ),
-    )
-    admitted = tuple(ordered[:MAX_ACTIVE_IMPLEMENTATION_PRS])
-    overflow = tuple(ordered[MAX_ACTIVE_IMPLEMENTATION_PRS:])
-    desired = {
-        positive_issue(item.get("number"), "implementation pull request number")
-        for item in admitted
-    }
-    mutations: list[tuple[dict[str, object], bool]] = []
-    evicted: list[dict[str, object]] = []
-    for pull_request in ordered:
-        number = positive_issue(
-            pull_request.get("number"), "implementation pull request number"
-        )
-        has_label = pull_request_has_admission_label(pull_request)
-        should_have_label = number in desired
-        if has_label != should_have_label:
-            mutations.append((pull_request, should_have_label))
-            if has_label and not should_have_label:
-                evicted.append(pull_request)
-    if len(evicted) > MAX_ADMISSION_REPAIR_STATUS_WRITES:
-        return ImplementationAdmission(
-            admitted=admitted,
-            overflow=overflow,
-            evicted=(),
-            failures=(
-                "IssueOps admission label drift would require more than the bounded "
-                f"{MAX_ADMISSION_REPAIR_STATUS_WRITES}-PR status repair"
-            ),
-            ready=False,
-        )
-    if len(mutations) > MAX_ADMISSION_LABEL_MUTATIONS:
-        return ImplementationAdmission(
-            admitted=admitted,
-            overflow=overflow,
-            evicted=tuple(evicted),
-            failures=(
-                "IssueOps admission label drift exceeded the bounded repair budget; "
-                "refusing to certify implementation statuses"
-            ),
-            ready=False,
-        )
-    try:
-        if ordered:
-            ensure_admission_label(repo)
-        owner, name = repo_parts(repo)
-        for pull_request, should_have_label in mutations:
-            number = positive_issue(
-                pull_request.get("number"), "implementation pull request number"
-            )
-            if should_have_label:
-                gh_api_json(
-                    [
-                        f"repos/{owner}/{name}/issues/{number}/labels",
-                        "--method",
-                        "POST",
-                        "-H",
-                        f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                        "-f",
-                        f"labels[]={ISSUEOPS_ADMISSION_LABEL}",
-                    ]
-                )
-            else:
-                gh_api_json(
-                    [
-                        f"repos/{owner}/{name}/issues/{number}/labels/"
-                        f"{quote(ISSUEOPS_ADMISSION_LABEL, safe='')}",
-                        "--method",
-                        "DELETE",
-                        "-H",
-                        f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                    ]
-                )
-    except BaseException as error:
-        detail = str(error).strip() or error.__class__.__name__
-        return ImplementationAdmission(
-            admitted=admitted,
-            overflow=overflow,
-            evicted=tuple(evicted),
-            failures=(f"IssueOps admission label reconciliation failed: {detail}",),
-            ready=False,
-        )
-    return ImplementationAdmission(
-        admitted=admitted,
-        overflow=overflow,
-        evicted=tuple(evicted),
-        failures=(),
-        ready=True,
-    )
-
-
-def implementation_pr_requires_admission(
-    repo: str,
-    pull_request: dict[str, object],
-    release_graphs: dict[str, ReleaseGraph],
-) -> tuple[bool, str | None]:
-    """Check a PR-side gate against the maintained deterministic admission set."""
-
-    references = pull_request.get("closingIssuesReferences")
-    if not isinstance(references, list):
-        return False, "implementation PR has malformed closing references"
-    graph_issue_numbers = {
-        issue for graph in release_graphs.values() for issue in graph.blocked_by
-    }
-    try:
-        reference_numbers = {
-            native_relation_issue_number(repo, reference, "closing issue reference")
-            for reference in references
-        }
-    except BaseException as error:
-        return False, str(error)
-    if not reference_numbers.intersection(graph_issue_numbers):
-        return True, None
-    pull_requests = open_pull_requests_snapshot(repo)
-    implementation_prs, selection_failures = implementation_prs_for_release_graphs(
-        repo, pull_requests, release_graphs
-    )
-    if selection_failures:
-        return False, selection_failures[0]
-    number = positive_issue(pull_request.get("number"), "pull request number")
-    ordered = sorted(
-        implementation_prs,
-        key=lambda item: positive_issue(item.get("number"), "implementation pull request number"),
-    )
-    admitted_numbers = {
-        positive_issue(item.get("number"), "implementation pull request number")
-        for item in ordered[:MAX_ACTIVE_IMPLEMENTATION_PRS]
-    }
-    if number not in admitted_numbers:
-        return (
-            False,
-            f"PR #{number} is outside the {MAX_ACTIVE_IMPLEMENTATION_PRS}-PR "
-            "IssueOps implementation admission ceiling",
-        )
-    matching = next((item for item in pull_requests if item.get("number") == number), None)
-    if not isinstance(matching, dict) or not pull_request_has_admission_label(matching):
-        return False, f"PR #{number} is not marked with the IssueOps admission label"
-    return True, None
-
-
-def affected_implementation_prs(
-    repo: str,
-    issue: int,
-    pull_requests: tuple[dict[str, object], ...],
-    graphs: dict[str, ReleaseGraph],
-    additional_issues: tuple[int, ...] = (),
-) -> tuple[list[dict[str, object]], list[str]]:
-    """Select affected PRs while isolating malformed entries as failures."""
-
-    impacted = {positive_issue(issue, "issue number")}
-    impacted.update(
-        positive_issue(candidate, "additional issue number")
-        for candidate in additional_issues
-    )
-    changed = True
-    while changed:
-        changed = False
-        for graph in graphs.values():
-            for candidate, blockers in graph.blocked_by.items():
-                if candidate not in impacted and impacted.intersection(blockers):
-                    impacted.add(candidate)
-                    changed = True
-    affected: list[dict[str, object]] = []
-    failures: list[str] = []
-    for pull_request in pull_requests:
-        number = pull_request.get("number", "unknown")
-        try:
-            references = pull_request.get("closingIssuesReferences")
-            if not isinstance(references, list):
-                raise SystemExit("malformed closing references")
-            if any(
-                native_relation_issue_number(repo, reference, "closing issue reference")
-                in impacted
-                for reference in references
-            ):
-                affected.append(pull_request)
-        except BaseException as error:
-            failures.append(f"PR #{number}: {error}")
-    return affected, failures
-
-
-def build_issueops_snapshot(
-    repo: str,
-    issue: int,
-    issue_map: dict[str, tuple[Owner, ...]],
-    release_graphs: dict[str, ReleaseGraph],
-    additional_issues: tuple[int, ...] = (),
-    reconcile_all_release_graphs: bool = False,
-    enforce_admission: bool = False,
-) -> tuple[IssueOpsSnapshot, list[dict[str, object]]]:
-    """Build one bounded immutable issue/graph/PR snapshot for a trigger."""
-
-    pull_requests = open_pull_requests_snapshot(repo)
-    selection_issues = additional_issues
-    if reconcile_all_release_graphs:
-        selection_issues = tuple(
-            sorted(
-                {
-                    candidate
-                    for graph in release_graphs.values()
-                    for candidate in graph.blocked_by
-                }
-            )
-        )
-    affected, selection_failures = affected_implementation_prs(
-        repo, issue, pull_requests, release_graphs, selection_issues
-    )
-    admission = ImplementationAdmission(
-        admitted=tuple(affected),
-        overflow=(),
-        evicted=(),
-        failures=(),
-        ready=True,
-    )
-    if enforce_admission:
-        admission = reconcile_admission_labels(repo, affected)
-        affected = list(admission.admitted)
-        selection_failures.extend(admission.failures)
-        if admission.overflow:
-            selection_failures.append(
-                f"{len(admission.overflow)} implementation PR(s) exceed the "
-                f"{MAX_ACTIVE_IMPLEMENTATION_PRS}-PR admission ceiling: "
-                + ", ".join(
-                    f"#{positive_issue(item.get('number'), 'implementation pull request number')}"
-                    for item in admission.overflow
-                )
-            )
-    trigger_issues = (issue, *selection_issues)
-    graph_milestones = {
-        graph.milestone
-        for graph in release_graphs.values()
-        if any(
-            positive_issue(candidate, "trigger issue number") in graph.blocked_by
-            for candidate in trigger_issues
-        )
-    }
-    for pull_request in affected:
-        references = pull_request.get("closingIssuesReferences", [])
-        if isinstance(references, list):
-            for reference in references:
-                try:
-                    reference_number = native_relation_issue_number(
-                        repo, reference, "closing issue reference"
-                    )
-                except BaseException:
-                    continue
-                graph = graph_for_issue(release_graphs, reference_number)
-                if graph is not None:
-                    graph_milestones.add(graph.milestone)
-    relevant_graphs = {
-        milestone: graph
-        for milestone, graph in release_graphs.items()
-        if milestone in graph_milestones
-    }
-    graph_budget = graph_request_budget(relevant_graphs)
-    if graph_budget > MAX_GRAPH_REQUESTS_PER_EVENT:
-        selection_failures.append(
-            f"IssueOps graph request budget {graph_budget} exceeds the bounded "
-            f"limit {MAX_GRAPH_REQUESTS_PER_EVENT}"
-        )
-    issue_numbers = {positive_issue(issue, "issue number")}
-    for graph in relevant_graphs.values():
-        issue_numbers.update(graph.blocked_by)
-    for pull_request in affected:
-        references = pull_request.get("closingIssuesReferences", [])
-        if isinstance(references, list):
-            for reference in references:
-                try:
-                    issue_numbers.add(
-                        native_relation_issue_number(repo, reference, "closing issue reference")
-                    )
-                except BaseException:
-                    pass
-    issue_payloads = {}
-    graph_failures: dict[str, tuple[str, ...]] = {}
-    if graph_budget <= MAX_GRAPH_REQUESTS_PER_EVENT:
-        issue_payloads = {
-            number: issue_payload(repo, number) for number in sorted(issue_numbers)
-        }
-        graph_failures = {
-            milestone: tuple(
-                release_graph_failures(repo, relevant_graphs, issue_map, {milestone})
-            )
-            for milestone in sorted(relevant_graphs)
-        }
-    snapshot = IssueOpsSnapshot(
-        pull_requests=pull_requests,
-        issue_payloads=issue_payloads,
-        graph_failures=graph_failures,
-        selection_failures=tuple(selection_failures),
-        overflow_implementation_prs=admission.overflow,
-        evicted_implementation_prs=admission.evicted,
-        admission_ready=admission.ready and graph_budget <= MAX_GRAPH_REQUESTS_PER_EVENT,
-    )
-    return snapshot, affected
-
-
-def implementation_prs_for_issue(
-    repo: str,
-    issue: int,
-    pull_requests: object,
-    graphs: dict[str, ReleaseGraph] | None = None,
-) -> list[dict[str, object]]:
-    """Select open implementation PRs affected by one changed release issue."""
-
-    issue = positive_issue(issue, "issue number")
-    impacted = {issue}
-    if graphs:
-        changed = True
-        while changed:
-            changed = False
-            for graph in graphs.values():
-                for candidate, blockers in graph.blocked_by.items():
-                    if candidate not in impacted and impacted.intersection(blockers):
-                        impacted.add(candidate)
-                        changed = True
-    if not isinstance(pull_requests, list):
-        raise SystemExit("GitHub open pull-request response must be an array")
-    affected: list[dict[str, object]] = []
-    for pull_request in pull_requests:
-        if not isinstance(pull_request, dict):
-            raise SystemExit("GitHub open pull-request response contained a non-object")
-        references = pull_request.get("closingIssuesReferences")
-        if not isinstance(references, list):
-            raise SystemExit(
-                "GitHub open pull-request response contained malformed closing references"
-            )
-        if any(
-            native_relation_issue_number(repo, reference, "closing issue reference") in impacted
-            for reference in references
-        ):
-            affected.append(pull_request)
-    return affected
-
-
-def commit_status(
-    repo: str, sha: str, state: str, description: str
-) -> None:
-    """Publish one fail-closed GitHub commit status for an exact PR head."""
-
-    if re.fullmatch(r"[0-9a-fA-F]{40,64}", sha) is None:
-        raise SystemExit("GitHub pull request head is not an exact commit SHA")
-    if state not in {"pending", "success", "failure", "error"}:
-        raise SystemExit(f"invalid implementation status state: {state!r}")
-    if not description or len(description) > 140:
-        raise SystemExit("implementation status description must be 1..140 characters")
-    owner, name = repo_parts(repo)
-    payload = gh_api_json(
-        [
-            f"repos/{owner}/{name}/statuses/{sha}",
-            "--method",
-            "POST",
-            "-H",
-            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-            "-f",
-            f"state={state}",
-            "-f",
-            f"context={IMPLEMENTATION_STATUS_CONTEXT}",
-            "-f",
-            f"description={description}",
-        ]
-    )
-    if not isinstance(payload, dict):
-        raise SystemExit("GitHub commit status response must be an object")
-
-
-def implementation_reference_failures(
-    repo: str,
-    reference: object,
-    root: Path,
-    issue_map: dict[str, tuple[Owner, ...]],
-    release_graphs: dict[str, ReleaseGraph],
-    snapshot: IssueOpsSnapshot | None = None,
-) -> list[str]:
-    """Run the default-branch implementation checker for one native reference."""
-
-    number = native_relation_issue_number(repo, reference, "closing issue reference")
-    issue = (
-        snapshot.issue_payloads[number]
-        if snapshot is not None and number in snapshot.issue_payloads
-        else issue_payload(repo, number)
-    )
-    target_graph, failures = target_graph_failures(issue, release_graphs)
-    failures.extend(
-        check_openspec_tasks(
-            repo,
-            root,
-            issue_map,
-            planned_issue=number,
-            issue_payloads=snapshot.issue_payloads if snapshot is not None else None,
-        )
-    )
-    failures.extend(planned_issue_failures(issue, issue_map, root))
-    failures.extend(
-        implementation_issue_failures(
-            repo,
-            issue,
-            release_graphs,
-            issue_payloads=snapshot.issue_payloads if snapshot is not None else None,
-        )
-    )
-    graph_milestones: set[str] = set()
-    if target_graph is not None:
-        graph_milestones.add(target_graph.milestone)
-    else:
-        milestone = issue.get("milestone")
-        if isinstance(milestone, dict) and isinstance(milestone.get("title"), str):
-            graph_milestones.add(milestone["title"])
-    if snapshot is not None:
-        for milestone in sorted(graph_milestones):
-            failures.extend(snapshot.graph_failures.get(milestone, ()))
-    else:
-        failures.extend(
-            release_graph_failures(
-                repo,
-                release_graphs,
-                issue_map,
-                graph_milestones or None,
-            )
-        )
-    return failures
-
-
-def prepare_implementation_status_candidates(
-    pull_requests: list[dict[str, object]],
-) -> tuple[list[ImplementationStatusCandidate], list[str]]:
-    """Validate every selected PR head before publishing any pending status."""
-
-    candidates: list[ImplementationStatusCandidate] = []
-    failures: list[str] = []
-    seen: set[int] = set()
-    for pull_request in pull_requests:
-        number_value = pull_request.get("number", "unknown")
-        try:
-            number = positive_issue(number_value, "pull request number")
-            if number in seen:
-                raise SystemExit(f"duplicate selected pull request #{number}")
-            seen.add(number)
-            expected_sha = pull_request.get("headRefOid")
-            if not isinstance(expected_sha, str) or re.fullmatch(
-                r"[0-9a-fA-F]{40,64}", expected_sha
-            ) is None:
-                raise SystemExit(
-                    f"GitHub pull request #{number} is missing an exact head commit"
-                )
-            candidates.append(
-                ImplementationStatusCandidate(pull_request, number, expected_sha)
-            )
-        except SystemExit as error:
-            failures.append(f"PR #{number_value}: {error}")
-    return candidates, failures
-
-
-def verify_live_candidate_head(
-    repo: str, candidate: ImplementationStatusCandidate
-) -> None:
-    """Bind one candidate to its live head before a status publication."""
-
-    live_pull_request = gh_json(
-        [
-            "pr",
-            "view",
-            str(candidate.number),
-            "-R",
-            repo,
-            "--json",
-            "number,headRefOid",
-        ]
-    )
-    if not isinstance(live_pull_request, dict):
-        raise SystemExit(
-            f"GitHub pull request #{candidate.number} head read-back was not an object"
-        )
-    live_number = positive_issue(
-        live_pull_request.get("number"), "live pull request number"
-    )
-    live_sha = live_pull_request.get("headRefOid")
-    if live_number == candidate.number and isinstance(live_sha, str):
-        if live_sha != candidate.expected_sha:
-            raise CandidateHeadChanged(candidate.number, candidate.expected_sha, live_sha)
-    elif live_number != candidate.number or live_sha != candidate.expected_sha:
-        raise SystemExit(
-            f"PR #{candidate.number} head changed before status publication: "
-            f"expected {candidate.expected_sha}, found {live_sha or 'missing'}"
-        )
-
-
-def run_bounded_status_work(
-    candidates: list[ImplementationStatusCandidate],
-    worker: Callable[[ImplementationStatusCandidate], None],
-    batch_precondition: Callable[[list[ImplementationStatusCandidate]], str | None]
-    | None = None,
-) -> list[str]:
-    """Drain bounded status work while retaining every candidate failure."""
-
-    failures: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=STATUS_WORKERS) as executor:
-        for offset in range(0, len(candidates), STATUS_WORKERS):
-            batch = candidates[offset : offset + STATUS_WORKERS]
-            if batch_precondition is not None:
-                try:
-                    precondition_failure = batch_precondition(batch)
-                except BaseException as error:
-                    detail = str(error).strip() or error.__class__.__name__
-                    failures.append(
-                        f"PR #{batch[0].number}: status batch precondition failed: {detail}"
-                    )
-                    break
-                if precondition_failure is not None:
-                    failures.append(precondition_failure)
-                    break
-            futures = [executor.submit(worker, candidate) for candidate in batch]
-            for candidate, future in zip(batch, futures):
-                try:
-                    future.result()
-                except BaseException as error:
-                    detail = str(error).strip() or error.__class__.__name__
-                    failures.append(f"PR #{candidate.number}: {detail}")
-    return failures
-
-
-def publish_pending_statuses(
-    repo: str, candidates: list[ImplementationStatusCandidate]
-) -> list[str]:
-    """Establish pending status for every candidate before expensive evaluation."""
-
-    validated: set[int] = set()
-    raced_heads: dict[int, str] = {}
-    validation_lock = threading.Lock()
-
-    def validate(candidate: ImplementationStatusCandidate) -> None:
-        try:
-            verify_live_candidate_head(repo, candidate)
-        except CandidateHeadChanged as error:
-            with validation_lock:
-                raced_heads[candidate.number] = error.live_sha
-            raise
-        with validation_lock:
-            validated.add(candidate.number)
-
-    head_failures = run_bounded_status_work(
-        candidates, validate
-    )
-    stable_candidates = [candidate for candidate in candidates if candidate.number in validated]
-    raced_candidates = [candidate for candidate in candidates if candidate.number in raced_heads]
-    candidates[:] = stable_candidates
-    raced_failures = run_bounded_status_work(
-        raced_candidates,
-        lambda candidate: commit_status(
-            repo,
-            raced_heads[candidate.number],
-            "failure",
-            "PR head changed before IssueOps revalidation completed",
-        ),
-    )
-    pending_candidates: set[int] = set()
-    pending_lock = threading.Lock()
-
-    def publish_pending(candidate: ImplementationStatusCandidate) -> None:
-        commit_status(
-            repo,
-            candidate.expected_sha,
-            "pending",
-            "Revalidating native implementation references",
-        )
-        with pending_lock:
-            pending_candidates.add(candidate.number)
-
-    pending_failures = run_bounded_status_work(stable_candidates, publish_pending)
-    candidates[:] = [
-        candidate for candidate in stable_candidates if candidate.number in pending_candidates
-    ]
-    return head_failures + raced_failures + pending_failures
-
-
-def publish_admission_failure_statuses(
-    repo: str, pull_requests: tuple[dict[str, object], ...]
-) -> list[str]:
-    """Fail PRs evicted from an admission slot without claiming a stale head."""
-
-    def fail_one(pull_request: dict[str, object]) -> None:
-        number = positive_issue(pull_request.get("number"), "implementation pull request number")
-        live = gh_json(
-            [
-                "pr",
-                "view",
-                str(number),
-                "-R",
-                repo,
-                "--json",
-                "number,headRefOid",
-            ]
-        )
-        if not isinstance(live, dict):
-            raise SystemExit(f"PR #{number} head read-back was not an object")
-        live_number = positive_issue(live.get("number"), "live pull request number")
-        live_sha = live.get("headRefOid")
-        if live_number != number or not isinstance(live_sha, str):
-            raise SystemExit(f"PR #{number} admission failure head read-back was invalid")
-        commit_status(
-            repo,
-            live_sha,
-            "failure",
-            "IssueOps implementation admission slot is no longer available",
-        )
-
-    return run_bounded_status_work(
-        [
-            ImplementationStatusCandidate(
-                pull_request,
-                positive_issue(pull_request.get("number"), "implementation pull request number"),
-                pull_request.get("headRefOid", ""),
-            )
-            for pull_request in pull_requests
-        ],
-        lambda candidate: fail_one(candidate.pull_request),
-    )
-
-
-def finalize_implementation_statuses(
-    repo: str,
-    root: Path,
-    issue_map: dict[str, tuple[Owner, ...]],
-    release_graphs: dict[str, ReleaseGraph],
-    snapshot: IssueOpsSnapshot,
-    candidates: list[ImplementationStatusCandidate],
-    run_id: int | None = None,
-) -> list[str]:
-    """Evaluate all candidates after mutation, retaining pending/failure on errors."""
-
-    def generation_precondition(
-        batch: list[ImplementationStatusCandidate],
-    ) -> str | None:
-        if run_id is None:
-            return None
-        try:
-            if newer_issueops_run_exists(repo, run_id):
-                return (
-                    f"IssueOps workflow run {run_id} was superseded before final status "
-                    f"batch starting at PR #{batch[0].number}"
-                )
-        except BaseException as error:
-            detail = str(error).strip() or error.__class__.__name__
-            return (
-                f"PR #{batch[0].number}: IssueOps generation check failed before final "
-                f"status batch: {detail}"
-            )
-        return None
-
-    def finalize(candidate: ImplementationStatusCandidate) -> None:
-        publish_implementation_status_for_pr(
-            repo,
-            candidate.number,
-            root,
-            issue_map,
-            release_graphs,
-            candidate.pull_request,
-            expected_pr_head_sha=candidate.expected_sha,
-            snapshot=snapshot,
-            skip_pending=True,
-            run_id=run_id,
-            generation_checked=run_id is not None,
-        )
-
-    return run_bounded_status_work(
-        candidates,
-        finalize,
-        batch_precondition=generation_precondition if run_id is not None else None,
-    )
-
-
-def refresh_snapshot_graph_failures(
-    repo: str,
-    issue_map: dict[str, tuple[Owner, ...]],
-    release_graphs: dict[str, ReleaseGraph],
-    snapshot: IssueOpsSnapshot,
-) -> IssueOpsSnapshot:
-    """Refresh live issue payloads and each preselected graph once before finalization."""
-
-    refreshed_issue_payloads = {
-        number: issue_payload(repo, number) for number in sorted(snapshot.issue_payloads)
-    }
-    refreshed = {
-        milestone: tuple(
-            release_graph_failures(repo, release_graphs, issue_map, {milestone})
-        )
-        for milestone in sorted(snapshot.graph_failures)
-    }
-    return IssueOpsSnapshot(
-        pull_requests=snapshot.pull_requests,
-        issue_payloads=refreshed_issue_payloads,
-        graph_failures=refreshed,
-        selection_failures=snapshot.selection_failures,
-        overflow_implementation_prs=snapshot.overflow_implementation_prs,
-        evicted_implementation_prs=snapshot.evicted_implementation_prs,
-        admission_ready=snapshot.admission_ready,
-    )
-
-
-def publish_implementation_status_for_pr(
-    repo: str,
-    pull_request_number: int,
-    root: Path,
-    issue_map: dict[str, tuple[Owner, ...]],
-    release_graphs: dict[str, ReleaseGraph],
-    pull_request: dict[str, object] | None = None,
-    expected_pr_head_sha: str | None = None,
-    snapshot: IssueOpsSnapshot | None = None,
-    skip_pending: bool = False,
-    run_id: int | None = None,
-    generation_checked: bool = False,
-) -> None:
-    """Validate live native references and publish pending then final status."""
-
-    loaded_pull_request = pull_request is None
-    if pull_request is None:
-        pull_request = gh_json(
-            [
-                "pr",
-                "view",
-                str(positive_issue(pull_request_number, "pull request number")),
-                "-R",
-                repo,
-                "--json",
-                "number,headRefOid,closingIssuesReferences,author,labels",
-            ]
-        )
-    if not isinstance(pull_request, dict):
-        raise SystemExit("GitHub pull-request response must be an object")
-    number = positive_issue(pull_request.get("number"), "pull request number")
-    if number != positive_issue(pull_request_number, "pull request number"):
-        raise SystemExit("GitHub pull-request response number did not match the request")
-    sha = pull_request.get("headRefOid")
-    if not isinstance(sha, str):
-        raise SystemExit(f"GitHub pull request #{number} is missing its head commit")
-    expected_sha = expected_pr_head_sha or sha
-    if sha != expected_sha:
-        raise SystemExit(
-            f"PR #{number} head changed before status publication: expected {expected_sha}, "
-            f"found {sha}"
-        )
-    references = pull_request.get("closingIssuesReferences")
-    if not isinstance(references, list):
-        raise SystemExit(
-            f"GitHub pull request #{number} has malformed closing issue references"
-        )
-    if not skip_pending:
-        if loaded_pull_request and snapshot is None:
-            try:
-                admitted, admission_failure = implementation_pr_requires_admission(
-                    repo, pull_request, release_graphs
-                )
-            except BaseException as error:
-                admitted = False
-                admission_failure = str(error).strip() or error.__class__.__name__
-            if not admitted:
-                detail = admission_failure or "PR is outside the IssueOps admission set"
-                try:
-                    commit_status(
-                        repo,
-                        sha,
-                        "failure",
-                        "IssueOps implementation admission failed: " + clean(detail),
-                    )
-                except SystemExit as error:
-                    raise SystemExit(
-                        f"unable to publish {IMPLEMENTATION_STATUS_CONTEXT} admission failure "
-                        f"for PR #{number}: {error}"
-                    ) from error
-                raise SystemExit(f"PR #{number} was not admitted: {detail}")
-        commit_status(repo, sha, "pending", "Revalidating native implementation references")
-    failures: list[str] = []
-    if snapshot is not None and not snapshot.admission_ready:
-        failures.append("IssueOps admission or graph request budget was not established")
-    author = pull_request.get("author")
-    author_login = author.get("login") if isinstance(author, dict) else None
-    if author_login == "dependabot[bot]":
-        description = "Dependabot dependency update uses the standard CI path"
-    elif not references:
-        description = "Planning PR has no native implementation closing reference"
-    else:
-        for reference in references:
-            try:
-                failures.extend(
-                    implementation_reference_failures(
-                        repo,
-                        reference,
-                        root,
-                        issue_map,
-                        release_graphs,
-                        snapshot,
-                    )
-                )
-            except SystemExit as error:
-                failures.append(str(error))
-            except Exception as error:
-                failures.append(f"implementation validation failed: {error}")
-        description = (
-            "Native implementation references passed"
-            if not failures
-            else "Native implementation references failed: " + clean(failures[0])
-        )[:140]
-    live_pull_request = gh_json(
-        [
-            "pr",
-            "view",
-            str(number),
-            "-R",
-            repo,
-            "--json",
-            "number,headRefOid",
-        ]
-    )
-    if not isinstance(live_pull_request, dict):
-        raise SystemExit(f"GitHub pull request #{number} head read-back was not an object")
-    live_sha = live_pull_request.get("headRefOid")
-    if live_sha != expected_sha:
-        raise SystemExit(
-            f"PR #{number} head changed before status publication: expected {expected_sha}, "
-            f"found {live_sha or 'missing'}"
-        )
-    state = "success" if not failures else "failure"
-    if (
-        state == "success"
-        and run_id is not None
-        and not generation_checked
-        and newer_issueops_run_exists(repo, run_id)
-    ):
-        raise SystemExit(
-            f"IssueOps workflow run {run_id} was superseded before PR #{number} success publication"
-        )
-    try:
-        commit_status(repo, expected_sha, state, description)
-    except SystemExit as error:
-        raise SystemExit(
-            f"unable to publish {IMPLEMENTATION_STATUS_CONTEXT} for PR #{number}: {error}"
-        ) from error
-    if failures:
-        raise SystemExit(
-            f"{IMPLEMENTATION_STATUS_CONTEXT} failed for PR #{number}:\n"
-            + "\n".join(f"- {failure}" for failure in failures)
-        )
-
-
-def publish_implementation_statuses_for_issue(
-    repo: str,
-    issue: int,
-    root: Path,
-    issue_map: dict[str, tuple[Owner, ...]],
-    release_graphs: dict[str, ReleaseGraph],
-    additional_issues: tuple[int, ...] = (),
-    reconcile_all_release_graphs: bool = False,
-    run_id: int | None = None,
-    enforce_admission: bool = False,
-) -> None:
-    """Refresh selected implementation PRs from one bounded live snapshot."""
-
-    snapshot, affected = build_issueops_snapshot(
-        repo,
-        issue,
-        issue_map,
-        release_graphs,
-        additional_issues,
-        reconcile_all_release_graphs,
-        enforce_admission,
-    )
-    candidates, candidate_failures = prepare_implementation_status_candidates(affected)
-    failures: list[str] = list(snapshot.selection_failures)
-    failures.extend(candidate_failures)
-    failures.extend(
-        publish_admission_failure_statuses(
-            repo, snapshot.evicted_implementation_prs
-        )
-    )
-    pending_failures = publish_pending_statuses(repo, candidates)
-    failures.extend(pending_failures)
-    final_snapshot = refresh_snapshot_graph_failures(
-        repo, issue_map, release_graphs, snapshot
-    )
-    failures.extend(
-        finalize_implementation_statuses(
-            repo,
-            root,
-            issue_map,
-            release_graphs,
-            final_snapshot,
-            candidates,
-            run_id=run_id,
-        )
-    )
-    if failures:
-        raise SystemExit("affected implementation status publication failed:\n" + "\n".join(failures))
-
-
-def invalidate_implementation_statuses_for_issue(
-    repo: str,
-    issue: int,
-    issue_map: dict[str, tuple[Owner, ...]],
-    release_graphs: dict[str, ReleaseGraph],
-    reconcile_all_release_graphs: bool = False,
-    enforce_admission: bool = False,
-) -> None:
-    """Publish fail-closed pending statuses before a queued finalizer runs."""
-
-    snapshot, affected = build_issueops_snapshot(
-        repo,
-        issue,
-        issue_map,
-        release_graphs,
-        reconcile_all_release_graphs=reconcile_all_release_graphs,
-        enforce_admission=enforce_admission,
-    )
-    candidates, candidate_failures = prepare_implementation_status_candidates(affected)
-    failures = list(snapshot.selection_failures) + candidate_failures
-    failures.extend(
-        publish_admission_failure_statuses(
-            repo, snapshot.evicted_implementation_prs
-        )
-    )
-    failures.extend(publish_pending_statuses(repo, candidates))
-    if failures:
-        raise SystemExit("IssueOps invalidation failed:\n" + "\n".join(failures))
-
-
-def enforce_closed_issue_blockers(
-    repo: str, issue_number: int, graphs: dict[str, ReleaseGraph]
-) -> list[str]:
-    """Reopen any declared issue that closes while a direct blocker remains open."""
-
-    issue = issue_payload(repo, positive_issue(issue_number, "issue number"))
-    if str(issue.get("state", "")).upper() != "CLOSED":
-        return []
-    failures = implementation_issue_failures(repo, issue, graphs)
-    if not failures:
-        return []
-    run(["gh", "issue", "reopen", str(issue_number), "--repo", repo])
-    raise SystemExit(
-        "closed issue was reopened because blocker enforcement failed:\n"
-        + "\n".join(f"- {failure}" for failure in failures)
-    )
+        raise SystemExit("relationship graph reconciliation failed:\n" + "\n".join(failures))
+    print(relationship_outcome(request_id, "applied" if changed else "already-satisfied"))
 
 
 def _live_graph_failure(operation: str, error: BaseException) -> str:
@@ -2982,11 +1764,566 @@ def target_graph_failures(
     return graph, []
 
 
-def implementation_issue_failures(
+def commit_status(repo: str, sha: str, state: str, description: str, context: str = IMPLEMENTATION_STATUS_CONTEXT) -> None:
+    if re.fullmatch(r"[0-9a-fA-F]{40}", sha) is None:
+        raise SystemExit("GitHub commit status requires an exact 40-character SHA")
+    if state not in {"pending", "success", "failure", "error"}:
+        raise SystemExit(f"invalid commit status state: {state!r}")
+    if not description or len(description) > 140:
+        raise SystemExit("commit status description must be 1..140 characters")
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            f"repos/{owner}/{name}/statuses/{sha}",
+            "--method",
+            "POST",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+            "-f",
+            f"state={state}",
+            "-f",
+            f"context={context}",
+            "-f",
+            f"description={description}",
+        ]
+    )
+    if not isinstance(payload, dict):
+        raise SystemExit("GitHub commit status response must be an object")
+
+
+def implementation_reference_failures(
     repo: str,
-    issue: dict[str, object],
-    graphs: dict[str, ReleaseGraph],
-    issue_payloads: dict[int, dict[str, object]] | None = None,
+    reference: object,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+) -> list[str]:
+    number = native_relation_issue_number(repo, reference, "closing issue reference")
+    issue = issue_payload(repo, number)
+    target_graph, failures = target_graph_failures(issue, release_graphs)
+    failures.extend(check_openspec_tasks(repo, root, issue_map, planned_issue=number))
+    failures.extend(planned_issue_failures(issue, issue_map, root))
+    failures.extend(implementation_issue_failures(repo, issue, release_graphs))
+    milestone = target_graph.milestone if target_graph is not None else None
+    if milestone is None:
+        live_milestone = issue.get("milestone")
+        milestone = live_milestone.get("title") if isinstance(live_milestone, dict) else None
+    if isinstance(milestone, str):
+        failures.extend(release_graph_failures(repo, release_graphs, issue_map, {milestone}))
+    return failures
+
+
+def publish_implementation_status_for_pr(
+    repo: str,
+    pull_request_number: int,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+    expected_pr_head_sha: str | None = None,
+) -> None:
+    pull_request = gh_json(
+        [
+            "pr",
+            "view",
+            str(positive_issue(pull_request_number, "pull request number")),
+            "-R",
+            repo,
+            "--json",
+            "number,headRefOid,closingIssuesReferences,author",
+        ]
+    )
+    if not isinstance(pull_request, dict):
+        raise SystemExit("GitHub pull-request response must be an object")
+    number = positive_issue(pull_request.get("number"), "pull request number")
+    sha = pull_request.get("headRefOid")
+    if number != pull_request_number or not isinstance(sha, str):
+        raise SystemExit("GitHub pull-request identity or head was invalid")
+    expected_sha = expected_pr_head_sha or sha
+    if sha != expected_sha:
+        raise SystemExit(f"PR #{number} head changed before status publication")
+    references = pull_request.get("closingIssuesReferences")
+    if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
+        raise SystemExit("pull request closing references exceeded the bounded limit")
+    commit_status(repo, sha, "pending", "Revalidating native implementation references")
+    failures: list[str] = []
+    author = pull_request.get("author")
+    author_login = author.get("login") if isinstance(author, dict) else None
+    if author_login == "dependabot[bot]" or not references:
+        description = (
+            "Dependabot dependency update uses the standard CI path"
+            if author_login == "dependabot[bot]"
+            else "Planning PR has no native implementation closing reference"
+        )
+    else:
+        for reference in references:
+            try:
+                failures.extend(
+                    implementation_reference_failures(
+                        repo, reference, root, issue_map, release_graphs
+                    )
+                )
+            except BaseException as error:
+                failures.append(str(error))
+        description = (
+            "Native implementation references passed"
+            if not failures
+            else "Native implementation references failed: " + clean(failures[0])
+        )[:140]
+    live = gh_json(
+        [
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            repo,
+            "--json",
+            "number,headRefOid",
+        ]
+    )
+    if not isinstance(live, dict) or live.get("headRefOid") != expected_sha:
+        raise SystemExit("PR head changed before implementation status publication")
+    state = "success" if not failures else "failure"
+    commit_status(repo, expected_sha, state, description)
+    if failures:
+        raise SystemExit("implementation status failed:\n" + "\n".join(failures))
+
+
+def revoke_merge_authorization_for_pr(
+    repo: str, pull_request_number: int, expected_head_sha: str | None = None
+) -> None:
+    details = gh_json(
+        [
+            "pr",
+            "view",
+            str(positive_issue(pull_request_number, "pull request number")),
+            "-R",
+            repo,
+            "--json",
+            "number,headRefOid",
+        ]
+    )
+    if not isinstance(details, dict):
+        raise SystemExit("merge authorization revocation response was malformed")
+    number = positive_issue(details.get("number"), "pull request number")
+    sha = details.get("headRefOid")
+    if number != pull_request_number or not isinstance(sha, str):
+        raise SystemExit("merge authorization revocation identity was malformed")
+    commit_status(
+        repo,
+        sha,
+        "failure",
+        "Merge authorization is only issued by a trusted one-shot dispatch",
+        MERGE_AUTHORIZATION_STATUS_CONTEXT,
+    )
+
+
+GITHUB_ACTIONS_APP_ID = 15368
+
+
+def bounded_api_object_collection(
+    args: list[str], key: str, cap: int, label: str
+) -> list[dict[str, object]]:
+    """Read a paginated object collection with the same finite cap contract."""
+
+    page_size = min(100, cap + 1)
+    collected: list[dict[str, object]] = []
+    for page in range(1, MAX_COLLECTION_PAGES + 1):
+        payload = gh_api_json(
+            [*args, "-F", f"per_page={page_size}", "-F", f"page={page}"]
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get(key), list):
+            raise SystemExit(f"GitHub {label} page {page} was malformed")
+        items = payload[key]
+        if not all(isinstance(item, dict) for item in items):
+            raise SystemExit(f"GitHub {label} page {page} contained a non-object")
+        collected.extend(items)
+        if len(collected) > cap:
+            raise SystemExit(f"GitHub {label} exceeded the bounded {cap}-item limit")
+        if len(items) < page_size:
+            return collected
+    raise SystemExit(
+        f"GitHub {label} exceeded the bounded {MAX_COLLECTION_PAGES}-page limit"
+    )
+
+
+def default_branch_head(repo: str, branch: str) -> str:
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            f"repos/{owner}/{name}/git/ref/heads/{branch}",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ]
+    )
+    if not isinstance(payload, dict):
+        raise SystemExit("default branch ref response was malformed")
+    obj = payload.get("object")
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", sha) is None:
+        raise SystemExit("default branch ref did not contain an exact commit SHA")
+    return sha
+
+
+def required_check_contexts(repo: str, branch: str) -> list[str]:
+    owner, name = repo_parts(repo)
+    payload = bounded_api_values(
+        [
+            f"repos/{owner}/{name}/branches/{branch}/protection/required_status_checks/contexts",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ],
+        MAX_CHECKS,
+        "required status-check contexts",
+    )
+    contexts: list[str] = []
+    for item in payload:
+        context = item.get("context") if isinstance(item, dict) else item
+        if not isinstance(context, str) or not context:
+            raise SystemExit("required status-check context was malformed")
+        contexts.append(context)
+    return contexts
+
+
+def check_run_collections(repo: str, sha: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    owner, name = repo_parts(repo)
+    statuses = bounded_api_collection(
+        [
+            f"repos/{owner}/{name}/commits/{sha}/statuses",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ],
+        MAX_CHECKS,
+        f"commit statuses for {sha}",
+    )
+    checks = bounded_api_object_collection(
+        [
+            f"repos/{owner}/{name}/commits/{sha}/check-runs",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ],
+        "check_runs",
+        MAX_CHECKS,
+        f"check runs for {sha}",
+    )
+    return statuses, checks
+
+
+def pull_request_reviews(repo: str, number: int) -> list[dict[str, object]]:
+    owner, name = repo_parts(repo)
+    return bounded_api_collection(
+        [
+            f"repos/{owner}/{name}/pulls/{number}/reviews",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ],
+        MAX_REVIEWS,
+        f"reviews for PR #{number}",
+    )
+
+
+def unresolved_review_failures(repo: str, number: int) -> list[str]:
+    owner, name = repo_parts(repo)
+    query = """
+    query($owner:String!, $repo:String!, $number:Int!) {
+      repository(owner:$owner, name:$repo) {
+        pullRequest(number:$number) {
+          reviewThreads(first:100) {
+            nodes { isResolved }
+            pageInfo { hasNextPage }
+          }
+        }
+      }
+    }
+    """.replace("reviewThreads(first:100)", f"reviewThreads(first:{MAX_REVIEWS})")
+    payload = gh_api_json(
+        [
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"repo={name}",
+            "-F",
+            f"number={number}",
+        ]
+    )
+    try:
+        threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+        nodes = threads["nodes"]
+        has_next = threads["pageInfo"]["hasNextPage"]
+    except (KeyError, TypeError):
+        raise SystemExit("GitHub review-thread response was malformed")
+    if not isinstance(nodes, list) or not isinstance(has_next, bool):
+        raise SystemExit("GitHub review-thread collection was malformed")
+    if has_next or len(nodes) >= MAX_REVIEWS:
+        raise SystemExit("GitHub review-thread collection exceeded the bounded limit")
+    return ["unresolved review thread remains"] if any(
+        not isinstance(node, dict) or node.get("isResolved") is not True for node in nodes
+    ) else []
+
+
+def merge_readiness_failures(
+    repo: str,
+    number: int,
+    expected_head: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+    expected_base_sha: str | None = None,
+) -> tuple[list[str], dict[str, object]]:
+    details = gh_json(
+        [
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            repo,
+            "--json",
+            "number,state,isDraft,baseRefName,headRefOid,mergeable,mergeCommit,id,author,closingIssuesReferences,reviewDecision",
+        ]
+    )
+    if not isinstance(details, dict):
+        raise SystemExit("merge PR response was malformed")
+    failures: list[str] = []
+    if details.get("number") != number:
+        failures.append("merge PR number did not match the request")
+    if details.get("headRefOid") != expected_head:
+        failures.append("merge PR head changed before authorization")
+    state = str(details.get("state", "")).upper()
+    if state not in {"OPEN", "MERGED"}:
+        failures.append("merge PR is not open")
+    if state == "OPEN" and details.get("isDraft") is not False:
+        failures.append("merge PR is still a draft")
+    default_branch = gh_json(["repo", "view", repo, "--json", "defaultBranchRef"])
+    branch_ref = default_branch.get("defaultBranchRef") if isinstance(default_branch, dict) else None
+    branch = branch_ref.get("name") if isinstance(branch_ref, dict) else None
+    if not isinstance(branch, str) or not branch:
+        raise SystemExit("repository default branch response was malformed")
+    if details.get("baseRefName") != branch:
+        failures.append("merge PR does not target the repository default branch")
+    if state == "OPEN" and details.get("mergeable") != "MERGEABLE":
+        failures.append("merge PR is not currently mergeable")
+    if state == "MERGED":
+        merge_commit = details.get("mergeCommit")
+        if not isinstance(merge_commit, dict) or not isinstance(merge_commit.get("oid"), str):
+            failures.append("merged PR did not expose an exact merge commit")
+    references = details.get("closingIssuesReferences")
+    if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
+        failures.append("merge PR closing references exceeded the bounded limit")
+        references = []
+    author = details.get("author")
+    if not isinstance(author, dict) or not isinstance(author.get("login"), str):
+        failures.append("merge PR author identity was malformed")
+    reviews = pull_request_reviews(repo, number)
+    if any(
+        isinstance(review, dict) and review.get("state") == "CHANGES_REQUESTED"
+        for review in reviews
+    ):
+        failures.append("merge PR has unresolved changes requested")
+    failures.extend(unresolved_review_failures(repo, number))
+    base_sha = default_branch_head(repo, branch)
+    if expected_base_sha is not None and base_sha != expected_base_sha:
+        failures.append("default branch changed during merge authorization")
+    required = required_check_contexts(repo, branch)
+    statuses, checks = check_run_collections(repo, expected_head)
+    for context in required:
+        if context == MERGE_AUTHORIZATION_STATUS_CONTEXT:
+            continue
+        matching = [
+            check
+            for check in checks
+            if check.get("name") == context
+            and isinstance(check.get("app"), dict)
+            and check["app"].get("id") == GITHUB_ACTIONS_APP_ID
+        ]
+        matching.extend(
+            status
+            for status in statuses
+            if status.get("context") == context
+            and isinstance(status.get("creator"), dict)
+            and status["creator"].get("login") == "github-actions[bot]"
+        )
+        if not matching or not any(
+            item.get("conclusion") == "success" or item.get("state") == "success"
+            for item in matching
+        ):
+            failures.append(f"required check {context!r} is not successful from GitHub Actions")
+    failures.extend(release_graph_failures(repo, release_graphs, issue_map))
+    for reference in references:
+        try:
+            failures.extend(
+                implementation_reference_failures(
+                    repo, reference, root, issue_map, release_graphs
+                )
+            )
+        except BaseException as error:
+            failures.append(str(error))
+    return failures, {"branch": branch, "base_sha": base_sha, "details": details}
+
+
+def graphql_mutation(query: str, variables: dict[str, object]) -> dict[str, object]:
+    args = ["graphql", "-f", f"query={query}"]
+    for key, value in variables.items():
+        args.extend(["-F", f"{key}={value}"])
+    payload = gh_api_json(args)
+    if not isinstance(payload, dict) or payload.get("errors"):
+        raise SystemExit("GitHub GraphQL mutation failed")
+    return payload
+
+
+def enable_auto_merge(repo: str, node_id: str, expected_head: str) -> None:
+    payload = graphql_mutation(
+        """
+        mutation($pullRequestId:ID!, $expectedHeadOid:GitObjectID!) {
+          enablePullRequestAutoMerge(input:{pullRequestId:$pullRequestId, mergeMethod:SQUASH, expectedHeadOid:$expectedHeadOid}) {
+            pullRequest { autoMergeRequest { enabledAt } }
+          }
+        }
+        """,
+        {"pullRequestId": node_id, "expectedHeadOid": expected_head},
+    )
+    try:
+        auto_merge_request = payload["data"]["enablePullRequestAutoMerge"]["pullRequest"][
+            "autoMergeRequest"
+        ]
+    except (KeyError, TypeError):
+        raise SystemExit("GitHub did not confirm enabling squash auto-merge")
+    if not isinstance(auto_merge_request, dict):
+        raise SystemExit("GitHub did not confirm enabling squash auto-merge")
+
+
+def disable_auto_merge(repo: str, node_id: str) -> None:
+    graphql_mutation(
+        """
+        mutation($pullRequestId:ID!) {
+          disablePullRequestAutoMerge(input:{pullRequestId:$pullRequestId}) {
+            pullRequest { number }
+          }
+        }
+        """,
+        {"pullRequestId": node_id},
+    )
+
+
+def wait_for_merged_pr(repo: str, number: int, expected_head: str, branch: str) -> bool:
+    for _ in range(12):
+        details = gh_json(
+            [
+                "pr",
+                "view",
+                str(number),
+                "-R",
+                repo,
+                "--json",
+                "state,headRefOid,baseRefName,mergeCommit",
+            ]
+        )
+        if isinstance(details, dict) and details.get("state") == "MERGED":
+            merge_commit = details.get("mergeCommit")
+            return (
+                details.get("headRefOid") == expected_head
+                and details.get("baseRefName") == branch
+                and isinstance(merge_commit, dict)
+                and isinstance(merge_commit.get("oid"), str)
+            )
+        time.sleep(5)
+    return False
+
+
+def authorize_merge(
+    repo: str,
+    number: int,
+    expected_head: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    release_graphs: dict[str, ReleaseGraph],
+    request_id: str,
+    actor: str,
+    sender: str,
+) -> str:
+    owner, _ = repo_parts(repo)
+    if actor != owner or sender != owner:
+        raise SystemExit("merge dispatch actor and sender must equal the repository owner")
+    commit_status(
+        repo,
+        expected_head,
+        "pending",
+        "Validating one-shot merge authorization",
+        MERGE_AUTHORIZATION_STATUS_CONTEXT,
+    )
+    auto_merge_enabled = False
+    node_id: str | None = None
+    try:
+        failures, state = merge_readiness_failures(
+            repo, number, expected_head, root, issue_map, release_graphs
+        )
+        details = state["details"]
+        node_id = details.get("id") if isinstance(details, dict) else None
+        if str(details.get("state", "")).upper() == "MERGED" and not failures:
+            commit_status(
+                repo, expected_head, "success", "Merge already confirmed", MERGE_AUTHORIZATION_STATUS_CONTEXT
+            )
+            return "already-satisfied"
+        if failures or not isinstance(node_id, str):
+            raise SystemExit("merge authorization preflight failed:\n" + "\n".join(failures))
+        enable_auto_merge(repo, node_id, expected_head)
+        auto_merge_enabled = True
+        final_failures, final_state = merge_readiness_failures(
+            repo,
+            number,
+            expected_head,
+            root,
+            issue_map,
+            release_graphs,
+            expected_base_sha=state["base_sha"],
+        )
+        if final_failures:
+            raise SystemExit("merge authorization final re-read failed:\n" + "\n".join(final_failures))
+        commit_status(
+            repo,
+            expected_head,
+            "success",
+            "Merge authorization passed; awaiting merge read-back",
+            MERGE_AUTHORIZATION_STATUS_CONTEXT,
+        )
+        if not wait_for_merged_pr(repo, number, expected_head, final_state["branch"]):
+            raise SystemExit("merge authorization did not receive an exact merged read-back")
+        return "applied"
+    except BaseException:
+        if auto_merge_enabled and node_id is not None:
+            try:
+                disable_auto_merge(repo, node_id)
+            except BaseException:
+                pass
+        try:
+            live = gh_json(["pr", "view", str(number), "-R", repo, "--json", "headRefOid"])
+            live_sha = live.get("headRefOid") if isinstance(live, dict) else None
+            if isinstance(live_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", live_sha):
+                commit_status(
+                    repo,
+                    live_sha,
+                    "failure",
+                    "Merge authorization failed; no merge was confirmed",
+                    MERGE_AUTHORIZATION_STATUS_CONTEXT,
+                )
+        except BaseException:
+            pass
+        raise
+
+
+def implementation_issue_failures(
+    repo: str, issue: dict[str, object], graphs: dict[str, ReleaseGraph]
 ) -> list[str]:
     """Require every declared direct blocker of an issue to be closed."""
 
@@ -2997,11 +2334,7 @@ def implementation_issue_failures(
     failures: list[str] = []
     for blocker in graph.blocked_by[number]:
         try:
-            blocker_issue = (
-                issue_payloads[blocker]
-                if issue_payloads is not None and blocker in issue_payloads
-                else issue_payload(repo, blocker)
-            )
+            blocker_issue = issue_payload(repo, blocker)
         except BaseException as error:
             failures.append(_live_graph_failure(f"reading blocker #{blocker}", error))
             continue
@@ -3012,6 +2345,24 @@ def implementation_issue_failures(
                 f"{state or 'UNKNOWN'}, not CLOSED"
             )
     return failures
+
+
+def enforce_closed_issue_blockers(
+    repo: str, issue_number: int, graphs: dict[str, ReleaseGraph]
+) -> None:
+    """Repair a closed declared issue when a direct blocker is still open."""
+
+    issue = issue_payload(repo, positive_issue(issue_number, "issue number"))
+    if str(issue.get("state", "")).upper() != "CLOSED":
+        return
+    failures = implementation_issue_failures(repo, issue, graphs)
+    if not failures:
+        return
+    run(["gh", "issue", "reopen", str(issue_number), "--repo", repo])
+    raise SystemExit(
+        "closed issue was reopened because blocker enforcement failed:\n"
+        + "\n".join(f"- {failure}" for failure in failures)
+    )
 
 
 def mapped_issue_numbers(issue_map: dict[str, tuple[Owner, ...]]) -> set[int]:
@@ -3550,10 +2901,6 @@ Mitigations:
         raise AssertionError("overlapping owner ranges were accepted")
     assert first_task_difference(expected, expected[:-1]) == "task count differs: expected 2, found 1"
     assert repo_parts("owner/repo") == ("owner", "repo")
-    assert flatten_paginated_response([[{"number": 1}], [{"number": 2}]]) == [
-        {"number": 1},
-        {"number": 2},
-    ]
     assert mapped_issue_numbers({"one": (Owner(1),), "two": (Owner(2),)}) == {
         1,
         2,
@@ -3727,11 +3074,9 @@ Mitigations:
     saved_native_blocked_by = globals()["native_blocked_by"]
     saved_native_sub_issues = globals()["native_sub_issues"]
     saved_native_parent_issue = globals()["native_parent_issue"]
-    saved_native_issue_id = globals()["native_issue_id"]
     saved_issue_payload = globals()["issue_payload"]
-    saved_gh_json = globals()["gh_json"]
-    saved_run = globals()["run"]
     saved_gh_api_json = globals()["gh_api_json"]
+    saved_run = globals()["run"]
     saved_subprocess_run = subprocess.run
     try:
         api_args: list[list[str]] = []
@@ -3741,29 +3086,19 @@ Mitigations:
             api_args.append(args)
             joined = " ".join(args)
             if "/milestones" in joined:
-                return [[{"title": "v1.2.3-00", "number": 7}]]
+                return [{"title": "v1.2.3-00", "number": 7}]
             if "/dependencies/blocked_by" in joined:
-                return [[{**local_identity, "number": 11}]]
+                return [{**local_identity, "number": 11}]
             if "milestone=7" in joined:
-                return [[{"number": 10}, {"number": 11}]]
-            return [[
+                return [{"number": 10}, {"number": 11}]
+            return [
                 {**local_identity, "number": 10},
                 {**local_identity, "number": 11},
-            ]]
+            ]
 
         globals()["gh_api_json"] = fake_gh_api_json
         assert native_blocked_by("owner/repo", 10) == {11}
         assert native_sub_issues("owner/repo", 12) == {10, 11}
-        local_closing_reference = {
-            "number": 11,
-            "repository": {"name": "repo", "owner": {"login": "owner"}},
-        }
-        assert (
-            native_relation_issue_number(
-                "owner/repo", local_closing_reference, "closing issue reference"
-            )
-            == 11
-        )
 
         class FakeProcess:
             def __init__(self, payload: object) -> None:
@@ -3776,17 +3111,68 @@ Mitigations:
         )
         assert native_parent_issue("owner/repo", 10) == 12
 
+        native_mutation_state = {"blocked_by": set(), "sub_issue": set()}
+        native_mutation_calls: list[list[str]] = []
+
+        def fake_native_api(args: list[str]) -> object:
+            path = args[0]
+            if path.endswith("/dependencies/blocked_by"):
+                return (
+                    [{**local_identity, "number": 11}]
+                    if 11 in native_mutation_state["blocked_by"]
+                    else []
+                )
+            if path.endswith("/sub_issues"):
+                return (
+                    [{**local_identity, "number": 11}]
+                    if 11 in native_mutation_state["sub_issue"]
+                    else []
+                )
+            if path.endswith("/issues/11"):
+                return {**local_identity, "number": 11, "id": 1100}
+            raise AssertionError(f"unexpected native mutation API call: {args}")
+
+        def fake_native_run(args: list[str]) -> str:
+            native_mutation_calls.append(args)
+            path = args[2]
+            method = args[4]
+            kind = "blocked_by" if "/dependencies/blocked_by" in path else "sub_issue"
+            if method == "POST":
+                native_mutation_state[kind].add(11)
+            else:
+                native_mutation_state[kind].discard(11)
+            return ""
+
+        globals()["gh_api_json"] = fake_native_api
+        globals()["run"] = fake_native_run
+        globals()["native_parent_issue"] = lambda repo, issue: None
+        assert mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add")
+        assert native_mutation_calls[-1][2].endswith(
+            "/issues/10/dependencies/blocked_by"
+        )
+        assert native_mutation_calls[-1][4] == "POST"
+        assert native_mutation_calls[-1][-2:] == ["-F", "issue_id=1100"]
+        call_count = len(native_mutation_calls)
+        assert not mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add")
+        assert len(native_mutation_calls) == call_count
+        assert mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "remove")
+        assert native_mutation_calls[-1][2].endswith(
+            "/issues/10/dependencies/blocked_by/1100"
+        )
+        assert native_mutation_calls[-1][4] == "DELETE"
+        assert "-F" not in native_mutation_calls[-1]
+        assert mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "add")
+        assert native_mutation_calls[-1][2].endswith("/issues/10/sub_issues")
+        assert native_mutation_calls[-1][4] == "POST"
+        assert native_mutation_calls[-1][-2:] == ["-F", "sub_issue_id=1100"]
+        assert mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "remove")
+        assert native_mutation_calls[-1][2].endswith("/issues/10/sub_issue")
+        assert native_mutation_calls[-1][4] == "DELETE"
+        assert native_mutation_calls[-1][-2:] == ["-F", "sub_issue_id=1100"]
+        globals()["native_parent_issue"] = saved_native_parent_issue
+
         foreign_identity = {
             "repository_url": "https://api.github.com/repos/foreign/repo",
-            "number": 11,
-        }
-        foreign_closing_reference = {
-            "number": 11,
-            "repository": {"name": "repo", "owner": {"login": "foreign"}},
-        }
-        conflicting_identity = {
-            **local_identity,
-            "repository": {"full_name": "foreign/repo"},
             "number": 11,
         }
         for label in (
@@ -3800,30 +3186,10 @@ Mitigations:
                 assert "exact owner/repo repository identity" in str(error)
             else:
                 raise AssertionError(f"foreign {label} was accepted")
-        try:
-            native_relation_issue_number(
-                "owner/repo", conflicting_identity, "conflicting native relation"
-            )
-        except SystemExit as error:
-            assert "exact owner/repo repository identity" in str(error)
-        else:
-            raise AssertionError("conflicting native identities were accepted")
-        try:
-            native_relation_issue_number(
-                "owner/repo", foreign_closing_reference, "closing issue reference"
-            )
-        except SystemExit as error:
-            assert "exact owner/repo repository identity" in str(error)
-        else:
-            raise AssertionError("foreign closing issue reference was accepted")
         for malformed in (
             {"number": 11},
             {"number": 11, "repository_url": 12},
             {"number": 11, "repository": {"full_name": 12}},
-            {
-                "number": 11,
-                "repository": {"name": "repo", "owner": {"login": 12}},
-            },
         ):
             try:
                 native_relation_issue_number("owner/repo", malformed, "native relation")
@@ -3832,7 +3198,7 @@ Mitigations:
             else:
                 raise AssertionError("missing or malformed native identity was accepted")
 
-        globals()["gh_api_json"] = lambda args: [[foreign_identity]]
+        globals()["gh_api_json"] = lambda args: [foreign_identity]
         for relation, label in (
             (native_blocked_by, "blocked-by issue number"),
             (native_sub_issues, "sub-issue number"),
@@ -3925,1173 +3291,27 @@ Mitigations:
         assert implementation_issue_failures(
             "owner/repo", {"number": 10}, valid_graphs
         ) == []
-        implementation_pr = {
-            "number": 494,
-            "headRefOid": "a" * 40,
-            "closingIssuesReferences": [
-                {
-                    "number": 10,
-                    "repository": {"name": "repo", "owner": {"login": "owner"}},
-                }
-            ],
-        }
-        assert implementation_prs_for_issue("owner/repo", 10, [implementation_pr]) == [
-            implementation_pr
-        ]
-        dependent_graphs = parse_release_graphs(
-            {
-                "schema_version": 2,
-                "changes": {},
-                "release_graphs": {
-                    "v1.2.3-00": {
-                        "release_issue": 12,
-                        "issues": {"10": [], "11": [10], "12": [10, 11]},
-                    }
-                },
-            },
-            Path("issue-map.json"),
-            graph_owners,
-        )
-        assert implementation_prs_for_issue(
-            "owner/repo", 10, [
-                {
-                    **implementation_pr,
-                    "closingIssuesReferences": [
-                        {
-                            "number": 11,
-                            "repository": {
-                                "name": "repo",
-                                "owner": {"login": "owner"},
-                            },
-                        }
-                    ],
-                }
-            ], dependent_graphs
-        )
-        status_issue_calls: list[int] = []
-        saved_status_publisher = publish_implementation_status_for_pr
-        saved_commit_status = commit_status
-        globals()["publish_implementation_status_for_pr"] = (
-            lambda repo, number, root, issue_map, release_graphs, pull_request=None,
-            expected_pr_head_sha=None, snapshot=None, skip_pending=False, run_id=None,
-            generation_checked=False: status_issue_calls.append(
-                number
-            )
-        )
-        globals()["commit_status"] = lambda *args, **kwargs: None
-        globals()["gh_json"] = lambda args: (
-            [implementation_pr]
-            if args[:2] == ["pr", "list"]
-            else {"number": 494, "headRefOid": implementation_pr["headRefOid"]}
-        )
-        publish_implementation_statuses_for_issue(
-            "owner/repo", 10, Path("."), {}, dependent_graphs
-        )
-        assert status_issue_calls == [494]
-        globals()["publish_implementation_status_for_pr"] = saved_status_publisher
-        globals()["commit_status"] = saved_commit_status
-        try:
-            implementation_prs_for_issue(
-                "owner/repo",
-                10,
-                [
-                    {
-                        **implementation_pr,
-                        "closingIssuesReferences": [foreign_closing_reference],
-                    }
-                ],
-            )
-        except SystemExit as error:
-            assert "exact owner/repo repository identity" in str(error)
-        else:
-            raise AssertionError("foreign implementation PR reference was accepted")
-        assert implementation_prs_for_issue("owner/repo", 10, []) == []
-        status_calls: list[list[str]] = []
-
-        def fake_status_gh_json(args: list[str]) -> object:
-            assert args[:2] == ["pr", "view"]
-            return implementation_pr
-
-        def fake_status_api(args: list[str]) -> object:
-            status_calls.append(args)
-            return {}
-
-        globals()["gh_json"] = fake_status_gh_json
-        globals()["gh_api_json"] = fake_status_api
-        publish_implementation_status_for_pr(
-            "owner/repo", 494, Path("."), {}, {}
-        )
-        status_states = [
-            argument.split("=", 1)[1]
-            for call in status_calls
-            for argument in call
-            if argument.startswith("state=")
-        ]
-        assert status_states == ["pending", "success"]
-        assert all(
-            IMPLEMENTATION_STATUS_CONTEXT in call for call in (" ".join(args) for args in status_calls)
-        )
-
-        saved_generation_guard = newer_issueops_run_exists
-        globals()["newer_issueops_run_exists"] = lambda repo, run_id: True
-        status_calls.clear()
-        globals()["gh_json"] = fake_status_gh_json
-        try:
-            publish_implementation_status_for_pr(
-                "owner/repo", 494, Path("."), {}, {}, run_id=100
-            )
-        except SystemExit as error:
-            assert "superseded before PR #494 success publication" in str(error)
-        else:
-            raise AssertionError("superseded IssueOps run published success")
-        status_states = [
-            argument.split("=", 1)[1]
-            for call in status_calls
-            for argument in call
-            if argument.startswith("state=")
-        ]
-        assert status_states == ["pending"]
-        globals()["newer_issueops_run_exists"] = saved_generation_guard
-
-        saved_workflow_runs_api = globals()["gh_api_json"]
-        globals()["gh_api_json"] = lambda args: {
-            "workflow_runs": [
-                {
-                    "id": 101,
-                    "event": "repository_dispatch",
-                    "path": ISSUEOPS_WORKFLOW_PATH,
-                },
-                {"id": 100, "event": "issues", "path": ISSUEOPS_WORKFLOW_PATH},
-            ]
-        }
-        assert newer_issueops_run_exists("owner/repo", 100)
-        globals()["gh_api_json"] = lambda args: {
-            "workflow_runs": [
-                {"id": 100, "event": "issues", "path": ISSUEOPS_WORKFLOW_PATH}
-            ]
-        }
-        assert not newer_issueops_run_exists("owner/repo", 100)
-        globals()["gh_api_json"] = saved_workflow_runs_api
-
-        invalidation_pending: list[list[int]] = []
-        invalidation_saved = {
-            name: globals()[name]
-            for name in (
-                "build_issueops_snapshot",
-                "prepare_implementation_status_candidates",
-                "publish_pending_statuses",
-            )
-        }
-        invalidation_candidate = ImplementationStatusCandidate(
-            {"number": 912, "headRefOid": "e" * 40}, 912, "e" * 40
-        )
-        globals()["build_issueops_snapshot"] = lambda *args, **kwargs: (
-            IssueOpsSnapshot((), {}, {}, ()),
-            [{"number": 912, "headRefOid": "e" * 40}],
-        )
-        globals()["prepare_implementation_status_candidates"] = (
-            lambda affected: ([invalidation_candidate], [])
-        )
-        globals()["publish_pending_statuses"] = lambda repo, candidates: (
-            invalidation_pending.append([candidate.number for candidate in candidates])
-            or []
-        )
-        invalidate_implementation_statuses_for_issue(
-            "owner/repo", 314, {}, {}, reconcile_all_release_graphs=True
-        )
-        assert invalidation_pending == [[912]]
-        for name, value in invalidation_saved.items():
-            globals()[name] = value
-
-        status_calls.clear()
-        changed_heads = iter(
-            [implementation_pr, {**implementation_pr, "headRefOid": "b" * 40}]
-        )
-        globals()["gh_json"] = lambda args: next(changed_heads)
-        try:
-            publish_implementation_status_for_pr(
-                "owner/repo",
-                494,
-                Path("."),
-                {},
-                {},
-                expected_pr_head_sha="a" * 40,
-            )
-        except SystemExit as error:
-            assert "head changed before status publication" in str(error)
-        else:
-            raise AssertionError("changed PR head was accepted")
-        status_states = [
-            argument.split("=", 1)[1]
-            for call in status_calls
-            for argument in call
-            if argument.startswith("state=")
-        ]
-        assert status_states == ["pending"]
-
-        mutation_calls: list[list[str]] = []
-        blocked_edges: set[int] = set()
-        sub_issue_edges: set[int] = set()
-        globals()["native_blocked_by"] = lambda repo, issue: set(blocked_edges)
-        globals()["native_sub_issues"] = lambda repo, issue: set(sub_issue_edges)
-        globals()["native_parent_issue"] = lambda repo, issue: None
-        globals()["native_issue_id"] = lambda repo, issue, label: issue + 1000
-
-        def fake_mutation_run(args: list[str]) -> str:
-            mutation_calls.append(args)
-            if "POST" in args:
-                if "blocked_by" in args[2]:
-                    blocked_edges.add(11)
-                else:
-                    sub_issue_edges.add(11)
-            elif "DELETE" in args:
-                if "blocked_by" in args[2]:
-                    blocked_edges.discard(11)
-                else:
-                    sub_issue_edges.discard(11)
-            return "{}"
-
-        globals()["run"] = fake_mutation_run
-        mutation_results = [
-            mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add"),
-            mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "add"),
-            mutate_native_relationship("owner/repo", 10, 11, "blocked_by", "remove"),
-            mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "add"),
-            mutate_native_relationship("owner/repo", 10, 11, "sub_issue", "remove"),
-        ]
-        assert mutation_results == [True, False, True, True, True]
-        assert sum("POST" in call for call in mutation_calls) == 2
-        assert sum("DELETE" in call for call in mutation_calls) == 2
-        assert mutation_calls == [
-            [
-                "gh",
-                "api",
-                "repos/owner/repo/issues/10/dependencies/blocked_by",
-                "--method",
-                "POST",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                "-F",
-                "issue_id=1011",
-            ],
-            [
-                "gh",
-                "api",
-                "repos/owner/repo/issues/10/dependencies/blocked_by/1011",
-                "--method",
-                "DELETE",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-            ],
-            [
-                "gh",
-                "api",
-                "repos/owner/repo/issues/10/sub_issues",
-                "--method",
-                "POST",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                "-F",
-                "sub_issue_id=1011",
-            ],
-            [
-                "gh",
-                "api",
-                "repos/owner/repo/issues/10/sub_issue",
-                "--method",
-                "DELETE",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                "-F",
-                "sub_issue_id=1011",
-            ],
-        ]
-        assert all(
-            any(GITHUB_API_VERSION in argument for argument in call)
-            for call in mutation_calls
-        )
-        request_id = validate_request_id("rel-20260823-001")
-        assert json.loads(relationship_outcome(request_id, "applied"))["outcome"] == "applied"
-        assert (
-            json.loads(relationship_outcome(request_id, "already-satisfied"))["outcome"]
-            == "already-satisfied"
-        )
-        for invalid_request_id in ("", "short", "bad space", "x" * 65, "-leading-8"):
-            try:
-                validate_request_id(invalid_request_id)
-            except SystemExit:
-                pass
-            else:
-                raise AssertionError("invalid relationship request_id was accepted")
-        assert validate_native_relationship_request("sub_issue", "add", "492", "339") == (
-            492,
-            339,
-        )
-        for malformed_relationship in (
-            ("none", "add", "492", "339"),
-            ("sub_issue", "none", "492", "339"),
-            ("sub_issue", "remove", None, "339"),
-            ("sub_issue", "remove", "492", ""),
-        ):
-            try:
-                validate_native_relationship_request(*malformed_relationship)
-            except SystemExit:
-                failed = json.loads(relationship_outcome(request_id, "failed"))
-                assert failed == {
-                    "event": "issueops_relationship",
-                    "outcome": "failed",
-                    "request_id": request_id,
-                }
-                assert failed["outcome"] not in {"applied", "already-satisfied"}
-            else:
-                raise AssertionError(
-                    "malformed relationship payload was accepted: "
-                    f"{malformed_relationship!r}"
-                )
-        try:
-            mutate_native_relationship("owner/repo", 10, 10, "blocked_by", "add")
-        except SystemExit as error:
-            assert "itself" in str(error)
-        else:
-            raise AssertionError("self native relation was accepted")
-        mutation_revalidation: list[tuple[str, object]] = []
-        saved_mutation = mutate_native_relationship
-        saved_snapshot_builder = build_issueops_snapshot
-        saved_candidate_builder = prepare_implementation_status_candidates
-        saved_pending_publisher = publish_pending_statuses
-        saved_status_finalizer = finalize_implementation_statuses
-        globals()["mutate_native_relationship"] = (
-            lambda repo, issue, related_issue, relation_kind, operation: mutation_revalidation.append(
-                ("mutate", (issue, related_issue))
-            )
-        )
-        globals()["build_issueops_snapshot"] = lambda *args, **kwargs: (
-            IssueOpsSnapshot((), {}, {}, ()), []
-        )
-        globals()["prepare_implementation_status_candidates"] = (
-            lambda affected: ([], [])
-        )
-        globals()["publish_pending_statuses"] = (
-            lambda repo, candidates: mutation_revalidation.append(("pending", candidates))
-        )
-        globals()["finalize_implementation_statuses"] = (
-            lambda repo, root, issue_map, release_graphs, snapshot, candidates, run_id=None: mutation_revalidation.append(
-                ("finalize", candidates)
-            )
-            or []
-        )
-        mutate_native_relationship_and_revalidate(
-            "owner/repo", 10, 11, "blocked_by", "add", Path("."), {}, {}
-        )
-        assert [event for event, _ in mutation_revalidation] == [
-            "pending",
-            "mutate",
-            "finalize",
-        ]
-        globals()["mutate_native_relationship"] = saved_mutation
-        globals()["build_issueops_snapshot"] = saved_snapshot_builder
-        globals()["prepare_implementation_status_candidates"] = saved_candidate_builder
-        globals()["publish_pending_statuses"] = saved_pending_publisher
-        globals()["finalize_implementation_statuses"] = saved_status_finalizer
-
-        globals()["gh_json"] = lambda args: [{}] * (MAX_OPEN_PULL_REQUESTS + 1)
-        try:
-            open_pull_requests_snapshot("owner/repo")
-        except SystemExit as error:
-            assert "bounded limit" in str(error)
-        else:
-            raise AssertionError("truncated open-PR snapshot was accepted")
-        globals()["gh_json"] = lambda args: [{}] * MAX_OPEN_PULL_REQUESTS
-        assert len(open_pull_requests_snapshot("owner/repo")) == MAX_OPEN_PULL_REQUESTS
-        saved_open_snapshot = open_pull_requests_snapshot
-        selected_prs = tuple(
-            {
-                **implementation_pr,
-                "number": 600 + index,
-                "headRefOid": f"{index:040d}",
-            }
-            for index in range(33)
-        )
-        globals()["open_pull_requests_snapshot"] = lambda repo: selected_prs
-        saved_selected_issue_payload = issue_payload
-        globals()["issue_payload"] = lambda repo, issue: {"number": issue}
-        exact_selected_snapshot, exact_selected = build_issueops_snapshot(
-            "owner/repo", 10, {}, {}
-        )
-        assert len(exact_selected) == 33
-        assert exact_selected_snapshot.selection_failures == ()
-        globals()["issue_payload"] = saved_selected_issue_payload
-        globals()["open_pull_requests_snapshot"] = saved_open_snapshot
-
-        worker_saved = {
-            name: globals()[name]
-            for name in (
-                "verify_live_candidate_head",
-                "commit_status",
-                "publish_implementation_status_for_pr",
-            )
-        }
-        active_workers = 0
-        maximum_active_workers = 0
-        worker_lock = threading.Lock()
-
-        def record_bounded_work() -> None:
-            nonlocal active_workers, maximum_active_workers
-            with worker_lock:
-                active_workers += 1
-                maximum_active_workers = max(maximum_active_workers, active_workers)
-            time.sleep(0.0001)
-            with worker_lock:
-                active_workers -= 1
-
-        pending_heads: list[int] = []
-        pending_statuses: list[int] = []
-        final_statuses: list[int] = []
-
-        def fake_worker_head(repo: str, candidate: ImplementationStatusCandidate) -> None:
-            record_bounded_work()
-            pending_heads.append(candidate.number)
-
-        def fake_worker_status(
-            repo: str, sha: str, state: str, description: str
-        ) -> None:
-            record_bounded_work()
-            assert state == "pending"
-            pending_statuses.append(1)
-
-        def fake_worker_final(
-            repo: str,
-            number: int,
-            root: Path,
-            issue_map: dict[str, tuple[Owner, ...]],
-            release_graphs: dict[str, ReleaseGraph],
-            pull_request: dict[str, object] | None = None,
-            expected_pr_head_sha: str | None = None,
-            snapshot: IssueOpsSnapshot | None = None,
-            skip_pending: bool = False,
-            run_id: int | None = None,
-            generation_checked: bool = False,
-        ) -> None:
-            record_bounded_work()
-            assert skip_pending
-            final_statuses.append(number)
-
-        globals()["verify_live_candidate_head"] = fake_worker_head
-        globals()["commit_status"] = fake_worker_status
-        globals()["publish_implementation_status_for_pr"] = fake_worker_final
-
-        def worker_candidates(count: int) -> list[ImplementationStatusCandidate]:
-            return [
-                ImplementationStatusCandidate(
-                    {"number": 800 + index, "headRefOid": f"{index:040d}"},
-                    800 + index,
-                    f"{index:040d}",
-                )
-                for index in range(count)
-            ]
-
-        thirty_three_candidates, selected_candidate_failures = (
-            prepare_implementation_status_candidates(exact_selected)
-        )
-        assert selected_candidate_failures == []
-        assert len(thirty_three_candidates) == 33
-        assert pending_heads == []
-        assert pending_statuses == []
-        assert final_statuses == []
-
-        generation_guard_calls: list[int] = []
-        saved_generation_guard = newer_issueops_run_exists
-        globals()["newer_issueops_run_exists"] = (
-            lambda repo, run_id: generation_guard_calls.append(run_id) or False
-        )
-        final_statuses.clear()
-        assert finalize_implementation_statuses(
-            "owner/repo",
-            Path("."),
-            {},
-            {},
-            exact_selected_snapshot,
-            thirty_three_candidates,
-            run_id=100,
-        ) == []
-        assert generation_guard_calls == [100] * 5
-
-        cross_batch_candidates = worker_candidates(9)
-        cross_batch_generation = iter([False, True])
-        generation_guard_calls.clear()
-        globals()["newer_issueops_run_exists"] = (
-            lambda repo, run_id: generation_guard_calls.append(run_id)
-            or next(cross_batch_generation)
-        )
-        final_statuses.clear()
-        cross_batch_failures = finalize_implementation_statuses(
-            "owner/repo",
-            Path("."),
-            {},
-            {},
-            exact_selected_snapshot,
-            cross_batch_candidates,
-            run_id=100,
-        )
-        assert generation_guard_calls == [100, 100]
-        assert len(final_statuses) == STATUS_WORKERS
-        assert any("superseded before final status batch" in failure for failure in cross_batch_failures)
-
-        def failing_generation_guard(repo: str, run_id: int) -> bool:
-            raise SystemExit("injected generation API failure")
-
-        globals()["newer_issueops_run_exists"] = failing_generation_guard
-        generation_guard_calls.clear()
-        final_statuses.clear()
-        generation_failures = finalize_implementation_statuses(
-            "owner/repo",
-            Path("."),
-            {},
-            {},
-            exact_selected_snapshot,
-            worker_candidates(9),
-            run_id=100,
-        )
-        assert generation_guard_calls == []
-        assert final_statuses == []
-        assert any("generation check failed before final status batch" in failure for failure in generation_failures)
-        globals()["newer_issueops_run_exists"] = saved_generation_guard
-
-        classification_prs = tuple(
-            {
-                **implementation_pr,
-                "number": 1200 + index,
-                "headRefOid": f"{index:040d}",
-            }
-            for index in range(MAX_OPEN_PULL_REQUESTS)
-        )
-        classified, classification_failures = implementation_prs_for_release_graphs(
-            "owner/repo", classification_prs, dependent_graphs
-        )
-        assert classification_failures == []
-        assert len(classified) == MAX_OPEN_PULL_REQUESTS
-        assert final_statuses == []
-        budget = issueops_request_budget(dependent_graphs)
-        assert budget["status_writes"] == 49
-        assert budget["generation_reads"] == 2
-        assert budget["head_reads"] == 33
-        assert budget["content_writes"] < MAX_CONTENT_WRITES_PER_MINUTE
-        assert budget["request_total"] < MAX_GITHUB_REQUESTS_PER_HOUR
-        assert budget["graph_reads"] <= MAX_GRAPH_REQUESTS_PER_EVENT
-
-        admission_api_saved = gh_api_json
-        admission_commit_saved = commit_status
-        admission_gh_json_saved = gh_json
-        admission_api_calls: list[list[str]] = []
-        admission_status_calls: list[tuple[str, str]] = []
-
-        def admission_api(args: list[str]) -> object:
-            admission_api_calls.append(args)
-            if args[0].endswith(f"/labels/{ISSUEOPS_ADMISSION_LABEL}"):
-                return {"name": ISSUEOPS_ADMISSION_LABEL}
-            return {}
-
-        globals()["gh_api_json"] = admission_api
-        globals()["commit_status"] = (
-            lambda repo, sha, state, description: admission_status_calls.append((sha, state))
-        )
-
-        def admission_pr(number: int, admitted: bool) -> dict[str, object]:
-            return {
-                "number": number,
-                "headRefOid": f"{number:040d}",
-                "closingIssuesReferences": [
-                    {
-                        "number": 10,
-                        "repository": {"name": "repo", "owner": {"login": "owner"}},
-                    }
-                ],
-                "labels": (
-                    [{"name": ISSUEOPS_ADMISSION_LABEL}] if admitted else []
-                ),
-            }
-
-        seventeen = [admission_pr(1000 + index, index < MAX_ACTIVE_IMPLEMENTATION_PRS) for index in range(17)]
-        first_admission = reconcile_admission_labels("owner/repo", seventeen)
-        assert len(first_admission.admitted) == MAX_ACTIVE_IMPLEMENTATION_PRS
-        assert [item["number"] for item in first_admission.overflow] == [1016]
-        assert first_admission.evicted == ()
-        admission_open_saved = open_pull_requests_snapshot
-        globals()["open_pull_requests_snapshot"] = lambda repo: tuple(seventeen)
-        admitted_ok, admitted_failure = implementation_pr_requires_admission(
-            "owner/repo", seventeen[0], dependent_graphs
-        )
-        overflow_ok, overflow_failure = implementation_pr_requires_admission(
-            "owner/repo", seventeen[-1], dependent_graphs
-        )
-        assert admitted_ok and admitted_failure is None
-        assert not overflow_ok and "admission ceiling" in (overflow_failure or "")
-        globals()["open_pull_requests_snapshot"] = admission_open_saved
-
-        after_close = seventeen[1:]
-        after_close[0] = admission_pr(1001, True)
-        after_close[-1] = admission_pr(1016, False)
-        freed_admission = reconcile_admission_labels("owner/repo", after_close)
-        assert [item["number"] for item in freed_admission.admitted] == list(range(1001, 1017))
-        assert freed_admission.overflow == ()
-        assert any("labels" in " ".join(call) and "1016" not in " ".join(call) for call in admission_api_calls)
-
-        reopened = [admission_pr(1000, False)] + [
-            admission_pr(number, number <= 1016) for number in range(1001, 1017)
-        ]
-        reopened_admission = reconcile_admission_labels("owner/repo", reopened)
-        assert [item["number"] for item in reopened_admission.overflow] == [1016]
-        assert [item["number"] for item in reopened_admission.evicted] == [1016]
-        globals()["gh_json"] = lambda args: {
-            "number": 1016,
-            "headRefOid": f"{1016:040d}",
-        }
-        assert publish_admission_failure_statuses("owner/repo", reopened_admission.evicted) == []
-        assert admission_status_calls == [(f"{1016:040d}", "failure")]
-        globals()["gh_api_json"] = admission_api_saved
-        globals()["commit_status"] = admission_commit_saved
-        globals()["gh_json"] = admission_gh_json_saved
-
-        failure_candidates = worker_candidates(4)
-        pending_attempts: list[int] = []
-
-        def failing_worker_status(
-            repo: str, sha: str, state: str, description: str
-        ) -> None:
-            pending_attempts.append(int(sha[-3:]))
-            if pending_attempts[-1] == 1:
-                raise SystemExit("injected pending worker failure")
-
-        globals()["commit_status"] = failing_worker_status
-        pending_failures = publish_pending_statuses("owner/repo", failure_candidates)
-        assert len(pending_attempts) == 4
-        assert any("injected pending worker failure" in failure for failure in pending_failures)
-
-        final_failure_candidates = worker_candidates(4)
-        final_attempts: list[int] = []
-
-        def failing_worker_final(*args: object, **kwargs: object) -> None:
-            number = int(args[1])
-            final_attempts.append(number)
-            if number == 801:
-                raise SystemExit("injected final worker failure")
-
-        globals()["commit_status"] = saved_commit_status
-        globals()["publish_implementation_status_for_pr"] = failing_worker_final
-        final_failures = finalize_implementation_statuses(
-            "owner/repo",
-            Path("."),
-            {},
-            {},
-            exact_selected_snapshot,
-            final_failure_candidates,
-        )
-        assert sorted(final_attempts) == sorted(
-            candidate.number for candidate in final_failure_candidates
-        )
-        assert any("injected final worker failure" in failure for failure in final_failures)
-        for name, value in worker_saved.items():
-            globals()[name] = value
-
-        race_candidates = [
-            ImplementationStatusCandidate(
-                {"number": 900, "headRefOid": "9" * 40}, 900, "9" * 40
-            ),
-            ImplementationStatusCandidate(
-                {"number": 901, "headRefOid": "a" * 40}, 901, "a" * 40
-            ),
-        ]
-        race_status_calls: list[tuple[int | str, str]] = []
-        race_final_numbers: list[int] = []
-
-        def race_verify(repo: str, candidate: ImplementationStatusCandidate) -> None:
-            if candidate.number == 901:
-                raise CandidateHeadChanged(candidate.number, candidate.expected_sha, "b" * 40)
-
-        def race_commit(
-            repo: str, sha: str, state: str, description: str
-        ) -> None:
-            race_status_calls.append((sha, state))
-
-        def race_finalize(*args: object, **kwargs: object) -> None:
-            race_final_numbers.append(int(args[1]))
-
-        race_saved = {
-            name: globals()[name]
-            for name in (
-                "verify_live_candidate_head",
-                "commit_status",
-                "publish_implementation_status_for_pr",
-                "build_issueops_snapshot",
-                "prepare_implementation_status_candidates",
-            )
-        }
-        globals()["verify_live_candidate_head"] = race_verify
-        globals()["commit_status"] = race_commit
-        globals()["publish_implementation_status_for_pr"] = race_finalize
-        globals()["build_issueops_snapshot"] = (
-            lambda *args, **kwargs: (exact_selected_snapshot, [])
-        )
-        globals()["prepare_implementation_status_candidates"] = (
-            lambda affected: (race_candidates, [])
-        )
-        try:
-            publish_implementation_statuses_for_issue(
-                "owner/repo", 10, Path("."), {}, {}
-            )
-        except SystemExit as error:
-            assert "head changed before status publication" in str(error)
-        else:
-            raise AssertionError("raced candidate did not fail the aggregate refresh")
-        assert [candidate.number for candidate in race_candidates] == [900]
-        assert ("b" * 40, "failure") in race_status_calls
-        assert ("9" * 40, "pending") in race_status_calls
-        assert all(state != "pending" or sha != "a" * 40 for sha, state in race_status_calls)
-        assert race_final_numbers == [900]
-        for name, value in race_saved.items():
-            globals()[name] = value
-
-        coalesced_graphs = {
-            "v0.5.0-00": ReleaseGraph(
-                "v0.5.0-00", 492, {339: (), 492: (339,)}
-            )
-        }
-        coalesced_pr_sha = "c" * 40
-        coalesced_pr = {
-            "number": 910,
-            "headRefOid": coalesced_pr_sha,
-            "closingIssuesReferences": [
-                {
-                    "number": 339,
-                    "repository": {"name": "repo", "owner": {"login": "owner"}},
-                }
-            ],
-            "author": {"login": "atlas"},
-        }
-        coalesced_status_states: list[str] = []
-        coalesced_final_numbers: list[int] = []
-        coalesced_saved = {
-            name: globals()[name]
-            for name in (
-                "open_pull_requests_snapshot",
-                "issue_payload",
-                "release_graph_failures",
-                "gh_json",
-                "commit_status",
-                "publish_implementation_status_for_pr",
-            )
-        }
-        globals()["open_pull_requests_snapshot"] = lambda repo: (coalesced_pr,)
-        globals()["issue_payload"] = (
-            lambda repo, issue: {
-                "number": issue,
-                "state": "CLOSED",
-                "milestone": {"title": "v0.5.0-00"},
-            }
-        )
-        globals()["release_graph_failures"] = lambda *args, **kwargs: []
-
-        def coalesced_gh_json(args: list[str]) -> object:
-            if args[:2] == ["pr", "view"]:
-                return {"number": 910, "headRefOid": coalesced_pr_sha}
-            raise AssertionError(f"unexpected coalesced command: {args}")
-
-        globals()["gh_json"] = coalesced_gh_json
-        globals()["commit_status"] = (
-            lambda repo, sha, state, description: coalesced_status_states.append(state)
-        )
-
-        def coalesced_final(
-            repo: str,
-            number: int,
-            root: Path,
-            issue_map: dict[str, tuple[Owner, ...]],
-            release_graphs: dict[str, ReleaseGraph],
-            *args: object,
-            **kwargs: object,
-        ) -> None:
-            coalesced_final_numbers.append(number)
-
-        globals()["publish_implementation_status_for_pr"] = coalesced_final
-        # GitHub-native concurrency cancels stale A before it can finalize; this
-        # local half proves surviving C still refreshes B's disjoint PR.
-        coalesced_issue_events = {"A": 310, "B": 339, "C": 314}
-        assert coalesced_issue_events["C"] == 314
-        publish_implementation_statuses_for_issue(
-            "owner/repo",
-            coalesced_issue_events["C"],
-            Path("."),
-            {},
-            coalesced_graphs,
-            reconcile_all_release_graphs=True,
-        )
-        assert coalesced_status_states == ["pending"]
-        assert coalesced_final_numbers == [910]
-        for name, value in coalesced_saved.items():
-            globals()[name] = value
-
-        live_refresh_graphs = {
-            "v0.5.0-00": ReleaseGraph(
-                "v0.5.0-00", 492, {339: (), 492: (339,)}
-            )
-        }
-        live_refresh_pr_sha = "d" * 40
-        live_refresh_pr = {
-            "number": 911,
-            "headRefOid": live_refresh_pr_sha,
-            "closingIssuesReferences": [
-                {
-                    "number": 339,
-                    "repository": {"name": "repo", "owner": {"login": "owner"}},
-                }
-            ],
-            "author": {"login": "atlas"},
-        }
-        live_refresh_states: list[str] = []
-        live_refresh_calls = [0]
-        live_refresh_b_changed = [False]
-        live_refresh_saved = {
-            name: globals()[name]
-            for name in (
-                "open_pull_requests_snapshot",
-                "issue_payload",
-                "release_graph_failures",
-                "gh_json",
-                "commit_status",
-            )
-        }
-        globals()["open_pull_requests_snapshot"] = lambda repo: (live_refresh_pr,)
-
-        def live_refresh_issue(repo: str, issue: int) -> dict[str, object]:
-            return {
-                "number": issue,
-                "state": "OPEN" if live_refresh_b_changed[0] and issue == 339 else "CLOSED",
-                "milestone": {"title": "v0.5.0-00"},
-            }
-
-        globals()["issue_payload"] = live_refresh_issue
-
-        def live_refresh_graph_failures(*args: object, **kwargs: object) -> list[str]:
-            live_refresh_calls[0] += 1
-            if live_refresh_calls[0] == 1:
-                # A captured its immutable snapshot; B's live graph change is now visible.
-                live_refresh_b_changed[0] = True
-                return []
-            assert live_refresh_b_changed[0]
-            return ["B changed a native release-graph edge after A's snapshot"]
-
-        globals()["release_graph_failures"] = live_refresh_graph_failures
-        globals()["gh_json"] = lambda args: (
-            {"number": 911, "headRefOid": live_refresh_pr_sha}
-            if args[:2] == ["pr", "view"]
-            else (_ for _ in ()).throw(AssertionError(f"unexpected live-refresh command: {args}"))
-        )
-        globals()["commit_status"] = (
-            lambda repo, sha, state, description: live_refresh_states.append(state)
-        )
-        try:
-            publish_implementation_statuses_for_issue(
-                "owner/repo",
-                314,
-                Path("."),
-                {},
-                live_refresh_graphs,
-                reconcile_all_release_graphs=True,
-            )
-        except SystemExit as error:
-            assert "affected implementation status publication failed" in str(error)
-        else:
-            raise AssertionError("live pre-final graph change did not fail the refresh")
-        assert live_refresh_calls == [2]
-        assert live_refresh_states == ["pending", "failure"]
-        assert "success" not in live_refresh_states
-        for name, value in live_refresh_saved.items():
-            globals()[name] = value
-
-        malformed_refresh = {"number": 495, "closingIssuesReferences": None}
-        affected, refresh_failures = affected_implementation_prs(
-            "owner/repo",
-            10,
-            (implementation_pr, malformed_refresh),
-            dependent_graphs,
-        )
-        assert affected == [implementation_pr]
-        assert any("PR #495" in failure for failure in refresh_failures)
-
-        status_pr = {**implementation_pr, "closingIssuesReferences": []}
-        status_calls.clear()
-        globals()["gh_json"] = lambda args: status_pr
-        publish_implementation_status_for_pr(
-            "owner/repo", 494, Path("."), {}, {}
-        )
-        status_states = [
-            argument.split("=", 1)[1]
-            for call in status_calls
-            for argument in call
-            if argument.startswith("state=")
-        ]
-        assert status_states == ["pending", "success"]
-
-        status_calls.clear()
-        foreign_status_pr = {
-            **implementation_pr,
-            "closingIssuesReferences": [foreign_closing_reference],
-        }
-
-        def fake_foreign_status_gh_json(args: list[str]) -> object:
-            assert args[:2] == ["pr", "view"]
-            return foreign_status_pr
-
-        globals()["gh_json"] = fake_foreign_status_gh_json
-        try:
-            publish_implementation_status_for_pr(
-                "owner/repo", 494, Path("."), {}, {}
-            )
-        except SystemExit as error:
-            assert "exact owner/repo repository identity" in str(error)
-        else:
-            raise AssertionError("foreign status reference was accepted")
-        status_states = [
-            argument.split("=", 1)[1]
-            for call in status_calls
-            for argument in call
-            if argument.startswith("state=")
-        ]
-        assert status_states == ["failure"]
-
+        repair_commands: list[list[str]] = []
         globals()["issue_payload"] = lambda repo, issue: {
             "number": issue,
-            "state": {10: "CLOSED", 11: "OPEN", 12: "CLOSED"}.get(issue, "CLOSED"),
+            "state": "OPEN" if issue == 10 else "CLOSED",
         }
-        rerun_commands: list[list[str]] = []
-        globals()["run"] = lambda args: rerun_commands.append(args) or ""
-        assert enforce_closed_issue_blockers("owner/repo", 10, dependent_graphs) == []
-        assert rerun_commands == []
+        globals()["run"] = lambda args: repair_commands.append(args) or ""
         try:
-            enforce_closed_issue_blockers("owner/repo", 12, dependent_graphs)
+            enforce_closed_issue_blockers("owner/repo", 12, valid_graphs)
         except SystemExit as error:
             assert "closed issue was reopened" in str(error)
-            assert "blocker #11" in str(error)
+            assert repair_commands == [["gh", "issue", "reopen", "12", "--repo", "owner/repo"]]
         else:
-            raise AssertionError("early-closed release root was accepted")
-        assert rerun_commands == [["gh", "issue", "reopen", "12", "--repo", "owner/repo"]]
-
-        relationship_graphs = {
-            "v0.5.0-00": ReleaseGraph(
-                "v0.5.0-00", 492, {339: (), 492: (339,)}
-            )
-        }
-        relationship_pr_sha = "d" * 40
-        relationship_pr = {
-            "number": 500,
-            "headRefOid": relationship_pr_sha,
-            "closingIssuesReferences": [
-                {
-                    "number": 339,
-                    "repository": {"name": "repo", "owner": {"login": "owner"}},
-                }
-            ],
-            "author": {"login": "atlas"},
-        }
-        relationship_pr_two = {
-            **relationship_pr,
-            "number": 501,
-            "headRefOid": "e" * 40,
-        }
-        behavior_saved = {
-            name: globals()[name]
-            for name in (
-                "gh_json",
-                "gh_api_json",
-                "run",
-                "issue_payload",
-                "native_sub_issues",
-                "native_issue_id",
-                "check_openspec_tasks",
-                "planned_issue_failures",
-                "release_graph_failures",
-                "build_issueops_snapshot",
-                "prepare_implementation_status_candidates",
-                "publish_pending_statuses",
-                "finalize_implementation_statuses",
-                "mutate_native_relationship",
-                "reconcile_admission_labels",
-            )
-        }
-        relationship_sub_issues = {339}
-        status_api_calls: list[list[str]] = []
-        lifecycle_events: list[str] = []
-
-        def relationship_gh_json(args: list[str]) -> object:
-            if args[:2] == ["pr", "list"]:
-                return [relationship_pr, relationship_pr_two]
-            if args[:2] == ["pr", "view"]:
-                number = int(args[2])
-                return {
-                    "number": number,
-                    "headRefOid": (
-                        relationship_pr_sha if number == 500 else relationship_pr_two["headRefOid"]
-                    ),
-                }
-            raise AssertionError(f"unexpected relationship snapshot command: {args}")
-
-        def relationship_gh_api_json(args: list[str]) -> object:
-            status_api_calls.append(args)
-            lifecycle_events.append(
-                "status:"
-                + next(
-                    argument.split("=", 1)[1]
-                    for argument in args
-                    if argument.startswith("state=")
-                )
-            )
-            return {}
-
-        def relationship_run(args: list[str]) -> str:
-            assert args == [
-                "gh",
-                "api",
-                "repos/owner/repo/issues/492/sub_issue",
-                "--method",
-                "DELETE",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                "-F",
-                "sub_issue_id=1339",
-            ]
-            lifecycle_events.append("mutate")
-            relationship_sub_issues.remove(339)
-            return "{}"
-
-        def relationship_issue_payload(repo: str, issue: int) -> dict[str, object]:
-            return {
-                "number": issue,
-                "state": "CLOSED",
-                "milestone": {"title": "v0.5.0-00"},
-            }
-
-        def relationship_graph_failures(
-            repo: str,
-            graphs: dict[str, ReleaseGraph],
-            issue_map: dict[str, tuple[Owner, ...]],
-            milestones: set[str] | None = None,
-        ) -> list[str]:
-            assert milestones == {"v0.5.0-00"}
-            return (
-                []
-                if 339 in relationship_sub_issues
-                else ["#492 is missing native sub-issue relation(s): #339"]
-            )
-
-        globals()["gh_json"] = relationship_gh_json
-        globals()["gh_api_json"] = relationship_gh_api_json
-        globals()["run"] = relationship_run
-        globals()["issue_payload"] = relationship_issue_payload
-        globals()["native_sub_issues"] = (
-            lambda repo, issue: set(relationship_sub_issues)
-        )
-        globals()["native_issue_id"] = lambda repo, issue, label: issue + 1000
-        globals()["check_openspec_tasks"] = lambda *args, **kwargs: []
-        globals()["planned_issue_failures"] = lambda *args, **kwargs: []
-        globals()["release_graph_failures"] = relationship_graph_failures
-        globals()["reconcile_admission_labels"] = (
-            lambda repo, implementation_prs: ImplementationAdmission(
-                tuple(implementation_prs), (), (), (), True
-            )
-        )
-        try:
-            mutate_native_relationship_and_revalidate(
-                "owner/repo",
-                492,
-                339,
-                "sub_issue",
-                "remove",
-                Path("."),
-                {},
-                relationship_graphs,
-            )
-        except SystemExit as error:
-            assert "affected implementation status publication failed" in str(error)
-        else:
-            raise AssertionError("relationship drift did not fail child implementation status")
-        assert relationship_sub_issues == set()
-        assert lifecycle_events == [
-            "status:pending",
-            "status:pending",
-            "mutate",
-            "status:failure",
-            "status:failure",
-        ]
-        assert len(status_api_calls) == 4
-        status_states = [
-            argument.split("=", 1)[1]
-            for call in status_api_calls
-            for argument in call
-            if argument.startswith("state=")
-        ]
-        assert status_states == ["pending", "pending", "failure", "failure"]
-        assert all(
-            "context=issueops-implementation" in call
-            for call in (" ".join(args) for args in status_api_calls)
-        )
-        status_paths = [args[0] for args in status_api_calls]
-        assert sorted(status_paths) == sorted([
-            f"repos/owner/repo/statuses/{relationship_pr_sha}",
-            f"repos/owner/repo/statuses/{relationship_pr_two['headRefOid']}",
-            f"repos/owner/repo/statuses/{relationship_pr_sha}",
-            f"repos/owner/repo/statuses/{relationship_pr_two['headRefOid']}",
-        ])
-        assert "#492 is missing native sub-issue relation(s): #339" in " ".join(
-            argument
-            for call in status_api_calls
-            for argument in call
-            if argument.startswith("description=")
-        )
-        pending_failure_mutations: list[object] = []
-        globals()["build_issueops_snapshot"] = lambda *args, **kwargs: (
-            IssueOpsSnapshot((), {}, {}, ()), [relationship_pr]
-        )
-        globals()["prepare_implementation_status_candidates"] = lambda affected: (
-            [ImplementationStatusCandidate(relationship_pr, 500, relationship_pr_sha)],
-            [],
-        )
-        globals()["publish_pending_statuses"] = (
-            lambda repo, candidates: (_ for _ in ()).throw(
-                SystemExit("injected pending publication failure")
-            )
-        )
-        globals()["mutate_native_relationship"] = (
-            lambda *args: pending_failure_mutations.append(args)
-        )
-        try:
-            mutate_native_relationship_and_revalidate(
-                "owner/repo",
-                492,
-                339,
-                "sub_issue",
-                "remove",
-                Path("."),
-                {},
-                relationship_graphs,
-            )
-        except SystemExit as error:
-            assert "injected pending publication failure" in str(error)
-        else:
-            raise AssertionError("pending failure did not abort relationship mutation")
-        assert pending_failure_mutations == []
-        assert len(status_api_calls) == 4
-        for name, value in behavior_saved.items():
-            globals()[name] = value
+            raise AssertionError("closed issue with an open blocker was not repaired")
     finally:
         globals()["milestone_issues"] = saved_milestone_issues
         globals()["native_blocked_by"] = saved_native_blocked_by
         globals()["native_sub_issues"] = saved_native_sub_issues
         globals()["native_parent_issue"] = saved_native_parent_issue
-        globals()["native_issue_id"] = saved_native_issue_id
         globals()["issue_payload"] = saved_issue_payload
-        globals()["gh_json"] = saved_gh_json
-        globals()["run"] = saved_run
         globals()["gh_api_json"] = saved_gh_api_json
+        globals()["run"] = saved_run
         subprocess.run = saved_subprocess_run
     assert milestone_issue_failures(
         "v1.0.0-00",
@@ -5234,6 +3454,297 @@ Mitigations:
                 readiness_root, "ready-change"
             )
         )
+    saved_merge_gh_json = globals()["gh_json"]
+    saved_merge_gh_api_json = globals()["gh_api_json"]
+    saved_merge_graph_failures = globals()["release_graph_failures"]
+    saved_sleep = time.sleep
+    merge_sha = "a" * 40
+    current_merge_head = merge_sha
+    merge_state = "OPEN"
+    merge_mode = "success"
+    merge_statuses: list[tuple[str, str, str]] = []
+    disable_calls = 0
+    merge_graph_calls = 0
+
+    def fake_merge_gh_json(args: list[str]) -> object:
+        nonlocal current_merge_head, merge_state, merge_mode
+        if args[0] == "repo":
+            return {"defaultBranchRef": {"name": "main"}}
+        if args[0] != "pr":
+            raise AssertionError(f"unexpected merge gh call: {args}")
+        fields = args[-1] if "--json" in args else ""
+        if fields == "headRefOid":
+            return {"headRefOid": current_merge_head}
+        return {
+            "number": 494,
+            "state": merge_state,
+            "isDraft": merge_mode == "draft",
+            "baseRefName": "main",
+            "headRefOid": current_merge_head,
+            "mergeable": "CONFLICTING" if merge_mode == "unmergeable" else "MERGEABLE",
+            "mergeCommit": {"oid": "c" * 40} if merge_state == "MERGED" else None,
+            "id": "PR_node_494",
+            "author": {"login": "owner"},
+            "closingIssuesReferences": [],
+            "reviewDecision": "APPROVED",
+            "reviews": [],
+        }
+
+    def fake_merge_gh_api(args: list[str]) -> object:
+        nonlocal merge_state, merge_graph_calls, merge_mode, current_merge_head, disable_calls
+        joined = " ".join(args)
+        if "/statuses/" in joined and "commits/" not in joined:
+            state = next(
+                argument.split("=", 1)[1]
+                for argument in args
+                if argument.startswith("state=")
+            )
+            context = next(
+                argument.split("=", 1)[1]
+                for argument in args
+                if argument.startswith("context=")
+            )
+            merge_statuses.append((state, context, args[2]))
+            return {}
+        if "/git/ref/heads/main" in joined:
+            return {"object": {"sha": "b" * 40}}
+        if "required_status_checks/contexts" in joined:
+            return [{"context": "verify"}]
+        if "/commits/" in joined and "/statuses" in joined:
+            return []
+        if "/check-runs" in joined:
+            return {
+                "check_runs": [
+                    {
+                        "name": "verify",
+                        "conclusion": "success",
+                        "app": {"id": 999 if merge_mode == "wrong-check" else GITHUB_ACTIONS_APP_ID},
+                    }
+                ]
+            }
+        if "/reviews" in joined:
+            return [{"state": "CHANGES_REQUESTED"}] if merge_mode == "review-failure" else []
+        if args[0] == "graphql":
+            query = next(argument for argument in args if argument.startswith("query="))
+            if "reviewThreads" in query:
+                return {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [],
+                                    "pageInfo": {"hasNextPage": False},
+                                }
+                            }
+                        }
+                    }
+                }
+            if "enablePullRequestAutoMerge" in query:
+                if merge_mode == "enable-failure":
+                    return {"errors": [{"message": "enable failed"}]}
+                if merge_mode == "final-drift":
+                    current_merge_head = "d" * 40
+                if merge_mode not in {"final-drift", "timeout"}:
+                    merge_state = "MERGED"
+                return {
+                    "data": {
+                        "enablePullRequestAutoMerge": {
+                            "pullRequest": {"autoMergeRequest": {"enabledAt": "now"}}
+                        }
+                    }
+                }
+            if "disablePullRequestAutoMerge" in query:
+                disable_calls += 1
+                return {"data": {"disablePullRequestAutoMerge": {"pullRequest": {"number": 494}}}}
+            return {"data": {}}
+        if "milestones" in joined or "/issues" in joined:
+            merge_graph_calls += 1
+        return []
+
+    globals()["gh_json"] = fake_merge_gh_json
+    globals()["gh_api_json"] = fake_merge_gh_api
+    globals()["release_graph_failures"] = lambda *args, **kwargs: (
+        ["graph drift"] if merge_mode == "graph-failure" else []
+    )
+    time.sleep = lambda _: None
+    try:
+        assert authorize_merge(
+            "owner/repo",
+            494,
+            merge_sha,
+            Path("."),
+            {},
+            {},
+            "merge-test-01",
+            "owner",
+            "owner",
+        ) == "applied"
+        assert [state for state, context, _ in merge_statuses if context == MERGE_AUTHORIZATION_STATUS_CONTEXT] == [
+            "pending",
+            "success",
+        ]
+        assert json.loads(merge_outcome("merge-test-01", "applied"))["event"] == DISPATCH_MERGE_EVENT
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "merge-test-02", "other", "other"
+            )
+        except SystemExit as error:
+            assert "actor and sender" in str(error)
+        else:
+            raise AssertionError("foreign merge dispatch actor was accepted")
+        merge_state = "MERGED"
+        assert authorize_merge(
+            "owner/repo", 494, merge_sha, Path("."), {}, {},
+            "merge-test-03", "owner", "owner"
+        ) == "already-satisfied"
+        current_merge_head = "b" * 40
+        merge_state = "OPEN"
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "merge-test-04", "owner", "owner"
+            )
+        except SystemExit as error:
+            assert "authorization" in str(error)
+        else:
+            raise AssertionError("stale merge head was authorized")
+        assert not any(
+            state == "success" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+            for state, context, _ in merge_statuses[-2:]
+        )
+        current_merge_head = merge_sha
+        for failure_mode in ("enable-failure", "final-drift", "timeout"):
+            merge_mode = failure_mode
+            merge_state = "OPEN"
+            current_merge_head = merge_sha
+            before = len(merge_statuses)
+            try:
+                authorize_merge(
+                    "owner/repo", 494, merge_sha, Path("."), {}, {},
+                    f"merge-{failure_mode}", "owner", "owner"
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError(f"merge {failure_mode} was incorrectly authorized")
+            dispositions = merge_statuses[before:]
+            assert any(
+                state == "failure" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+                for state, context, _ in dispositions
+            )
+        assert disable_calls >= 2
+        merge_mode = "wrong-check"
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        before = len(merge_statuses)
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "merge-wrong-check", "owner", "owner"
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("wrong-app required check was accepted")
+        assert not any(
+            state == "success" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+            for state, context, _ in merge_statuses[before:]
+        )
+        merge_mode = "review-failure"
+        before = len(merge_statuses)
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "merge-review-failure", "owner", "owner"
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("changes-requested review was accepted")
+        assert not any(
+            state == "success" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+            for state, context, _ in merge_statuses[before:]
+        )
+        merge_mode = "graph-failure"
+        before = len(merge_statuses)
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "merge-graph-failure", "owner", "owner"
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("release graph drift was accepted")
+        assert not any(
+            state == "success" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+            for state, context, _ in merge_statuses[before:]
+        )
+        merge_mode = "draft"
+        before = len(merge_statuses)
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "merge-draft", "owner", "owner"
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("draft PR was accepted")
+        assert not any(
+            state == "success" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+            for state, context, _ in merge_statuses[before:]
+        )
+        merge_mode = "success"
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        globals()["gh_api_json"] = lambda args: [{"number": 1}] * 3
+        try:
+            bounded_api_collection([], 2, "test collection")
+        except BaseException as error:
+            assert "bounded" in str(error)
+        else:
+            raise AssertionError("bounded collection did not fail closed")
+        globals()["gh_api_json"] = lambda args: {"check_runs": [{"name": "verify"}] * 3}
+        try:
+            bounded_api_object_collection([], "check_runs", 2, "test object collection")
+        except BaseException as error:
+            assert "bounded" in str(error)
+        else:
+            raise AssertionError("bounded object collection did not fail closed")
+        globals()["gh_api_json"] = lambda args: ["verify"] * 3
+        try:
+            bounded_api_values([], 2, "test scalar collection")
+        except BaseException as error:
+            assert "bounded" in str(error)
+        else:
+            raise AssertionError("bounded scalar collection did not fail closed")
+        globals()["gh_api_json"] = fake_merge_gh_api
+        for malformed in (None, "", "short"):
+            try:
+                validate_request_id(malformed)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("malformed dispatch request_id was accepted")
+        for malformed_number, malformed_head in (
+            (None, "a" * 40),
+            ("not-a-number", "a" * 40),
+            (494, "short"),
+        ):
+            try:
+                validate_merge_request(malformed_number, malformed_head)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("malformed merge dispatch payload was accepted")
+        assert json.loads(relationship_outcome("rel-test-01", "failed"))["outcome"] == "failed"
+    finally:
+        globals()["gh_json"] = saved_merge_gh_json
+        globals()["gh_api_json"] = saved_merge_gh_api_json
+        globals()["release_graph_failures"] = saved_merge_graph_failures
+        time.sleep = saved_sleep
     print("issue checklist self-test passed")
 
 
@@ -5250,58 +3761,21 @@ def main() -> None:
         type=int,
         help="require every direct release-graph blocker to be closed",
     )
-    issue_mode.add_argument(
-        "--implementation-issue-reference",
-        help="validate a JSON GitHub native closing issue reference and require its blockers to be closed",
-    )
-    parser.add_argument(
-        "--publish-implementation-status-for-pr",
-        type=int,
-        help="publish the current-policy implementation status for one PR head",
-    )
-    parser.add_argument(
-        "--expected-pr-head-sha",
-        help="immutable PR head SHA from the triggering pull-request event",
-    )
-    parser.add_argument(
-        "--publish-implementation-statuses-for-issue",
-        type=int,
-        help="publish current-policy implementation statuses for affected open PRs",
-    )
-    parser.add_argument(
-        "--invalidate-implementation-statuses-for-issue",
-        type=int,
-        help="publish pending implementation statuses before queued finalization",
-    )
-    parser.add_argument(
-        "--reconcile-all-release-graphs",
-        action="store_true",
-        help="reconcile every open implementation PR in every declared release graph",
-    )
-    parser.add_argument(
-        "--enforce-implementation-admission",
-        action="store_true",
-        help="maintain and enforce the bounded native implementation admission set",
-    )
-    parser.add_argument(
-        "--mutate-native-relationship",
-        action="store_true",
-        help="apply one authorized native relationship and revalidate affected PRs",
-    )
+    parser.add_argument("--publish-implementation-status-for-pr", type=int)
+    parser.add_argument("--expected-pr-head-sha")
+    parser.add_argument("--revoke-merge-authorization-for-pr", type=int)
+    parser.add_argument("--enforce-closed-issue-blockers", type=int)
+    parser.add_argument("--mutate-native-relationship", action="store_true")
     parser.add_argument("--native-relationship-kind")
     parser.add_argument("--native-relationship-operation")
     parser.add_argument("--native-relationship-issue")
     parser.add_argument("--native-related-issue")
-    parser.add_argument(
-        "--request-id",
-        help="validated repository_dispatch correlation token for relationship outcomes",
-    )
-    parser.add_argument(
-        "--enforce-closed-issue-blockers",
-        type=int,
-        help="reopen a declared issue that closed before its direct blockers",
-    )
-    parser.add_argument("--run-id", type=int, help="current IssueOps workflow run id")
+    parser.add_argument("--authorize-merge", action="store_true")
+    parser.add_argument("--merge-pr-number")
+    parser.add_argument("--merge-expected-head")
+    parser.add_argument("--request-id")
+    parser.add_argument("--dispatch-actor", default="")
+    parser.add_argument("--event-sender", default="")
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -5311,28 +3785,53 @@ def main() -> None:
         return
     if not args.repo:
         raise SystemExit("--repo is required unless --self-test is used")
-    if args.run_id is not None and args.run_id <= 0:
-        raise SystemExit("--run-id must be a positive IssueOps workflow run id")
+
     request_id = validate_request_id(args.request_id) if args.request_id is not None else None
-    status_modes = [
-        args.publish_implementation_status_for_pr,
-        args.publish_implementation_statuses_for_issue,
-        args.invalidate_implementation_statuses_for_issue,
-    ]
-    if args.mutate_native_relationship and (
-        any(value is not None for value in status_modes)
-        or args.enforce_closed_issue_blockers is not None
-    ):
-        raise SystemExit(
-            "native relationship mutation cannot be combined with another status mode"
+    if args.authorize_merge:
+        if request_id is None:
+            raise SystemExit("merge authorization requires a validated --request-id")
+        try:
+            number, expected_head = validate_merge_request(
+                args.merge_pr_number, args.merge_expected_head
+            )
+            issue_map = load_issue_map(args.issue_map)
+            release_graphs = load_release_graphs(args.issue_map, issue_map)
+            outcome = authorize_merge(
+                args.repo,
+                number,
+                expected_head,
+                Path(args.root),
+                issue_map,
+                release_graphs,
+                request_id,
+                args.dispatch_actor,
+                args.event_sender,
+            )
+        except BaseException:
+            print(merge_outcome(request_id, "failed"))
+            raise
+        print(merge_outcome(request_id, outcome))
+        return
+
+    if args.enforce_closed_issue_blockers is not None:
+        issue_map = load_issue_map(args.issue_map)
+        release_graphs = load_release_graphs(args.issue_map, issue_map)
+        enforce_closed_issue_blockers(
+            args.repo, args.enforce_closed_issue_blockers, release_graphs
         )
-    if sum(value is not None for value in status_modes) > 1:
-        raise SystemExit("implementation status modes are mutually exclusive")
+        return
+
+    if args.revoke_merge_authorization_for_pr is not None:
+        revoke_merge_authorization_for_pr(
+            args.repo,
+            args.revoke_merge_authorization_for_pr,
+            args.expected_pr_head_sha,
+        )
+        return
+
     if args.mutate_native_relationship:
         if request_id is None:
-            raise SystemExit(
-                "native relationship mutation requires a validated --request-id"
-            )
+            raise SystemExit("native relationship mutation requires a validated --request-id")
         try:
             issue, related_issue = validate_native_relationship_request(
                 args.native_relationship_kind,
@@ -5348,88 +3847,33 @@ def main() -> None:
                 related_issue,
                 args.native_relationship_kind,
                 args.native_relationship_operation,
-                Path(args.root),
                 issue_map,
                 release_graphs,
-                run_id=args.run_id,
-                request_id=request_id,
+                request_id,
             )
         except BaseException:
-            print(relationship_outcome(request_id, "failed"), file=sys.stderr)
+            print(relationship_outcome(request_id, "failed"))
             raise
         return
-    if (
-        any(value is not None for value in status_modes)
-        or args.enforce_closed_issue_blockers is not None
-    ):
+
+    if args.publish_implementation_status_for_pr is not None:
         issue_map = load_issue_map(args.issue_map)
         release_graphs = load_release_graphs(args.issue_map, issue_map)
-        root = Path(args.root)
-        closure_error: SystemExit | None = None
-        if args.enforce_closed_issue_blockers is not None:
-            try:
-                enforce_closed_issue_blockers(
-                    args.repo, args.enforce_closed_issue_blockers, release_graphs
-                )
-            except SystemExit as error:
-                # The issue was reopened before this error.  Publish status from
-                # the repaired live state before rejecting the triggering event.
-                closure_error = error
-        try:
-            if args.invalidate_implementation_statuses_for_issue is not None:
-                invalidate_implementation_statuses_for_issue(
-                    args.repo,
-                    args.invalidate_implementation_statuses_for_issue,
-                    issue_map,
-                    release_graphs,
-                    reconcile_all_release_graphs=args.reconcile_all_release_graphs,
-                    enforce_admission=args.enforce_implementation_admission,
-                )
-            if args.publish_implementation_status_for_pr is not None:
-                publish_implementation_status_for_pr(
-                    args.repo,
-                    args.publish_implementation_status_for_pr,
-                    root,
-                    issue_map,
-                    release_graphs,
-                    expected_pr_head_sha=args.expected_pr_head_sha,
-                    run_id=args.run_id,
-                )
-            if args.publish_implementation_statuses_for_issue is not None:
-                publish_implementation_statuses_for_issue(
-                    args.repo,
-                    args.publish_implementation_statuses_for_issue,
-                    root,
-                    issue_map,
-                    release_graphs,
-                    reconcile_all_release_graphs=args.reconcile_all_release_graphs,
-                    run_id=args.run_id,
-                    enforce_admission=args.enforce_implementation_admission,
-                )
-        except SystemExit as status_error:
-            if closure_error is not None:
-                raise SystemExit(f"{closure_error}\n{status_error}") from status_error
-            raise
-        if closure_error is not None:
-            raise closure_error
+        publish_implementation_status_for_pr(
+            args.repo,
+            args.publish_implementation_status_for_pr,
+            Path(args.root),
+            issue_map,
+            release_graphs,
+            expected_pr_head_sha=args.expected_pr_head_sha,
+        )
         return
 
     root = Path(args.root)
     failures: list[str] = []
     issue_map = load_issue_map(args.issue_map)
     release_graphs = load_release_graphs(args.issue_map, issue_map)
-    implementation_issue = args.implementation_issue
-    if args.implementation_issue_reference is not None:
-        try:
-            implementation_reference = json.loads(args.implementation_issue_reference)
-        except json.JSONDecodeError as error:
-            raise SystemExit(
-                f"GitHub closing issue reference was not valid JSON: {error}"
-            ) from error
-        implementation_issue = native_relation_issue_number(
-            args.repo, implementation_reference, "closing issue reference"
-        )
-    issue_number = args.planned_issue or implementation_issue
+    issue_number = args.planned_issue or args.implementation_issue
     target_issue: dict[str, object] | None = None
     target_graph: ReleaseGraph | None = None
     if issue_number is not None:
@@ -5446,7 +3890,7 @@ def main() -> None:
                 issue_map,
                 planned_issue=args.planned_issue
                 if args.planned_issue is not None
-                else implementation_issue,
+                else args.implementation_issue,
             )
         )
     if target_issue is not None:
@@ -5455,7 +3899,7 @@ def main() -> None:
                 target_issue, issue_map, root
             )
         )
-    if implementation_issue is not None and target_issue is not None:
+    if args.implementation_issue is not None and target_issue is not None:
         failures.extend(
             implementation_issue_failures(args.repo, target_issue, release_graphs)
         )
