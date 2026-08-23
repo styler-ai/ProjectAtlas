@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -132,6 +133,14 @@ class ReleaseGraph:
     milestone: str
     release_issue: int
     blocked_by: dict[int, tuple[int, ...]]
+
+
+@dataclass(frozen=True)
+class PublishedSnapshot:
+    """The exact default-branch revision proved before reading local artifacts."""
+
+    branch: str
+    sha: str
 
 
 NATIVE_RELATION_KINDS = {"blocked_by", "sub_issue"}
@@ -1818,8 +1827,7 @@ def publish_implementation_status_for_pr(
     repo: str,
     pull_request_number: int,
     root: Path,
-    issue_map: dict[str, tuple[Owner, ...]],
-    release_graphs: dict[str, ReleaseGraph],
+    issue_map_path: str | Path,
     expected_pr_head_sha: str | None = None,
 ) -> None:
     pull_request = gh_json(
@@ -1856,6 +1864,9 @@ def publish_implementation_status_for_pr(
             else "Planning PR has no native implementation closing reference"
         )
     else:
+        require_published_snapshot(repo, root)
+        issue_map = load_issue_map(issue_map_path)
+        release_graphs = load_release_graphs(issue_map_path, issue_map)
         for reference in references:
             try:
                 failures.extend(
@@ -1947,6 +1958,30 @@ def bounded_api_object_collection(
     )
 
 
+def git_output(root: Path, args: list[str]) -> str:
+    """Read one bounded Git fact without allowing a candidate checkout fallback."""
+
+    command = ["git", "-C", str(root), *args]
+    try:
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SystemExit(f"published readiness Git inspection failed: {error}") from error
+    if process.returncode:
+        detail = process.stderr.strip()
+        raise SystemExit(
+            "published readiness Git inspection failed: "
+            f"{detail or 'git returned a non-zero status'}"
+        )
+    return process.stdout.strip()
+
+
 def default_branch_head(repo: str, branch: str) -> str:
     owner, name = repo_parts(repo)
     payload = gh_api_json(
@@ -1965,6 +2000,29 @@ def default_branch_head(repo: str, branch: str) -> str:
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", sha) is None:
         raise SystemExit("default branch ref did not contain an exact commit SHA")
     return sha
+
+
+def require_published_snapshot(repo: str, root: Path) -> PublishedSnapshot:
+    """Prove that local artifact reads come from the exact clean live default branch."""
+
+    checkout = root.resolve()
+    reported_root = Path(git_output(root, ["rev-parse", "--show-toplevel"])).resolve()
+    if os.path.normcase(str(reported_root)) != os.path.normcase(str(checkout)):
+        raise SystemExit("published readiness root is not the addressed Git checkout")
+    if git_output(root, ["status", "--porcelain=v1", "--untracked-files=no"]):
+        raise SystemExit("published readiness checkout has tracked modifications")
+    local_sha = git_output(root, ["rev-parse", "HEAD"])
+    if re.fullmatch(r"[0-9a-fA-F]{40}", local_sha) is None:
+        raise SystemExit("published readiness checkout HEAD was malformed")
+    repository = gh_json(["repo", "view", repo, "--json", "defaultBranchRef"])
+    branch_ref = repository.get("defaultBranchRef") if isinstance(repository, dict) else None
+    branch = branch_ref.get("name") if isinstance(branch_ref, dict) else None
+    if not isinstance(branch, str) or not branch:
+        raise SystemExit("published readiness default branch identity was malformed")
+    live_sha = default_branch_head(repo, branch)
+    if local_sha.casefold() != live_sha.casefold():
+        raise SystemExit("published readiness checkout HEAD does not equal live default branch")
+    return PublishedSnapshot(branch, live_sha)
 
 
 def required_check_contexts(repo: str, branch: str) -> list[str]:
@@ -2178,7 +2236,10 @@ def merge_readiness_failures(
     issue_map: dict[str, tuple[Owner, ...]],
     release_graphs: dict[str, ReleaseGraph],
     expected_base_sha: str | None = None,
+    published_snapshot: PublishedSnapshot | None = None,
 ) -> tuple[list[str], dict[str, object]]:
+    if published_snapshot is None:
+        published_snapshot = require_published_snapshot(repo, root)
     details = gh_json(
         [
             "pr",
@@ -2207,6 +2268,8 @@ def merge_readiness_failures(
     branch = branch_ref.get("name") if isinstance(branch_ref, dict) else None
     if not isinstance(branch, str) or not branch:
         raise SystemExit("repository default branch response was malformed")
+    if branch != published_snapshot.branch:
+        failures.append("repository default branch changed during published readiness")
     if details.get("baseRefName") != branch:
         failures.append("merge PR does not target the repository default branch")
     try:
@@ -2234,6 +2297,8 @@ def merge_readiness_failures(
         failures.append("merge PR has unresolved changes requested")
     failures.extend(unresolved_review_failures(repo, number))
     base_sha = default_branch_head(repo, branch)
+    if base_sha.casefold() != published_snapshot.sha.casefold():
+        failures.append("default branch changed during published readiness")
     if expected_base_sha is not None and base_sha != expected_base_sha:
         failures.append("default branch changed during merge authorization")
     required = required_check_contexts(repo, branch)
@@ -2352,10 +2417,13 @@ def authorize_merge(
     request_id: str,
     actor: str,
     sender: str,
+    published_snapshot: PublishedSnapshot | None = None,
 ) -> str:
     owner, _ = repo_parts(repo)
     if actor != owner or sender != owner:
         raise SystemExit("merge dispatch actor and sender must equal the repository owner")
+    if published_snapshot is None:
+        published_snapshot = require_published_snapshot(repo, root)
     commit_status(
         repo,
         expected_head,
@@ -2367,7 +2435,13 @@ def authorize_merge(
     node_id: str | None = None
     try:
         failures, state = merge_readiness_failures(
-            repo, number, expected_head, root, issue_map, release_graphs
+            repo,
+            number,
+            expected_head,
+            root,
+            issue_map,
+            release_graphs,
+            published_snapshot=published_snapshot,
         )
         details = state["details"]
         node_id = details.get("id") if isinstance(details, dict) else None
@@ -2388,6 +2462,7 @@ def authorize_merge(
             issue_map,
             release_graphs,
             expected_base_sha=state["base_sha"],
+            published_snapshot=published_snapshot,
         )
         if final_failures:
             raise SystemExit("merge authorization final re-read failed:\n" + "\n".join(final_failures))
@@ -3555,9 +3630,139 @@ Mitigations:
                 readiness_root, "ready-change"
             )
         )
+        (change / "tasks.md").write_text(
+            "## 1. Contract\n- [x] 1.1 Specify the contract.\n"
+            "## 2. Acceptance\n- [ ] 2.1 Review the final implementation against the "
+            "architecture diagrams, update the diagrams or implementation until they "
+            "agree, or reconfirm the reasoned N/A.\n",
+            encoding="utf-8",
+        )
+        (readiness_root / "docs").mkdir()
+        (readiness_root / "docs" / "candidate-only.md").write_text(
+            "## Candidate Heading\n\nCandidate-only presentation.\n",
+            encoding="utf-8",
+        )
+        assert openspec_readiness_failures(readiness_root, "ready-change") == []
+        assert planned_issue_failures(
+            ready_issue, {"ready-change": (Owner(448),)}, readiness_root
+        ) == []
+        try:
+            require_published_snapshot("owner/repo", readiness_root)
+        except SystemExit as error:
+            assert "Git inspection failed" in str(error)
+        else:
+            raise AssertionError("candidate-only artifacts passed published readiness")
+
+    saved_guard_git_output = globals()["git_output"]
+    saved_guard_gh_json = globals()["gh_json"]
+    saved_guard_default_branch_head = globals()["default_branch_head"]
+    guard_mode = "clean"
+    guard_sha = "e" * 40
+
+    def fake_guard_git_output(root: Path, args: list[str]) -> str:
+        if guard_mode == "git-failure":
+            raise SystemExit("published readiness Git inspection failed: fixture")
+        if args == ["rev-parse", "--show-toplevel"]:
+            return str(self_test_root)
+        if args == ["status", "--porcelain=v1", "--untracked-files=no"]:
+            return " M tracked.md" if guard_mode == "tracked-dirty" else ""
+        if args == ["rev-parse", "HEAD"]:
+            return "d" * 40 if guard_mode == "stale" else guard_sha
+        raise AssertionError(f"unexpected published Git fixture command: {args}")
+
+    def fake_guard_gh_json(args: list[str]) -> object:
+        if guard_mode == "default-unavailable":
+            raise SystemExit("default branch unavailable")
+        if guard_mode == "default-missing":
+            return {}
+        if guard_mode == "default-malformed":
+            return {"defaultBranchRef": {"name": 7}}
+        return {"defaultBranchRef": {"name": "main"}}
+
+    def fake_guard_default_branch_head(repo: str, branch: str) -> str:
+        if guard_mode == "live-unavailable":
+            raise SystemExit("default branch ref unavailable")
+        return guard_sha
+
+    globals()["git_output"] = fake_guard_git_output
+    globals()["gh_json"] = fake_guard_gh_json
+    globals()["default_branch_head"] = fake_guard_default_branch_head
+    try:
+        assert require_published_snapshot(
+            "owner/repo", self_test_root
+        ) == PublishedSnapshot("main", guard_sha)
+        for failure_mode, expected in (
+            ("stale", "does not equal live default branch"),
+            ("tracked-dirty", "tracked modifications"),
+            ("default-missing", "identity was malformed"),
+            ("default-malformed", "identity was malformed"),
+            ("default-unavailable", "default branch unavailable"),
+            ("live-unavailable", "default branch ref unavailable"),
+            ("git-failure", "Git inspection failed"),
+        ):
+            guard_mode = failure_mode
+            try:
+                require_published_snapshot("owner/repo", self_test_root)
+            except SystemExit as error:
+                assert expected in str(error)
+            else:
+                raise AssertionError(
+                    f"published readiness fixture {failure_mode} was accepted"
+                )
+        guard_mode = "clean"
+    finally:
+        globals()["git_output"] = saved_guard_git_output
+        globals()["gh_json"] = saved_guard_gh_json
+        globals()["default_branch_head"] = saved_guard_default_branch_head
+
+    saved_planning_gh_json = globals()["gh_json"]
+    saved_planning_gh_api_json = globals()["gh_api_json"]
+    saved_planning_guard = globals()["require_published_snapshot"]
+    planning_statuses: list[str] = []
+
+    def fake_planning_gh_json(args: list[str]) -> object:
+        if args[0] != "pr":
+            raise AssertionError(f"unexpected planning PR call: {args}")
+        fields = args[-1]
+        if fields == "number,headRefOid,closingIssuesReferences,author":
+            return {
+                "number": 494,
+                "headRefOid": "f" * 40,
+                "closingIssuesReferences": [],
+                "author": {"login": "owner"},
+            }
+        if fields == "number,headRefOid":
+            return {"number": 494, "headRefOid": "f" * 40}
+        raise AssertionError(f"unexpected planning PR fields: {fields}")
+
+    def fake_planning_gh_api(args: list[str]) -> object:
+        state = next(
+            argument.split("=", 1)[1]
+            for argument in args
+            if argument.startswith("state=")
+        )
+        planning_statuses.append(state)
+        return {}
+
+    globals()["gh_json"] = fake_planning_gh_json
+    globals()["gh_api_json"] = fake_planning_gh_api
+    globals()["require_published_snapshot"] = lambda *args, **kwargs: (
+        (_ for _ in ()).throw(AssertionError("planning PR unexpectedly required publication"))
+    )
+    try:
+        publish_implementation_status_for_pr(
+            "owner/repo", 494, self_test_root, self_test_root / "issue-map.json"
+        )
+        assert planning_statuses == ["pending", "success"]
+    finally:
+        globals()["gh_json"] = saved_planning_gh_json
+        globals()["gh_api_json"] = saved_planning_gh_api_json
+        globals()["require_published_snapshot"] = saved_planning_guard
+
     saved_merge_gh_json = globals()["gh_json"]
     saved_merge_gh_api_json = globals()["gh_api_json"]
     saved_merge_graph_failures = globals()["release_graph_failures"]
+    saved_merge_guard = globals()["require_published_snapshot"]
     saved_sleep = time.sleep
     merge_sha = "a" * 40
     current_merge_head = merge_sha
@@ -3727,6 +3932,9 @@ Mitigations:
     globals()["gh_api_json"] = fake_merge_gh_api
     globals()["release_graph_failures"] = lambda *args, **kwargs: (
         ["graph drift"] if merge_mode == "graph-failure" else []
+    )
+    globals()["require_published_snapshot"] = lambda *args, **kwargs: PublishedSnapshot(
+        "main", "b" * 40
     )
     time.sleep = lambda _: None
     try:
@@ -3945,6 +4153,7 @@ Mitigations:
         globals()["gh_json"] = saved_merge_gh_json
         globals()["gh_api_json"] = saved_merge_gh_api_json
         globals()["release_graph_failures"] = saved_merge_graph_failures
+        globals()["require_published_snapshot"] = saved_merge_guard
         time.sleep = saved_sleep
     print("issue checklist self-test passed")
 
@@ -3995,6 +4204,8 @@ def main() -> None:
             number, expected_head = validate_merge_request(
                 args.merge_pr_number, args.merge_expected_head
             )
+            root = Path(args.root)
+            published_snapshot = require_published_snapshot(args.repo, root)
             issue_map = load_issue_map(args.issue_map)
             release_graphs = load_release_graphs(args.issue_map, issue_map)
             outcome = authorize_merge(
@@ -4007,6 +4218,7 @@ def main() -> None:
                 request_id,
                 args.dispatch_actor,
                 args.event_sender,
+                published_snapshot=published_snapshot,
             )
         except BaseException:
             print(merge_outcome(request_id, "failed"))
@@ -4015,6 +4227,7 @@ def main() -> None:
         return
 
     if args.enforce_closed_issue_blockers is not None:
+        require_published_snapshot(args.repo, Path(args.root))
         issue_map = load_issue_map(args.issue_map)
         release_graphs = load_release_graphs(args.issue_map, issue_map)
         enforce_closed_issue_blockers(
@@ -4040,6 +4253,7 @@ def main() -> None:
                 args.native_relationship_issue,
                 args.native_related_issue,
             )
+            require_published_snapshot(args.repo, Path(args.root))
             issue_map = load_issue_map(args.issue_map)
             release_graphs = load_release_graphs(args.issue_map, issue_map)
             mutate_native_relationship_and_revalidate(
@@ -4058,20 +4272,23 @@ def main() -> None:
         return
 
     if args.publish_implementation_status_for_pr is not None:
-        issue_map = load_issue_map(args.issue_map)
-        release_graphs = load_release_graphs(args.issue_map, issue_map)
         publish_implementation_status_for_pr(
             args.repo,
             args.publish_implementation_status_for_pr,
             Path(args.root),
-            issue_map,
-            release_graphs,
+            args.issue_map,
             expected_pr_head_sha=args.expected_pr_head_sha,
         )
         return
 
     root = Path(args.root)
     failures: list[str] = []
+    if (
+        args.planned_issue is not None
+        or args.implementation_issue is not None
+        or args.milestone
+    ):
+        require_published_snapshot(args.repo, root)
     issue_map = load_issue_map(args.issue_map)
     release_graphs = load_release_graphs(args.issue_map, issue_map)
     issue_number = args.planned_issue or args.implementation_issue
