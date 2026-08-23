@@ -22,6 +22,37 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 - **WHEN** a planned, implementation, merge-authorization, milestone, or release check resolves an artifact only from a candidate, stale, or dirty checkout
 - **THEN** readiness fails until a planning pull request lands and the exact live default-branch artifact is read back successfully
 
+#### Scenario: The local checkout is not the exact published root
+- **WHEN** Git reports another top-level root, a malformed local HEAD, a well-formed but different HEAD, or tracked modifications
+- **THEN** published readiness fails before the checkout's OpenSpec or architecture artifacts authorize state
+
+#### Scenario: Only ignored untracked notes exist
+- **WHEN** the exact live default-branch checkout differs only by untracked files excluded from tracked publication identity
+- **THEN** published readiness may continue without treating those notes as repository evidence
+
+#### Scenario: Published identity cannot be established
+- **WHEN** Git inspection times out or raises an OS/process error, or GitHub returns a malformed default-branch identity, ref, or SHA
+- **THEN** the check fails closed with no fallback to candidate or cached identity
+
+#### Scenario: The default branch moves during merge authorization
+- **WHEN** the live default-branch SHA differs between published-snapshot admission, merge preflight, or final authorization reread
+- **THEN** authorization fails and cannot arm or preserve a merge decision based on the earlier snapshot
+
+### Requirement: Native relationship changes are prevalidated and reverse drift is repaired
+IssueOps SHALL derive a bounded transition plan from the declared release graph and current native state before any relationship mutation. The requested relation kind, orientation, issue, related issue, and operation SHALL match exactly one missing-or-extra transition toward the declaration. Post-mutation readback and complete graph reconciliation SHALL remain mandatory. Issue events SHALL repair invalid closed state in both blocker directions within the declared graph and SHALL validate a declared issue even when a `demilestoned` event removed its live milestone.
+
+#### Scenario: A relationship request does not match the declared transition
+- **WHEN** the requested tuple is unknown, ambiguous, reversed, graph-widening, or does not repair one exact missing-or-extra relation
+- **THEN** IssueOps rejects it before any GitHub mutation and does not rely on rollback after reconciliation failure
+
+#### Scenario: A blocker reopens
+- **WHEN** a declared blocker becomes open while one or more graph-bounded reverse dependents are closed
+- **THEN** IssueOps derives reverse direct-blocker adjacency, reopens or fails every invalid closed dependent through a bounded queue, and invalidates affected implementation or merge readiness
+
+#### Scenario: A declared issue is demilestoned
+- **WHEN** an issue event removes the live milestone from an issue still owned by a release graph
+- **THEN** IssueOps selects the graph from the issue map, reports targeted milestone drift, and does not skip validation because the event payload milestone is null
+
 ### Requirement: Release input is exact and complete
 #492 SHALL freeze one exact `main` revision only after every accepted child, task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete and the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source and architecture target. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
 
