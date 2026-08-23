@@ -14,7 +14,7 @@ on:
   issues:
     types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
   pull_request_target:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, milestoned, demilestoned]
   repository_dispatch:
     types: [issueops_relationship, issueops_merge]
   # Relationship and merge clients use authenticated default-branch dispatches.

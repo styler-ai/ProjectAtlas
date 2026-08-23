@@ -8568,6 +8568,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "relationship_outcome",
         "merge_outcome",
         "merge_readiness_failures",
+        "pull_request_milestone_failures",
+        "autoMergeRequest,milestone",
+        "closingIssuesReferences,reviewDecision,milestone",
+        "merge authorization milestone preflight failed",
+        "implementation status final milestone read-back failed",
         "merge_authorization_policy",
         "repository identity response was malformed",
         "repository_owner",
@@ -8793,7 +8798,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary checkout step is missing"))?;
     if !ci.contains(
-        "pull_request:\n    branches: [main, dev]\n    types: [opened, edited, synchronize, reopened]",
+        "pull_request:\n    branches: [main, dev]\n    types: [opened, edited, synchronize, reopened, milestoned, demilestoned]",
     ) {
         return Err(io::Error::other(
             "pull_request CI must rerun on body edits while retaining the ordinary activity types",
@@ -8884,7 +8889,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "format('merge {0} pr-{1}', github.event.client_payload.request_id, github.event.client_payload.pr_number)",
         "format('relationship {0}', github.event.client_payload.request_id)",
         "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
-        "types: [opened, edited, synchronize, reopened]",
+        "types: [opened, edited, synchronize, reopened, milestoned, demilestoned]",
         "repository_dispatch:",
         "types: [issueops_relationship, issueops_merge]",
         "gh api repos/OWNER/REPO/dispatches",

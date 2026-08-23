@@ -1976,7 +1976,7 @@ def pull_request_readback(
             "-R",
             repo,
             "--json",
-            "number,headRefOid,closingIssuesReferences,id,autoMergeRequest",
+            "number,headRefOid,closingIssuesReferences,id,autoMergeRequest,milestone",
         ]
     )
     if not isinstance(payload, dict) or positive_issue(
@@ -1996,6 +1996,62 @@ def pull_request_readback(
     if expected_references is not None and references != expected_references:
         raise SystemExit(f"PR #{number} closing references changed before mutation")
     return payload
+
+
+def pull_request_milestone_failures(
+    repo: str,
+    details: dict[str, object],
+    release_graphs: dict[str, ReleaseGraph] | None = None,
+) -> list[str]:
+    """Require one native owner and an unchanged release milestone before mutation."""
+
+    references = details.get("closingIssuesReferences")
+    if not isinstance(references, list) or len(references) != 1:
+        return ["merge PR must have exactly one native owning issue reference"]
+    try:
+        owner_issue_number = native_relation_issue_number(
+            repo, references[0], "merge PR closing issue reference"
+        )
+        owner_issue = issue_payload(repo, owner_issue_number)
+    except BaseException as error:
+        return [f"merge PR owning issue identity or milestone was unreadable: {error}"]
+    owner_milestone = owner_issue.get("milestone")
+    owner_title = (
+        owner_milestone.get("title")
+        if isinstance(owner_milestone, dict)
+        else None
+    )
+    failures: list[str] = []
+    if not isinstance(owner_title, str) or RELEASE_MILESTONE_RE.fullmatch(owner_title) is None:
+        failures.append("merge PR owning issue milestone was missing or malformed")
+    graph = None
+    if release_graphs is not None:
+        graph_matches = [
+            candidate
+            for candidate in release_graphs.values()
+            if owner_issue_number in candidate.blocked_by
+        ]
+        if len(graph_matches) != 1:
+            failures.append(
+                f"merge PR owning issue #{owner_issue_number} must belong to exactly one release graph"
+            )
+        else:
+            graph = graph_matches[0]
+        if graph is not None and isinstance(owner_title, str) and graph.milestone != owner_title:
+            failures.append(
+                f"merge PR owning issue #{owner_issue_number} milestone does not match "
+                f"release graph {graph.milestone}"
+            )
+    expected_title = graph.milestone if graph is not None else owner_title
+    pr_milestone = details.get("milestone")
+    pr_title = pr_milestone.get("title") if isinstance(pr_milestone, dict) else None
+    if not isinstance(pr_title, str) or RELEASE_MILESTONE_RE.fullmatch(pr_title) is None:
+        failures.append("merge PR milestone was missing or malformed")
+    elif isinstance(expected_title, str) and pr_title != expected_title:
+        failures.append(
+            f"merge PR milestone {pr_title} does not match owning release milestone {expected_title}"
+        )
+    return failures
 
 
 def implementation_reference_failures(
@@ -2035,7 +2091,7 @@ def publish_implementation_status_for_pr(
             "-R",
             repo,
             "--json",
-            "number,headRefOid,closingIssuesReferences,author",
+            "number,headRefOid,closingIssuesReferences,author,milestone",
         ]
     )
     if not isinstance(pull_request, dict):
@@ -2050,14 +2106,14 @@ def publish_implementation_status_for_pr(
     references = pull_request.get("closingIssuesReferences")
     if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
         raise SystemExit("pull request closing references exceeded the bounded limit")
-    pull_request_readback(
+    readback = pull_request_readback(
         repo,
         number,
         expected_head_sha=expected_sha,
         expected_references=references,
     )
-    commit_status(repo, sha, "pending", "Revalidating native implementation references")
     failures: list[str] = []
+    release_graphs: dict[str, ReleaseGraph] | None = None
     author = pull_request.get("author")
     author_login = author.get("login") if isinstance(author, dict) else None
     if author_login == "dependabot[bot]" or not references:
@@ -2070,6 +2126,7 @@ def publish_implementation_status_for_pr(
         require_published_snapshot(repo, root)
         issue_map = load_issue_map(issue_map_path)
         release_graphs = load_release_graphs(issue_map_path, issue_map)
+        failures.extend(pull_request_milestone_failures(repo, readback, release_graphs))
         for reference in references:
             try:
                 failures.extend(
@@ -2084,12 +2141,30 @@ def publish_implementation_status_for_pr(
             if not failures
             else "Native implementation references failed: " + clean(failures[0])
         )[:140]
-    pull_request_readback(
+    if failures:
+        raise SystemExit("implementation status preflight failed:\n" + "\n".join(failures))
+    commit_status(repo, sha, "pending", "Revalidating native implementation references")
+    final_readback = pull_request_readback(
         repo,
         number,
         expected_head_sha=expected_sha,
         expected_references=references,
     )
+    if references and author_login != "dependabot[bot]":
+        final_milestone_failures = pull_request_milestone_failures(
+            repo, final_readback, release_graphs
+        )
+        if final_milestone_failures:
+            commit_status(
+                repo,
+                expected_sha,
+                "failure",
+                "Implementation readiness failed after milestone re-read",
+            )
+            raise SystemExit(
+                "implementation status final milestone read-back failed:\n"
+                + "\n".join(final_milestone_failures)
+            )
     state = "success" if not failures else "failure"
     commit_status(repo, expected_sha, state, description)
     if failures:
@@ -2101,6 +2176,7 @@ def revoke_merge_authorization_for_pr(
     pull_request_number: int,
     expected_head_sha: str | None = None,
     expected_references: list[object] | None = None,
+    release_graphs: dict[str, ReleaseGraph] | None = None,
 ) -> None:
     details = pull_request_readback(
         repo,
@@ -2111,6 +2187,7 @@ def revoke_merge_authorization_for_pr(
     number = positive_issue(details["number"], "pull request number")
     sha = details["headRefOid"]
     failures: list[str] = []
+    failures.extend(pull_request_milestone_failures(repo, details, release_graphs))
     auto_merge_request = details.get("autoMergeRequest")
     if auto_merge_request is not None:
         if not isinstance(auto_merge_request, dict) or not isinstance(
@@ -2463,7 +2540,7 @@ def merge_readiness_failures(
             "-R",
             repo,
             "--json",
-            "number,state,isDraft,baseRefName,headRefOid,mergeable,mergeCommit,id,author,closingIssuesReferences,reviewDecision",
+            "number,state,isDraft,baseRefName,headRefOid,mergeable,mergeCommit,id,author,closingIssuesReferences,reviewDecision,milestone",
         ]
     )
     if not isinstance(details, dict):
@@ -2501,6 +2578,7 @@ def merge_readiness_failures(
     if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
         failures.append("merge PR closing references exceeded the bounded limit")
         references = []
+    failures.extend(pull_request_milestone_failures(repo, details, release_graphs))
     author = details.get("author")
     if not isinstance(author, dict) or not isinstance(author.get("login"), str):
         failures.append("merge PR author identity was malformed")
@@ -2639,7 +2717,10 @@ def authorize_merge(
         raise SystemExit("merge dispatch actor and sender must equal the repository owner")
     if published_snapshot is None:
         published_snapshot = require_published_snapshot(repo, root)
-    pull_request_readback(repo, number, expected_head_sha=expected_head)
+    initial = pull_request_readback(repo, number, expected_head_sha=expected_head)
+    milestone_failures = pull_request_milestone_failures(repo, initial, release_graphs)
+    if milestone_failures:
+        raise SystemExit("merge authorization milestone preflight failed:\n" + "\n".join(milestone_failures))
     commit_status(
         repo,
         expected_head,
@@ -2669,12 +2750,20 @@ def authorize_merge(
         )
         node_id = current.get("id")
         if str(details.get("state", "")).upper() == "MERGED" and not failures:
-            pull_request_readback(
+            final_current = pull_request_readback(
                 repo,
                 number,
                 expected_head_sha=expected_head,
                 expected_references=current["closingIssuesReferences"],
             )
+            final_milestone_failures = pull_request_milestone_failures(
+                repo, final_current, release_graphs
+            )
+            if final_milestone_failures:
+                raise SystemExit(
+                    "merge authorization final milestone read-back failed:\n"
+                    + "\n".join(final_milestone_failures)
+                )
             commit_status(
                 repo, expected_head, "success", "Merge already confirmed", MERGE_AUTHORIZATION_STATUS_CONTEXT
             )
@@ -2701,12 +2790,20 @@ def authorize_merge(
             if isinstance(final_details, dict)
             else None
         )
-        pull_request_readback(
+        final_current = pull_request_readback(
             repo,
             number,
             expected_head_sha=expected_head,
             expected_references=final_references if isinstance(final_references, list) else None,
         )
+        final_milestone_failures = pull_request_milestone_failures(
+            repo, final_current, release_graphs
+        )
+        if final_milestone_failures:
+            raise SystemExit(
+                "merge authorization final milestone read-back failed:\n"
+                + "\n".join(final_milestone_failures)
+            )
         commit_status(
             repo,
             expected_head,
@@ -2765,7 +2862,9 @@ def implementation_issue_failures(
     return failures
 
 
-def invalidate_issue_readiness(repo: str, issue: int) -> None:
+def invalidate_issue_readiness(
+    repo: str, issue: int, release_graphs: dict[str, ReleaseGraph] | None = None
+) -> None:
     """Invalidate bounded open PR readiness statuses linked to one affected issue."""
 
     pull_requests = gh_json(
@@ -2829,6 +2928,7 @@ def invalidate_issue_readiness(repo: str, issue: int) -> None:
                 number,
                 expected_head_sha=head,
                 expected_references=references,
+                release_graphs=release_graphs,
             )
         except BaseException as error:
             failures.append(f"PR #{number} merge authorization invalidation failed: {error}")
@@ -2875,7 +2975,7 @@ def repair_reopened_blocker(
                 raise SystemExit(
                     f"dependent #{dependent} has an invalid state {state or 'UNKNOWN'}"
                 )
-            invalidate_issue_readiness(repo, dependent)
+            invalidate_issue_readiness(repo, dependent, graphs)
             queue.append(dependent)
 
 
@@ -2895,7 +2995,7 @@ def enforce_closed_issue_blockers(
     if not failures:
         return
     run(["gh", "issue", "reopen", str(issue_number), "--repo", repo])
-    invalidate_issue_readiness(repo, issue_number)
+    invalidate_issue_readiness(repo, issue_number, graphs)
     repair_reopened_blocker(repo, issue_number, graphs)
     raise SystemExit(
         "closed issue was reopened because blocker enforcement failed:\n"
@@ -4120,7 +4220,10 @@ Mitigations:
                     "autoMergeRequest": {"id": f"AUTO_{number}"}
                     if number == 494
                     else None,
+                    "milestone": {"title": "v1.2.3-00"},
                 }
+            if args[:2] == ["issue", "view"]:
+                return {"number": int(args[2]), "milestone": {"title": "v1.2.3-00"}}
             raise AssertionError(f"unexpected invalidation gh_json call: {args}")
 
         def fake_invalidation_status(
@@ -4136,6 +4239,10 @@ Mitigations:
                 raise RuntimeError(f"simulated {number} {context} status failure")
 
         globals()["gh_json"] = fake_invalidation_gh_json
+        globals()["issue_payload"] = lambda repo, issue: {
+            "number": issue,
+            "milestone": {"title": "v1.2.3-00"},
+        }
         globals()["commit_status"] = fake_invalidation_status
 
         def fake_disable_auto_merge(repo: str, node_id: str) -> None:
@@ -4624,20 +4731,22 @@ Mitigations:
         if args[0] != "pr":
             raise AssertionError(f"unexpected planning PR call: {args}")
         fields = args[-1]
-        if fields == "number,headRefOid,closingIssuesReferences,author":
+        if fields == "number,headRefOid,closingIssuesReferences,author,milestone":
             return {
                 "number": 494,
                 "headRefOid": "f" * 40,
                 "closingIssuesReferences": [],
                 "author": {"login": "owner"},
+                "milestone": {"title": "v0.5.0-00"},
             }
-        if fields == "number,headRefOid,closingIssuesReferences,id,autoMergeRequest":
+        if fields == "number,headRefOid,closingIssuesReferences,id,autoMergeRequest,milestone":
             return {
                 "number": 494,
                 "headRefOid": "f" * 40,
                 "closingIssuesReferences": [],
                 "id": "PR_494",
                 "autoMergeRequest": None,
+                "milestone": {"title": "v0.5.0-00"},
             }
         raise AssertionError(f"unexpected planning PR fields: {fields}")
 
@@ -4680,9 +4789,11 @@ Mitigations:
     merge_graph_calls = 0
     default_branch_reads = 0
     review_thread_mode = "empty"
+    merge_pr_reads = 0
+    merge_reference = {**local_identity, "number": 10}
 
     def fake_merge_gh_json(args: list[str]) -> object:
-        nonlocal current_merge_head, merge_state, merge_mode
+        nonlocal current_merge_head, merge_state, merge_mode, merge_pr_reads
         if args[0] == "repo":
             repository = {
                 "defaultBranchRef": {"name": "main"},
@@ -4701,11 +4812,28 @@ Mitigations:
                 }
             )
             return repository
+        if args[0] == "issue":
+            return {
+                "number": 10,
+                "milestone": {"title": "v1.2.3-00"},
+            }
         if args[0] != "pr":
             raise AssertionError(f"unexpected merge gh call: {args}")
         fields = args[-1] if "--json" in args else ""
         if fields == "headRefOid":
             return {"headRefOid": current_merge_head}
+        if fields != "state,headRefOid,baseRefName,mergeCommit":
+            merge_pr_reads += 1
+        if merge_mode == "missing-milestone":
+            milestone = None
+        elif merge_mode == "malformed-milestone":
+            milestone = "v1.2.3-00"
+        elif merge_mode in {"wrong-milestone", "final-milestone-drift"} and (
+            merge_mode == "wrong-milestone" or merge_pr_reads >= 4
+        ):
+            milestone = {"title": "v9.9.9-00"}
+        else:
+            milestone = {"title": "v1.2.3-00"}
         return {
             "number": 494,
             "state": merge_state,
@@ -4716,7 +4844,8 @@ Mitigations:
             "mergeCommit": {"oid": "c" * 40} if merge_state == "MERGED" else None,
             "id": "PR_node_494",
             "author": {"login": "owner"},
-            "closingIssuesReferences": [],
+            "closingIssuesReferences": [merge_reference],
+            "milestone": milestone,
             "reviewDecision": {
                 "review-failure": "CHANGES_REQUESTED",
                 "review-no-decision": None,
@@ -4865,6 +4994,8 @@ Mitigations:
     globals()["release_graph_failures"] = lambda *args, **kwargs: (
         ["graph drift"] if merge_mode == "graph-failure" else []
     )
+    saved_merge_implementation_failures = globals()["implementation_reference_failures"]
+    globals()["implementation_reference_failures"] = lambda *args, **kwargs: []
     globals()["require_published_snapshot"] = lambda *args, **kwargs: PublishedSnapshot(
         "main", "b" * 40
     )
@@ -4888,7 +5019,7 @@ Mitigations:
             merge_sha,
             Path("."),
             {},
-            {},
+            valid_graphs,
             "merge-test-01",
             "owner",
             "owner",
@@ -4898,9 +5029,69 @@ Mitigations:
             "success",
         ]
         assert json.loads(merge_outcome("merge-test-01", "applied"))["event"] == DISPATCH_MERGE_EVENT
+        merge_mode = "wrong-milestone"
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        before_enable = enable_calls
         try:
             authorize_merge(
-                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
+                "merge-wrong-milestone", "owner", "owner"
+            )
+        except SystemExit as error:
+            assert "milestone" in str(error)
+        else:
+            raise AssertionError("wrong PR milestone was accepted")
+        assert enable_calls == before_enable
+        for milestone_mode, milestone_value in (
+            ("missing-milestone", None),
+            ("malformed-milestone", "v1.2.3-00"),
+        ):
+            merge_mode = milestone_mode
+            failures = pull_request_milestone_failures(
+                "owner/repo",
+                {"closingIssuesReferences": [merge_reference], "milestone": milestone_value},
+                valid_graphs,
+            )
+            assert any("milestone" in failure for failure in failures)
+        ambiguous_graphs = {
+            **valid_graphs,
+            "v9.9.9-00": ReleaseGraph(
+                "v9.9.9-00", 12, {10: (11,), 11: (), 12: (10, 11)}
+            ),
+        }
+        failures = pull_request_milestone_failures(
+            "owner/repo",
+            {"closingIssuesReferences": [merge_reference], "milestone": {"title": "v1.2.3-00"}},
+            ambiguous_graphs,
+        )
+        assert any("exactly one release graph" in failure for failure in failures)
+        merge_mode = "success"
+        merge_pr_reads = 0
+        assert authorize_merge(
+            "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
+            "merge-restored-milestone", "owner", "owner"
+        ) == "applied"
+        merge_mode = "final-milestone-drift"
+        merge_pr_reads = 0
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        before_enable = enable_calls
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
+                "merge-final-milestone-drift", "owner", "owner"
+            )
+        except SystemExit as error:
+            assert "milestone" in str(error)
+        else:
+            raise AssertionError("final milestone movement was accepted")
+        assert enable_calls == before_enable + 1
+        merge_mode = "success"
+        merge_pr_reads = 0
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                 "merge-test-02", "other", "other"
             )
         except SystemExit as error:
@@ -4909,7 +5100,7 @@ Mitigations:
             raise AssertionError("foreign merge dispatch actor was accepted")
         merge_state = "MERGED"
         assert authorize_merge(
-            "owner/repo", 494, merge_sha, Path("."), {}, {},
+            "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
             "merge-test-03", "owner", "owner"
         ) == "already-satisfied"
         current_merge_head = "b" * 40
@@ -4917,7 +5108,7 @@ Mitigations:
         before_stale = len(merge_statuses)
         try:
             authorize_merge(
-                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                 "merge-test-04", "owner", "owner"
             )
         except SystemExit as error:
@@ -4936,7 +5127,7 @@ Mitigations:
             before = len(merge_statuses)
             try:
                 authorize_merge(
-                    "owner/repo", 494, merge_sha, Path("."), {}, {},
+                    "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                     f"merge-{failure_mode}", "owner", "owner"
                 )
             except SystemExit:
@@ -4957,7 +5148,7 @@ Mitigations:
             before = len(merge_statuses)
             try:
                 authorize_merge(
-                    "owner/repo", 494, merge_sha, Path("."), {}, {},
+                    "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                     f"merge-{failure_mode}", "owner", "owner"
                 )
             except SystemExit as error:
@@ -4995,7 +5186,7 @@ Mitigations:
             before = len(merge_statuses)
             try:
                 authorize_merge(
-                    "owner/repo", 494, merge_sha, Path("."), {}, {},
+                    "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                     f"merge-{policy_failure}", "owner", "owner"
                 )
             except SystemExit:
@@ -5017,7 +5208,7 @@ Mitigations:
         before = len(merge_statuses)
         try:
             authorize_merge(
-                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                 "merge-wrong-check", "owner", "owner"
             )
         except SystemExit:
@@ -5032,7 +5223,7 @@ Mitigations:
         before = len(merge_statuses)
         try:
             authorize_merge(
-                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                 "merge-review-failure", "owner", "owner"
             )
         except SystemExit:
@@ -5047,7 +5238,7 @@ Mitigations:
         before = len(merge_statuses)
         try:
             authorize_merge(
-                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                 "merge-graph-failure", "owner", "owner"
             )
         except SystemExit:
@@ -5062,7 +5253,7 @@ Mitigations:
         before = len(merge_statuses)
         try:
             authorize_merge(
-                "owner/repo", 494, merge_sha, Path("."), {}, {},
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
                 "merge-draft", "owner", "owner"
             )
         except SystemExit:
@@ -5077,7 +5268,7 @@ Mitigations:
         merge_state = "OPEN"
         current_merge_head = merge_sha
         assert authorize_merge(
-            "owner/repo", 494, merge_sha, Path("."), {}, {},
+            "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
             "merge-review-history-approved", "owner", "owner"
         ) == "applied"
         merge_mode = "success"
@@ -5128,6 +5319,7 @@ Mitigations:
         globals()["gh_json"] = saved_merge_gh_json
         globals()["gh_api_json"] = saved_merge_gh_api_json
         globals()["release_graph_failures"] = saved_merge_graph_failures
+        globals()["implementation_reference_failures"] = saved_merge_implementation_failures
         globals()["require_published_snapshot"] = saved_merge_guard
         time.sleep = saved_sleep
     print("issue checklist self-test passed")
@@ -5211,10 +5403,15 @@ def main() -> None:
         return
 
     if args.revoke_merge_authorization_for_pr is not None:
+        root = Path(args.root)
+        require_published_snapshot(args.repo, root)
+        issue_map = load_issue_map(args.issue_map)
+        release_graphs = load_release_graphs(args.issue_map, issue_map)
         revoke_merge_authorization_for_pr(
             args.repo,
             args.revoke_merge_authorization_for_pr,
             args.expected_pr_head_sha,
+            release_graphs=release_graphs,
         )
         return
 

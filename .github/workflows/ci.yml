@@ -11,7 +11,7 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, milestoned, demilestoned]
   pull_request_review:
     types: [submitted, edited, dismissed]
   pull_request_review_comment:
