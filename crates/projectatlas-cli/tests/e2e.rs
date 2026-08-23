@@ -8597,6 +8597,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "repair_reopened_blocker",
         "invalidate_issue_readiness",
         "commit_status",
+        "pull_request_readback",
         "implementation_reference_failures",
         "publish_implementation_status_for_pr",
         "IMPLEMENTATION_STATUS_CONTEXT",

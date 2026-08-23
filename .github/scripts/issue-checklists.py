@@ -1788,21 +1788,30 @@ def declared_native_relations(
 ) -> set[int]:
     """Return the declared native relation targets for one graph-owned issue."""
 
+    owner = declared_native_owner(graphs, relation_kind, issue)
     if relation_kind == "blocked_by":
-        return {
-            blocker
-            for graph in graphs.values()
-            for blocker in graph.blocked_by.get(issue, ())
-        }
+        return set(owner.blocked_by.get(issue, ()))
     if relation_kind == "sub_issue":
-        return {
-            child
-            for graph in graphs.values()
-            if graph.release_issue == issue
-            for child in graph.blocked_by
-            if child != graph.release_issue
-        }
+        return {child for child in owner.blocked_by if child != owner.release_issue}
     raise SystemExit(f"native relation kind is invalid: {relation_kind!r}")
+
+
+def declared_native_owner(
+    graphs: dict[str, ReleaseGraph], relation_kind: str, issue: int
+) -> ReleaseGraph:
+    """Select exactly one graph owner before consulting native relation state."""
+
+    if relation_kind == "blocked_by":
+        matches = [graph for graph in graphs.values() if issue in graph.blocked_by]
+    elif relation_kind == "sub_issue":
+        matches = [graph for graph in graphs.values() if graph.release_issue == issue]
+    else:
+        raise SystemExit(f"native relation kind is invalid: {relation_kind!r}")
+    if len(matches) != 1:
+        raise SystemExit(
+            f"native {relation_kind} source #{issue} must belong to exactly one release graph"
+        )
+    return matches[0]
 
 
 def validate_declared_native_transition(
@@ -1815,7 +1824,12 @@ def validate_declared_native_transition(
 ) -> None:
     """Reject graph-widening or graph-erasing mutations before their POST/DELETE."""
 
-    declared = declared_native_relations(release_graphs, relation_kind, issue)
+    owner = declared_native_owner(release_graphs, relation_kind, issue)
+    declared = (
+        set(owner.blocked_by.get(issue, ()))
+        if relation_kind == "blocked_by"
+        else {child for child in owner.blocked_by if child != owner.release_issue}
+    )
     read_relation = native_blocked_by if relation_kind == "blocked_by" else native_sub_issues
     current = read_relation(repo, issue)
     present = related_issue in current
@@ -1880,6 +1894,45 @@ def commit_status(repo: str, sha: str, state: str, description: str, context: st
         raise SystemExit("GitHub commit status response must be an object")
 
 
+def pull_request_readback(
+    repo: str,
+    pull_request_number: int,
+    expected_head_sha: str | None = None,
+    expected_references: list[object] | None = None,
+) -> dict[str, object]:
+    """Read one bounded PR identity before any status or auto-merge mutation."""
+
+    number = positive_issue(pull_request_number, "pull request number")
+    payload = gh_json(
+        [
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            repo,
+            "--json",
+            "number,headRefOid,closingIssuesReferences,id,autoMergeRequest",
+        ]
+    )
+    if not isinstance(payload, dict) or positive_issue(
+        payload.get("number"), "pull request number"
+    ) != number:
+        raise SystemExit("GitHub pull-request identity was malformed")
+    head = payload.get("headRefOid")
+    if not isinstance(head, str) or re.fullmatch(r"[0-9a-fA-F]{40}", head) is None:
+        raise SystemExit(f"PR #{number} did not expose an exact head SHA")
+    if expected_head_sha is not None and head != expected_head_sha:
+        raise SystemExit(f"PR #{number} head changed before mutation")
+    references = payload.get("closingIssuesReferences")
+    if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
+        raise SystemExit(f"PR #{number} closing references were malformed or unbounded")
+    for reference in references:
+        native_relation_issue_number(repo, reference, "pull request closing issue reference")
+    if expected_references is not None and references != expected_references:
+        raise SystemExit(f"PR #{number} closing references changed before mutation")
+    return payload
+
+
 def implementation_reference_failures(
     repo: str,
     reference: object,
@@ -1932,6 +1985,12 @@ def publish_implementation_status_for_pr(
     references = pull_request.get("closingIssuesReferences")
     if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
         raise SystemExit("pull request closing references exceeded the bounded limit")
+    pull_request_readback(
+        repo,
+        number,
+        expected_head_sha=expected_sha,
+        expected_references=references,
+    )
     commit_status(repo, sha, "pending", "Revalidating native implementation references")
     failures: list[str] = []
     author = pull_request.get("author")
@@ -1960,19 +2019,12 @@ def publish_implementation_status_for_pr(
             if not failures
             else "Native implementation references failed: " + clean(failures[0])
         )[:140]
-    live = gh_json(
-        [
-            "pr",
-            "view",
-            str(number),
-            "-R",
-            repo,
-            "--json",
-            "number,headRefOid",
-        ]
+    pull_request_readback(
+        repo,
+        number,
+        expected_head_sha=expected_sha,
+        expected_references=references,
     )
-    if not isinstance(live, dict) or live.get("headRefOid") != expected_sha:
-        raise SystemExit("PR head changed before implementation status publication")
     state = "success" if not failures else "failure"
     commit_status(repo, expected_sha, state, description)
     if failures:
@@ -1980,32 +2032,49 @@ def publish_implementation_status_for_pr(
 
 
 def revoke_merge_authorization_for_pr(
-    repo: str, pull_request_number: int, expected_head_sha: str | None = None
+    repo: str,
+    pull_request_number: int,
+    expected_head_sha: str | None = None,
+    expected_references: list[object] | None = None,
 ) -> None:
-    details = gh_json(
-        [
-            "pr",
-            "view",
-            str(positive_issue(pull_request_number, "pull request number")),
-            "-R",
-            repo,
-            "--json",
-            "number,headRefOid",
-        ]
-    )
-    if not isinstance(details, dict):
-        raise SystemExit("merge authorization revocation response was malformed")
-    number = positive_issue(details.get("number"), "pull request number")
-    sha = details.get("headRefOid")
-    if number != pull_request_number or not isinstance(sha, str):
-        raise SystemExit("merge authorization revocation identity was malformed")
-    commit_status(
+    details = pull_request_readback(
         repo,
-        sha,
-        "failure",
-        "Merge authorization is only issued by a trusted one-shot dispatch",
-        MERGE_AUTHORIZATION_STATUS_CONTEXT,
+        pull_request_number,
+        expected_head_sha=expected_head_sha,
+        expected_references=expected_references,
     )
+    number = positive_issue(details["number"], "pull request number")
+    sha = details["headRefOid"]
+    failures: list[str] = []
+    auto_merge_request = details.get("autoMergeRequest")
+    if auto_merge_request is not None:
+        if not isinstance(auto_merge_request, dict) or not isinstance(
+            auto_merge_request.get("id"), str
+        ):
+            failures.append(f"PR #{number} auto-merge identity was malformed")
+        else:
+            try:
+                disable_auto_merge(repo, auto_merge_request["id"])
+            except BaseException as error:
+                failures.append(f"PR #{number} auto-merge revocation failed: {error}")
+    try:
+        pull_request_readback(
+            repo,
+            number,
+            expected_head_sha=sha,
+            expected_references=details["closingIssuesReferences"],
+        )
+        commit_status(
+            repo,
+            sha,
+            "failure",
+            "Merge authorization is only issued by a trusted one-shot dispatch",
+            MERGE_AUTHORIZATION_STATUS_CONTEXT,
+        )
+    except BaseException as error:
+        failures.append(f"PR #{number} merge authorization status failed: {error}")
+    if failures:
+        raise SystemExit("merge authorization revocation failed:\n" + "\n".join(failures))
 
 
 GITHUB_ACTIONS_APP_ID = 15368
@@ -2503,6 +2572,7 @@ def authorize_merge(
         raise SystemExit("merge dispatch actor and sender must equal the repository owner")
     if published_snapshot is None:
         published_snapshot = require_published_snapshot(repo, root)
+    pull_request_readback(repo, number, expected_head_sha=expected_head)
     commit_status(
         repo,
         expected_head,
@@ -2523,8 +2593,21 @@ def authorize_merge(
             published_snapshot=published_snapshot,
         )
         details = state["details"]
-        node_id = details.get("id") if isinstance(details, dict) else None
+        references = details.get("closingIssuesReferences") if isinstance(details, dict) else None
+        current = pull_request_readback(
+            repo,
+            number,
+            expected_head_sha=expected_head,
+            expected_references=references if isinstance(references, list) else None,
+        )
+        node_id = current.get("id")
         if str(details.get("state", "")).upper() == "MERGED" and not failures:
+            pull_request_readback(
+                repo,
+                number,
+                expected_head_sha=expected_head,
+                expected_references=current["closingIssuesReferences"],
+            )
             commit_status(
                 repo, expected_head, "success", "Merge already confirmed", MERGE_AUTHORIZATION_STATUS_CONTEXT
             )
@@ -2545,6 +2628,18 @@ def authorize_merge(
         )
         if final_failures:
             raise SystemExit("merge authorization final re-read failed:\n" + "\n".join(final_failures))
+        final_details = final_state["details"]
+        final_references = (
+            final_details.get("closingIssuesReferences")
+            if isinstance(final_details, dict)
+            else None
+        )
+        pull_request_readback(
+            repo,
+            number,
+            expected_head_sha=expected_head,
+            expected_references=final_references if isinstance(final_references, list) else None,
+        )
         commit_status(
             repo,
             expected_head,
@@ -2558,13 +2653,14 @@ def authorize_merge(
     except BaseException:
         if auto_merge_enabled and node_id is not None:
             try:
+                pull_request_readback(repo, number, expected_head_sha=expected_head)
                 disable_auto_merge(repo, node_id)
             except BaseException:
                 pass
         try:
-            live = gh_json(["pr", "view", str(number), "-R", repo, "--json", "headRefOid"])
-            live_sha = live.get("headRefOid") if isinstance(live, dict) else None
-            if isinstance(live_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", live_sha):
+            live = pull_request_readback(repo, number)
+            live_sha = live["headRefOid"]
+            if isinstance(live_sha, str):
                 commit_status(
                     repo,
                     live_sha,
@@ -2625,35 +2721,68 @@ def invalidate_issue_readiness(repo: str, issue: int) -> None:
         raise SystemExit("GitHub affected PR response was malformed")
     if len(pull_requests) > MAX_REPAIR_DEPENDENTS:
         raise SystemExit("GitHub affected PR response exceeded the bounded repair limit")
+    failures: list[str] = []
     for pull_request in pull_requests:
         if not isinstance(pull_request, dict):
-            raise SystemExit("GitHub affected PR response contained a non-object")
-        number = positive_issue(pull_request.get("number"), "affected pull request number")
-        head = pull_request.get("headRefOid")
-        references = pull_request.get("closingIssuesReferences")
-        if re.fullmatch(r"[0-9a-fA-F]{40}", head or "") is None:
-            raise SystemExit(f"affected PR #{number} did not expose an exact head SHA")
-        if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
-            raise SystemExit(f"affected PR #{number} references were malformed or unbounded")
-        if not any(
-            isinstance(reference, dict) and reference.get("number") == issue
-            for reference in references
-        ):
+            failures.append("GitHub affected PR response contained a non-object")
             continue
-        commit_status(
-            repo,
-            head,
-            "failure",
-            "Implementation readiness invalidated by an open declared blocker",
-            IMPLEMENTATION_STATUS_CONTEXT,
-        )
-        commit_status(
-            repo,
-            head,
-            "failure",
-            "Merge authorization invalidated by an open declared blocker",
-            MERGE_AUTHORIZATION_STATUS_CONTEXT,
-        )
+        try:
+            number = positive_issue(
+                pull_request.get("number"), "affected pull request number"
+            )
+            head = pull_request.get("headRefOid")
+            references = pull_request.get("closingIssuesReferences")
+            if re.fullmatch(r"[0-9a-fA-F]{40}", head or "") is None:
+                raise SystemExit(f"affected PR #{number} did not expose an exact head SHA")
+            if not isinstance(references, list) or len(references) > MAX_PULL_REQUEST_REFERENCES:
+                raise SystemExit(
+                    f"affected PR #{number} references were malformed or unbounded"
+                )
+            matches_issue = False
+            for reference in references:
+                referenced_issue = native_relation_issue_number(
+                    repo, reference, "affected PR closing issue reference"
+                )
+                matches_issue = matches_issue or referenced_issue == issue
+            if not matches_issue:
+                continue
+            pull_request_readback(
+                repo,
+                number,
+                expected_head_sha=head,
+                expected_references=references,
+            )
+        except BaseException as error:
+            failures.append(f"PR #{pull_request.get('number', '?')} target validation failed: {error}")
+            continue
+
+        try:
+            revoke_merge_authorization_for_pr(
+                repo,
+                number,
+                expected_head_sha=head,
+                expected_references=references,
+            )
+        except BaseException as error:
+            failures.append(f"PR #{number} merge authorization invalidation failed: {error}")
+        try:
+            pull_request_readback(
+                repo,
+                number,
+                expected_head_sha=head,
+                expected_references=references,
+            )
+            commit_status(
+                repo,
+                head,
+                "failure",
+                "Implementation readiness invalidated by an open declared blocker",
+                IMPLEMENTATION_STATUS_CONTEXT,
+            )
+        except BaseException as error:
+            failures.append(f"PR #{number} implementation invalidation failed: {error}")
+    if failures:
+        raise SystemExit("issue readiness invalidation failed:\n" + "\n".join(failures))
 
 
 def repair_reopened_blocker(
@@ -3420,6 +3549,7 @@ Mitigations:
     saved_release_graph_failures = globals()["release_graph_failures"]
     saved_gh_json = globals()["gh_json"]
     saved_commit_status = globals()["commit_status"]
+    saved_disable_auto_merge = globals()["disable_auto_merge"]
     saved_gh_api_json = globals()["gh_api_json"]
     saved_run = globals()["run"]
     saved_subprocess_run = subprocess.run
@@ -3519,6 +3649,48 @@ Mitigations:
         globals()["release_graph_failures"] = lambda *args, **kwargs: []
         native_mutation_calls.clear()
         native_mutation_state["blocked_by"] = set()
+        for relation_kind, issue, related in (
+            ("blocked_by", 99, 11),
+            ("sub_issue", 10, 11),
+        ):
+            try:
+                mutate_native_relationship_and_revalidate(
+                    "owner/repo",
+                    issue,
+                    related,
+                    relation_kind,
+                    "remove",
+                    graph_owners,
+                    valid_graphs,
+                    f"rel-unowned-{relation_kind}",
+                )
+            except SystemExit as error:
+                assert "exactly one release graph" in str(error)
+                assert native_mutation_calls == []
+            else:
+                raise AssertionError(f"unowned {relation_kind} source was admitted")
+        ambiguous_graphs = {
+            **valid_graphs,
+            "v9.9.9-00": ReleaseGraph(
+                "v9.9.9-00", 12, {10: (11,), 11: (), 12: (10, 11)}
+            ),
+        }
+        try:
+            mutate_native_relationship_and_revalidate(
+                "owner/repo",
+                12,
+                10,
+                "sub_issue",
+                "add",
+                graph_owners,
+                ambiguous_graphs,
+                "rel-ambiguous-sub-issue",
+            )
+        except SystemExit as error:
+            assert "exactly one release graph" in str(error)
+            assert native_mutation_calls == []
+        else:
+            raise AssertionError("multiply-owned sub-issue source was admitted")
         try:
             mutate_native_relationship_and_revalidate(
                 "owner/repo",
@@ -3719,22 +3891,129 @@ Mitigations:
             ["gh", "issue", "reopen", "10", "--repo", "owner/repo"],
             ["gh", "issue", "reopen", "12", "--repo", "owner/repo"],
         ]
-        affected_statuses: list[tuple[str, str]] = []
-        globals()["gh_json"] = lambda args: [
-            {
-                "number": 494,
-                "headRefOid": "a" * 40,
-                "closingIssuesReferences": [{"number": 10}],
-            }
-        ]
-        globals()["commit_status"] = (
-            lambda repo, sha, state, description, context=IMPLEMENTATION_STATUS_CONTEXT:
-            affected_statuses.append((state, context))
+        affected_statuses: list[tuple[int, str]] = []
+        disable_calls: list[str] = []
+        status_failures: set[tuple[int, str]] = set()
+        invalidation_mode = "normal"
+
+        def fake_invalidation_gh_json(args: list[str]) -> object:
+            if args[:2] == ["pr", "list"]:
+                if invalidation_mode == "foreign-same-number":
+                    references = [{
+                        "repository_url": "https://api.github.com/repos/foreign/repo",
+                        "number": 10,
+                    }]
+                else:
+                    references = [{**local_identity, "number": 10}]
+                return [
+                    {
+                        "number": number,
+                        "headRefOid": ("a" if number == 494 else "c") * 40,
+                        "closingIssuesReferences": references,
+                    }
+                    for number in (494, 495)
+                ]
+            if args[:2] == ["pr", "view"]:
+                number = int(args[2])
+                return {
+                    "number": number,
+                    "headRefOid": "b" * 40
+                    if invalidation_mode == "raced-head" and number == 494
+                    else ("a" if number == 494 else "c") * 40,
+                    "closingIssuesReferences": [{**local_identity, "number": 10}],
+                    "id": f"PR_{number}",
+                    "autoMergeRequest": {"id": f"AUTO_{number}"}
+                    if number == 494
+                    else None,
+                }
+            raise AssertionError(f"unexpected invalidation gh_json call: {args}")
+
+        def fake_invalidation_status(
+            repo: str,
+            sha: str,
+            state: str,
+            description: str,
+            context: str = IMPLEMENTATION_STATUS_CONTEXT,
+        ) -> None:
+            number = 494 if sha == "a" * 40 else 495
+            affected_statuses.append((number, context))
+            if (number, context) in status_failures:
+                raise RuntimeError(f"simulated {number} {context} status failure")
+
+        globals()["gh_json"] = fake_invalidation_gh_json
+        globals()["commit_status"] = fake_invalidation_status
+        globals()["disable_auto_merge"] = (
+            lambda repo, node_id: disable_calls.append(node_id)
         )
         invalidate_issue_readiness("owner/repo", 10)
         assert affected_statuses == [
-            ("failure", IMPLEMENTATION_STATUS_CONTEXT),
-            ("failure", MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (494, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (494, IMPLEMENTATION_STATUS_CONTEXT),
+            (495, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (495, IMPLEMENTATION_STATUS_CONTEXT),
+        ]
+        assert disable_calls == ["AUTO_494"]
+        affected_statuses.clear()
+        status_failures = {(494, MERGE_AUTHORIZATION_STATUS_CONTEXT)}
+        try:
+            invalidate_issue_readiness("owner/repo", 10)
+        except SystemExit as error:
+            assert "issue readiness invalidation failed" in str(error)
+        else:
+            raise AssertionError("merge invalidation failure was masked")
+        assert affected_statuses == [
+            (494, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (494, IMPLEMENTATION_STATUS_CONTEXT),
+            (495, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (495, IMPLEMENTATION_STATUS_CONTEXT),
+        ]
+        affected_statuses.clear()
+        status_failures = {(494, IMPLEMENTATION_STATUS_CONTEXT)}
+        try:
+            invalidate_issue_readiness("owner/repo", 10)
+        except SystemExit as error:
+            assert "issue readiness invalidation failed" in str(error)
+        else:
+            raise AssertionError("implementation invalidation failure was masked")
+        assert affected_statuses == [
+            (494, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (494, IMPLEMENTATION_STATUS_CONTEXT),
+            (495, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (495, IMPLEMENTATION_STATUS_CONTEXT),
+        ]
+        affected_statuses.clear()
+        status_failures = {
+            (494, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (494, IMPLEMENTATION_STATUS_CONTEXT),
+            (495, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (495, IMPLEMENTATION_STATUS_CONTEXT),
+        }
+        try:
+            invalidate_issue_readiness("owner/repo", 10)
+        except SystemExit as error:
+            assert "issue readiness invalidation failed" in str(error)
+        else:
+            raise AssertionError("all invalidation status failures were masked")
+        affected_statuses.clear()
+        status_failures.clear()
+        invalidation_mode = "foreign-same-number"
+        try:
+            invalidate_issue_readiness("owner/repo", 10)
+        except SystemExit as error:
+            assert "exact owner/repo repository identity" in str(error)
+        else:
+            raise AssertionError("foreign same-number closing reference was accepted")
+        assert affected_statuses == []
+        invalidation_mode = "raced-head"
+        try:
+            invalidate_issue_readiness("owner/repo", 10)
+        except SystemExit as error:
+            assert "target validation failed" in str(error)
+        else:
+            raise AssertionError("raced PR head was accepted for invalidation")
+        assert affected_statuses == [
+            (495, MERGE_AUTHORIZATION_STATUS_CONTEXT),
+            (495, IMPLEMENTATION_STATUS_CONTEXT),
         ]
     finally:
         globals()["milestone_issues"] = saved_milestone_issues
@@ -3744,6 +4023,7 @@ Mitigations:
         globals()["issue_payload"] = saved_issue_payload
         globals()["gh_json"] = saved_gh_json
         globals()["commit_status"] = saved_commit_status
+        globals()["disable_auto_merge"] = saved_disable_auto_merge
         globals()["gh_api_json"] = saved_gh_api_json
         globals()["run"] = saved_run
         globals()["release_graph_failures"] = saved_release_graph_failures
@@ -4082,8 +4362,14 @@ Mitigations:
                 "closingIssuesReferences": [],
                 "author": {"login": "owner"},
             }
-        if fields == "number,headRefOid":
-            return {"number": 494, "headRefOid": "f" * 40}
+        if fields == "number,headRefOid,closingIssuesReferences,id,autoMergeRequest":
+            return {
+                "number": 494,
+                "headRefOid": "f" * 40,
+                "closingIssuesReferences": [],
+                "id": "PR_494",
+                "autoMergeRequest": None,
+            }
         raise AssertionError(f"unexpected planning PR fields: {fields}")
 
     def fake_planning_gh_api(args: list[str]) -> object:
@@ -4327,18 +4613,19 @@ Mitigations:
         ) == "already-satisfied"
         current_merge_head = "b" * 40
         merge_state = "OPEN"
+        before_stale = len(merge_statuses)
         try:
             authorize_merge(
                 "owner/repo", 494, merge_sha, Path("."), {}, {},
                 "merge-test-04", "owner", "owner"
             )
         except SystemExit as error:
-            assert "authorization" in str(error)
+            assert "head changed" in str(error) or "authorization" in str(error)
         else:
             raise AssertionError("stale merge head was authorized")
         assert not any(
             state == "success" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
-            for state, context, _ in merge_statuses[-2:]
+            for state, context, _ in merge_statuses[before_stale:]
         )
         current_merge_head = merge_sha
         for failure_mode in ("enable-failure", "final-drift", "timeout"):
