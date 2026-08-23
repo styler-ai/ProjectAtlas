@@ -1426,6 +1426,19 @@ def native_relation_issue_number(
             if not isinstance(full_name, str):
                 raise SystemExit(f"GitHub returned {label} with malformed repository identity")
             identities.append(full_name.casefold() == expected_full_name)
+        nested_name = repository.get("name")
+        nested_owner = repository.get("owner")
+        if nested_name is not None or nested_owner is not None:
+            if not isinstance(nested_name, str) or not nested_name:
+                raise SystemExit(f"GitHub returned {label} with malformed repository identity")
+            if not isinstance(nested_owner, dict):
+                raise SystemExit(f"GitHub returned {label} with malformed repository identity")
+            owner_login = nested_owner.get("login")
+            if not isinstance(owner_login, str) or not owner_login:
+                raise SystemExit(f"GitHub returned {label} with malformed repository identity")
+            identities.append(
+                f"{owner_login}/{nested_name}".casefold() == expected_full_name
+            )
     if not identities or not all(identities):
         raise SystemExit(
             f"GitHub returned {label} without the exact {repo} repository identity"
@@ -3891,6 +3904,44 @@ Mitigations:
             "repository_url": "https://api.github.com/repos/foreign/repo",
             "number": 11,
         }
+        rest_full_name_identity = {
+            "repository": {"full_name": "owner/repo"},
+            "number": 11,
+        }
+        rest_url_identity = {
+            "repository_url": "https://api.github.com/repos/owner/repo",
+            "number": 11,
+        }
+        nested_gh_identity = {
+            "repository": {"name": "repo", "owner": {"login": "owner"}},
+            "number": 11,
+        }
+        assert native_relation_issue_number(
+            "owner/repo", rest_full_name_identity, "native relation"
+        ) == 11
+        assert native_relation_issue_number(
+            "owner/repo", rest_url_identity, "native relation"
+        ) == 11
+        assert native_relation_issue_number(
+            "owner/repo", nested_gh_identity, "native relation"
+        ) == 11
+        try:
+            native_relation_issue_number(
+                "owner/repo",
+                {
+                    "repository_url": "https://api.github.com/repos/owner/repo",
+                    "repository": {
+                        "name": "repo",
+                        "owner": {"login": "foreign"},
+                    },
+                    "number": 11,
+                },
+                "native relation",
+            )
+        except SystemExit as error:
+            assert "exact owner/repo repository identity" in str(error)
+        else:
+            raise AssertionError("conflicting REST and gh repository identities were accepted")
         for label in (
             "blocked-by issue number",
             "sub-issue number",
@@ -3906,6 +3957,9 @@ Mitigations:
             {"number": 11},
             {"number": 11, "repository_url": 12},
             {"number": 11, "repository": {"full_name": 12}},
+            {"number": 11, "repository": {"name": "repo"}},
+            {"number": 11, "repository": {"owner": {"login": "owner"}}},
+            {"number": 11, "repository": {"name": "repo", "owner": {"login": 12}}},
         ):
             try:
                 native_relation_issue_number("owner/repo", malformed, "native relation")
