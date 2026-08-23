@@ -6,15 +6,15 @@ run-name: >-
       && format('merge {0} pr-{1}', github.event.client_payload.request_id, github.event.client_payload.pr_number)
       || github.event_name == 'repository_dispatch'
       && format('relationship {0}', github.event.client_payload.request_id)
-      || github.event_name == 'pull_request'
+      || github.event_name == 'pull_request_target'
       && format('PR #{0}', github.event.pull_request.number)
       || format('issue #{0}', github.event.issue.number) }}
 
 on:
   issues:
     types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]
-  pull_request:
-    types: [opened, edited, synchronize, reopened, enqueued]
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
   repository_dispatch:
     types: [issueops_relationship, issueops_merge]
   # Relationship and merge clients use authenticated default-branch dispatches.
@@ -91,7 +91,7 @@ jobs:
 
   merge-authorization-invalidation:
     name: merge-authorization-invalidation
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request_target'
     permissions:
       contents: read
       pull-requests: read
@@ -117,6 +117,36 @@ jobs:
             --root . \
             --issue-map openspec/issue-map.json \
             --revoke-merge-authorization-for-pr "$PR_NUMBER" \
+            --expected-pr-head-sha "$EXPECTED_PR_HEAD_SHA"
+
+  implementation-status-validation:
+    name: issueops-implementation-validation
+    if: github.event_name == 'pull_request_target'
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Publish implementation readiness
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --publish-implementation-status-for-pr "$PR_NUMBER" \
             --expected-pr-head-sha "$EXPECTED_PR_HEAD_SHA"
 
   relationship-mutation:

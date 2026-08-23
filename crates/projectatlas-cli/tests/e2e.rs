@@ -8563,7 +8563,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "relationship_outcome",
         "merge_outcome",
         "merge_readiness_failures",
+        "merge_authorization_policy",
         "GITHUB_ACTIONS_APP_ID",
+        "allowAutoMerge",
+        "required_status_checks",
         "enable_auto_merge",
         "disable_auto_merge",
         "expectedHeadOid",
@@ -8702,11 +8705,24 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
-        "statuses: write",
     ] {
         if !ci.contains(required) {
             return Err(io::Error::other(format!(
                 "ordinary CI is missing blocking gate {required:?}"
+            ))
+            .into());
+        }
+    }
+    for rejected in [
+        "statuses: write",
+        "publish-implementation-status-for-pr",
+        "issueops-implementation",
+        "issueops-merge-authorized",
+        "/statuses/",
+    ] {
+        if ci.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "untrusted CI must not publish IssueOps status {rejected:?}"
             ))
             .into());
         }
@@ -8793,14 +8809,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    if ci.find("- name: Default branch delivery check")
-        >= ci.find("- name: Implementation merge-readiness status")
-    {
-        return Err(io::Error::other(
-            "default branch delivery must run before the Dependabot exemption and implementation status",
-        )
-        .into());
-    }
     for event in ["pull_request_review", "pull_request_review_comment"] {
         if !checklist_step.contains(event) {
             return Err(io::Error::other(format!(
@@ -8814,26 +8822,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             "ordinary pull requests must not require full milestone completion",
         )
         .into());
-    }
-    let implementation_step = ci
-        .split("- name: Implementation merge-readiness status")
-        .nth(1)
-        .and_then(|tail| tail.split("- name:").next())
-        .ok_or_else(|| io::Error::other("ordinary implementation status step is missing"))?;
-    for required in [
-        "--publish-implementation-status-for-pr \"$PR_NUMBER\"",
-        "--expected-pr-head-sha \"$EXPECTED_PR_HEAD_SHA\"",
-        "EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
-        "github.event_name == 'pull_request_review'",
-        "github.event_name == 'pull_request_review_comment'",
-        "PR_NUMBER: ${{ github.event.pull_request.number }}",
-    ] {
-        if !implementation_step.contains(required) {
-            return Err(io::Error::other(format!(
-                "ordinary implementation status step is missing native merge-boundary behavior {required:?}"
-            ))
-            .into());
-        }
     }
     if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
@@ -8870,7 +8858,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "format('merge {0} pr-{1}', github.event.client_payload.request_id, github.event.client_payload.pr_number)",
         "format('relationship {0}', github.event.client_payload.request_id)",
         "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
-        "types: [opened, edited, synchronize, reopened, enqueued]",
+        "types: [opened, edited, synchronize, reopened]",
         "repository_dispatch:",
         "types: [issueops_relationship, issueops_merge]",
         "gh api repos/OWNER/REPO/dispatches",
@@ -8898,7 +8886,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "merge-authorization-invalidation",
         "relationship-mutation",
         "merge-authorization",
-        "github.event_name == 'pull_request'",
+        "implementation-status-validation",
+        "github.event_name == 'pull_request_target'",
         "github.event_name == 'repository_dispatch'",
         "timeout-minutes: 5",
         "contents: read",
@@ -8939,7 +8928,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
                 .into());
             }
         }
-        if job == "issue-state-repair" || job == "merge-authorization-invalidation" {
+        if job == "issue-state-repair"
+            || job == "merge-authorization-invalidation"
+            || job == "implementation-status-validation"
+        {
             if !block.contains("timeout-minutes: 10") {
                 return Err(io::Error::other(format!(
                     "IssueOps {job} job must have a finite 10-minute timeout"
@@ -8957,6 +8949,29 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let merge_job = workflow_job_block(&issueops_workflow, "merge-authorization")?;
     let invalidation_job =
         workflow_job_block(&issueops_workflow, "merge-authorization-invalidation")?;
+    let implementation_job =
+        workflow_job_block(&issueops_workflow, "implementation-status-validation")?;
+    for rejected in [
+        "github.event_name == 'pull_request'",
+        "ref: refs/pull/",
+        "github.event.pull_request.head.ref",
+        "github.event.pull_request.head.repo",
+        "state=success",
+        "issueops-merge-authorized=success",
+    ] {
+        if invalidation_job.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "trusted pull_request_target invalidator contains hostile-PR authority {rejected:?}"
+            ))
+            .into());
+        }
+    }
+    if issueops_workflow.contains("\n  pull_request:\n") {
+        return Err(io::Error::other(
+            "write-capable merge authorization invalidation must not run from pull_request",
+        )
+        .into());
+    }
     let repair_job = workflow_job_block(&issueops_workflow, "issue-state-repair")?;
     for required in ["issues: write", "--enforce-closed-issue-blockers"] {
         if !repair_job.contains(required) {
@@ -8970,6 +8985,33 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !invalidation_job.contains(required) {
             return Err(io::Error::other(format!(
                 "IssueOps invalidation job is missing status revocation guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "github.event_name == 'pull_request_target'",
+        "statuses: write",
+        "--publish-implementation-status-for-pr \"$PR_NUMBER\"",
+        "--expected-pr-head-sha \"$EXPECTED_PR_HEAD_SHA\"",
+        "EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+    ] {
+        if !implementation_job.contains(required) {
+            return Err(io::Error::other(format!(
+                "IssueOps implementation validation job is missing trusted status guard {required:?}"
+            ))
+            .into());
+        }
+    }
+    for rejected in [
+        "github.event_name == 'pull_request'",
+        "ref: refs/pull/",
+        "github.event.pull_request.head.ref",
+        "github.event.pull_request.head.repo",
+    ] {
+        if implementation_job.contains(rejected) {
+            return Err(io::Error::other(format!(
+                "trusted implementation validation contains hostile-PR authority {rejected:?}"
             ))
             .into());
         }

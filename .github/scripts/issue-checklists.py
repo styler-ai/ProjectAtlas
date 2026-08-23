@@ -1988,6 +1988,45 @@ def required_check_contexts(repo: str, branch: str) -> list[str]:
     return contexts
 
 
+def merge_authorization_policy(repo: str, branch: str) -> None:
+    """Prove the live repository gate is installed before arming auto-merge."""
+
+    owner, name = repo_parts(repo)
+    protection = gh_api_json(
+        [
+            f"repos/{owner}/{name}/branches/{branch}/protection",
+            "--method",
+            "GET",
+            "-H",
+            f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+        ]
+    )
+    if not isinstance(protection, dict):
+        raise SystemExit("branch protection response was malformed")
+    required = protection.get("required_status_checks")
+    if not isinstance(required, dict) or required.get("strict") is not True:
+        raise SystemExit("branch protection is not strict")
+    checks = required.get("checks")
+    if not isinstance(checks, list) or len(checks) > MAX_CHECKS:
+        raise SystemExit("branch protection required checks exceeded the bounded limit")
+    if any(
+        not isinstance(check, dict)
+        or not isinstance(check.get("context"), str)
+        or not isinstance(check.get("app_id"), int)
+        for check in checks
+    ):
+        raise SystemExit("branch protection required checks were malformed")
+    if not any(
+        check["context"] == MERGE_AUTHORIZATION_STATUS_CONTEXT
+        and check["app_id"] == GITHUB_ACTIONS_APP_ID
+        for check in checks
+    ):
+        raise SystemExit("branch protection does not require the merge authorization check")
+    repository = gh_json(["repo", "view", repo, "--json", "allowAutoMerge"])
+    if not isinstance(repository, dict) or repository.get("allowAutoMerge") is not True:
+        raise SystemExit("repository auto-merge is not enabled")
+
+
 def check_run_collections(repo: str, sha: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     owner, name = repo_parts(repo)
     statuses = bounded_api_collection(
@@ -2105,13 +2144,17 @@ def merge_readiness_failures(
         failures.append("merge PR is not open")
     if state == "OPEN" and details.get("isDraft") is not False:
         failures.append("merge PR is still a draft")
-    default_branch = gh_json(["repo", "view", repo, "--json", "defaultBranchRef"])
+    default_branch = gh_json(["repo", "view", repo, "--json", "defaultBranchRef,allowAutoMerge"])
     branch_ref = default_branch.get("defaultBranchRef") if isinstance(default_branch, dict) else None
     branch = branch_ref.get("name") if isinstance(branch_ref, dict) else None
     if not isinstance(branch, str) or not branch:
         raise SystemExit("repository default branch response was malformed")
     if details.get("baseRefName") != branch:
         failures.append("merge PR does not target the repository default branch")
+    try:
+        merge_authorization_policy(repo, branch)
+    except BaseException as error:
+        failures.append(str(error))
     if state == "OPEN" and details.get("mergeable") != "MERGEABLE":
         failures.append("merge PR is not currently mergeable")
     if state == "MERGED":
@@ -3463,13 +3506,17 @@ Mitigations:
     merge_state = "OPEN"
     merge_mode = "success"
     merge_statuses: list[tuple[str, str, str]] = []
+    enable_calls = 0
     disable_calls = 0
     merge_graph_calls = 0
 
     def fake_merge_gh_json(args: list[str]) -> object:
         nonlocal current_merge_head, merge_state, merge_mode
         if args[0] == "repo":
-            return {"defaultBranchRef": {"name": "main"}}
+            return {
+                "defaultBranchRef": {"name": "main"},
+                "allowAutoMerge": merge_mode != "no-auto-merge",
+            }
         if args[0] != "pr":
             raise AssertionError(f"unexpected merge gh call: {args}")
         fields = args[-1] if "--json" in args else ""
@@ -3491,7 +3538,7 @@ Mitigations:
         }
 
     def fake_merge_gh_api(args: list[str]) -> object:
-        nonlocal merge_state, merge_graph_calls, merge_mode, current_merge_head, disable_calls
+        nonlocal merge_state, merge_graph_calls, merge_mode, current_merge_head, enable_calls, disable_calls
         joined = " ".join(args)
         if "/statuses/" in joined and "commits/" not in joined:
             state = next(
@@ -3508,6 +3555,24 @@ Mitigations:
             return {}
         if "/git/ref/heads/main" in joined:
             return {"object": {"sha": "b" * 40}}
+        if "/branches/main/protection" in joined and "required_status_checks/contexts" not in joined:
+            if merge_mode == "malformed-protection":
+                return {"required_status_checks": {"strict": True}}
+            checks = []
+            if merge_mode != "missing-merge-context":
+                checks.append(
+                    {
+                        "context": MERGE_AUTHORIZATION_STATUS_CONTEXT,
+                        "app_id": 999 if merge_mode == "wrong-merge-app" else GITHUB_ACTIONS_APP_ID,
+                    }
+                )
+            checks.append({"context": "verify", "app_id": GITHUB_ACTIONS_APP_ID})
+            return {
+                "required_status_checks": {
+                    "strict": merge_mode != "non-strict",
+                    "checks": checks,
+                }
+            }
         if "required_status_checks/contexts" in joined:
             return [{"context": "verify"}]
         if "/commits/" in joined and "/statuses" in joined:
@@ -3540,6 +3605,7 @@ Mitigations:
                     }
                 }
             if "enablePullRequestAutoMerge" in query:
+                enable_calls += 1
                 if merge_mode == "enable-failure":
                     return {"errors": [{"message": "enable failed"}]}
                 if merge_mode == "final-drift":
@@ -3634,6 +3700,36 @@ Mitigations:
                 for state, context, _ in dispositions
             )
         assert disable_calls >= 2
+        for policy_failure in (
+            "missing-merge-context",
+            "wrong-merge-app",
+            "non-strict",
+            "malformed-protection",
+            "no-auto-merge",
+        ):
+            merge_mode = policy_failure
+            merge_state = "OPEN"
+            current_merge_head = merge_sha
+            before_enable = enable_calls
+            before = len(merge_statuses)
+            try:
+                authorize_merge(
+                    "owner/repo", 494, merge_sha, Path("."), {}, {},
+                    f"merge-{policy_failure}", "owner", "owner"
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError(f"merge policy failure {policy_failure} was accepted")
+            assert enable_calls == before_enable
+            assert any(
+                state == "failure" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+                for state, context, _ in merge_statuses[before:]
+            )
+            assert not any(
+                state == "success" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+                for state, context, _ in merge_statuses[before:]
+            )
         merge_mode = "wrong-check"
         merge_state = "OPEN"
         current_merge_head = merge_sha
