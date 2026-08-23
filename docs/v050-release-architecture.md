@@ -356,16 +356,18 @@ flowchart TB
 
 ## Lean affected-contract planning and stable-context aggregation
 
-Pull-request optimization selects existing proof; it never deletes proof. One closed contract and one standard-library planner serve human and Dependabot pull requests. Unknown, shared, or planner-owning input selects full proof, while every shared or release boundary starts in full-proof mode. Stable required contexts accept only current plan-bound evidence.
+Pull-request optimization selects existing proof; it never deletes proof. One closed contract and one standard-library planner serve human and Dependabot pull requests. Only ordinary additions and modifications may union known impacts. Every rename or deletion, plus unknown, shared, or planner-owning input, selects full proof even when every observed path is classified. Every shared or release boundary starts in full-proof mode, and stable required contexts accept only current plan-bound evidence.
 
 ```mermaid
 flowchart TB
-    Event[Human or Dependabot pull request] --> Inputs[Diff + closed impact contract + one cargo metadata result]
-    Inputs --> EventClass{Pull-request boundary?}
+    Event[Workflow event] --> EventClass{Pull-request boundary?}
     EventClass -- No: main, schedule, candidate, release --> Full[Select complete proof set]
-    EventClass -- Yes --> Trusted{Plan complete, current, and fully classified?}
+    EventClass -- Yes: human or Dependabot --> ChangeKind{Any rename or deletion?}
+    ChangeKind -- Yes, even if classified --> Full
+    ChangeKind -- No: ordinary additions or modifications --> Inputs[Diff + closed impact contract + one cargo metadata result]
+    Inputs --> Trusted{Plan complete, current, and fully classified?}
     Trusted -- No: unknown, shared, planner-owned, stale, malformed --> Full
-    Trusted -- Yes --> Affected[Select smallest contract-complete affected set]
+    Trusted -- Yes --> Affected[Union known impacts into smallest contract-complete set]
     Full --> Jobs[Run existing build, test, quality, and platform contracts]
     Affected --> Jobs
     Jobs --> Result{Current result for each stable context}
@@ -378,45 +380,85 @@ flowchart TB
 
 ## One Dependabot campaign from weekly intake through release
 
-GitHub-hosted Dependabot remains the weekly pull-request producer. The trusted default-branch workflow owns one v0.5.0 campaign inventory and one sequential on-demand audit. CI selection stays with the shared affected-contract planner; the campaign only reconciles identity, review, disposition, and release readiness.
+GitHub-hosted Dependabot remains the weekly pull-request producer. The trusted default-branch workflow owns one v0.5.0 campaign inventory. CI selection stays with the shared affected-contract planner; the campaign only reconciles identity, review, and disposition. Historical pre-contract checks remain history, not later-gate proof.
 
 ```mermaid
 flowchart TB
-    Config[Default .github/dependabot.yml] --> Hosted[Hosted weekly Dependabot producer]
-    Hosted --> PullRequest[Create or update Dependabot PR]
-    PullRequest --> Intake[Trusted workflow reconciles exact PR, head, milestone, and Relates to campaign]
-    PullRequest --> Refresh[Refresh or rebase onto accepted current main]
-    Refresh --> SharedCI[Run the same affected planner and protected quality bar]
-    SharedCI --> CurrentProof{Exact current proof succeeds?}
-    CurrentProof -- No: stale shared IssueOps state --> Drift[Record baseline drift, not package regression]
-    Drift --> Refresh
-    CurrentProof -- Yes --> Review[Read back review, threads, branch sync, and every protected context]
-    Review --> Sol[Explicit exact-head Sol authorization dispatch]
-    Sol --> PRRecord[Retain PR state and final or provisional disposition]
+    subgraph PostContract[Post-contract pull request]
+        Config[Default .github/dependabot.yml] --> Hosted[Hosted weekly Dependabot producer]
+        Hosted --> PullRequest[Create or update Dependabot PR]
+        PullRequest --> Intake[Reconcile exact PR, head, milestone, and Relates to campaign]
+        Intake --> Refresh[Refresh or rebase onto accepted current main]
+        Refresh --> SharedCI[Run the same affected planner and protected quality bar]
+        SharedCI --> CurrentProof{Exact current proof succeeds?}
+        CurrentProof -- No --> FailureBasis{Failure evidence?}
+        FailureBasis -- Proven stale baseline and retry budget remains --> Drift[Record baseline drift, not package regression]
+        Drift --> Refresh
+        FailureBasis -- Genuine, unknown, or retry exhausted --> Technical[Blocking technical disposition or corrective delivery]
+        Technical --> FutureBlock([Admission and checkpoint blocked])
+        CurrentProof -- Yes --> Review[Read back review, threads, branch sync, and every protected context]
+        Review --> Sol[Explicit exact-head Sol authorization dispatch]
+        Sol --> PRRecord[Record final disposition]
+    end
+    PRRecord --> Inventory[(One machine-owned campaign body region)]
 
-    Harness[CLI harness: gh workflow run before RC and stable] --> Audit[Trusted default workflow parses config and runs pinned CLI/images sequentially]
-    Audit --> Outcome{Audit outcome}
-    Outcome -- clean --> AuditRecord[Record clean]
-    Outcome -- findings --> Pending[Create or refresh pending items]
-    Outcome -- failed --> Block([Release blocked])
+    subgraph PreContract[Pre-contract merged record]
+        Historical[Read exact historical merge and head] --> Retrospective{Main inclusion, safe metadata, fresh Sol review, and current full proof pass?}
+        Retrospective -- No --> Corrective[Require revert, fix, or superseding delivery]
+        Corrective --> RetroBlock([Retrospective acceptance blocked])
+        Retrospective -- Yes --> RetroRecord[Record retrospective_precontract provenance, historical gap, and final disposition]
+    end
+    RetroRecord --> Inventory
+```
 
-    Intake --> Inventory[One campaign issue body region: full release-window union]
-    PRRecord --> Inventory
-    AuditRecord --> Inventory
-    Pending --> Inventory
-    Inventory --> Final{Every record final and both audits reconciled?}
-    Final -- No: pending, provisional, or failed --> Block
-    Final -- Yes --> Release([Dependency gate eligible for release issue 492])
+## Dependency audit and two-stage release checkpoints
+
+The same trusted default-branch workflow runs the audit once before RC and again after the accepted RC but before stable. Both executions translate the current Dependabot configuration without loss, keep the issues-write token outside every updater/proxy boundary, and require bounded sanitized output plus certain container cleanup before reconciliation. The single campaign body region advances from `collecting` to an exact `candidate_ready` snapshot and later to `stable_ready`; it is not a second graph or database.
+
+```mermaid
+flowchart TB
+    Config[Default .github/dependabot.yml] --> AuditContract[Lossless translation; token-free sequential updater/proxy; bounded sanitized output; verified cleanup; then issues-write reconciliation]
+    PreRC[gh workflow run before RC] --> PreRCAudit[Run pre-RC audit]
+    AuditContract --> PreRCAudit
+    PreRCAudit -- failed or uncertain cleanup --> Block([Applicable checkpoint blocked])
+    CandidateRecords[Every candidate-window record has a final disposition] --> CandidateInventory[Campaign body region at candidate cutoff]
+    PreRCAudit -- clean or bounded findings --> CandidateInventory
+    CandidateInventory --> CandidateGate{Audit successful and snapshot final for exact candidate?}
+    CandidateGate -- No --> Block
+    CandidateGate -- Yes --> CandidateReady[candidate_ready bound to exact RC revision and inventory]
+    CandidateReady --> RC1([Publish and accept RC1 while issues 499 and 492 stay open])
+
+    RC1 --> StableWindow[Continue weekly intake through stable window]
+    StableWindow --> LaterRecords[Finally disposition every new full-window record]
+    CandidateInventory --> StableInventory[Same body region retains candidate history and later records]
+    LaterRecords --> StableInventory
+    RC1 --> PreStable[gh workflow run after accepted RC and before stable]
+    AuditContract --> StableAudit[Run pre-stable audit]
+    PreStable --> StableAudit
+    StableAudit -- clean or bounded findings --> StableInventory
+    StableAudit -- failed or uncertain cleanup --> Block
+    StableInventory --> StableGate
+    StableGate{Audit successful and full-window snapshot final?}
+    StableGate -- No --> Block
+    StableGate -- Yes --> StableReady[stable_ready exact full-window readback]
+    StableReady --> Close499[Close campaign issue 499]
+    Close499 --> Release([Stable issue 492 acceptance may begin])
 ```
 
 ## CI and dependency campaign sequencing
 
-#497 lands first as the shared lean-CI foundation without becoming a fake graph blocker for independent product issues. #498 genuinely depends on #497; #482 remains dependency-free and may proceed in parallel after that operational priority. #499 waits for both accepted results, then owns the ordered high-impact update campaign while all other disjoint release lanes continue independently.
+#497 lands first as the shared lean-CI operational priority without becoming a fake graph blocker for #482 or other independent product issues. #498 genuinely depends on #497; #482 remains dependency-free. #499 waits for both accepted results, then owns the ordered high-impact update campaign while all other disjoint release lanes continue independently.
 
 ```mermaid
 flowchart TB
-    CI497[#497 lean affected CI] --> Auto498[#498 campaign automation]
-    CI497 -. Operational priority, not blocker .-> Rust482[#482 exact Rust 1.98.0]
+    subgraph Priority[Operational priority only - no #497 to #482 blocker]
+        CI497[#497 lean affected CI lands first]
+    end
+    subgraph Foundations[Genuine prerequisite lanes]
+        Auto498[#498 campaign automation]
+        Rust482[#482 exact Rust 1.98.0]
+    end
+    CI497 -- Genuine blocker for #498 --> Auto498
     Auto498 --> Ready{#498 and #482 accepted on main?}
     Rust482 --> Ready
     Ready -- No --> Stop([#499 handoff blocked])
@@ -424,9 +466,13 @@ flowchart TB
     Campaign499 --> PR453[#453 object: Rust and parser]
     PR453 --> PR454[#454 rusqlite: Rust, database, SQLite]
     PR454 --> PR455[#455 rmcp: Rust and MCP]
-    PR455 --> FinalState{All records final and audits reconciled?}
-    FinalState -- No --> Stop
-    FinalState -- Yes --> Release492[#492 release acceptance closes last]
+    PR455 --> CandidateState{Pre-RC audit and candidate inventory final?}
+    CandidateState -- No --> Stop
+    CandidateState -- Yes --> RC1[RC1 while #499 and #492 remain open]
+    RC1 --> StableState{Post-RC audit and full-window inventory final?}
+    StableState -- No --> Stop
+    StableState -- Yes --> Close499[Close #499]
+    Close499 --> Release492[Stable #492 acceptance closes last]
     Parallel[Existing independent release lanes] --> Release492
 ```
 
@@ -437,17 +483,18 @@ stateDiagram-v2
   [*] --> PublishedIssueReadback: read exact main OpenSpec and architecture targets
   PublishedIssueReadback --> PublicationRepair: mapped task, document, heading, or Mermaid is missing or stale
   PublicationRepair --> PublishedIssueReadback: planning PR publishes corrected evidence
-  PublishedIssueReadback --> ExactRevision: published milestone gate and every required review pass
+  PublishedIssueReadback --> ExactRevision: implementation children closed and campaign candidate-ready
   ExactRevision --> SurfaceInventory: freeze complete CLI and MCP inventory
   SurfaceInventory --> InstalledProof: safely execute every supported route
   InstalledProof --> CandidateBuild: package exact main revision
   CandidateBuild --> UpdateProof: update exercised v0.4.5 installation and database
-  UpdateProof --> RC1: state, migration, failure, retry, and rollback hard gate passes
+  UpdateProof --> RC1: hard gate passes while campaign and release issues stay open
   UpdateProof --> Remediation: update or migration blocker
   RC1 --> HostedReadback: independently verify tag, assets, runtime, and Latest
   HostedReadback --> Remediation: confirmed blocker
   Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
-  HostedReadback --> StableBuild: accepted candidate and no blocker
+  HostedReadback --> StableCampaign: accepted candidate then continue intake and run pre-stable audit
+  StableCampaign --> StableBuild: campaign stable-ready, campaign issue closed, every child closed
   StableBuild --> StableReadback: repeat installs and hosted identity
   StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified
   FinalState --> [*]

@@ -35,7 +35,7 @@ The alternative of a provider/plugin framework or a second dependency graph was 
 
 The planner records the base and head commit, pull-request event class, impact-contract digest, planner/workflow identity, toolchain identity, platform when platform-specific, selected contracts, and one digest over the canonical plan. Downstream jobs validate that identity before trusting either work or not-applicable state.
 
-Changed planner code, its data contract, aggregation/workflow ownership, shared repository metadata, unknown paths, unclassified renames/deletes, failed or malformed diffs, failed `cargo metadata`, and stale or mismatched plan fields select full proof. A mixed diff selects the union of all known effects unless any input forces full proof. This makes false negatives more expensive in compute, never in quality.
+Changed planner code, its data contract, aggregation/workflow ownership, shared repository metadata, unknown paths, every rename or deletion, failed or malformed diffs, failed `cargo metadata`, and stale or mismatched plan fields select full proof. Only ordinary additions and modifications may select the union of all known effects, and any fail-closed input in a mixed diff selects full proof. Both sides of a rename remain diagnostic input, but classification of both sides never makes affected selection permissible. This makes false negatives more expensive in compute, never in quality.
 
 The alternative of caching a plan by branch or pull-request number was rejected because either identity can outlive the evidence inputs.
 
@@ -66,7 +66,7 @@ Planner cost is linear in changed paths plus Cargo graph nodes/edges plus declar
 
 ## Risks / Trade-offs
 
-- **A missing path or edge could under-select proof** → unknown, shared, and planner-owning inputs select full proof; focused fixtures cover additions, renames, deletes, mixed diffs, and every declared edge.
+- **A missing path or edge could under-select proof** → unknown, shared, planner-owning, rename, and deletion inputs select full proof; focused fixtures cover ordinary additions/modifications, every rename/delete shape, mixed diffs, and every declared edge.
 - **A stale plan could bless a skip** → every execution and not-applicable record validates exact plan identity and digest before aggregation.
 - **Conditional jobs could make a required context look green without work** → stable aggregators accept only plan-bound affected success or trusted not-applicable state and reject every other conclusion.
 - **Cancellation could interrupt stateful work** → only superseded read-only pull-request CI shares the cancelable concurrency group.

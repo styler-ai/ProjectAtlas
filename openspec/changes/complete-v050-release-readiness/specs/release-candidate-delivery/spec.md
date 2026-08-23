@@ -7,12 +7,20 @@
 - **WHEN** the native hierarchy is read
 - **THEN** #492 exposes every accepted child once while each issue's direct blocker list independently communicates execution order
 
-#### Scenario: A child is incomplete
-- **WHEN** any child issue, mapped task, required proof, or review remains open
-- **THEN** #492 cannot freeze, publish, promote, or close
+#### Scenario: An implementation-bearing child is incomplete at RC
+- **WHEN** any feature, bug, or maintenance child other than the declared release-governance campaign #499, or any of its mapped tasks, required proof, or review, remains open
+- **THEN** #492 cannot freeze or publish an RC candidate
+
+#### Scenario: Release-governance issues remain open at RC
+- **WHEN** every implementation-bearing child is closed and #499 has exact `candidate_ready` evidence for the frozen candidate
+- **THEN** RC publication MAY proceed while #499 and unparented release owner #492 intentionally remain open
+
+#### Scenario: A child is incomplete at stable
+- **WHEN** any child including #499 remains open, or any final mapped task, proof, review, or stage evidence is incomplete
+- **THEN** #492 cannot publish stable or close
 
 ### Requirement: Lean CI and the dependency campaign remain release gates
-Pull requests SHALL run the smallest contract-complete existing proof selected by the single #497 affected-contract planner, with human and Dependabot parity and unknown/shared/planner-owning input failing closed to complete proof. Default-branch, scheduled, candidate, and release boundaries SHALL run complete proof. Each release SHALL declare at most one active Dependabot campaign issue; v0.5.0 SHALL declare #499, and release acceptance SHALL require every release-window record and the pre-RC/pre-stable audits to be final and successful.
+Pull requests SHALL run the smallest contract-complete existing proof selected by the single #497 affected-contract planner, with human and Dependabot parity, ordinary additions/modifications eligible for known-impact union, and every rename/deletion plus unknown/shared/planner-owning input failing closed to complete proof. Default-branch, scheduled, candidate, and release boundaries SHALL run complete proof. Each release SHALL declare at most one active Dependabot campaign issue; v0.5.0 SHALL declare #499 and use its same body region for exact candidate-ready and stable-ready evidence.
 
 #### Scenario: Pull-request proof is narrowed safely
 - **WHEN** the exact current plan proves a closed subset of existing contracts affected
@@ -24,12 +32,16 @@ Pull requests SHALL run the smallest contract-complete existing proof selected b
 - **THEN** the complete repository proof executes without treating pull-request not-applicable state as release evidence
 
 #### Scenario: Dependabot campaign is incomplete
-- **WHEN** #499 has a pending, provisional, or failed PR/audit record, a missing exact campaign relationship, or incomplete review/thread/protected-context/Sol-authorization readback
-- **THEN** #499 and #492 remain blocked
+- **WHEN** #499 has a pending, provisional, or failed PR/audit record applicable to the checkpoint, a missing exact campaign relationship, incomplete review/thread/protected-context/applicable-Sol-authorization readback, or stale/malformed stage evidence
+- **THEN** candidate-ready or stable-ready fails closed
 
-#### Scenario: Dependabot campaign is reconciled
-- **WHEN** both bounded audits complete, every release-window record is finally accepted, deferred, declined, or superseded, and all delivered PRs passed the normal exact-head gates
-- **THEN** dependency campaign acceptance may unblock #492 without creating per-PR issues or weakening proof
+#### Scenario: Dependabot campaign is candidate-ready
+- **WHEN** the pre-RC audit completes successfully, every finding and candidate-snapshot record is finally accepted, deferred, declined, or superseded for the exact candidate, and revision/inventory/config/audit identities match at publication preflight
+- **THEN** #499 records `candidate_ready` and RC1 may publish while #499/#492 remain open
+
+#### Scenario: Dependabot campaign is stable-ready
+- **WHEN** RC1 is accepted, the later pre-stable audit completes successfully, every finding and every newly observed/full-window record is final, and the exact stage/full-union readback matches
+- **THEN** #499 records `stable_ready`, may close, and may unblock stable #492 acceptance without per-PR issues or weaker proof
 
 ### Requirement: Accepted issue evidence is published before implementation
 Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped OpenSpec task source and every architecture URL, heading, and Mermaid block from an exact clean checkout of the live default-branch revision. Candidate-local validation SHALL remain required for proposed artifacts but SHALL NOT authorize readiness, milestone assignment, native release relationships, implementation handoff, merge, or release.
@@ -86,7 +98,7 @@ IssueOps SHALL derive a bounded transition plan from the declared release graph 
 - **THEN** IssueOps selects the graph from the issue map, reports targeted milestone drift, and does not skip validation because the event payload milestone is null
 
 ### Requirement: Release input is exact and complete
-#492 SHALL freeze one exact `main` revision only after every accepted child, task, owning proof, document/diagram, dependency, final Dependabot campaign record/audit, release note, and actionable human/automated review finding is complete and the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source and architecture target. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
+#492 SHALL freeze one exact RC `main` revision only after every implementation-bearing child other than #499 is closed successfully; every applicable task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete; the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source and architecture target; and #499 has exact `candidate_ready` evidence. #499 and #492 SHALL remain open at RC publication. Stable acceptance SHALL require later exact `stable_ready`, #499 closure, and every child closed. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
 
 #### Scenario: Evidence-led no-change issue
 - **WHEN** a measurement or reproduction task proves existing behavior already satisfies its contract
@@ -145,15 +157,15 @@ Before RC or stable publication, the release gate SHALL install `v0.4.5`, create
 - **THEN** it is recorded without weakening an accepted task
 
 ### Requirement: v0.5.0 begins with an independently read-back prerelease
-With explicit authorization, `v0.5.0-rc1` SHALL publish as a non-draft prerelease from the exact accepted revision. Independent readback SHALL verify tag/revision, metadata, assets, checksums/integrity records, installers, npm, runtime/plugin/skill/MCP/CLI/host identity, and acceptance results. v0.4.5 SHALL remain Latest.
+With explicit authorization, `v0.5.0-rc1` SHALL publish as a non-draft prerelease from the exact accepted revision only after every implementation-bearing child is closed and #499's exact candidate-ready record matches publication preflight. Independent readback SHALL verify tag/revision, metadata, assets, checksums/integrity records, installers, npm, runtime/plugin/skill/MCP/CLI/host identity, and acceptance results. #499 and #492 SHALL remain open for the stable window, and v0.4.5 SHALL remain Latest.
 
 #### Scenario: Missing or mismatched release artifact
 - **WHEN** any required tuple/asset/digest/version/readback is absent or inconsistent
 - **THEN** RC acceptance fails and stable promotion is blocked
 
 ### Requirement: Stable promotion repeats complete proof and closes last
-After an accepted candidate and explicit authorization, stable v0.5.0 SHALL repeat installed and hosted proof before becoming Latest. #492 SHALL remain open until downstream pins and final IssueOps/OpenSpec/review/milestone/workflow state agree and SHALL close last.
+After an accepted candidate and explicit authorization, stable v0.5.0 SHALL require the post-accepted-RC pre-stable audit, exact stable-ready full-window reconciliation, #499 closure, and therefore every child closed before repeating installed and hosted proof and becoming Latest. #492 SHALL remain open until downstream pins and final IssueOps/OpenSpec/review/milestone/workflow state agree and SHALL close last.
 
 #### Scenario: Stable promotion
-- **WHEN** no blocker remains and stable artifacts pass the complete proof
+- **WHEN** #499 is closed from exact stable-ready evidence, no child blocker remains, and stable artifacts pass the complete proof
 - **THEN** v0.5.0 becomes Latest only after exact readback and #492/milestone finalization

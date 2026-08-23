@@ -6,7 +6,7 @@ For v0.5.0, the release window starts at the v0.4.5 publication time, `2026-08-2
 
 Current official-source facts were refreshed on 2026-08-23:
 
-- [GitHub's Dependabot configuration reference](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference) keeps hosted version-update production driven by `.github/dependabot.yml` on the default branch.
+- [GitHub's Dependabot configuration reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference) keeps hosted version-update production driven by `.github/dependabot.yml` on the default branch.
 - [GitHub's REST Dependabot API](https://docs.github.com/en/rest/dependabot) exposes alerts, secrets, and repository-access administration, not a public endpoint that triggers hosted version updates. GitHub documents an interactive “Check for updates” path, but this design does not automate the UI.
 - [`gh workflow run`](https://cli.github.com/manual/gh_workflow_run) dispatches workflows that declare `workflow_dispatch`.
 - The official [`dependabot/cli` v1.92.0](https://github.com/dependabot/cli/tree/v1.92.0) release resolves to commit `13f626792737e1a2975e94feb8065874882616c4`, uses Docker, and reports would-be pull-request operations without creating hosted Dependabot pull requests. Its source owns the official `ghcr.io/dependabot/dependabot-updater-<ecosystem>` and `ghcr.io/dependabot/proxy` image contracts. The official [`dependabot-action`](https://github.com/dependabot/dependabot-action) states that it is used by GitHub.com and is not supported as a directly embedded repository workflow action.
@@ -49,7 +49,9 @@ The pull-request inventory is the union of:
 
 Each PR record includes repository, PR number, author, base, exact head, package ecosystem and dependency/update summary, first-seen and last-seen timestamps, current PR state, milestone, campaign relationship, proof/review summary, and disposition. Records are keyed by PR number within the repository, updated idempotently, and never deleted during the campaign. A closed or merged record remains in history.
 
-Allowed final dispositions are `accepted`, `deferred`, `declined`, and `superseded`. Intake begins `pending`; a retrospective or not-yet-final judgment may be `provisional`. Both non-final states block release. A final disposition records a short repository-technical rationale and, where applicable, the superseding PR or follow-up issue. The v0.5.0 records for #457 and #468 begin provisional accepted and must be finalized before release.
+Allowed final dispositions are `accepted`, `deferred`, `declined`, and `superseded`. Intake begins `pending`; a not-yet-final judgment may be `provisional`. Both non-final states block the applicable readiness checkpoint. Provenance is orthogonal: `retrospective_precontract` identifies a PR merged before the campaign contract without becoming a fifth disposition or claiming post-hoc pre-merge authorization. A final disposition records a short repository-technical rationale and, where applicable, the superseding or corrective PR.
+
+The same machine region records the exact published campaign-contract activation revision and owns one closed campaign stage: `collecting`, `candidate_ready`, or `stable_ready`. A readiness record binds the release/candidate revision, inventory digest, full-union reconciliation high-water mark, configuration digest, audit run identity and outcome, immutable CLI/updater/proxy identities, and stage timestamp. Any missing, malformed, stale, or mismatched field, or a newly observed event before the stage-consuming publication readback, returns the campaign to `collecting`; this is not a second issue, graph, database, or proof ledger.
 
 ### Intake and CI planning have different owners
 
@@ -57,7 +59,7 @@ The campaign automation owns discovery, exact campaign/PR relationship, body-reg
 
 This single-writer split prevents two inventory stores or two planners.
 
-### Dependabot gets a narrow exact-author IssueOps path
+### Future Dependabot pull requests get one narrow exact-author IssueOps path
 
 The implementation context admits the campaign path only when all of these bind to the same current readback:
 
@@ -71,26 +73,59 @@ The normal implementation-owner closing-reference path remains unchanged for all
 
 Merge authorization remains explicit and one-shot. It reads back exact author, campaign mapping, PR number/head/body/milestone, inventory record, review decision, unresolved threads, every protected check, current base, and branch synchronization. Only an explicit Sol dispatch for that exact head may authorize the existing `issueops-merge-authorized` context. There is no automatic merge or gate waiver. Any new commit invalidates the authorization and requires fresh proof/readback/dispatch.
 
-#494's blanket rejection can be narrowed only after these positive invariants and negative tests exist; until then rejection remains the safe behavior.
+#494's blanket rejection can be narrowed only after these positive invariants and negative tests exist; until then rejection remains the safe behavior. This path applies only to pull requests opened or updated under the published campaign contract. It has no retrospective exception: every post-contract Dependabot pull request must satisfy admission, protected proof, review/thread readback, and explicit pre-merge Sol authorization before merge.
+
+### Pre-contract merges use truthful retrospective reconciliation
+
+#457 and #468 merged before the campaign, `issueops-implementation`, and `issueops-merge-authorized` contracts existed. Their records therefore use provenance `retrospective_precontract` and preserve the explicit historical gate gap. Their original five successful checks are historical evidence only; they do not satisfy later IssueOps, review, campaign, or authorization requirements.
+
+A retrospective record may become finally `accepted` only after all of the following are read back together:
+
+- the exact dependency head, merge commit, changed-file set, merge time, and ancestry/inclusion in current `main`;
+- after a metadata-only safety preflight, exactly one post-hoc non-closing `Relates to #499` relationship and the `v0.5.0-00` milestone; a failed or ambiguous metadata update blocks acceptance;
+- a fresh Sol review of both the exact merged diff and its behavior integrated into current `main`, with zero unresolved actionable human or automated findings; and
+- fresh complete current-`main` proof, including the current protected and all four platform contexts required by the affected-contract contract.
+
+No record claims a historical review or pre-merge Sol dispatch that did not occur. If retrospective review or current proof fails, the record cannot be `accepted`: an actual revert, corrective, or superseding delivery must pass its normal current gates, and the historical record becomes `declined` when fully reverted or `superseded` with the exact accepted successor. This bounded exception is selected only when the recorded merge predates the published campaign-contract activation revision.
 
 ### One trusted sequential audit complements hosted weekly updates
 
 One manually dispatchable job stays in the existing trusted default-branch workflow and declares least job-level permissions. The CLI harness launches it with `gh workflow run`; it does not attempt a nonexistent hosted-update REST trigger or drive the GitHub UI.
 
-The job parses only the current default-branch `.github/dependabot.yml`, validates its supported entries, and invokes the official Dependabot CLI sequentially once per entry. Later Luna implementation pins:
+One standard-library translator parses only the current default-branch `.github/dependabot.yml` and produces official CLI job-description input for `dependabot update -f <input> --output <bounded-output>`; `dependabot test` is not the audit entrypoint because it replays a smoke-test expectation. The translator's closed supported surface is:
+
+- top-level `version: 2` and `updates` only;
+- the current `cargo` -> CLI `cargo` and `github-actions` -> CLI `github_actions` ecosystems, exactly one `directory`, `target-branch`, and `schedule.interval` (validated as hosted-schedule policy but not invented as an update-job field);
+- group names with supported `patterns`, `exclude-patterns`, `dependency-type`, and group `update-types`, including the current Cargo `minor-and-patch` group and the current ungrouped GitHub Actions entry;
+- `allow` rules with dependency name/type and allow-style semantic update types, plus `ignore` rules with dependency name, versions expanded losslessly into conditions, and ignore-style semantic update types; and
+- `versioning-strategy` and `exclude-paths` only where the pinned CLI job model has an exact owning field.
+
+Unknown keys, `directories`, unsupported ecosystems or group rules, lossy policy combinations, ambiguous values, or a field that cannot be represented exactly fail the audit before container startup. Fixtures freeze both current repository entries, allow/ignore precedence, group/update-type translation, and unsupported/lossy rejection. Later Luna implementation pins:
 
 - `dependabot/cli` to v1.92.0 commit `13f626792737e1a2975e94feb8065874882616c4` or a newer Sol-approved official immutable replacement refreshed at implementation time; and
 - every official updater and proxy image used by those entries to an OCI digest recorded in the workflow, never a mutable tag alone.
 
-The proxy remains the secret/network isolation boundary documented by the official CLI. Audit input, logs, and the campaign update must not expose credentials. `clean` means no would-be update operations, `findings` means one or more bounded operations were reported, and `failed` covers invalid configuration, tooling/image/pin failure, API/rate failure, or incomplete execution. Every outcome and exact config/tool identity is ingested into the same campaign body region. `findings` create or refresh pending inventory items; `failed` blocks release; `clean` cannot silently finalize existing pending or provisional records.
+Each translated entry runs sequentially with a checked-in positive per-entry timeout passed through the CLI's `--timeout`; the workflow has a larger positive total `timeout-minutes`. The contract also pins positive per-entry and total output-byte and recorded-operation ceilings. Timeout, overflow, unknown output operation, cancellation, signal failure, nonzero exit, or uncertain completion/cleanup produces `failed`. The wrapper forwards cancellation/termination to the one active CLI process, waits within a bounded cleanup interval, and verifies the updater, proxy, container network, and temporary output are gone before continuing.
 
-One sequential job avoids duplicate runners, rate bursts, and cross-job aggregation. A second `workflow_run` handoff is unnecessary because the trusted default-branch job can hold narrow issues write permission at job scope and update/read back the campaign directly.
+Job-level permission alone is not credential isolation. Checkout uses `persist-credentials: false`. The issues-write token is absent from updater/proxy command input, environment, mounts, logs, credentials, generated job YAML, and persisted Git configuration. Because ProjectAtlas is public, the updater uses no repository token; if rate limits later require one, it must be a distinct read-only credential supplied only to the official proxy and never the updater. All updater/proxy containers must exit, and their output must pass bounded schema validation plus credential/log sanitization, before a later reconciliation step receives an issues-write token scoped only to campaign mutation/readback. Negative tests inspect generated environment, input, mounts, proxy/updater arguments, logs, persisted Git configuration, cancellation, and cleanup for any issues-write credential exposure.
+
+`clean` means a successful complete run reported no would-be update operations. `findings` means a successful complete run reported one or more bounded create/update/close operations, each of which becomes or refreshes a pending campaign record. `failed` covers invalid or lossy configuration, tooling/image/pin failure, API/rate failure, timeout, overflow, cancellation, schema/sanitization failure, or incomplete execution/cleanup. Every outcome and exact config/tool identity is ingested into the same campaign body region. `clean` cannot silently finalize existing pending or provisional records.
+
+One sequential job avoids duplicate runners, rate bursts, and cross-job aggregation. A second `workflow_run` handoff is unnecessary: the same trusted job keeps the token out of the updater phase and injects it only into the later reconciler after verified container cleanup.
+
+### Candidate-ready and stable-ready are distinct checkpoints
+
+`candidate_ready` is permitted only after an exact RC candidate revision is frozen, the pre-RC audit completes successfully as `clean` or `findings`, every finding and every campaign record in the full union reconciled through the stage high-water mark has a final disposition for its exact head/state, and the publication preflight rereads the same inventory/config/audit digests with no intervening event. This state permits `v0.5.0-rc1` publication while #499 and #492 intentionally remain open so weekly intake continues through the stable window.
+
+After RC1 is independently accepted, the campaign returns to `collecting` for newly created or updated records. `stable_ready` requires a later pre-stable audit on a current accepted `main` revision, successful `clean` or `findings` completion, final disposition of every resulting finding and every record newly observed since `candidate_ready`, and exact final readback of the full window union. Only then may #499 close; that native blocker removal allows #492 to begin stable publication acceptance. Stable acceptance still requires every release child closed, and #492 closes last after stable hosted readback.
+
+All implementation-bearing feature, bug, and maintenance children—including #497 and #498—must be accepted and closed before the RC candidate checkpoint. For v0.5.0 the only intentional open governance issues at RC publication are #499 and unparented release owner #492.
 
 ### The v0.5.0 campaign delivery order follows compatibility risk
 
 After exact Rust #482 is accepted on `main`, campaign delivery is #453 (`object`, Rust/parser) then #454 (`rusqlite`, Rust/database/SQLite implementation and review) then #455 (`rmcp`, Rust/MCP). Each branch first refreshes or rebases onto accepted current `main`, resolves only its own new findings, and reruns the same affected-contract quality bar. Existing red checks caused by stale shared IssueOps state are recorded as stale-baseline evidence, not package regressions.
 
-The sequence is intentionally local to these high-impact open updates. It does not make #497 a fake blocker of independent product work.
+The sequence is intentionally local to these high-impact open updates. It does not make #497 a fake blocker of independent product work. #457 (dependency head `7942d8e…`, merge `e142f95…`) and #468 (dependency head `bad62e3…`, merge `409a28d…`) follow the retrospective contract above; their original five green checks, absent milestone, and absent review are retained as history, never promoted into later-gate proof.
 
 ### Rust, storage, and resource pattern fit
 
@@ -103,19 +138,23 @@ Inventory reconciliation is linear in the bounded release-window PR record count
 - **A PR could be admitted under the wrong campaign** → bind exact author, milestone release graph, standalone relationship, PR/head/body, and inventory record in both implementation and merge contexts.
 - **Automation could overwrite human issue prose** → mutate one delimited machine region with optimistic concurrency and read back the exact body.
 - **A closed PR could disappear from release history** → retain every release-window record and update state instead of deleting rows.
-- **A clean audit could be mistaken for campaign completion** → clean records the audit result only; every PR record still needs a final disposition.
+- **A successful audit could be mistaken for campaign completion** → clean/findings record completed execution only; every resulting PR record still needs a final disposition and an exact stage-bound inventory digest.
 - **Mutable container tags could drift** → pin the CLI source and every updater/proxy image by immutable commit/digest and fail on missing/mismatched pins.
-- **Audit secrets or untrusted branch code could cross the boundary** → run only the trusted default-branch workflow, use the official proxy contract, declare least job-level permissions, and sanitize logs/body output.
+- **The issues-write token could reach updater-controlled code** → use checkout without persisted credentials, no updater token (or a distinct proxy-only read credential), keep the issues token absent until containers exit and bounded sanitized output validates, and test environment/input/mount/log/config/cleanup isolation negatively.
+- **A lossy configuration translation could audit different updates than hosted Dependabot** → support one closed field mapping with current Cargo-group and GitHub Actions fixtures and fail before containers on every unknown, unsupported, or lossy field.
+- **RC and stable readiness could form a closure cycle** → bind `candidate_ready` while #499/#492 stay open, then require post-RC `stable_ready` before #499 closes and #492 stable acceptance begins.
+- **A pre-contract merge could be granted fictional later authorization** → retain `retrospective_precontract` provenance, original-check history, current-main proof, fresh Sol review, explicit historical gap, and require a real successor when proof fails.
 - **Current red checks could be misdiagnosed as dependency breakage** → require refresh/rebase and fresh protected proof before technical disposition; label stale shared IssueOps failures as baseline drift.
 - **Serial updates take longer** → accept the bounded sequence because object/parser, rusqlite/storage, and rmcp/MCP compatibility need distinct review; unrelated release lanes remain parallel.
 
 ## Migration Plan
 
 1. Land #497 so both human and Dependabot pull requests have one affected-proof contract.
-2. Implement #498's release-graph campaign declaration, exact-author IssueOps path, body-region reconciler, audit job, tests, and architecture readback while the blanket Dependabot merge rejection remains the default on any mismatch.
-3. After #482 and #498 are accepted on `main`, publish/read back #499's native relationships and initial inventory, refresh/rebase #453/#454/#455, and deliver them in order.
-4. Reconcile every window record and both pre-RC/pre-stable audits to final state before #499 closes; #492 performs final release readback and closes last.
-5. Roll back automation by restoring blanket Dependabot merge rejection and manual campaign-region maintenance. The release remains blocked rather than bypassing the inventory.
+2. Implement #498's release-graph campaign declaration, exact-author future-PR IssueOps path, retrospective contract, body-region/stage reconciler, isolated bounded audit job, tests, and architecture readback while the blanket Dependabot merge rejection remains the default on any mismatch.
+3. After #482 and #498 are accepted on `main`, publish/read back #499's native relationships and initial inventory, refresh/rebase #453/#454/#455, deliver them in order, and reconcile #457/#468 truthfully.
+4. Reach exact `candidate_ready`, publish/read back RC1 while #499/#492 remain open, then continue intake, run the post-accepted-RC pre-stable audit, reconcile every new record, reach `stable_ready`, and close #499.
+5. #492 verifies every child is closed, performs stable publication/readback, and closes last.
+6. Roll back automation by restoring blanket Dependabot merge rejection and manual campaign-region maintenance. The release remains blocked rather than bypassing the inventory.
 
 ## Open Questions
 

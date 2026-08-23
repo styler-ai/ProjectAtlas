@@ -40,16 +40,20 @@ Every plan SHALL bind its base commit, head commit, pull-request event class, im
 - **AND** the required context fails or the event reruns complete proof
 
 ### Requirement: Pull requests run the smallest contract-complete proof
-For a trusted pull-request plan, the workflows SHALL execute every affected existing contract and SHALL omit work only through an explicit plan-bound not-applicable result. A mixed known diff SHALL select the union of its effects, while any fail-closed input SHALL select complete proof.
+For a trusted pull-request plan, the workflows SHALL execute every affected existing contract and SHALL omit work only through an explicit plan-bound not-applicable result. Only ordinary additions and modifications MAY select the union of known effects. Every rename or deletion SHALL select complete proof even when both old and new paths are classified, and any other fail-closed input SHALL select complete proof.
 
 #### Scenario: Narrow known change
 - **WHEN** a trusted plan proves that only a closed subset of contracts is affected
 - **THEN** the pull request executes that complete subset without rebuilding or retesting unrelated contracts
 
-#### Scenario: Rename delete or mixed diff
-- **WHEN** a diff renames, deletes, or combines paths
-- **THEN** the planner evaluates both sides and the full union of known impacts
-- **AND** any unclassifiable side selects complete proof
+#### Scenario: Rename or deletion
+- **WHEN** a diff contains any rename or deletion
+- **THEN** the planner selects complete proof regardless of whether the old and new paths are both classified
+
+#### Scenario: Ordinary mixed diff
+- **WHEN** a diff contains only ordinary additions and modifications with known impacts
+- **THEN** the planner selects the deterministic union of those known impacts
+- **AND** any fail-closed input in the same diff selects complete proof
 
 ### Requirement: Shared truth boundaries always run full proof
 Default-branch pushes, scheduled drift checks, release-candidate paths, release paths, and manually invoked release proof SHALL execute the complete repository proof set without accepting affected-plan not-applicable state.

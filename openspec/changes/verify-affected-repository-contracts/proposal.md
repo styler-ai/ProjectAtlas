@@ -6,7 +6,7 @@ ProjectAtlas currently pays for the complete repository proof chain on every pul
 
 - Add one checked-in closed impact contract and one Python-standard-library planner for all human and Dependabot pull requests.
 - Derive Rust reverse dependencies from `cargo metadata`; declare only cross-contract edges Cargo cannot know for database/schema, CLI/MCP, Python, Node/Mermaid, documentation/OpenSpec/IssueOps, installers/packages, fixtures/generated inputs, and platform gates.
-- Run only affected build, test, and quality contracts for pull requests, while unknown, shared, planner-owning, stale, or malformed inputs fail closed to full proof.
+- Run only affected build, test, and quality contracts for ordinary additions and modifications on pull requests. Every rename or deletion, plus unknown, shared, planner-owning, stale, or malformed input, fails closed to full proof even when all observed paths are otherwise classified.
 - Always run full proof on the default branch, scheduled drift checks, and release paths.
 - Keep every stable required context present by aggregating either affected success or trusted plan-bound not-applicable state; missing, skipped, canceled, stale, malformed, or mismatched evidence fails.
 - Reuse #341's digest-addressed dependency layer and #366's input-based proof contract without adding a second classifier, build system, dependency graph framework, or proof ledger.
