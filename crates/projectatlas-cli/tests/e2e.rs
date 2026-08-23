@@ -8575,6 +8575,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "Relates to",
         "expected_body",
         "merge authorization milestone preflight failed",
+        "Dependabot pull requests are not eligible for one-shot merge authorization",
         "implementation status final milestone read-back failed",
         "merge_authorization_policy",
         "repository identity response was malformed",

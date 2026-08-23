@@ -2638,6 +2638,10 @@ def merge_readiness_failures(
     author = details.get("author")
     if not isinstance(author, dict) or not isinstance(author.get("login"), str):
         failures.append("merge PR author identity was malformed")
+    elif author["login"].casefold() == "dependabot[bot]":
+        failures.append(
+            "Dependabot pull requests are not eligible for one-shot merge authorization"
+        )
     review_decision = details.get("reviewDecision")
     if state == "OPEN" and review_decision != "APPROVED":
         failures.append(
@@ -4908,7 +4912,11 @@ Mitigations:
             milestone = {"title": "v9.9.9-00"}
         else:
             milestone = {"title": "v1.2.3-00"}
-        planning = merge_mode in {"planning", "planning-body-drift"}
+        planning = merge_mode in {
+            "planning",
+            "planning-body-drift",
+            "dependabot-planning",
+        }
         planning_body = (
             "Relates to #12. The release-acceptance issue remains open and closes last; "
             "this PR implements no release feature or bug."
@@ -4924,7 +4932,11 @@ Mitigations:
             "mergeable": "CONFLICTING" if merge_mode == "unmergeable" else "MERGEABLE",
             "mergeCommit": {"oid": "c" * 40} if merge_state == "MERGED" else None,
             "id": "PR_node_494",
-            "author": {"login": "owner"},
+            "author": {
+                "login": "dependabot[bot]"
+                if merge_mode == "dependabot-planning"
+                else "owner"
+            },
             "closingIssuesReferences": [] if planning else [merge_reference],
             "autoMergeRequest": {"id": "AUTO_494"} if planning else None,
             "milestone": milestone,
@@ -5162,6 +5174,26 @@ Mitigations:
         assert any(
             state == "failure" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
             for state, context, _ in merge_statuses
+        )
+        merge_mode = "dependabot-planning"
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        merge_pr_reads = 0
+        before_enable = enable_calls
+        before_statuses = len(merge_statuses)
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
+                "merge-dependabot-planning", "owner", "owner"
+            )
+        except SystemExit as error:
+            assert "Dependabot" in str(error)
+        else:
+            raise AssertionError("Dependabot planning PR was authorized")
+        assert enable_calls == before_enable
+        assert any(
+            state == "failure" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+            for state, context, _ in merge_statuses[before_statuses:]
         )
         merge_mode = "wrong-milestone"
         merge_state = "OPEN"
