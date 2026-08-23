@@ -3,7 +3,7 @@
 - [x] 1.1 Freeze the v0.5.0 proposal, design, capability specifications, non-goals, dependency order, CLI-versus-MCP policy, and RC-first publication contract.
 - [x] 1.2 Classify database, path, parser, platform, performance, installer, compatibility, security, and release-proof implications before implementation ownership begins.
 - [x] 1.3 Add the durable issue-specific v0.5.0 architecture views, render every Mermaid block with Mermaid CLI, and inspect both visual communication and semantic truth.
-- [x] 1.4 Map ordered issue-owned task slices, prepare exact sanitized issue-body mirrors, reconcile the native release hierarchy/dependency graph, preserve candidate-local OpenSpec/Mermaid validation for planning PRs, and require an exact clean live-default-branch IssueOps readback before readiness, milestone assignment, native relationships, or implementation handoff.
+- [ ] 1.4 Map ordered issue-owned task slices, prepare exact sanitized issue-body mirrors, reconcile the native release hierarchy/dependency graph, preserve candidate-local OpenSpec/Mermaid validation for planning PRs, and require an exact clean live-default-branch IssueOps readback before readiness, milestone assignment, native relationships, or implementation handoff.
 
 ## 2. Canonical project-root identity (#481)
 
