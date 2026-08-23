@@ -2389,7 +2389,7 @@ def required_check_contexts(repo: str, branch: str) -> list[str]:
     return contexts
 
 
-def merge_authorization_policy(repo: str, branch: str) -> None:
+def merge_authorization_policy(repo: str, branch: str) -> int:
     """Prove the live repository gate is installed before arming auto-merge."""
 
     owner, name = repo_parts(repo)
@@ -2461,6 +2461,23 @@ def merge_authorization_policy(repo: str, branch: str) -> None:
     )
     if not isinstance(protection, dict):
         raise SystemExit("branch protection response was malformed")
+    review_policy = protection.get("required_pull_request_reviews")
+    if review_policy is None:
+        required_approvals = 0
+    elif not isinstance(review_policy, dict):
+        raise SystemExit("branch protection pull-request review policy was malformed")
+    else:
+        required_approvals = review_policy.get("required_approving_review_count")
+        if (
+            isinstance(required_approvals, bool)
+            or not isinstance(required_approvals, int)
+            or required_approvals < 0
+        ):
+            raise SystemExit("branch protection approving-review count was malformed")
+    if required_approvals > 0:
+        raise SystemExit(
+            "merge authorization requires branch protection with zero approving reviews"
+        )
     required = protection.get("required_status_checks")
     if not isinstance(required, dict) or required.get("strict") is not True:
         raise SystemExit("branch protection is not strict")
@@ -2483,6 +2500,7 @@ def merge_authorization_policy(repo: str, branch: str) -> None:
     repository_view = gh_json(["repo", "view", repo, "--json", "allowAutoMerge"])
     if not isinstance(repository_view, dict) or repository_view.get("allowAutoMerge") is not True:
         raise SystemExit("repository auto-merge is not enabled")
+    return required_approvals
 
 
 def check_run_collections(repo: str, sha: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
@@ -2617,8 +2635,9 @@ def merge_readiness_failures(
         failures.append("repository default branch changed during published readiness")
     if details.get("baseRefName") != branch:
         failures.append("merge PR does not target the repository default branch")
+    approval_requirement: int | None = None
     try:
-        merge_authorization_policy(repo, branch)
+        approval_requirement = merge_authorization_policy(repo, branch)
     except BaseException as error:
         failures.append(str(error))
     if state == "OPEN" and details.get("mergeable") != "MERGEABLE":
@@ -2643,11 +2662,14 @@ def merge_readiness_failures(
             "Dependabot pull requests are not eligible for one-shot merge authorization"
         )
     review_decision = details.get("reviewDecision")
-    if state == "OPEN" and review_decision != "APPROVED":
-        failures.append(
-            "merge PR review decision is not APPROVED: "
-            + (review_decision if isinstance(review_decision, str) else "missing")
-        )
+    if state == "OPEN" and approval_requirement is not None:
+        if review_decision == "CHANGES_REQUESTED":
+            failures.append("merge PR review decision is CHANGES_REQUESTED")
+        elif not (review_decision is None or review_decision == "APPROVED"):
+            failures.append(
+                "merge PR review decision is not ready: "
+                + (review_decision if isinstance(review_decision, str) else "malformed")
+            )
     failures.extend(unresolved_review_failures(repo, number))
     base_sha = default_branch_head(repo, branch)
     if base_sha.casefold() != published_snapshot.sha.casefold():
@@ -4993,7 +5015,10 @@ Mitigations:
             return {"object": {"sha": "b" * 40}}
         if "/branches/main/protection" in joined and "required_status_checks/contexts" not in joined:
             if merge_mode == "malformed-protection":
-                return {"required_status_checks": {"strict": True}}
+                return {
+                    "required_pull_request_reviews": "malformed",
+                    "required_status_checks": {"strict": True},
+                }
             checks = []
             if merge_mode != "missing-merge-context":
                 checks.append(
@@ -5003,7 +5028,13 @@ Mitigations:
                     }
                 )
             checks.append({"context": "verify", "app_id": GITHUB_ACTIONS_APP_ID})
+            review_policy = None
+            if merge_mode == "required-approval":
+                review_policy = {"required_approving_review_count": 1}
+            elif merge_mode == "malformed-approval-policy":
+                review_policy = {"required_approving_review_count": "1"}
             return {
+                "required_pull_request_reviews": review_policy,
                 "required_status_checks": {
                     "strict": merge_mode != "non-strict",
                     "checks": checks,
@@ -5362,6 +5393,7 @@ Mitigations:
             "wrong-merge-app",
             "non-strict",
             "malformed-protection",
+            "malformed-approval-policy",
             "no-auto-merge",
             "missing-owner",
             "malformed-repository",
@@ -5372,7 +5404,6 @@ Mitigations:
             "collaborator-owner-mismatch",
             "malformed-collaborators",
             "collaborator-truncation",
-            "review-no-decision",
         ):
             merge_mode = policy_failure
             merge_state = "OPEN"
@@ -5466,6 +5497,46 @@ Mitigations:
             "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
             "merge-review-history-approved", "owner", "owner"
         ) == "applied"
+        merge_mode = "review-no-decision"
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        assert authorize_merge(
+            "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
+            "merge-review-no-decision", "owner", "owner"
+        ) == "applied"
+        merge_mode = "required-approval"
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        before_enable = enable_calls
+        before_statuses = len(merge_statuses)
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
+                "merge-required-approval", "owner", "owner"
+            )
+        except SystemExit as error:
+            assert "zero approving reviews" in str(error)
+        else:
+            raise AssertionError("branch protection requiring approval was accepted")
+        assert enable_calls == before_enable
+        assert any(
+            state == "failure" and context == MERGE_AUTHORIZATION_STATUS_CONTEXT
+            for state, context, _ in merge_statuses[before_statuses:]
+        )
+        merge_mode = "malformed-approval-policy"
+        merge_state = "OPEN"
+        current_merge_head = merge_sha
+        before_enable = enable_calls
+        try:
+            authorize_merge(
+                "owner/repo", 494, merge_sha, Path("."), {}, valid_graphs,
+                "merge-malformed-approval-policy", "owner", "owner"
+            )
+        except SystemExit as error:
+            assert "approving-review count" in str(error)
+        else:
+            raise AssertionError("malformed branch approval policy was accepted")
+        assert enable_calls == before_enable
         merge_mode = "success"
         merge_state = "OPEN"
         current_merge_head = merge_sha
