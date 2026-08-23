@@ -2190,6 +2190,7 @@ def publish_implementation_status_for_pr(
             else "Native implementation references failed: " + clean(failures[0])
         )[:140]
     if failures:
+        commit_status(repo, sha, "failure", description)
         raise SystemExit("implementation status preflight failed:\n" + "\n".join(failures))
     commit_status(repo, sha, "pending", "Revalidating native implementation references")
     final_readback = pull_request_readback(
@@ -2665,7 +2666,11 @@ def merge_readiness_failures(
     if state == "OPEN" and approval_requirement is not None:
         if review_decision == "CHANGES_REQUESTED":
             failures.append("merge PR review decision is CHANGES_REQUESTED")
-        elif not (review_decision is None or review_decision == "APPROVED"):
+        elif not (
+            review_decision is None
+            or review_decision == ""
+            or review_decision == "APPROVED"
+        ):
             failures.append(
                 "merge PR review decision is not ready: "
                 + (review_decision if isinstance(review_decision, str) else "malformed")
@@ -4874,6 +4879,81 @@ Mitigations:
         globals()["gh_api_json"] = saved_planning_gh_api_json
         globals()["require_published_snapshot"] = saved_planning_guard
 
+    saved_status_gh_json = globals()["gh_json"]
+    saved_status_gh_api_json = globals()["gh_api_json"]
+    saved_status_guard = globals()["require_published_snapshot"]
+    saved_status_load_issue_map = globals()["load_issue_map"]
+    saved_status_load_graphs = globals()["load_release_graphs"]
+    saved_status_milestone_failures = globals()["pull_request_milestone_failures"]
+    saved_status_reference_failures = globals()["implementation_reference_failures"]
+    implementation_status_events = ["success"]
+
+    def fake_implementation_status_gh_json(args: list[str]) -> object:
+        if args[0] != "pr":
+            raise AssertionError(f"unexpected implementation status call: {args}")
+        fields = args[-1]
+        reference = {**local_identity, "number": 10}
+        if fields == "number,headRefOid,closingIssuesReferences,author,milestone":
+            return {
+                "number": 494,
+                "headRefOid": "f" * 40,
+                "closingIssuesReferences": [reference],
+                "author": {"login": "owner"},
+                "milestone": {"title": "v1.2.3-00"},
+            }
+        if fields == "number,headRefOid,closingIssuesReferences,id,autoMergeRequest,milestone,body":
+            return {
+                "number": 494,
+                "headRefOid": "f" * 40,
+                "closingIssuesReferences": [reference],
+                "id": "PR_494",
+                "autoMergeRequest": None,
+                "milestone": {"title": "v1.2.3-00"},
+                "body": "",
+            }
+        raise AssertionError(f"unexpected implementation status fields: {fields}")
+
+    def fake_implementation_status_gh_api(args: list[str]) -> object:
+        if "/statuses/" in " ".join(args):
+            state = next(
+                argument.split("=", 1)[1]
+                for argument in args
+                if argument.startswith("state=")
+            )
+            implementation_status_events.append(state)
+            return {}
+        raise AssertionError(f"unexpected implementation status API call: {args}")
+
+    globals()["gh_json"] = fake_implementation_status_gh_json
+    globals()["gh_api_json"] = fake_implementation_status_gh_api
+    globals()["require_published_snapshot"] = lambda *args, **kwargs: PublishedSnapshot(
+        "main", "b" * 40
+    )
+    globals()["load_issue_map"] = lambda *args, **kwargs: {}
+    globals()["load_release_graphs"] = lambda *args, **kwargs: valid_graphs
+    globals()["pull_request_milestone_failures"] = lambda *args, **kwargs: [
+        "PR milestone changed before status publication"
+    ]
+    globals()["implementation_reference_failures"] = lambda *args, **kwargs: []
+    try:
+        try:
+            publish_implementation_status_for_pr(
+                "owner/repo", 494, self_test_root, self_test_root / "issue-map.json"
+            )
+        except SystemExit as error:
+            assert "preflight failed" in str(error)
+        else:
+            raise AssertionError("implementation milestone drift was accepted")
+        assert implementation_status_events == ["success", "failure"]
+    finally:
+        globals()["gh_json"] = saved_status_gh_json
+        globals()["gh_api_json"] = saved_status_gh_api_json
+        globals()["require_published_snapshot"] = saved_status_guard
+        globals()["load_issue_map"] = saved_status_load_issue_map
+        globals()["load_release_graphs"] = saved_status_load_graphs
+        globals()["pull_request_milestone_failures"] = saved_status_milestone_failures
+        globals()["implementation_reference_failures"] = saved_status_reference_failures
+
     saved_merge_gh_json = globals()["gh_json"]
     saved_merge_gh_api_json = globals()["gh_api_json"]
     saved_merge_graph_failures = globals()["release_graph_failures"]
@@ -4969,7 +5049,7 @@ Mitigations:
             ),
             "reviewDecision": {
                 "review-failure": "CHANGES_REQUESTED",
-                "review-no-decision": None,
+                "review-no-decision": "",
             }.get(merge_mode, "APPROVED"),
             "reviews": [],
         }
