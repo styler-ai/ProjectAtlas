@@ -12,6 +12,7 @@ The accepted Rust shape remains seven crates with concrete modules, typed values
 - Require exact published-default-branch OpenSpec and architecture evidence before an issue becomes ready, enters a release, or reaches implementation.
 - Preserve strict identity, freshness, typed errors, exact source evidence, bounded output, one-generation publication, authored state, and platform security.
 - Keep independent graph lanes parallel while requiring accepted predecessors on `main` before dependent implementation/merge.
+- Reduce pull-request work to the smallest contract-complete affected proof while retaining full proof at every shared or release boundary, and reconcile all Dependabot updates through one release-owned campaign.
 - Finish with complete installed CLI/MCP/host/public-surface execution, a hard-gated in-place v0.4.5 database update, holistic packaged E2E, RC remediation, stable readback, and #492 closes-last truth.
 
 **Non-goals:**
@@ -73,6 +74,14 @@ Issue-event repair derives reverse direct-blocker adjacency solely from the decl
 
 #372 adds only the existing GitHub Actions `timeout-minutes` field to the reported filtered custom-harness step and its narrow contract assertion. #487 uses the accepted five-domain E2E move map and extracts only multiply-owned support. #488 accepts or rejects cohesive moves from an explicit caller/state/data/SQL/transaction/cancellation/test map, preserving seven crates and permitting no-change. #489 removes only the named 42,809,126-byte raw trace from the current tree and extends the narrow existing policy. #490 gap-audits and reuses the existing equal-arm harness, retaining failures and publishing only bounded sanitized evidence.
 
+### Lean CI and one dependency campaign preserve proof ownership
+
+#497 owns one checked-in closed impact contract and one Python-standard-library planner reused by human and Dependabot pull requests. Rust reverse dependencies come from `cargo metadata`; only database/schema, CLI/MCP, Python, Node/Mermaid, documentation/OpenSpec/IssueOps, installer/package, fixture/generated-input, and platform edges are declared. A trusted pull-request plan runs the smallest complete subset of existing contracts. Unknown, shared, planner-owning, stale, malformed, rename/delete, or graph-failure input selects full proof; default-branch, scheduled, candidate, and release boundaries always run full proof. Stable protected contexts aggregate only affected success or exact plan-bound not-applicable evidence. #341's digest-addressed dependency reuse and #366's fail-closed input proof remain the foundations; #372 remains separate timeout work. Only superseded read-only pull-request CI may be canceled.
+
+#498 owns intake, the exact source-aware Dependabot identity (`dependabot[bot]` event actor and `app/dependabot` authenticated PR-author readback), campaign relationship and IssueOps authorization contract, one bounded body-region reconciler, and one sequential default-branch `workflow_dispatch` audit driven solely by `.github/dependabot.yml`. #499 is the single v0.5.0 campaign issue declared by the existing release graph. Its inventory retains every currently open and release-window Dependabot PR through campaign close; `pending` and `provisional` block release until each record is finally `accepted`, `deferred`, `declined`, or `superseded`. Campaign automation reads #497 proof but never duplicates its planner. Dependabot PRs retain the same protected checks, review/thread readback, exact-head binding, and explicit Sol merge authorization; there is no per-PR issue, auto-merge, App/bot waiver, second graph/database/service, REST/UI hosted-update trigger, parallel audit fan-out, or second `workflow_run` framework.
+
+The v0.5.0 release window starts at `2026-08-20T16:55:18Z`. #457/#468 begin retrospective provisional accepted. After #482 and #498 are accepted on `main`, #453, #454, and #455 refresh/rebase onto current `main` and deliver in that order. Their current stale #314 branch-global IssueOps failures are baseline drift, not dependency-regression evidence. #454 separately requires the complete Rust/database/SQLite implementation and review stack; campaign automation itself adds no Rust or storage boundary.
+
 ### Release acceptance composes rather than repairs
 
 #492 freezes one exact revision only after every child and required review is complete and the exact live default branch resolves every accepted issue's mapped OpenSpec task source and architecture URL, heading, and Mermaid. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization. Confirmed defects, including missing or stale published issue evidence, return to their specification or implementation owner and invalidate the candidate; #492 does not repair them. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
@@ -92,14 +101,15 @@ Parallel delivery waves derived from the exact graph:
 
 Before wave 1, the planning PR publishes the shared OpenSpec and architecture sources, the exact live default branch passes the published-readiness gate, and every accepted issue link/task mirror is read back. No Luna implementation worktree starts from candidate-only specification evidence.
 
-1. Independent foundations: #482, #372, and #489.
-2. After #482: #476, #480, #481, and #483 may proceed independently.
-3. #484 follows #481; #486 follows #482/#483; #487 follows #481/#476/#480.
-4. #488 follows #487.
-5. #477 follows #476/#488; #342, #358, and #465 follow #476/#480/#488; #491 follows #487.
-6. #339 follows #477; #384 follows #358/#477; #464 follows #358; #456 follows #358/#465/#477/#484; #485 follows #481/#482/#483/#484/#486; #388 and #390 follow #491.
-7. #490 follows #339/#342/#358/#384/#464/#465/#485/#489/#491.
-8. #492 follows every child issue, runs RC remediation and stable proof, and closes last.
+1. Operational priority lands #497 first without inventing blocker edges for independent product issues.
+2. After #497, #482 and #498 may proceed in parallel with independent #372 and #489; #498 is graph-blocked by #497 while #482 remains dependency-free.
+3. After #482: #476, #480, #481, and #483 may proceed independently.
+4. #484 follows #481; #486 follows #482/#483; #487 follows #481/#476/#480.
+5. #488 follows #487.
+6. #477 follows #476/#488; #342, #358, and #465 follow #476/#480/#488; #491 follows #487.
+7. #339 follows #477; #384 follows #358/#477; #464 follows #358; #456 follows #358/#465/#477/#484; #485 follows #481/#482/#483/#484/#486; #388 and #390 follow #491.
+8. #490 follows #339/#342/#358/#384/#464/#465/#485/#489/#491; #499 follows #482/#498 and delivers #453, #454, then #455 without serializing independent lanes.
+9. #492 follows every child issue, runs full CI/campaign reconciliation, RC remediation, and stable proof, and closes last.
 
 Each dependent worktree refreshes/rebases onto accepted predecessors on `main` and reruns affected proof. Independent, disjoint lanes remain parallel.
 

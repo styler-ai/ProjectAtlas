@@ -354,6 +354,82 @@ flowchart TB
   uninstall --> clean[Remove only managed artifact]
 ```
 
+## Lean affected-contract planning and stable-context aggregation
+
+Pull-request optimization selects existing proof; it never deletes proof. One closed contract and one standard-library planner serve human and Dependabot pull requests. Unknown, shared, or planner-owning input selects full proof, while every shared or release boundary starts in full-proof mode. Stable required contexts accept only current plan-bound evidence.
+
+```mermaid
+flowchart TB
+    Event[Human or Dependabot pull request] --> Inputs[Diff + closed impact contract + one cargo metadata result]
+    Inputs --> EventClass{Pull-request boundary?}
+    EventClass -- No: main, schedule, candidate, release --> Full[Select complete proof set]
+    EventClass -- Yes --> Trusted{Plan complete, current, and fully classified?}
+    Trusted -- No: unknown, shared, planner-owned, stale, malformed --> Full
+    Trusted -- Yes --> Affected[Select smallest contract-complete affected set]
+    Full --> Jobs[Run existing build, test, quality, and platform contracts]
+    Affected --> Jobs
+    Jobs --> Result{Current result for each stable context}
+    Result -- Affected pass --> Bind[Validate base, head, event, contract, workflow, toolchain, platform, and plan digest]
+    Result -- Trusted plan-bound N/A --> Bind
+    Result -- Missing, skipped, canceled, failed, or malformed --> Fail([Required context fails])
+    Bind -- Exact match --> Pass([Stable context succeeds])
+    Bind -- Missing, stale, or mismatched --> Fail
+```
+
+## One Dependabot campaign from weekly intake through release
+
+GitHub-hosted Dependabot remains the weekly pull-request producer. The trusted default-branch workflow owns one v0.5.0 campaign inventory and one sequential on-demand audit. CI selection stays with the shared affected-contract planner; the campaign only reconciles identity, review, disposition, and release readiness.
+
+```mermaid
+flowchart TB
+    Config[Default .github/dependabot.yml] --> Hosted[Hosted weekly Dependabot producer]
+    Hosted --> PullRequest[Create or update Dependabot PR]
+    PullRequest --> Intake[Trusted workflow reconciles exact PR, head, milestone, and Relates to campaign]
+    PullRequest --> Refresh[Refresh or rebase onto accepted current main]
+    Refresh --> SharedCI[Run the same affected planner and protected quality bar]
+    SharedCI --> CurrentProof{Exact current proof succeeds?}
+    CurrentProof -- No: stale shared IssueOps state --> Drift[Record baseline drift, not package regression]
+    Drift --> Refresh
+    CurrentProof -- Yes --> Review[Read back review, threads, branch sync, and every protected context]
+    Review --> Sol[Explicit exact-head Sol authorization dispatch]
+    Sol --> PRRecord[Retain PR state and final or provisional disposition]
+
+    Harness[CLI harness: gh workflow run before RC and stable] --> Audit[Trusted default workflow parses config and runs pinned CLI/images sequentially]
+    Audit --> Outcome{Audit outcome}
+    Outcome -- clean --> AuditRecord[Record clean]
+    Outcome -- findings --> Pending[Create or refresh pending items]
+    Outcome -- failed --> Block([Release blocked])
+
+    Intake --> Inventory[One campaign issue body region: full release-window union]
+    PRRecord --> Inventory
+    AuditRecord --> Inventory
+    Pending --> Inventory
+    Inventory --> Final{Every record final and both audits reconciled?}
+    Final -- No: pending, provisional, or failed --> Block
+    Final -- Yes --> Release([Dependency gate eligible for release issue 492])
+```
+
+## CI and dependency campaign sequencing
+
+#497 lands first as the shared lean-CI foundation without becoming a fake graph blocker for independent product issues. #498 genuinely depends on #497; #482 remains dependency-free and may proceed in parallel after that operational priority. #499 waits for both accepted results, then owns the ordered high-impact update campaign while all other disjoint release lanes continue independently.
+
+```mermaid
+flowchart TB
+    CI497[#497 lean affected CI] --> Auto498[#498 campaign automation]
+    CI497 -. Operational priority, not blocker .-> Rust482[#482 exact Rust 1.98.0]
+    Auto498 --> Ready{#498 and #482 accepted on main?}
+    Rust482 --> Ready
+    Ready -- No --> Stop([#499 handoff blocked])
+    Ready -- Yes --> Campaign499[#499 sole v0.5.0 campaign]
+    Campaign499 --> PR453[#453 object: Rust and parser]
+    PR453 --> PR454[#454 rusqlite: Rust, database, SQLite]
+    PR454 --> PR455[#455 rmcp: Rust and MCP]
+    PR455 --> FinalState{All records final and audits reconciled?}
+    FinalState -- No --> Stop
+    FinalState -- Yes --> Release492[#492 release acceptance closes last]
+    Parallel[Existing independent release lanes] --> Release492
+```
+
 ## v0.5.0 candidate, readback, remediation, and stable promotion
 
 ```mermaid

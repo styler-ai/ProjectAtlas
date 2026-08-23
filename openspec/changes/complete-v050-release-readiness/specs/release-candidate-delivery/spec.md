@@ -11,6 +11,26 @@
 - **WHEN** any child issue, mapped task, required proof, or review remains open
 - **THEN** #492 cannot freeze, publish, promote, or close
 
+### Requirement: Lean CI and the dependency campaign remain release gates
+Pull requests SHALL run the smallest contract-complete existing proof selected by the single #497 affected-contract planner, with human and Dependabot parity and unknown/shared/planner-owning input failing closed to complete proof. Default-branch, scheduled, candidate, and release boundaries SHALL run complete proof. Each release SHALL declare at most one active Dependabot campaign issue; v0.5.0 SHALL declare #499, and release acceptance SHALL require every release-window record and the pre-RC/pre-stable audits to be final and successful.
+
+#### Scenario: Pull-request proof is narrowed safely
+- **WHEN** the exact current plan proves a closed subset of existing contracts affected
+- **THEN** stable required contexts aggregate affected success or exact plan-bound not-applicable evidence
+- **AND** missing, skipped, canceled, stale, malformed, or mismatched proof fails
+
+#### Scenario: Shared or release proof runs
+- **WHEN** proof runs on the default branch, a schedule, a candidate, or a release boundary
+- **THEN** the complete repository proof executes without treating pull-request not-applicable state as release evidence
+
+#### Scenario: Dependabot campaign is incomplete
+- **WHEN** #499 has a pending, provisional, or failed PR/audit record, a missing exact campaign relationship, or incomplete review/thread/protected-context/Sol-authorization readback
+- **THEN** #499 and #492 remain blocked
+
+#### Scenario: Dependabot campaign is reconciled
+- **WHEN** both bounded audits complete, every release-window record is finally accepted, deferred, declined, or superseded, and all delivered PRs passed the normal exact-head gates
+- **THEN** dependency campaign acceptance may unblock #492 without creating per-PR issues or weakening proof
+
 ### Requirement: Accepted issue evidence is published before implementation
 Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped OpenSpec task source and every architecture URL, heading, and Mermaid block from an exact clean checkout of the live default-branch revision. Candidate-local validation SHALL remain required for proposed artifacts but SHALL NOT authorize readiness, milestone assignment, native release relationships, implementation handoff, merge, or release.
 
@@ -66,7 +86,7 @@ IssueOps SHALL derive a bounded transition plan from the declared release graph 
 - **THEN** IssueOps selects the graph from the issue map, reports targeted milestone drift, and does not skip validation because the event payload milestone is null
 
 ### Requirement: Release input is exact and complete
-#492 SHALL freeze one exact `main` revision only after every accepted child, task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete and the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source and architecture target. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
+#492 SHALL freeze one exact `main` revision only after every accepted child, task, owning proof, document/diagram, dependency, final Dependabot campaign record/audit, release note, and actionable human/automated review finding is complete and the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source and architecture target. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
 
 #### Scenario: Evidence-led no-change issue
 - **WHEN** a measurement or reproduction task proves existing behavior already satisfies its contract
