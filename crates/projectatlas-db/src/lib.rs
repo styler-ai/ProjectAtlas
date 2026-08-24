@@ -3310,7 +3310,7 @@ impl AtlasStore {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<u64>>(5)?,
+                    option_u64_from_sql(row, 5)?,
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
@@ -3367,7 +3367,7 @@ impl AtlasStore {
                             row.get::<_, Option<String>>(2)?,
                             row.get::<_, Option<String>>(3)?,
                             row.get::<_, Option<String>>(4)?,
-                            row.get::<_, Option<u64>>(5)?,
+                            option_u64_from_sql(row, 5)?,
                             row.get::<_, Option<i64>>(6)?,
                             row.get::<_, Option<String>>(7)?,
                             row.get::<_, Option<String>>(8)?,
@@ -4414,7 +4414,7 @@ impl AtlasStore {
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<u64>>(5)?,
+                option_u64_from_sql(row, 5)?,
                 row.get::<_, Option<i64>>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
@@ -4635,7 +4635,7 @@ impl AtlasStore {
         let mut statement = self.connection.prepare(&sql)?;
         let mut rows = statement.query(params_from_iter(values))?;
         while let Some(row) = rows.next()? {
-            if !visitor(row.get::<_, String>(0)?, row.get::<_, Option<u64>>(1)?)? {
+            if !visitor(row.get::<_, String>(0)?, option_u64_from_sql(row, 1)?)? {
                 return Ok(());
             }
         }
@@ -6415,8 +6415,14 @@ fn record_released_schema_eight_usage_event(
             event.command,
             event.path,
             event.query,
-            event.estimated_tokens_without_projectatlas,
-            event.estimated_tokens_with_projectatlas,
+            option_usize_to_i64(
+                "estimated_tokens_without_projectatlas",
+                event.estimated_tokens_without_projectatlas,
+            )?,
+            option_usize_to_i64(
+                "estimated_tokens_with_projectatlas",
+                event.estimated_tokens_with_projectatlas,
+            )?,
             event.estimated_tokens_saved,
             event.token_savings_bucket,
             event.provider,
@@ -6569,6 +6575,15 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
         ",
     )?;
     for node in nodes {
+        let size_bytes = node
+            .size_bytes
+            .map(|value| {
+                i64::try_from(value).map_err(|_source| DbError::GraphCountOverflow {
+                    field: "nodes.size_bytes",
+                    value,
+                })
+            })
+            .transpose()?;
         let existing = select_existing
             .query_row([&node.path], |row| row.get::<_, Option<String>>(0))
             .optional()?;
@@ -6584,7 +6599,7 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
             node.parent_path,
             node.extension,
             node.language,
-            node.size_bytes,
+            size_bytes,
             node.mtime_ns,
             node.content_hash
         ])?;
@@ -6747,7 +6762,7 @@ impl<'connection> SqliteReadProgressGuard<'connection> {
                     );
                     interrupted
                 }),
-            );
+            )?;
             true
         } else {
             false
@@ -6759,7 +6774,7 @@ impl<'connection> SqliteReadProgressGuard<'connection> {
 impl Drop for SqliteReadProgressGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.connection.progress_handler(0, None::<fn() -> bool>);
+            drop(self.connection.progress_handler(0, None::<fn() -> bool>));
         }
     }
 }
@@ -6935,7 +6950,7 @@ fn indexed_node_parts_from_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<
         row.get::<_, Option<String>>(2)?,
         row.get::<_, Option<String>>(3)?,
         row.get::<_, Option<String>>(4)?,
-        row.get::<_, Option<u64>>(5)?,
+        option_u64_from_sql(row, 5)?,
         row.get::<_, Option<i64>>(6)?,
         row.get::<_, Option<String>>(7)?,
         row.get::<_, Option<String>>(8)?,
@@ -7439,6 +7454,31 @@ fn usize_to_i64(value: usize) -> i64 {
 /// Convert a non-negative i64 to usize for database reads.
 fn i64_to_usize(value: i64) -> usize {
     usize::try_from(value.max(0)).unwrap_or(usize::MAX)
+}
+
+/// Decode an optional nonnegative `SQLite` integer into the public unsigned size type.
+fn option_u64_from_sql(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
+    row.get::<_, Option<i64>>(index)?
+        .map(|value| {
+            u64::try_from(value).map_err(|source| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Integer,
+                    Box::new(source),
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Convert an optional token count into the exact `SQLite` integer range.
+#[cfg(test)]
+fn option_usize_to_i64(field: &'static str, value: Option<usize>) -> DbResult<Option<i64>> {
+    value
+        .map(|value| {
+            i64::try_from(value).map_err(|_source| DbError::TelemetryIntegerOverflow { field })
+        })
+        .transpose()
 }
 
 /// Build the classified symbol query from static clauses and bound caller values.
@@ -8335,6 +8375,35 @@ mod tests {
     }
 
     #[test]
+    fn load_nodes_rejects_negative_size_bytes_without_partial_page() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        store.connection.execute(
+            "UPDATE nodes SET size_bytes = -1 WHERE path = 'src/b.rs'",
+            [],
+        )?;
+
+        let Err(error) = store.load_nodes() else {
+            return Err(io::Error::other("negative node size returned a partial page").into());
+        };
+        require(
+            matches!(
+                error,
+                DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Integer,
+                    _
+                ))
+            ),
+            "negative node size returned the wrong conversion error",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn validated_existing_database_paths_are_never_recreated() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
 
@@ -8767,9 +8836,9 @@ mod tests {
             let restored_busy_timeout =
                 writer_b
                     .connection
-                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
+                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?;
             require_eq(
-                &u128::from(restored_busy_timeout),
+                &u128::try_from(restored_busy_timeout)?,
                 &SQLITE_BUSY_TIMEOUT.as_millis(),
                 "ordinary busy timeout after failed publication acquisition",
             )?;
@@ -8800,9 +8869,9 @@ mod tests {
         let restored_busy_timeout =
             writer_a
                 .connection
-                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?;
         require_eq(
-            &u128::from(restored_busy_timeout),
+            &u128::try_from(restored_busy_timeout)?,
             &SQLITE_BUSY_TIMEOUT.as_millis(),
             "ordinary busy timeout after successful publication acquisition",
         )?;
@@ -14553,9 +14622,9 @@ mod tests {
     /// Assert the bounded contention wait shared by ordinary connections.
     fn require_busy_timeout(connection: &Connection) -> Result<(), Box<dyn Error>> {
         let busy_timeout =
-            connection.pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))?;
+            connection.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))?;
         require_eq(
-            &u128::from(busy_timeout),
+            &u128::try_from(busy_timeout)?,
             &SQLITE_BUSY_TIMEOUT.as_millis(),
             "bounded connection busy timeout",
         )

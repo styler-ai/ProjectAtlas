@@ -2650,7 +2650,13 @@ impl AtlasStore {
                     .map(|_| Vec::new())
                     .collect::<Vec<Vec<OccurrenceRow>>>();
                 while let Some(row) = queried.next()? {
-                    let index = row.get::<_, usize>(0)?;
+                    let index_value = row.get::<_, i64>(0)?;
+                    let index =
+                        usize::try_from(index_value).map_err(|source| DbError::InvalidCount {
+                            field: "graph_relation_occurrences.relation_index",
+                            value: index_value,
+                            source,
+                        })?;
                     let group = grouped.get_mut(index).ok_or(DbError::GraphRowShape {
                         table: "graph_relation_occurrences",
                         reason: "occurrence batch returned an invalid relation position",
@@ -6922,12 +6928,25 @@ mod tests {
         operation: impl FnOnce(&AtlasStore) -> DbResult<T>,
     ) -> Result<(T, Vec<String>), Box<dyn Error>> {
         TRACED_STATEMENTS.with(|statements| statements.borrow_mut().clear());
-        store.connection.trace(Some(record_traced_statement));
+        store.connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_traced_event),
+        );
         let result = operation(store);
-        store.connection.trace(None);
+        store
+            .connection
+            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
         let statements =
             TRACED_STATEMENTS.with(|statements| std::mem::take(&mut *statements.borrow_mut()));
         Ok((result?, statements))
+    }
+
+    /// Adapt `rusqlite` statement trace events to the SQL text collector used by tests.
+    #[allow(clippy::needless_pass_by_value)]
+    fn record_traced_event(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            record_traced_statement(sql);
+        }
     }
 
     /// Closed production statement families allowed during detailed relation reads.
@@ -10832,7 +10851,10 @@ mod tests {
 
         let (entities, relations, occurrences) = graph(IndexGeneration::new(2))?;
         TRACED_STATEMENTS.with(|statements| statements.borrow_mut().clear());
-        store.connection.trace(Some(record_traced_statement));
+        store.connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_traced_event),
+        );
         let changed_before = store.connection.total_changes();
         let refresh = (|| -> DbResult<()> {
             let mut publication = store.begin_index_publication("high-fanout-document")?;
@@ -10846,7 +10868,9 @@ mod tests {
             )?;
             publication.complete()
         })();
-        store.connection.trace(None);
+        store
+            .connection
+            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
         refresh?;
         let changed_rows = store.connection.total_changes() - changed_before;
         let statements =
@@ -10862,12 +10886,12 @@ mod tests {
             &EXPECTED_CHANGED_ROWS,
             "high-fanout refresh changed rows",
         )?;
-        let relation_count = store.connection.query_row(
+        let relation_count = usize::try_from(store.connection.query_row(
             "SELECT COUNT(*) FROM graph_relations
               WHERE relation_scope = 'extended' AND relation_kind = 'documents'",
             [],
-            |row| row.get::<_, usize>(0),
-        )?;
+            |row| row.get::<_, i64>(0),
+        )?)?;
         require_eq(&relation_count, &FANOUT, "retained document relation count")?;
         Ok(())
     }
@@ -13251,7 +13275,7 @@ mod tests {
                 skipped_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
                 false
             }),
-        );
+        )?;
         let skipped_result = store.repository_graph_adjacency_page(
             &skipped_frontier,
             RepositoryGraphDirection::Outbound,
@@ -13259,7 +13283,7 @@ mod tests {
             2,
             None,
         );
-        store.connection.progress_handler(0, None::<fn() -> bool>);
+        store.connection.progress_handler(0, None::<fn() -> bool>)?;
         skipped_result?;
         require(
             skipped_steps.load(std::sync::atomic::Ordering::Relaxed) < 100_000,
@@ -13291,7 +13315,7 @@ mod tests {
                 deep_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
                 false
             }),
-        );
+        )?;
         let deep_result = store.repository_graph_adjacency_page(
             &[source.key().clone()],
             RepositoryGraphDirection::Outbound,
@@ -13299,7 +13323,7 @@ mod tests {
             2,
             None,
         );
-        store.connection.progress_handler(0, None::<fn() -> bool>);
+        store.connection.progress_handler(0, None::<fn() -> bool>)?;
         deep_result?;
         require(
             deep_steps.load(std::sync::atomic::Ordering::Relaxed) < 100_000,
@@ -13405,7 +13429,7 @@ mod tests {
                 cte_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
                 false
             }),
-        );
+        )?;
         let cte_started = Instant::now();
         let cte_result = store
             .connection
@@ -13416,7 +13440,7 @@ mod tests {
             .map(|row| fixed_bytes::<32>("recursive_cte.entity_key", row?))
             .collect::<DbResult<Vec<_>>>();
         let cte_elapsed = cte_started.elapsed();
-        store.connection.progress_handler(0, None::<fn() -> bool>);
+        store.connection.progress_handler(0, None::<fn() -> bool>)?;
         let cte_nodes = cte_result?;
 
         let rust_steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -13427,11 +13451,11 @@ mod tests {
                 rust_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
                 false
             }),
-        );
+        )?;
         let rust_started = Instant::now();
         let rust_result = collect_bounded_outbound_calls(&store, source.key());
         let rust_elapsed = rust_started.elapsed();
-        store.connection.progress_handler(0, None::<fn() -> bool>);
+        store.connection.progress_handler(0, None::<fn() -> bool>)?;
         let (rust_nodes, inspected_edges, peak_frontier) = rust_result?;
         let (repeated_nodes, repeated_edges, repeated_peak) =
             collect_bounded_outbound_calls(&store, source.key())?;
@@ -13488,7 +13512,7 @@ mod tests {
             "bounded Rust frontier exceeded the shared compact byte ceiling",
         )?;
 
-        store.connection.progress_handler(1, Some(|| true));
+        store.connection.progress_handler(1, Some(|| true))?;
         let cancelled_cte = (|| -> Result<Vec<Vec<u8>>, rusqlite::Error> {
             let mut statement = store.connection.prepare(RECURSIVE_CTE)?;
             statement
@@ -13497,7 +13521,7 @@ mod tests {
                 })?
                 .collect()
         })();
-        store.connection.progress_handler(0, None::<fn() -> bool>);
+        store.connection.progress_handler(0, None::<fn() -> bool>)?;
         require(
             matches!(
                 cancelled_cte,
@@ -13574,7 +13598,7 @@ mod tests {
                FROM sequence",
             params![
                 fixture.project.as_bytes().as_slice(),
-                POSITIVE_DOCUMENT_ROWS
+                i64::try_from(POSITIVE_DOCUMENT_ROWS)?,
             ],
         )?;
         writer.connection.execute(
@@ -13785,7 +13809,7 @@ mod tests {
                     project_value.clone(),
                     Value::Text("tree-sitter".to_string()),
                 ],
-                &[index, "idx_graph_coverage_scope_order"],
+                &[index, "idx_graph_coverage_identity"],
                 true,
                 context,
             )?;

@@ -1289,8 +1289,16 @@ fn hash_field(hasher: &mut Hasher, value: &[u8]) -> DbResult<()> {
 
 /// Reject a private capture larger than the explicit snapshot ceiling.
 fn require_private_capture_size(connection: &Connection) -> DbResult<()> {
-    let page_count = connection.query_row("PRAGMA page_count", [], |row| row.get::<_, u64>(0))?;
-    let page_size = connection.query_row("PRAGMA page_size", [], |row| row.get::<_, u64>(0))?;
+    let page_count =
+        u64::try_from(connection.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))?)
+            .map_err(|_source| DbError::DerivedSnapshotInvalid {
+            reason: "private SQLite capture page count was negative",
+        })?;
+    let page_size =
+        u64::try_from(connection.query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))?)
+            .map_err(|_source| DbError::DerivedSnapshotInvalid {
+                reason: "private SQLite capture page size was negative",
+            })?;
     let bytes = page_count
         .checked_mul(page_size)
         .ok_or(DbError::DerivedSnapshotInvalid {
@@ -1797,7 +1805,7 @@ mod tests {
                     AND resolution_status = 'unresolved'
                     AND document_unresolved_reason = 'missing'",
                 [],
-                |row| row.get::<_, u64>(0),
+                |row| row.get::<_, i64>(0),
             )?,
             1
         );
@@ -1917,7 +1925,7 @@ mod tests {
             destination.connection.query_row(
                 "SELECT COUNT(*) FROM graph_relations",
                 [],
-                |row| { row.get::<_, u64>(0) }
+                |row| { row.get::<_, i64>(0) }
             )?,
             0
         );

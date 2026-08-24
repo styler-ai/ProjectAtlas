@@ -908,8 +908,14 @@ pub(crate) fn migrate_legacy_usage(connection: &Connection) -> DbResult<()> {
             command: row.get(1)?,
             path: row.get(2)?,
             query: row.get(3)?,
-            estimated_tokens_without_projectatlas: row.get(4)?,
-            estimated_tokens_with_projectatlas: row.get(5)?,
+            estimated_tokens_without_projectatlas: row
+                .get::<_, Option<i64>>(4)?
+                .map(|value| count_usize("estimated_tokens_without_projectatlas", value))
+                .transpose()?,
+            estimated_tokens_with_projectatlas: row
+                .get::<_, Option<i64>>(5)?
+                .map(|value| count_usize("estimated_tokens_with_projectatlas", value))
+                .transpose()?,
             estimated_tokens_saved: row.get(6)?,
             token_savings_bucket: row.get(7)?,
             provider: row.get(8)?,
@@ -4413,8 +4419,14 @@ fn map_usage_event(row: &rusqlite::Row<'_>) -> DbResult<UsageEvent> {
         command: row.get(1)?,
         path: row.get(2)?,
         query: row.get(3)?,
-        estimated_tokens_without_projectatlas: row.get(4)?,
-        estimated_tokens_with_projectatlas: row.get(5)?,
+        estimated_tokens_without_projectatlas: row
+            .get::<_, Option<i64>>(4)?
+            .map(|value| count_usize("estimated_tokens_without_projectatlas", value))
+            .transpose()?,
+        estimated_tokens_with_projectatlas: row
+            .get::<_, Option<i64>>(5)?
+            .map(|value| count_usize("estimated_tokens_with_projectatlas", value))
+            .transpose()?,
         estimated_tokens_saved: row.get(6)?,
         token_savings_bucket: row.get(7)?,
         provider: row.get(8)?,
@@ -5205,6 +5217,14 @@ mod tests {
         WORKTREE_TRACE.with(|statements| statements.borrow_mut().push(sql.to_string()));
     }
 
+    /// Adapt `rusqlite` statement trace events to the SQL text collector used by tests.
+    #[allow(clippy::needless_pass_by_value)]
+    fn record_worktree_event(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            record_worktree_statement(sql);
+        }
+    }
+
     fn block_worktree_snapshot_aggregate_query(sql: &str) {
         if !sql.contains("SELECT -1 AS day_epoch") {
             return;
@@ -5217,6 +5237,14 @@ mod tests {
                 let _resume = blocker.resume.recv_timeout(Duration::from_secs(10));
             }
         });
+    }
+
+    /// Adapt `rusqlite` statement trace events to the snapshot query blocker.
+    #[allow(clippy::needless_pass_by_value)]
+    fn block_worktree_snapshot_aggregate_event(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            block_worktree_snapshot_aggregate_query(sql);
+        }
     }
 
     struct TestDatabase {
@@ -6658,6 +6686,35 @@ mod tests {
     }
 
     #[test]
+    fn public_raw_event_read_rejects_negative_optional_token_estimate() -> Result<(), Box<dyn Error>>
+    {
+        let database = production_database()?;
+        database
+            .store
+            .record_usage(&event("corrupt-reader", 100, 10))?;
+        database.store.connection.execute(
+            "UPDATE usage_events
+             SET estimated_tokens_without_projectatlas = -1
+             WHERE id = (SELECT id FROM usage_events ORDER BY id DESC LIMIT 1)",
+            [],
+        )?;
+
+        let Err(error) = database.store.usage_events(Some("corrupt-reader")) else {
+            return Err(io::Error::other("negative persisted token estimate was accepted").into());
+        };
+        require(
+            matches!(
+                error,
+                DbError::TelemetryIntegerOverflow {
+                    field: "estimated_tokens_without_projectatlas"
+                }
+            ),
+            "negative persisted token estimate returned the wrong error",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn baseline_capacity_collision_and_integer_overflow_roll_back_completely() {
         let result = (|| -> Result<(), Box<dyn Error>> {
             let database = test_database()?;
@@ -7736,7 +7793,7 @@ mod tests {
         let root = temp.path().join("worktree");
         fs::create_dir(&root)?;
         let database_path = root.join("projectatlas.db");
-        let mut worktree = AtlasStore::open_for_project(&database_path, &root)?;
+        let worktree = AtlasStore::open_for_project(&database_path, &root)?;
         worktree.record_usage(&event("snapshot", 100, 20))?;
 
         let (entered_sender, entered_receiver) = sync_channel(1);
@@ -7747,9 +7804,10 @@ mod tests {
                 resume: resume_receiver,
             });
         });
-        worktree
-            .connection
-            .trace(Some(block_worktree_snapshot_aggregate_query));
+        worktree.connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(block_worktree_snapshot_aggregate_event),
+        );
 
         let writer_root = root.clone();
         let writer_database = database_path.clone();
@@ -7769,7 +7827,9 @@ mod tests {
         });
 
         let snapshot_result = worktree.export_worktree_usage_snapshot();
-        worktree.connection.trace(None);
+        worktree
+            .connection
+            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
         WORKTREE_SNAPSHOT_EXPORT_BLOCKER.with(|slot| {
             slot.borrow_mut().take();
         });
@@ -8101,13 +8161,16 @@ mod tests {
         let control_root = temp.path().join("control");
         fs::create_dir_all(&control_root)?;
         let database = control_root.join("projectatlas.db");
-        let mut control = AtlasStore::open_for_project(&database, &control_root)?;
+        let control = AtlasStore::open_for_project(&database, &control_root)?;
         let project = control.captured_project_binding()?.project_instance_id;
         let common = temp.path().join("common.git");
         let event = event("worktree-scale", 100, 20);
 
         WORKTREE_TRACE.with(|statements| statements.borrow_mut().clear());
-        control.connection.trace(Some(record_worktree_statement));
+        control.connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_worktree_event),
+        );
         let changed_before = control.connection.total_changes();
         for index in 0..ORIGINS {
             let suffix = index + 1;
@@ -8134,7 +8197,9 @@ mod tests {
         }
         let registrations = control.worktree_registrations(false)?;
         let overview = control.repository_token_overview()?;
-        control.connection.trace(None);
+        control
+            .connection
+            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
         let changed_rows = control.connection.total_changes() - changed_before;
         let statements =
             WORKTREE_TRACE.with(|statements| std::mem::take(&mut *statements.borrow_mut()));

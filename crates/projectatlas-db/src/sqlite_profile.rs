@@ -592,17 +592,18 @@ fn verify_query_only(connection: &Connection) -> DbResult<()> {
 
 /// Verify the bounded ordinary-writer wait configured on the connection.
 fn verify_busy_timeout(connection: &Connection, expected: Duration) -> DbResult<()> {
-    let found = connection.pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))?;
+    let found = connection.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))?;
     let expected_millis = expected.as_millis();
-    if u128::from(found) == expected_millis {
-        Ok(())
-    } else {
-        Err(DbError::DatabaseOperatingProfile {
-            setting: "busy_timeout",
-            expected: expected_millis.to_string(),
-            found: found.to_string(),
-        })
+    if let Ok(found_millis) = u128::try_from(found)
+        && found_millis == expected_millis
+    {
+        return Ok(());
     }
+    Err(DbError::DatabaseOperatingProfile {
+        setting: "busy_timeout",
+        expected: expected_millis.to_string(),
+        found: found.to_string(),
+    })
 }
 
 /// Build a typed connection-profile postcondition error.
