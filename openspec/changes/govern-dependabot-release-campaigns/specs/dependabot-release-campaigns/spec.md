@@ -28,17 +28,22 @@ The campaign issue SHALL contain one bounded machine-owned body region holding t
 - **AND** the lean issue sections and single OpenSpec task mirror remain byte-for-byte outside that region
 
 ### Requirement: Inventory identity dispositions provenance and stage are complete
-Every pull-request record SHALL bind repository, PR number, exact author, base, exact head, package ecosystem and update summary, first-seen and last-seen time, current PR state, milestone, campaign relationship, proof/review summary, and disposition. Final dispositions SHALL be exactly `accepted`, `deferred`, `declined`, or `superseded`; `pending` and `provisional` SHALL block the applicable campaign checkpoint. Provenance, including `retrospective_precontract`, SHALL be recorded separately and SHALL NOT act as a final disposition or imply a gate that did not run.
+Every pull-request record SHALL bind repository, PR number, exact author, base, exact head, package ecosystem and update summary, first-seen and last-seen time, current PR state, milestone, campaign relationship, proof/review summary, and disposition. Final dispositions SHALL be exactly `accepted`, `deferred`, `declined`, or `superseded`; `pending` and `provisional` SHALL block the applicable campaign checkpoint. A final `accepted` record SHALL additionally bind authenticated `MERGED` state, the exact accepted head and merge commit, and ancestry/inclusion of that merge commit in accepted current `main`. A green, authorized, or still-open pull request SHALL NOT be finally accepted. `Deferred`, `declined`, and `superseded` SHALL remain valid authorized non-merge dispositions for the exact recorded head/state and rationale. Provenance, including `retrospective_precontract`, SHALL be recorded separately and SHALL NOT act as a final disposition or imply a gate that did not run.
 
-The same machine-owned region SHALL record exactly one stage from `collecting`, `candidate_ready`, and `stable_ready`. A ready stage SHALL bind the exact candidate or stable revision, inventory digest, full-union reconciliation high-water mark, `.github/dependabot.yml` digest, audit run and outcome, immutable CLI/updater/proxy identities, and timestamp. Missing, malformed, stale, or mismatched stage evidence SHALL be `collecting` for readiness purposes.
+The same machine-owned region SHALL record exactly one stage from `collecting`, `candidate_ready`, and `stable_ready`. A ready stage SHALL bind the exact candidate or stable revision, inventory digest, full-union reconciliation high-water mark, `.github/dependabot.yml` digest, audit run and outcome, immutable CLI/updater/proxy identities, and timestamp, and SHALL prove every finally accepted PR's exact merge commit is included by ancestry in that bound checkpoint revision/release input. Missing, malformed, stale, or mismatched stage evidence or an accepted merge absent from the bound input SHALL be `collecting` for readiness purposes.
 
 #### Scenario: Newly discovered update
 - **WHEN** a Dependabot pull request first enters the release window
 - **THEN** it is recorded as pending until reviewed and explicitly dispositioned
 
-#### Scenario: Final disposition
-- **WHEN** an authorized reconciliation records accepted, deferred, declined, or superseded with a repository-technical rationale
-- **THEN** the record is final for that exact head and state
+#### Scenario: Accepted disposition follows merge and inclusion
+- **WHEN** an authorized reconciliation attempts to record `accepted`
+- **THEN** the record is final only after authenticated readback proves `MERGED`, binds the exact accepted head and merge commit, and proves that commit is included in accepted current `main`
+- **AND** an open, merely green or authorized, mismatched, or not-current-main-included PR remains pending or provisional
+
+#### Scenario: Non-merge final disposition
+- **WHEN** an authorized reconciliation records `deferred`, `declined`, or `superseded` with a repository-technical rationale and exact successor when applicable
+- **THEN** the record is final for that exact head and state without requiring a merge
 
 #### Scenario: Non-final record remains
 - **WHEN** any pull-request record is pending or provisional
@@ -111,6 +116,11 @@ Dependabot pull requests SHALL NOT auto-merge or bypass required proof. `issueop
 #### Scenario: No automatic merge
 - **WHEN** a Dependabot pull request is admitted to a campaign
 - **THEN** admission alone does not merge it, enable auto-merge, or weaken a branch-protection context
+
+#### Scenario: Authorization does not finalize acceptance
+- **WHEN** the exact-head merge-authorization context succeeds but authenticated readback still reports the PR open or cannot prove the accepted head's merge commit in current `main`
+- **THEN** the PR record SHALL NOT become finally `accepted`
+- **AND** campaign readiness remains blocked until actual merge and exact inclusion readback succeed or an authorized non-merge disposition is recorded
 
 ### Requirement: Pre-contract merged updates reconcile without fictional authorization
 A pull request merged before the published campaign-contract activation revision MAY use `retrospective_precontract` provenance only. Final `accepted` SHALL require exact dependency head, merge commit, changed-file set, merge time, current-`main` ancestry/inclusion, a safe metadata-only post-hoc `Relates to #<campaign>` relationship and release milestone, fresh Sol review of the exact merged diff plus its behavior integrated into current `main`, fresh complete current-`main` protected and platform proof, zero unresolved actionable findings, and an explicit historical-gate-gap record. Original checks SHALL remain historical evidence and SHALL NOT satisfy later IssueOps, review, or authorization gates.
@@ -198,10 +208,10 @@ Only a successful complete audit with certain cleanup and validated bounded outp
 - **AND** release acceptance remains blocked until a later successful run writes a current matching final audit record
 
 ### Requirement: Candidate-ready and stable-ready are separate release checkpoints
-`candidate_ready` SHALL bind one exact RC candidate revision to a successful final pre-RC audit and the final full-union PR/finding inventory reconciled through that checkpoint. It MAY permit `v0.5.0-rc1` publication only while #499 and #492 remain open. After independent RC acceptance, newly created or updated PR or finding records SHALL return the campaign to `collecting`. `stable_ready` SHALL require a later successful pre-stable audit on accepted current `main`, final resolution of every audit finding and every PR record newly observed since candidate readiness, and exact full-window readback; only then MAY #499 close and unblock stable #492 acceptance.
+`candidate_ready` SHALL bind one exact RC candidate revision to a successful final pre-RC audit and the final full-union PR/finding inventory reconciled through that checkpoint, including exact ancestry/inclusion of every finally accepted PR merge commit in the RC release input. It MAY permit `v0.5.0-rc1` publication only while #499 and #492 remain open. After independent RC acceptance, newly created or updated PR or finding records SHALL return the campaign to `collecting`. `stable_ready` SHALL require a later successful pre-stable audit on accepted current `main`, final resolution of every audit finding and every PR record newly observed since candidate readiness, exact ancestry/inclusion of every finally accepted PR merge commit in the stable checkpoint/release input, and exact full-window readback; only then MAY #499 close and unblock stable #492 acceptance.
 
 #### Scenario: RC candidate checkpoint succeeds
-- **WHEN** the pre-RC audit is complete as `clean` or `findings`, its successful hosted run and current final campaign audit record match, every PR record is final, every unlinked finding is finally deferred/declined/superseded, every linked finding points to a finally dispositioned real PR, `accepted` is used only for a finding linked to a finally accepted real PR, and the publication preflight rereads matching revision/inventory/config/audit/hosted-run identities with no intervening event
+- **WHEN** the pre-RC audit is complete as `clean` or `findings`, its successful hosted run and current final campaign audit record match, every PR record is final, every finally accepted PR is authenticated as merged with its exact accepted head/merge commit included in accepted current `main` and the exact RC release input, every unlinked finding is finally deferred/declined/superseded, every linked finding points to a finally dispositioned real PR, `accepted` is used only for a finding linked to a finally accepted real PR, and the publication preflight rereads matching revision/inventory/config/audit/hosted-run/merge-inclusion identities with no intervening event
 - **THEN** the campaign records `candidate_ready`
 - **AND** RC1 may publish while #499 and #492 remain open for the stable window
 
@@ -216,12 +226,12 @@ Only a successful complete audit with certain cleanup and validated bounded outp
 - **AND** the new record must be final before stable readiness
 
 #### Scenario: Stable checkpoint succeeds
-- **WHEN** an accepted RC exists, the later pre-stable audit is complete as `clean` or `findings` with matching successful hosted-run/final campaign-record readback, every unlinked finding is deferred/declined/superseded, every linked finding points to a finally dispositioned real PR, `accepted` is linked-finally-accepted-PR-only, every newly observed release-window PR record is final, and the exact full inventory readback matches
+- **WHEN** an accepted RC exists, the later pre-stable audit is complete as `clean` or `findings` with matching successful hosted-run/final campaign-record readback, every unlinked finding is deferred/declined/superseded, every linked finding points to a finally dispositioned real PR, `accepted` is linked-finally-accepted-PR-only, every newly observed release-window PR record is final, every finally accepted PR is authenticated as merged with its exact accepted head/merge commit included in accepted current `main` and the exact stable checkpoint/release input, and the exact full inventory readback matches
 - **THEN** the campaign records `stable_ready`
 - **AND** #499 may close so stable #492 acceptance can begin
 
 #### Scenario: Stage evidence is stale or incomplete
-- **WHEN** a stage revision, inventory digest, high-water mark, config digest, audit identity/outcome, immutable tool identity, or current union readback is missing, stale, malformed, or mismatched
+- **WHEN** a stage revision, inventory digest, high-water mark, config digest, audit identity/outcome, immutable tool identity, current union readback, accepted-PR merged state, exact merge identity, current-main inclusion, or checkpoint-release-input inclusion is missing, stale, malformed, or mismatched
 - **THEN** the campaign is `collecting` for readiness purposes
 - **AND** RC or stable publication is blocked at that checkpoint
 

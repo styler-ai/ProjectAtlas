@@ -435,7 +435,7 @@ flowchart TB
 
 ## One Dependabot campaign from weekly intake through release
 
-GitHub-hosted Dependabot remains the weekly pull-request producer. The trusted default-branch workflow owns one v0.5.0 campaign inventory. CI selection stays with the shared affected-contract planner; the campaign only reconciles identity, review, and disposition. Historical pre-contract checks remain history, not later-gate proof.
+GitHub-hosted Dependabot remains the weekly pull-request producer. The trusted default-branch workflow owns one v0.5.0 campaign inventory. CI selection stays with the shared affected-contract planner; the campaign only reconciles identity, review, and disposition. Exact-head Sol authorization precedes merge, while final `accepted` follows authenticated merged-state and current-main inclusion readback; a green or authorized open PR is not accepted. Historical pre-contract checks remain history, not later-gate proof.
 
 ```mermaid
 flowchart TB
@@ -452,10 +452,16 @@ flowchart TB
         FailureBasis -- Genuine, unknown, or retry exhausted --> Technical[Blocking technical disposition or corrective delivery]
         Technical --> FutureBlock([Admission and checkpoint blocked])
         CurrentProof -- Yes --> Review[Read back review, threads, branch sync, and every protected context]
-        Review --> Sol[Explicit exact-head Sol authorization dispatch]
-        Sol --> PRRecord[Record final disposition]
+        Review --> Disposition{Authorized disposition?}
+        Disposition -- deferred, declined, or superseded --> NonAccepted[Record final non-merge disposition]
+        Disposition -- accepted --> Sol[Explicit exact-head Sol authorization dispatch]
+        Sol --> Merge[Merge exact authorized head]
+        Merge --> Inclusion{Authenticated merged state, exact head and merge commit included in accepted current main?}
+        Inclusion -- No --> FutureBlock
+        Inclusion -- Yes --> Accepted[Record final accepted disposition]
     end
-    PRRecord --> Inventory[(One machine-owned campaign body region)]
+    NonAccepted --> Inventory[(One machine-owned campaign body region)]
+    Accepted --> Inventory
 
     subgraph PreContract[Pre-contract merged record]
         Historical[Read exact historical merge and head] --> Retrospective{Main inclusion, safe metadata, fresh Sol review, and current full proof pass?}
@@ -468,7 +474,7 @@ flowchart TB
 
 ## Dependency audit and two-stage release checkpoints
 
-The same trusted default-branch workflow runs the audit once before RC and again after the accepted RC but before stable. Both executions translate the current Dependabot configuration without loss, keep the issues-write token outside every updater/proxy boundary, and allow campaign reconciliation only after bounded sanitized output and certain container cleanup. A failed, canceled, or uncertain hosted run receives no issues-write token and performs no campaign mutation; its hosted conclusion plus a missing or stale matching final campaign audit record blocks until a fresh successful audit/reconciliation. A would-be update without a hosted PR becomes a separate pre-PR finding with audit/update identity only. An unlinked finding may be deferred, declined, or superseded but never accepted; accepted requires exact linkage to a finally accepted real PR. The single campaign body region advances from `collecting` to exact `candidate_ready` and later `stable_ready`; it is not a second graph or database.
+The same trusted default-branch workflow runs the audit once before RC and again after the accepted RC but before stable. Both executions translate the current Dependabot configuration without loss, keep the issues-write token outside every updater/proxy boundary, and allow campaign reconciliation only after bounded sanitized output and certain container cleanup. A failed, canceled, or uncertain hosted run receives no issues-write token and performs no campaign mutation; its hosted conclusion plus a missing or stale matching final campaign audit record blocks until a fresh successful audit/reconciliation. A would-be update without a hosted PR becomes a separate pre-PR finding with audit/update identity only. An unlinked finding may be deferred, declined, or superseded but never accepted; accepted requires exact linkage to a finally accepted real PR. Every finally accepted PR is merged into accepted current `main`, and a ready checkpoint additionally proves its exact merge commit is included in that checkpoint's release input. The single campaign body region advances from `collecting` to exact `candidate_ready` and later `stable_ready`; it is not a second graph or database.
 
 ```mermaid
 flowchart TB
@@ -481,12 +487,12 @@ flowchart TB
     Finding --> Resolution{"Finding resolution"}
     Resolution -- deferred, declined, or superseded --> AuditFinal
     Resolution -- matching hosted PR appears --> Readback["Authenticated readback creates the complete real PR record and link"]
-    Readback --> PRFinal{"Linked PR finally dispositioned; accepted only when PR is finally accepted?"}
+    Readback --> PRFinal{"Linked PR finally dispositioned; if accepted, merged into current main?"}
     PRFinal -- No --> Block
     PRFinal -- Yes --> AuditFinal
     Resolution -- pending or provisional --> Block
-    AuditFinal --> Gate{"Successful hosted run, current final audit record, and every PR/finding final?"}
-    PRRecords[All applicable hosted PR records finally dispositioned] --> Gate
+    AuditFinal --> Gate{"Successful hosted run, current final audit record, every PR/finding final, and accepted merges in exact checkpoint input?"}
+    PRRecords[All applicable PRs final; every accepted merge included in current main] --> Gate
     Gate -- No --> Block
     Gate -- Yes --> Snapshot["Exact checkpoint snapshot: revision, PR/finding union, config, audit, and tool identities"]
     Snapshot --> Stage{"Which exact checkpoint is final?"}
