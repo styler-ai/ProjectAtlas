@@ -2498,8 +2498,7 @@ def merge_authorization_policy(repo: str, branch: str) -> int:
         for check in checks
     ):
         raise SystemExit("branch protection does not require the merge authorization check")
-    repository_view = gh_json(["repo", "view", repo, "--json", "allowAutoMerge"])
-    if not isinstance(repository_view, dict) or repository_view.get("allowAutoMerge") is not True:
+    if repository.get("allow_auto_merge") is not True:
         raise SystemExit("repository auto-merge is not enabled")
     return required_approvals
 
@@ -2627,7 +2626,7 @@ def merge_readiness_failures(
         failures.append("merge PR is not open")
     if state == "OPEN" and details.get("isDraft") is not False:
         failures.append("merge PR is still a draft")
-    default_branch = gh_json(["repo", "view", repo, "--json", "defaultBranchRef,allowAutoMerge"])
+    default_branch = gh_json(["repo", "view", repo, "--json", "defaultBranchRef"])
     branch_ref = default_branch.get("defaultBranchRef") if isinstance(default_branch, dict) else None
     branch = branch_ref.get("name") if isinstance(branch_ref, dict) else None
     if not isinstance(branch, str) or not branch:
@@ -4975,9 +4974,11 @@ Mitigations:
     def fake_merge_gh_json(args: list[str]) -> object:
         nonlocal current_merge_head, merge_state, merge_mode, merge_pr_reads
         if args[0] == "repo":
+            fields = args[-1] if "--json" in args else ""
+            if "allowAutoMerge" in fields:
+                raise AssertionError("unsupported gh repo field was requested")
             repository = {
                 "defaultBranchRef": {"name": "main"},
-                "allowAutoMerge": merge_mode != "no-auto-merge",
                 "name": "repo",
                 "full_name": "owner/repo",
             }
@@ -5076,6 +5077,13 @@ Mitigations:
             repository = {
                 "name": "repo",
                 "full_name": "owner/repo",
+                "allow_auto_merge": (
+                    False
+                    if merge_mode == "no-auto-merge"
+                    else "true"
+                    if merge_mode == "malformed-auto-merge"
+                    else True
+                ),
                 "owner": {
                     "login": "other" if merge_mode == "owner-mismatch" else "owner",
                     "type": "Organization" if merge_mode == "org-owner" else "User",
@@ -5085,6 +5093,8 @@ Mitigations:
                 repository.pop("owner")
             elif merge_mode == "malformed-owner":
                 repository["owner"] = "owner"
+            if merge_mode == "missing-auto-merge":
+                repository.pop("allow_auto_merge")
             return repository
         if "/git/ref/heads/main" in joined:
             default_branch_reads += 1
@@ -5475,6 +5485,8 @@ Mitigations:
             "malformed-protection",
             "malformed-approval-policy",
             "no-auto-merge",
+            "malformed-auto-merge",
+            "missing-auto-merge",
             "missing-owner",
             "malformed-repository",
             "malformed-owner",
