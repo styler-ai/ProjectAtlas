@@ -356,7 +356,7 @@ flowchart TB
 
 ## Planned-issue specification and delivery flow
 
-Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet and owns semantic acceptance plus every GitHub state transition. The tracked body manifest exposes every complete sanitized body byte and digest to exact-head independent Sol and hosted Codex review; ignored `.tmp` copies are not authority. After acceptance, strict schema/set/hash validation precedes a controlled manifest-only thirty-body bootstrap and normalized live readback while the planning PR remains open and the authoritative graph remains at the live twenty-five-child state. The temporary body-to-`main` architecture-link gap exists only to make normal unfiltered IssueOps/CI executable and authorizes no readiness. After the planning artifacts merge, Luna lands the objective repository integration; Sol then bootstraps hosted relationships from the separate graph manifest and promotes the accepted graph atomically through a narrow PR that removes both manifests before any product handoff.
+Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet and owns semantic acceptance plus every GitHub state transition. The tracked body manifest exposes every complete sanitized body byte and digest to exact-head independent Sol and hosted Codex review; ignored `.tmp` copies are not authority. After acceptance, strict schema/set/hash validation precedes a controlled manifest-only thirty-body bootstrap and normalized live readback while the planning PR remains open and the authoritative graph remains at the live twenty-five-child state. The temporary body-to-`main` architecture-link gap exists only to make normal unfiltered IssueOps/CI executable and authorizes no readiness. Trusted-default-branch repository dispatch remains the sole normal merge route. This planning PR alone may use the proven authorizer self-repair branch: immutable head/base/`main`/expected-tree/protection/check-app preflight, administrator-enforcement-only temporary removal, exact-head admin squash inside mandatory finally restoration, exact protection/parent/tree/`main` readback, then repaired-main idempotent dispatch. Any mismatch terminates in restoration/recovery; required checks are never removed, rebound, or forged. After exact planning-main readback, #497, #498/#499, and #500 expose only accepted checked specification work in section 1 while every delivery task lives in section 2 or later and incomplete delivery remains unchecked. #500's planning bootstrap task 2.1 remains unchecked while the independent shared task accepts and reads back its handoff; that later-section state does not block activation. The independent shared task assigns all four their v0.5 milestone/status, bootstraps hosted relationships from the separate graph manifest, and promotes the accepted graph atomically through a narrow PR that removes both manifests. Exact promoted-state readback accepts task 2.1 for later truthful synchronization, synchronizes the shared task, and releases only dependency-permitted delivery; each issue later completes its remaining delivery and closes through normal validation.
 
 ```mermaid
 flowchart TB
@@ -372,23 +372,36 @@ flowchart TB
     BodyPublication --> LinkGap["Temporary body-to-main architecture-link gap: no readiness"]
     LinkGap --> PlanningCI{"Normal unfiltered IssueOps and CI green?"}
     PlanningCI -- No --> PlanningBlocked(["No merge or readiness: repair the packet and repeat exact-head review"])
-    PlanningCI -- Yes --> PlanningMerge["Primary Sol merges and reads back exact planning main"]
-    PlanningMerge --> ObjectiveImplementation["Luna implements the objective repository checker, forms, and guidance contract"]
-    ObjectiveImplementation --> ObjectiveReadback{"Accepted review and exact implementation-main readback?"}
-    ObjectiveReadback -- No --> ImplementationBlocked(["No graph bootstrap: Luna repairs the repository integration"])
-    ObjectiveReadback -- Yes --> NativeState["Primary Sol applies and reads back the hosted milestone and 29-child native graph"]
-    NativeState --> HostedReadback{"Complete hosted state matches the accepted graph manifest?"}
+    PlanningCI -- Yes --> NormalDispatch["Sole normal route: trusted-default-branch repository dispatch"]
+    NormalDispatch --> NormalReadback{"Exact planning merge and main readback?"}
+    NormalReadback -- Yes --> PlanningMerge["Accepted planning main and repaired authorizer"]
+    NormalReadback -- No --> SelfRepair{"Only issueops-merge-authorized blocks this proven authorizer self-repair?"}
+    SelfRepair -- No --> PlanningBlocked
+    SelfRepair -- Yes --> BootstrapPin["Pin accepted head, base and main, expected tree, full protection, required check and app bindings"]
+    BootstrapPin --> AdminScope["Temporarily remove only administrator enforcement; admin-squash pinned head"]
+    AdminScope --> FinallyRestore["Mandatory finally: restore administrator enforcement regardless of outcome"]
+    FinallyRestore --> BootstrapReadback{"Merge succeeded and protection, parent, tree, and main exactly agree?"}
+    BootstrapReadback -- No --> BootstrapRecovery(["Stop at restoration or recovery; no downstream work"])
+    BootstrapReadback -- Yes --> RepairedDispatch["Dispatch issueops_merge from repaired main for the merged exact head"]
+    RepairedDispatch --> IdempotentReadback{"Exact already-satisfied readback with no state drift?"}
+    IdempotentReadback -- No --> BootstrapRecovery
+    IdempotentReadback -- Yes --> PlanningMerge
+    PlanningMerge --> TaskClassification{"#497-#500 section 1 specification tasks checked and section 2+ states truthful?"}
+    TaskClassification -- No --> TaskBlocked(["No milestone: repair task classification, owner slices, or body mirrors"])
+    TaskClassification -- Yes --> NativeState["Independent shared task 1.4 assigns #497-#500 milestone/status and applies the 29-child native graph"]
+    NativeState --> HostedReadback{"Complete hosted open-child state and blocker edges match the accepted graph manifest?"}
     HostedReadback -- No --> HostedBlocked(["No promotion or readiness: Sol repairs partial hosted state"])
     HostedReadback -- Yes --> Promotion["Separate narrow PR promotes graph/campaign and atomically removes both candidate manifests"]
-    Promotion --> PublishedReadback{"Exact merged main, live IssueOps, and hosted graph agree?"}
+    Promotion --> PublishedReadback{"Exact merged main, live IssueOps, task classification, and hosted graph agree?"}
     PublishedReadback -- No --> PromotionBlocked(["No readiness: Sol repairs and rereads promotion state"])
     PublishedReadback -- Yes --> SemanticReadback{"Fresh eight-question Sol reconciliation passes?"}
     SemanticReadback -- No --> SemanticBlocked(["No handoff: Sol repairs packet meaning"])
-    SemanticReadback -- Yes --> FinalReview["Finish #500 implementation-versus-diagram review"]
-    FinalReview --> Complete500["Complete #500, then independently synchronize shared task 1.4"]
-    Complete500 --> Readiness{"Each issue's exact published packet is ready?"}
+    SemanticReadback -- Yes --> SharedSync["Primary Sol checks independent shared task 1.4; incomplete delivery remains unchecked"]
+    SharedSync --> Readiness{"Issue packet is ready and declared blockers are clear?"}
     Readiness -- No --> IssueBlocked(["No product handoff: repair that issue's packet"])
-    Readiness -- Yes --> ProductHandoff["Luna product implementation handoff"]
+    Readiness -- Yes --> ProductHandoff["Luna executes the issue's section 2+ delivery"]
+    ProductHandoff --> DeliveryReview["Complete implementation, tests, GitHub synchronization, and final diagram review"]
+    DeliveryReview --> IssueClose["Close the issue only after every owning delivery task is checked"]
 ```
 
 ## Structural IssueOps and semantic Sol ownership

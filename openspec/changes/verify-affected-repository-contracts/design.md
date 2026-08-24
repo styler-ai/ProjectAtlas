@@ -64,6 +64,10 @@ No Rust implementation changes. The accepted seven-crate dependency direction an
 
 Planner cost is linear in changed paths plus Cargo graph nodes/edges plus declared cross-contract edges. `cargo metadata` runs once, sets/maps remain bounded by repository size, and output is limited to the closed contract set. A full-proof fallback has the current worst-case resource cost; the optimization cannot make the worst case larger except for the small planning step.
 
+## Dependencies / Cross-Issue Impact
+
+#497 has no native blocker and adds no blocker edge to independent product work. Its checked section 1 owns only the accepted proposal, design, capability, dependency, task, and architecture contract required before milestone planning; section 2 remains the executable delivery and closes only after implementation, proof, and final diagram review complete. #497 directly unlocks campaign-automation issue #498. The shared #500 planned-issue mechanism is a readiness prerequisite rather than a native dependency, so implementation handoff still waits for its accepted published contract and promoted graph without making #500 a product blocker.
+
 ## Risks / Trade-offs
 
 - **A missing path or edge could under-select proof** → unknown, shared, planner-owning, rename, and deletion inputs select full proof; focused fixtures cover ordinary additions/modifications, every rename/delete shape, mixed diffs, and every declared edge.
@@ -82,4 +86,4 @@ Planner cost is linear in changed paths plus Cargo graph nodes/edges plus declar
 
 ## Open Questions
 
-None. Exact contract identifiers and current required-context names are implementation details derived from the accepted workflow at #497 implementation time; their closed ownership and failure semantics are settled here.
+None.

@@ -137,6 +137,10 @@ Campaign automation introduces no Rust code. The Rust pattern-fit judgment is â€
 
 Inventory reconciliation is linear in the bounded release-window PR record count. The audit is linear in `.github/dependabot.yml` entries and intentionally sequential, with one updater/proxy pair active at a time. No long-lived worker, queue, lock, local persistent bytes, or additional service exists.
 
+## Dependencies / Cross-Issue Impact
+
+The shared change's checked section 1 owns only the accepted #498/#499 proposal, design, capability, trust, stage, audit, dependency, task, and architecture contract required before milestone planning. #498 owns section 2 automation delivery and is directly blocked by #497. #499 owns section 3 campaign delivery and is directly blocked by both #498 and #482; those native prerequisites still control its actual execution even though the shared specification contract permits the task-classified issues to enter the milestone with delivery tasks unchecked. #499 remains the sole v0.5 campaign child, #492 remains the sole release root, and unrelated release lanes remain independent.
+
 ## Risks / Trade-offs
 
 - **A PR could be admitted under the wrong campaign** â†’ bind exact author, milestone release graph, standalone relationship, PR/head/body, and inventory record in both implementation and merge contexts.
@@ -163,4 +167,4 @@ Inventory reconciliation is linear in the bounded release-window PR record count
 
 ## Open Questions
 
-None. OCI digests are intentionally resolved from the official registry at #498 implementation time and checked in beside the immutable CLI pin so the workflow never depends on a mutable tag.
+None.

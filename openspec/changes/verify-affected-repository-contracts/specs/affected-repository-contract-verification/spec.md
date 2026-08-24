@@ -95,3 +95,11 @@ Concurrency cancellation SHALL apply only to an older read-only pull-request CI 
 #### Scenario: Stateful or shared-boundary work
 - **WHEN** IssueOps, release, deployment, publication, scheduled, or default-branch work is running
 - **THEN** pull-request CI concurrency grouping does not cancel it
+
+### Requirement: Milestone planning separates specification from delivery
+The accepted #497 proposal, design, capability, dependency, task-ownership, and architecture contract SHALL be checked in section 1 before milestone planning. The impact data, planner/workflow implementation, proof coverage, and final implementation-versus-diagram review SHALL remain unchecked section 2 delivery until substantively complete.
+
+#### Scenario: #497 enters the release milestone
+- **WHEN** exact published-main readback proves the checked section 1 contract and the authoritative/native release graph assigns #497 to v0.5
+- **THEN** planned-issue readiness admits the open issue with its section 2 delivery tasks unchecked
+- **AND** implementation validation and closure continue to require those delivery tasks to complete normally

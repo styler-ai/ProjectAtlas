@@ -14,6 +14,7 @@ Weekly hosted Dependabot correctly produces update pull requests, but ProjectAtl
 - Keep the issues-write credential out of checkout persistence and every updater/proxy input, environment, mount, log, or container. Updater execution uses no credential for this public repository or a distinct read-only credential; all containers exit and bounded sanitized output validates before a later reconciliation step receives the issues-write token.
 - Record two exact states in the same campaign region: `candidate_ready` binds the pre-RC audit, final inventory snapshot, and every accepted PR merge to the exact RC candidate input while #499 and #492 stay open, and `stable_ready` binds a later pre-stable audit plus every newly discovered record and accepted merge to the exact stable input after the accepted RC, after which #499 closes and stable #492 acceptance may proceed.
 - Keep CI selection owned by `verify-affected-repository-contracts`; campaign automation consumes its result and does not duplicate its planner.
+- Keep only the accepted shared proposal/design/specification/trust/dependency/task/architecture contract in checked section 1; keep #498 automation in unchecked section 2 and #499 campaign execution in unchecked section 3 so milestone planning admits executable delivery without claiming it complete.
 
 Non-goals:
 

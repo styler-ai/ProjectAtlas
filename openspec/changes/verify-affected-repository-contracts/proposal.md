@@ -12,6 +12,7 @@ ProjectAtlas currently pays for the complete repository proof chain on every pul
 - Reuse #341's digest-addressed dependency layer and #366's input-based proof contract without adding a second classifier, build system, dependency graph framework, or proof ledger.
 - Cancel only superseded read-only CI; never cancel IssueOps, release, deployment, or another mutation path.
 - Apply the same planner and quality bar to Dependabot pull requests without a bot exemption. #372 remains the separate narrow timeout owner.
+- Keep only the accepted proposal/design/specification/dependency/task/architecture contract in checked section 1; keep impact data, planner/workflow implementation, proof, and final diagram review as unchecked section 2 delivery so milestone planning cannot misclassify unfinished implementation as contract work.
 
 Non-goals:
 

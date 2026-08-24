@@ -256,3 +256,11 @@ The v0.5.0 campaign issue #499 SHALL be blocked by #498 and exact Rust #482. #49
 - **WHEN** #457 and #468 enter the v0.5.0 inventory
 - **THEN** they begin provisional with `retrospective_precontract` provenance and explicit exact head/merge/history evidence
 - **AND** each blocks the applicable readiness checkpoint until the complete retrospective contract yields a final disposition
+
+### Requirement: Milestone planning separates the shared specification from both deliveries
+The accepted shared #498/#499 proposal, design, capability, trust, stage, audit, dependency, task-ownership, and architecture contract SHALL be checked in section 1 before milestone planning. #498 automation SHALL remain unchecked section 2 delivery and #499 campaign execution SHALL remain unchecked section 3 delivery until each owning issue substantively completes it.
+
+#### Scenario: #498 and #499 enter the release milestone
+- **WHEN** exact published-main readback proves the checked shared section 1 contract and the authoritative/native graph assigns #498 and #499 their v0.5 roles
+- **THEN** planned-issue readiness admits each open issue with its owning delivery tasks unchecked
+- **AND** #497 still blocks #498, #482 and #498 still block #499, and normal implementation/closing validation still requires each issue's delivery tasks to complete

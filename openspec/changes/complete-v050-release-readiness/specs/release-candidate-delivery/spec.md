@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: #492 is the feature-free v0.5 release hierarchy root
-#492 SHALL have no native parent and SHALL be the sole direct parent of all twenty-nine other accepted `v0.5.0-00` issues, including dependency-free acceptance-contract owner #500. It SHALL be directly blocked by every child and SHALL implement no feature or bug. #500 SHALL NOT become a native blocker of product issues whose implementation does not consume a genuine #500 product boundary.
+#492 SHALL have no native parent and SHALL be the sole direct parent of all twenty-nine other accepted `v0.5.0-00` issues, including dependency-free acceptance-contract owner #500 after exact planning-main readback proves each candidate change's checked section 1 specification contract and the independent shared task activates all four candidate issues with incomplete later delivery tasks still unchecked. It SHALL be directly blocked by every child and SHALL implement no feature or bug. #500 SHALL NOT become a native blocker of product issues whose implementation does not consume a genuine #500 product boundary.
 
 #### Scenario: Milestone progress is inspected
 - **WHEN** the native hierarchy is read
@@ -67,18 +67,36 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 
 #### Scenario: Body bootstrap makes normal planning CI pass
 - **WHEN** the tracked body manifest, ignored-copy comparison, exact task mirrors, write-time state, and normalized live-body hash readback all agree while the planning PR remains open
-- **THEN** normal unfiltered IssueOps/CI passes before primary Sol authorizes the planning merge and reads back exact `main`
+- **THEN** normal unfiltered IssueOps/CI passes before primary Sol attempts the trusted-default-branch repository-dispatch planning merge and reads back exact `main`
 
-#### Scenario: Repository implementation precedes native graph activation
-- **WHEN** the planning artifacts are exact on `main` but Luna's objective checker/forms/guidance implementation has not yet landed, received review, and been read back
-- **THEN** primary Sol does not apply milestone/native relationships and no issue becomes ready
+#### Scenario: Normal planning merge authorization is available
+- **WHEN** the trusted-default-branch repository-dispatch authorizer can consume its current accepted implementation and confirms the exact planning merge
+- **THEN** primary Sol uses that sole normal route without changing branch protection or invoking an administrator bootstrap
+
+#### Scenario: The accepted planning PR is the authorizer's one proven self-repair
+- **WHEN** the accepted immutable planning head is itself the exact repair for the old default-branch authorizer, all ordinary required checks are green, every review finding is resolved, and failed `issueops-merge-authorized` is the sole authorization blocker traced to that old-authorizer defect
+- **THEN** primary Sol pins the reviewed head, base branch and exact current `main`, expected squash-result tree, complete branch-protection state, and every required context/app binding; temporarily removes only administrator enforcement; admin-squashes only the pinned head inside a mandatory finally restoration path; and proceeds only after merge-command success, exact restored protection, pinned squash parent/tree and `main` readback, plus repaired-main `issueops_merge` idempotent `already-satisfied` readback for the merged exact head
+- **AND** no required check is removed, rebound, or forged, no other protection field is weakened, and the exception is not reusable
+
+#### Scenario: Self-repair preflight, restoration, or readback differs
+- **WHEN** any eligibility fact, pinned identity, merge command, mandatory restoration, protection/check-app binding, parent, tree, `main`, or repaired-dispatch outcome is missing, stale, failed, or mismatched
+- **THEN** the planning bootstrap terminates at restoration/recovery with no Luna handoff, hosted graph activation, or alternate merge route
+
+#### Scenario: Candidate specification tasks precede native graph activation
+- **WHEN** exact planning-main readback proves #497, the shared #498/#499 change, and #500 each contain only accepted checked contract/specification work in section 1, every delivery task is in section 2 or later with checked state equal to substantive completion, every incomplete delivery task remains unchecked, and every issue-map owner slice and body task mirror agrees
+- **THEN** shared release-readiness task 1.4 may assign #497-#500 their v0.5 milestone/status and apply/read their native hierarchy and blocker relationships from the accepted graph manifest
+- **AND** those open issues remain executable and incomplete, with their delivery tasks and normal blocker edges governing implementation and closure
+
+#### Scenario: A candidate contract task is unchecked or delivery is misclassified
+- **WHEN** any candidate change has no checked section 1 specification task, has an unchecked section 1 task, places implementation or final review in section 1, falsely checks incomplete delivery, or differs from its issue-map owner slice or published body mirror
+- **THEN** planned-issue readiness rejects milestone/status/native activation for the affected bootstrap and no graph promotion or implementation handoff proceeds
 
 #### Scenario: Candidate graph is promoted after hosted bootstrap
-- **WHEN** the accepted Luna implementation is on `main`, exact body and planning-main readback agree with the tracked body manifest, and primary Sol applies and reads the complete hosted milestone/native relationship bootstrap from the accepted graph manifest
-- **THEN** a separate narrow PR atomically replaces only `openspec/issue-map.json.release_graphs.v0.5.0-00` with the exact #499 campaign declaration and replacement graph, removes both candidate manifests, and requires exact merged-main plus live IssueOps/hosted reconciliation before readiness
+- **WHEN** exact body/planning-main/task-classification readback agrees with the tracked manifests and primary Sol applies and reads the complete hosted #497-#500 milestone/native relationship bootstrap from the accepted graph manifest
+- **THEN** a separate narrow PR atomically replaces only `openspec/issue-map.json.release_graphs.v0.5.0-00` with the exact #499 campaign declaration and replacement graph, removes both candidate manifests, and requires exact merged-main plus live IssueOps/hosted reconciliation before the independent shared task completes or any delivery handoff proceeds
 
 #### Scenario: Candidate and authoritative graph state differ
-- **WHEN** a required review, manifest entry/hash/removal, body, planning/implementation revision, mapping, milestone, parent, blocker, graph node, or published revision is missing, stale, raced, or mismatched during bootstrap or promotion
+- **WHEN** a required review, manifest entry/hash/removal, body, task state, issue closure, planning/implementation revision, mapping, milestone, parent, blocker, graph node, or published revision is missing, stale, raced, prematurely activated, or mismatched during bootstrap or promotion
 - **THEN** IssueOps remains fail-closed and no readiness, handoff, merge authorization, or release transition proceeds
 
 #### Scenario: IssueOps passes but the packet is not comprehensible
@@ -89,9 +107,9 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 - **WHEN** an issue such as #497 has a semantically reconciled candidate packet but the #500 objective mechanism and section order it requires are not accepted on published `main`
 - **THEN** the existing readiness gate blocks handoff without adding a native #500 product dependency edge
 
-#### Scenario: #500 completes before the shared readiness task is synchronized
-- **WHEN** #500 finishes exact publication/readback, semantic reconciliation, and its final implementation-versus-diagram review
-- **THEN** #500 may complete without checking or depending on shared release-readiness task 1.4, after which primary Sol independently synchronizes that shared task
+#### Scenario: Delivery remains truthful after shared synchronization
+- **WHEN** shared release-readiness task 1.4 completes exact #497-#500 activation, graph promotion/manifest cleanup, and hosted/published semantic readback
+- **THEN** #497-#500 retain their incomplete owner-specific delivery tasks unchecked, execute only when their declared blockers permit, and close only after normal task, implementation, review, and diagram validation completes
 
 #### Scenario: Candidate-only evidence is presented as published
 - **WHEN** a planned, implementation, merge-authorization, milestone, or release check resolves an artifact only from a candidate, stale, or dirty checkout
