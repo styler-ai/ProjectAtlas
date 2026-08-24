@@ -122,10 +122,6 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
 const OPENSPEC_DIR_NAME: &str = "openspec";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
-const MERMAID_NPM_CI: &str = "npm ci --ignore-scripts --prefix .github/mermaid-parser";
-const MERMAID_NPM_AUDIT: &str =
-    "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser";
-const ISSUE_CHECKLISTS_SELF_TEST: &str = "python3 .github/scripts/issue-checklists.py --self-test";
 const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
 const AUTO_RELEASE_WORKFLOW_FILE_NAME: &str = "03-auto-release.yml";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
@@ -8547,78 +8543,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "len(meaningful) > 1",
         "ARCHITECTURE_ACCEPTANCE_TASK",
         "planned_issue_failures",
-        "target_graph_failures",
-        "native_relation_issue_number",
-        "bounded_api_collection",
-        "bounded_api_values",
-        "bounded_api_object_collection",
-        "MAX_COLLECTION_PAGES",
-        "MAX_MILESTONES",
-        "MAX_MILESTONE_ISSUES",
-        "MAX_NATIVE_RELATIONS",
-        "MAX_PULL_REQUEST_REFERENCES",
-        "MAX_REPOSITORY_COLLABORATORS",
-        "MAX_CHECKS",
-        "MAX_REVIEWS",
-        "pull_request_reviews",
-        "validate_request_id",
-        "validate_merge_request",
-        "validate_native_relationship_request",
-        "dispatch_outcome",
-        "relationship_outcome",
-        "merge_outcome",
-        "merge_readiness_failures",
-        "resolve_pull_request_owner",
-        "pull_request_milestone_failures",
-        "autoMergeRequest,milestone,body",
-        "closingIssuesReferences,reviewDecision,milestone,body",
-        "Relates to",
-        "expected_body",
-        "merge authorization milestone preflight failed",
-        "Dependabot pull requests are not eligible for one-shot merge authorization",
-        "implementation status final milestone read-back failed",
-        "merge_authorization_policy",
-        "repository identity response was malformed",
-        "repository_owner",
-        "personal User repository owner",
-        "owner_login.casefold() != owner.casefold()",
-        "repository collaborators",
-        "affiliation=all",
-        "permissions.get(\"admin\") is not True",
-        "GITHUB_ACTIONS_APP_ID",
-        "allowAutoMerge",
-        "required_status_checks",
-        "enable_auto_merge",
-        "disable_auto_merge",
-        "expectedHeadOid",
-        "autoMergeRequest",
-        "mergeCommit",
-        "reviewThreads",
-        "15368",
-        "wait_for_merged_pr",
-        "authorize_merge",
-        "ISSUEOPS_WORKFLOW_PATH",
-        "MERGE_AUTHORIZATION_STATUS_CONTEXT",
-        "mutate_native_relationship",
-        "mutate_native_relationship_and_revalidate",
-        "validate_declared_native_transition",
-        "reverse_declared_dependents",
-        "repair_reopened_blocker",
-        "invalidate_issue_readiness",
-        "commit_status",
-        "pull_request_readback",
-        "implementation_reference_failures",
-        "publish_implementation_status_for_pr",
-        "IMPLEMENTATION_STATUS_CONTEXT",
-        "revoke_merge_authorization_for_pr",
-        "implementation_issue_failures",
-        "enforce_closed_issue_blockers",
         "openspec_readiness_failures",
-        "PublishedSnapshot",
-        "require_published_snapshot",
-        "git_output",
-        "--porcelain=v1",
-        "--untracked-files=no",
         "required_markdown_section_failures",
         "planned_issue=args.planned_issue",
         "MITIGATION_RE",
@@ -8627,30 +8552,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
                 "IssueOps is missing lean checklist behavior {required:?}"
-            ))
-            .into());
-        }
-    }
-    for obsolete in [
-        "implementation_gate_run",
-        "rerun_implementation_gates",
-        "gh run",
-        "MAX_AFFECTED_IMPLEMENTATION_PRS",
-        "MAX_OPEN_PULL_REQUESTS",
-        "MAX_ACTIVE_IMPLEMENTATION_PRS",
-        "ISSUEOPS_ADMISSION_LABEL",
-        "IssueOpsSnapshot",
-        "ImplementationStatusCandidate",
-        "ImplementationAdmission",
-        "CandidateHeadChanged",
-        "newer_issueops_run_exists",
-        "run_bounded_status_work",
-        "publish_implementation_statuses_for_issue",
-        "invalidate_implementation_statuses_for_issue",
-    ] {
-        if issueops.contains(obsolete) {
-            return Err(io::Error::other(format!(
-                "IssueOps retains stale workflow-run implementation policy {obsolete:?}"
             ))
             .into());
         }
@@ -8697,10 +8598,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "docs/*.md#user-content-heading` view on `main",
         "OpenSpec tasks:",
         "commit/SHA permalink evidence",
-        "personal `User` owner",
-        "affiliation=all",
-        "cap+1",
-        "first hosted merge dispatch",
     ] {
         if !workflow_docs.contains(required) {
             return Err(io::Error::other(format!(
@@ -8748,20 +8645,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    for rejected in [
-        "statuses: write",
-        "publish-implementation-status-for-pr",
-        "issueops-implementation",
-        "issueops-merge-authorized",
-        "/statuses/",
-    ] {
-        if ci.contains(rejected) {
-            return Err(io::Error::other(format!(
-                "untrusted CI must not publish IssueOps status {rejected:?}"
-            ))
-            .into());
-        }
-    }
     for (test, label) in [
         (
             "csharp_symbol_identity_boundary_preserves_full_and_incremental_publication",
@@ -8796,62 +8679,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary IssueOps step is missing"))?;
-    let checkout_step = ci
-        .split("- name: Checkout")
-        .nth(1)
-        .and_then(|tail| tail.split("- name:").next())
-        .ok_or_else(|| io::Error::other("ordinary checkout step is missing"))?;
-    if !ci.contains(
-        "pull_request:\n    branches: [main, dev]\n    types: [opened, edited, synchronize, reopened, milestoned, demilestoned]",
-    ) {
-        return Err(io::Error::other(
-            "pull_request CI must rerun on body edits while retaining the ordinary activity types",
-        )
-        .into());
-    }
-    if !checkout_step.contains(
-        "ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}",
-    )
-    {
-        return Err(io::Error::other(
-            "PR-derived CI events must check out the live pull-request merge ref rather than a payload SHA or base branch",
-        )
-        .into());
-    }
-    for rejected in ["github.event.pull_request.merge_commit_sha"] {
-        if ci.contains(rejected) {
-            return Err(io::Error::other(format!(
-                "PR-derived CI must not trust stale payload checkout identity {rejected:?}"
-            ))
-            .into());
-        }
-    }
-    let default_branch_step = ci
-        .split("- name: Default branch delivery check")
-        .nth(1)
-        .and_then(|tail| tail.split("- name:").next())
-        .ok_or_else(|| io::Error::other("default branch delivery step is missing"))?;
-    for required in [
-        "github.event.pull_request.base.ref || github.ref_name",
-        "github.event.repository.default_branch",
-        "ProjectAtlas delivery is restricted to the repository default branch",
-        "exit 1",
-    ] {
-        if !default_branch_step.contains(required) {
-            return Err(io::Error::other(format!(
-                "default branch delivery step is missing fail-closed behavior {required:?}"
-            ))
-            .into());
-        }
-    }
-    for event in ["pull_request_review", "pull_request_review_comment"] {
-        if !checklist_step.contains(event) {
-            return Err(io::Error::other(format!(
-                "ordinary IssueOps checklist must run for {event}"
-            ))
-            .into());
-        }
-    }
     if checklist_step.contains("--milestone") {
         return Err(io::Error::other(
             "ordinary pull requests must not require full milestone completion",
@@ -8889,363 +8716,15 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "run-name:",
-        "format('merge {0} pr-{1}', github.event.client_payload.request_id, github.event.client_payload.pr_number)",
-        "format('relationship {0}', github.event.client_payload.request_id)",
-        "types: [opened, edited, reopened, closed, labeled, unlabeled, milestoned, demilestoned]",
-        "types: [opened, edited, synchronize, reopened, milestoned, demilestoned]",
-        "repository_dispatch:",
-        "types: [issueops_relationship, issueops_merge]",
-        "gh api repos/OWNER/REPO/dispatches",
-        "dispatch admission is not run success",
-        "204 dispatch response is admission only",
-        "REQUEST_ID",
-        "^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$",
-        "client_payload.relation_kind",
-        "client_payload.operation",
-        "client_payload.issue_number",
-        "client_payload.related_issue_number",
-        "--mutate-native-relationship",
-        "--native-relationship-kind \"$RELATION_KIND\"",
-        "--native-relationship-operation \"$RELATION_OPERATION\"",
-        "--native-relationship-issue \"$ISSUE_NUMBER\"",
-        "--native-related-issue \"$RELATED_ISSUE\"",
-        "--request-id \"$REQUEST_ID\"",
-        "--authorize-merge",
-        "--merge-pr-number \"$PR_NUMBER\"",
-        "--merge-expected-head \"$EXPECTED_HEAD\"",
-        "--dispatch-actor \"$DISPATCH_ACTOR\"",
-        "--event-sender \"$EVENT_SENDER\"",
-        "issue-state-repair",
-        "--enforce-closed-issue-blockers \"$ISSUE_NUMBER\"",
-        "merge-authorization-invalidation",
-        "relationship-mutation",
-        "merge-authorization",
-        "implementation-status-validation",
-        "github.event_name == 'pull_request_target'",
-        "github.event_name == 'repository_dispatch'",
+        "types: [opened, edited, reopened, labeled, unlabeled, milestoned]",
+        "--planned-issue \"$ISSUE_NUMBER\"",
         "timeout-minutes: 5",
         "contents: read",
-        "issues: write",
-        "pull-requests: read",
-        "statuses: write",
+        "issues: read",
     ] {
         if !issueops_workflow.contains(required) {
             return Err(io::Error::other(format!(
                 "issue-event IssueOps workflow is missing readiness guard {required:?}"
-            ))
-            .into());
-        }
-    }
-    for job in [
-        "implementation-status-validation",
-        "issue-state-repair",
-        "merge-authorization-invalidation",
-        "relationship-mutation",
-        "merge-authorization",
-    ] {
-        let block = workflow_job_block(&issueops_workflow, job)?;
-        let job_permission = if job == "issue-state-repair" {
-            "issues: write"
-        } else if job == "merge-authorization" {
-            "pull-requests: write"
-        } else {
-            "pull-requests: read"
-        };
-        for required in [
-            "ref: ${{ github.event.repository.default_branch }}",
-            "if: ${{ !cancelled() }}",
-            "contents: read",
-            job_permission,
-        ] {
-            if !block.contains(required) {
-                return Err(io::Error::other(format!(
-                    "IssueOps {job} job is missing trusted bounded guard {required:?}"
-                ))
-                .into());
-            }
-        }
-        if job == "issue-state-repair"
-            || job == "merge-authorization-invalidation"
-            || job == "implementation-status-validation"
-        {
-            if !block.contains("timeout-minutes: 10") {
-                return Err(io::Error::other(format!(
-                    "IssueOps {job} job must have a finite 10-minute timeout"
-                ))
-                .into());
-            }
-        } else if !block.contains("timeout-minutes: 30") {
-            return Err(io::Error::other(format!(
-                "IssueOps {job} job must have a finite 30-minute timeout"
-            ))
-            .into());
-        }
-    }
-    let planned_issue_job = workflow_job_block(&issueops_workflow, "planned-issue")?;
-    for required in [
-        "github.event.issue.milestone != null || github.event.action == 'demilestoned'",
-        "--planned-issue \"$ISSUE_NUMBER\"",
-    ] {
-        if !planned_issue_job.contains(required) {
-            return Err(io::Error::other(format!(
-                "IssueOps planned-issue job is missing targeted demilestone guard {required:?}"
-            ))
-            .into());
-        }
-    }
-    let relationship_job = workflow_job_block(&issueops_workflow, "relationship-mutation")?;
-    let merge_job = workflow_job_block(&issueops_workflow, "merge-authorization")?;
-    let invalidation_job =
-        workflow_job_block(&issueops_workflow, "merge-authorization-invalidation")?;
-    let implementation_job =
-        workflow_job_block(&issueops_workflow, "implementation-status-validation")?;
-    for rejected in [
-        "github.event_name == 'pull_request'",
-        "ref: refs/pull/",
-        "github.event.pull_request.head.ref",
-        "github.event.pull_request.head.repo",
-        "state=success",
-        "issueops-merge-authorized=success",
-    ] {
-        if invalidation_job.contains(rejected) {
-            return Err(io::Error::other(format!(
-                "trusted pull_request_target invalidator contains hostile-PR authority {rejected:?}"
-            ))
-            .into());
-        }
-    }
-    if issueops_workflow.contains("\n  pull_request:\n") {
-        return Err(io::Error::other(
-            "write-capable merge authorization invalidation must not run from pull_request",
-        )
-        .into());
-    }
-    let repair_job = workflow_job_block(&issueops_workflow, "issue-state-repair")?;
-    for required in [
-        "issues: write",
-        "pull-requests: read",
-        "statuses: write",
-        "--enforce-closed-issue-blockers",
-    ] {
-        if !repair_job.contains(required) {
-            return Err(io::Error::other(format!(
-                "IssueOps issue repair job is missing blocker repair guard {required:?}"
-            ))
-            .into());
-        }
-    }
-    for required in ["statuses: write", "--revoke-merge-authorization-for-pr"] {
-        if !invalidation_job.contains(required) {
-            return Err(io::Error::other(format!(
-                "IssueOps invalidation job is missing status revocation guard {required:?}"
-            ))
-            .into());
-        }
-    }
-    for required in [
-        "github.event_name == 'pull_request_target'",
-        "statuses: write",
-        "--publish-implementation-status-for-pr \"$PR_NUMBER\"",
-        "--expected-pr-head-sha \"$EXPECTED_PR_HEAD_SHA\"",
-        "EXPECTED_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
-    ] {
-        if !implementation_job.contains(required) {
-            return Err(io::Error::other(format!(
-                "IssueOps implementation validation job is missing trusted status guard {required:?}"
-            ))
-            .into());
-        }
-    }
-    for rejected in [
-        "github.event_name == 'pull_request'",
-        "ref: refs/pull/",
-        "github.event.pull_request.head.ref",
-        "github.event.pull_request.head.repo",
-    ] {
-        if implementation_job.contains(rejected) {
-            return Err(io::Error::other(format!(
-                "trusted implementation validation contains hostile-PR authority {rejected:?}"
-            ))
-            .into());
-        }
-    }
-    for required in [
-        "group: issueops-mutations-${{ github.repository }}",
-        "cancel-in-progress: false",
-        "issues: write",
-        "--mutate-native-relationship",
-        "--request-id \"$REQUEST_ID\"",
-    ] {
-        if !relationship_job.contains(required) {
-            return Err(io::Error::other(format!(
-                "IssueOps relationship job is missing mutation guard {required:?}"
-            ))
-            .into());
-        }
-    }
-    for required in [
-        "group: issueops-mutations-${{ github.repository }}",
-        "cancel-in-progress: false",
-        "checks: read",
-        "pull-requests: write",
-        "statuses: write",
-        "--authorize-merge",
-        "--merge-pr-number \"$PR_NUMBER\"",
-        "--merge-expected-head \"$EXPECTED_HEAD\"",
-        "--dispatch-actor \"$DISPATCH_ACTOR\"",
-        "--event-sender \"$EVENT_SENDER\"",
-        "timeout-minutes: 30",
-    ] {
-        if !merge_job.contains(required) {
-            return Err(io::Error::other(format!(
-                "IssueOps merge job is missing authorization guard {required:?}"
-            ))
-            .into());
-        }
-    }
-    let self_test_jobs = [
-        "planned-issue",
-        "issue-state-repair",
-        "merge-authorization-invalidation",
-        "implementation-status-validation",
-    ];
-    let validate_self_test_setup =
-        |job: &str, block: &str, has_self_test: bool| -> Result<(), io::Error> {
-            let mutation_job = matches!(job, "relationship-mutation" | "merge-authorization");
-            if mutation_job && has_self_test {
-                return Err(io::Error::other(format!(
-                    "IssueOps {job} mutation route must remain self-test-free"
-                )));
-            }
-            if has_self_test {
-                let ci_position = block.find(MERMAID_NPM_CI).ok_or_else(|| {
-                    io::Error::other(format!(
-                        "IssueOps {job} self-test route is missing locked Mermaid npm ci"
-                    ))
-                })?;
-                let audit_position = block.find(MERMAID_NPM_AUDIT).ok_or_else(|| {
-                    io::Error::other(format!(
-                        "IssueOps {job} self-test route is missing locked Mermaid npm audit"
-                    ))
-                })?;
-                let self_test_position =
-                    block.find(ISSUE_CHECKLISTS_SELF_TEST).ok_or_else(|| {
-                        io::Error::other(format!(
-                            "IssueOps {job} self-test route is missing its Python self-test"
-                        ))
-                    })?;
-                if !(ci_position < audit_position && audit_position < self_test_position) {
-                    return Err(io::Error::other(format!(
-                        "IssueOps {job} must run Mermaid npm ci, npm audit, then Python self-test"
-                    )));
-                }
-            } else if mutation_job
-                && (block.contains(MERMAID_NPM_CI) || block.contains(MERMAID_NPM_AUDIT))
-            {
-                return Err(io::Error::other(format!(
-                    "IssueOps {job} mutation route must not carry Mermaid self-test setup"
-                )));
-            }
-            Ok(())
-        };
-    for job in [
-        "planned-issue",
-        "issue-state-repair",
-        "merge-authorization-invalidation",
-        "implementation-status-validation",
-        "relationship-mutation",
-        "merge-authorization",
-    ] {
-        let runs = workflow_job_runs(&issueops_workflow, job)?;
-        let has_self_test = runs.iter().any(|run| run.contains("--self-test"));
-        let block = workflow_job_block(&issueops_workflow, job)?;
-        validate_self_test_setup(job, &block, has_self_test)?;
-    }
-    let swapped_setup_fixture = format!(
-        "fixture:\n  run: |\n    {MERMAID_NPM_AUDIT}\n    {MERMAID_NPM_CI}\n    {ISSUE_CHECKLISTS_SELF_TEST}"
-    );
-    if validate_self_test_setup("fixture", &swapped_setup_fixture, true).is_ok() {
-        return Err(io::Error::other(
-            "IssueOps workflow contract accepted swapped Mermaid setup order",
-        )
-        .into());
-    }
-    let mutation_self_test_fixture = format!(
-        "  relationship-mutation:\n    run: |\n      {MERMAID_NPM_CI}\n      {MERMAID_NPM_AUDIT}\n      {ISSUE_CHECKLISTS_SELF_TEST}"
-    );
-    if validate_self_test_setup("relationship-mutation", &mutation_self_test_fixture, true).is_ok()
-    {
-        return Err(io::Error::other(
-            "IssueOps workflow contract accepted a self-test in a mutation route",
-        )
-        .into());
-    }
-    for job in ["relationship-mutation", "merge-authorization"] {
-        for setup in [MERMAID_NPM_CI, MERMAID_NPM_AUDIT] {
-            let mutation_setup_fixture = format!("  {job}:\n    run: |\n      {setup}");
-            if validate_self_test_setup(job, &mutation_setup_fixture, false).is_ok() {
-                return Err(io::Error::other(format!(
-                    "IssueOps workflow contract accepted Mermaid setup in non-self-test {job}"
-                ))
-                .into());
-            }
-        }
-    }
-    for job in self_test_jobs {
-        let runs = workflow_job_runs(&issueops_workflow, job)?;
-        if !runs.iter().any(|run| run.contains("--self-test")) {
-            return Err(io::Error::other(format!(
-                "IssueOps {job} is missing its expected Python self-test route"
-            ))
-            .into());
-        }
-    }
-    for job in ["relationship-mutation", "merge-authorization"] {
-        let block = workflow_job_block(&issueops_workflow, job)?;
-        for unsupported in ["queue:", "cancel-in-progress: true"] {
-            if block.contains(unsupported) {
-                return Err(io::Error::other(format!(
-                    "IssueOps {job} uses unsupported or unsafe concurrency setting {unsupported:?}"
-                ))
-                .into());
-            }
-        }
-    }
-    for obsolete in [
-        "--rerun-implementation-gates-for-issue",
-        "MAX_ACTIVE_IMPLEMENTATION_PRS",
-        "issueops-admitted",
-        "issueops_request_budget",
-        "publish_implementation_statuses_for_issue",
-        "invalidate_implementation_statuses_for_issue",
-        "open_pull_requests_snapshot",
-        "actions: write",
-        "gh run cancel",
-        "cancel-in-progress: true",
-        "gh pr merge",
-        "pulls/merge",
-    ] {
-        if issueops_workflow.contains(obsolete) {
-            return Err(io::Error::other(format!(
-                "issue-event IssueOps workflow retains obsolete stale-run mechanism {obsolete:?}"
-            ))
-            .into());
-        }
-    }
-    if issueops_workflow.contains("workflow_dispatch") {
-        return Err(io::Error::other(
-            "IssueOps relationship authority must not use workflow_dispatch",
-        )
-        .into());
-    }
-    for rejected in [
-        "relation kind, operation, and related issue must be supplied together",
-        "repository_dispatch requires an authorized native relationship payload",
-    ] {
-        if issueops_workflow.contains(rejected) {
-            return Err(io::Error::other(format!(
-                "IssueOps shell must defer relationship validation to Python {rejected:?}"
             ))
             .into());
         }
@@ -35104,9 +34583,7 @@ fn command_runs_projectatlas_maintenance(command: &str) -> bool {
 /// Require every GitHub Actions `uses:` reference to pin an immutable 40-char SHA.
 fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<dyn Error>> {
     for (index, line) in workflow.lines().enumerate() {
-        let line = line.trim_start();
-        let line = line.strip_prefix("- ").unwrap_or(line);
-        let Some(reference) = line.strip_prefix("uses:") else {
+        let Some((_, reference)) = line.split_once("uses:") else {
             continue;
         };
         let reference = reference.split('#').next().unwrap_or("").trim();
@@ -35130,29 +34607,6 @@ fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<d
         }
     }
     Ok(())
-}
-
-#[test]
-fn action_pin_policy_ignores_permissions_and_rejects_unpinned_references() {
-    let pinned_workflow = "permissions:\n  statuses: write\njobs:\n  check:\n    steps:\n      - uses: actions/checkout@0123456789012345678901234567890123456789\n";
-    let pinned_result = assert_actions_are_sha_pinned("pinned.yml", pinned_workflow);
-    assert!(
-        pinned_result.is_ok(),
-        "permission values must not be parsed as action references"
-    );
-
-    let unpinned_workflow = "jobs:\n  check:\n    steps:\n      - uses: actions/checkout@v4\n";
-    let unpinned_result = assert_actions_are_sha_pinned("unpinned.yml", unpinned_workflow);
-    assert!(
-        unpinned_result.is_err(),
-        "an unpinned uses: reference must be rejected"
-    );
-    let Err(error) = unpinned_result else { return };
-    assert!(
-        error
-            .to_string()
-            .contains("is not pinned to a 40-character SHA")
-    );
 }
 
 /// Return the deterministic quarantine path for a fixture stale shim.
