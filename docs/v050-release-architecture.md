@@ -562,8 +562,20 @@ stateDiagram-v2
   Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
   HostedReadback --> StableCampaign: accepted candidate then continue intake and run pre-stable audit
   StableCampaign --> StableSemanticReadback: campaign stable-ready, campaign issue closed, every child closed
-  StableSemanticReadback --> StableBuild: all-closed milestone gate plus repeated semantic and published-main readback
-  StableBuild --> StableReadback: repeat installs and hosted identity
-  StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified
+  StableSemanticReadback --> StableFinalizationGate: only issue 492 open and only task 26.6 unchecked, exact stable input and prepublication proof
+  StableFinalizationGate --> StableBuild: package exact stable input
+  StableFinalizationGate --> Remediation: extra issue or task, role drift, or stale proof
+  StableBuild --> StableInstalledProof: repeat installed public-surface and update proof
+  StableInstalledProof --> StablePublication: explicit authorization publishes exact stable assets
+  StableInstalledProof --> Remediation: installed or update blocker
+  StablePublication --> StableReadback: independently verify hosted identity
+  StableReadback --> Remediation: confirmed blocker or hosted product mismatch
+  StableReadback --> FinalSynchronization: v0.5.0 is Latest and downstream pins agree
+  FinalSynchronization --> Close492: check task 26.6 and close release root last
+  Close492 --> CloseMilestone: close milestone after every issue
+  CloseMilestone --> PostPublicationGate: reread exact hosted release, Latest, pins, issues, tasks, reviews, OpenSpec, and milestone
+  PostPublicationGate --> FinalState: all mapped issues closed, all mapped tasks checked, synchronized final state verified
+  PostPublicationGate --> FinalizationRepair: missing, stale, partial, raced, or mismatched synchronization
+  FinalizationRepair --> PostPublicationGate: restore exact synchronized state and reread
   FinalState --> [*]
 ```

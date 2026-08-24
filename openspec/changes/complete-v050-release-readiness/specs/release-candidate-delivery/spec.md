@@ -20,9 +20,18 @@
 - **WHEN** the milestone contains any other open issue, either governance role differs from the active graph, the campaign stage is not exact `candidate_ready` for the release input, or the graph/packet readback is stale or mismatched
 - **THEN** the prerelease milestone gate fails closed without accepting a caller-supplied allowlist
 
-#### Scenario: A child is incomplete at stable
-- **WHEN** any child including #499 remains open, or any final mapped task, proof, review, or stage evidence is incomplete
-- **THEN** the existing stable milestone gate requires every mapped milestone issue closed with every mapped task checked, and #492 cannot publish stable or close
+#### Scenario: A child or prerequisite root task is incomplete at stable
+- **WHEN** any child including #499 remains open, any child task, proof, review, or stage evidence is incomplete, or any #492 task other than exact finalization task 26.6 remains unchecked
+- **THEN** the stable prepublication finalization gate fails before packaging
+
+#### Scenario: Stable finalization is ready before packaging
+- **WHEN** trusted release-version classification selects stable, #499 has exact `stable_ready` evidence and is closed so every child is closed, every child task and #492 task other than 26.6 is checked, the accepted RC plus repeated semantic, published-main, source/workspace, security, release-policy, and package-input preflight binds the exact stable input, and #492 is the sole open milestone issue with 26.6 the sole unchecked task
+- **THEN** the stable prepublication finalization gate MAY permit only #492 to remain open and only exact task 26.6 to remain unchecked for stable packaging, installed-product proof, publication, exact hosted/Latest/downstream-pin readback, synchronization, and closure
+- **AND** it SHALL NOT reuse the prerelease permission for #499 or admit another issue, task, role, revision, or caller-supplied allowlist
+
+#### Scenario: Stable finalization has extra or stale residue
+- **WHEN** another issue is open, another task is unchecked, the release-root role or exact stable input differs, or any required prepublication readback is stale or mismatched
+- **THEN** the stable finalization gate fails closed without packaging
 
 ### Requirement: Lean CI and the dependency campaign remain release gates
 Pull requests SHALL run the smallest contract-complete existing proof selected by the single #497 affected-contract planner, with human and Dependabot parity, ordinary additions/modifications eligible for known-impact union, and every rename/deletion plus unknown/shared/planner-owning input failing closed to complete proof. Default-branch, scheduled, candidate, and release boundaries SHALL run complete proof. Each release SHALL declare at most one active Dependabot campaign issue; v0.5.0 SHALL declare #499 and use its same body region for exact candidate-ready and stable-ready evidence.
@@ -132,7 +141,7 @@ IssueOps SHALL derive a bounded transition plan from the declared release graph 
 - **THEN** IssueOps selects the graph from the issue map, reports targeted milestone drift, and does not skip validation because the event payload milestone is null
 
 ### Requirement: Release input is exact and complete
-#492 SHALL freeze one exact RC `main` revision only after the complete twenty-nine-child hierarchy is exact; every implementation-bearing child other than #499 is closed successfully; every applicable task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete; the fresh full-set Sol semantic reconciliation agrees; and #499 has exact `candidate_ready` evidence. The release workflow SHALL select its milestone gate from trusted release-version classification. For a prerelease, the gate SHALL derive #492/#499 from the active graph's release-root/campaign roles, permit exactly those two issues open, require every other milestone issue closed and complete, and bind the campaign's exact candidate revision/inventory/config/audit/hosted-run record to the release input. It SHALL NOT accept an arbitrary open-issue allowlist or represent the two governance issues' later work as complete. Stable SHALL preserve the existing all-mapped-milestone-issues-closed and all-mapped-tasks-checked gate. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
+#492 SHALL freeze one exact RC `main` revision only after the complete twenty-nine-child hierarchy is exact; every implementation-bearing child other than #499 is closed successfully; every applicable task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete; the fresh full-set Sol semantic reconciliation agrees; and #499 has exact `candidate_ready` evidence. The release workflow SHALL select its milestone gate from trusted release-version classification. For a prerelease, the gate SHALL derive #492/#499 from the active graph's release-root/campaign roles, permit exactly those two issues open, require every other milestone issue closed and complete, and bind the campaign's exact candidate revision/inventory/config/audit/hosted-run record to the release input. It SHALL NOT accept an arbitrary open-issue allowlist or represent the two governance issues' later work as complete. For stable prepublication, a distinct finalization gate SHALL derive #492 as the sole release root, require #499 exact `stable_ready` and closed, require every child closed and every mapped task except #492 task 26.6 checked, permit only #492 open and 26.6 unchecked, and bind the accepted RC plus repeated semantic, published-main, source/workspace, security, release-policy, and package-input preflight to the exact stable input. After publication, a separate final gate SHALL require exact stable hosted/Latest/downstream-pin readback, full OpenSpec/issue/review synchronization, all mapped issues closed, all mapped tasks checked, #492 closed last, and the milestone closed. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
 
 #### Scenario: Evidence-led no-change issue
 - **WHEN** a measurement or reproduction task proves existing behavior already satisfies its contract
@@ -193,15 +202,23 @@ Before RC or stable publication, the release gate SHALL install `v0.4.5`, create
 ### Requirement: v0.5.0 begins with an independently read-back prerelease
 With explicit authorization, `v0.5.0-rc1` SHALL publish as a non-draft prerelease from the exact accepted revision only after every implementation-bearing child is closed and #499's exact candidate-ready record matches publication preflight. Independent readback SHALL verify tag/revision, metadata, assets, checksums/integrity records, installers, npm, runtime/plugin/skill/MCP/CLI/host identity, and acceptance results. #499 and #492 SHALL remain open for the stable window, and v0.4.5 SHALL remain Latest.
 
-The RC release workflow SHALL invoke the prerelease-aware milestone gate above. Stable publication SHALL continue to invoke the existing all-closed milestone gate; the prerelease exception SHALL NOT be reused for stable.
+The RC release workflow SHALL invoke the prerelease-aware milestone gate above. Stable publication SHALL invoke the distinct stable prepublication finalization gate, never the prerelease exception; after exact stable publication/readback and synchronization, final acceptance SHALL invoke the postpublication all-issues-closed/all-tasks-checked gate.
 
 #### Scenario: Missing or mismatched release artifact
 - **WHEN** any required tuple/asset/digest/version/readback is absent or inconsistent
 - **THEN** RC acceptance fails and stable promotion is blocked
 
 ### Requirement: Stable promotion repeats complete proof and closes last
-After an accepted candidate and explicit authorization, stable v0.5.0 SHALL require the post-accepted-RC pre-stable audit, exact stable-ready full-window reconciliation, #499 closure, and therefore every child closed before repeating the full-set Sol semantic reconciliation, objective published-main IssueOps readback, installed proof, and hosted proof and becoming Latest. #492 SHALL remain open until downstream pins and final issue explanation/acceptance, diagram, task, IssueOps/OpenSpec/review/milestone/workflow state agree and SHALL close last.
+After an accepted candidate and explicit authorization, stable v0.5.0 SHALL require the post-accepted-RC pre-stable audit, exact stable-ready full-window reconciliation, #499 closure, and therefore every child closed before repeating the full-set Sol semantic reconciliation, objective published-main IssueOps readback, installed proof, and hosted proof. Before packaging, the stable prepublication finalization gate SHALL require #492 as the sole open milestone issue and task 26.6 as its sole unchecked mapped task; all other issue, task, role, revision, review, and proof state SHALL be exact. #492 SHALL remain open and task 26.6 SHALL remain unchecked only while the exact stable release publishes, independently reads back, becomes Latest, reconciles downstream pins, and synchronizes final OpenSpec/issue/review state. Primary Sol SHALL then check 26.6, close #492 last, and close the milestone. A postpublication final gate SHALL reread the exact stable tag, release, assets, checksums, runtime/plugin/MCP/CLI/host identity, Latest selection, downstream pins, issue/task/review/OpenSpec state, #492 closure, and milestone closure; any missing, stale, partial, raced, or mismatched state SHALL fail closed.
 
-#### Scenario: Stable promotion
-- **WHEN** #499 is closed from exact stable-ready evidence, no child blocker remains, and stable artifacts pass the complete proof
-- **THEN** v0.5.0 becomes Latest only after exact readback and #492/milestone finalization
+#### Scenario: Stable publication begins from exact finalization state
+- **WHEN** #499 is closed from exact stable-ready evidence, no child blocker remains, all tasks except #492 task 26.6 are checked, #492 is the sole open issue, and the exact stable input passes the repeated prepublication proof
+- **THEN** stable packaging and publication may proceed without treating 26.6 or #492 as complete
+
+#### Scenario: Stable hosted state is synchronized and closed
+- **WHEN** exact readback proves v0.5.0 is the intended stable release and Latest, downstream pins agree, and final OpenSpec/issue/review state is synchronized
+- **THEN** primary Sol checks task 26.6, closes #492 last, closes the milestone, and the postpublication gate succeeds only after rereading all mapped tasks and issues closed in that exact hosted state
+
+#### Scenario: Stable finalization or postpublication readback drifts
+- **WHEN** an extra issue/task remains, a required closure happens early, or any release, Latest, pin, synchronization, root, task, review, OpenSpec, or milestone fact is missing, stale, partial, raced, or mismatched
+- **THEN** publication or final acceptance fails at the applicable gate without reusing the RC exception or claiming complete closure
