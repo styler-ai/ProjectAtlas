@@ -1,6 +1,6 @@
 # v0.5.0 release architecture
 
-Each active or candidate v0.5.0 issue owns one focused view below. `openspec/issue-map.json` maps candidate OpenSpec task ownership, but its `release_graphs` section owns only the current live hierarchy and implementation order. The #500 change-local candidate manifest is a deterministic future-graph promotion source, not graph authority; it becomes authoritative only after exact body and hosted relationship bootstrap, narrow graph promotion, and published-main readback. #492 owns acceptance only and closes after every child issue.
+Each active or candidate v0.5.0 issue owns one focused view below. `openspec/issue-map.json` maps candidate OpenSpec task ownership, but its `release_graphs` section owns only the current live hierarchy and implementation order. #500 carries two temporary change-local manifests: the tracked body manifest is the sole reviewed source for exact thirty-body publication, while the separate graph manifest is the deterministic future-graph promotion source and not live graph authority. Both disappear atomically only after exact body, planning-main, and hosted relationship readback agree and the graph is promoted. #492 owns acceptance only and closes after every child issue.
 
 ## PHP language-guidance evidence flow
 
@@ -356,17 +356,19 @@ flowchart TB
 
 ## Planned-issue specification and delivery flow
 
-Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet and owns semantic acceptance plus every GitHub state transition. Exact-head independent Sol and hosted Codex review precede a controlled thirty-body bootstrap while the planning PR remains open and the authoritative graph remains at the live twenty-five-child state. The temporary body-to-`main` architecture-link gap exists only to make normal unfiltered IssueOps/CI executable and authorizes no readiness. After the planning artifacts merge, Luna lands the objective repository integration; Sol then bootstraps hosted relationships and promotes the accepted graph atomically through a separate narrow PR before any product handoff.
+Issue forms supply behavior-level acceptance and applicable bug or improvement context. Sol turns that intake into one coherent body/OpenSpec/diagram packet and owns semantic acceptance plus every GitHub state transition. The tracked body manifest exposes every complete sanitized body byte and digest to exact-head independent Sol and hosted Codex review; ignored `.tmp` copies are not authority. After acceptance, strict schema/set/hash validation precedes a controlled manifest-only thirty-body bootstrap and normalized live readback while the planning PR remains open and the authoritative graph remains at the live twenty-five-child state. The temporary body-to-`main` architecture-link gap exists only to make normal unfiltered IssueOps/CI executable and authorizes no readiness. After the planning artifacts merge, Luna lands the objective repository integration; Sol then bootstraps hosted relationships from the separate graph manifest and promotes the accepted graph atomically through a narrow PR that removes both manifests before any product handoff.
 
 ```mermaid
 flowchart TB
     Intake["Issue-form intake: acceptance plus applicable reproduction or agent workflow"] --> SolSpec["Sol specification: body, OpenSpec, diagram meaning, and release role"]
     SolSpec --> CandidateReview{"Candidate eight-question semantic review passes?"}
     CandidateReview -- No --> CandidateBlocked(["No publication: Sol repairs the candidate packet"])
-    CandidateReview -- Yes --> PlanningPR["Open planning PR: specs, diagrams, drafts, task mappings, and candidate graph; active graph stays live at 25 children"]
+    CandidateReview -- Yes --> PlanningPR["Open planning PR: specs, diagrams, tracked body and graph manifests, task mappings; active graph stays live at 25 children"]
     PlanningPR --> ExactHeadReview{"Independent Sol and new hosted Codex reviews accept the exact head?"}
     ExactHeadReview -- No --> ReviewBlocked(["No mutation: correct and rereview the exact PR head"])
-    ExactHeadReview -- Yes --> BodyPublication["Primary Sol publishes and reads back exact 30 bodies while the PR remains open"]
+    ExactHeadReview -- Yes --> BodyManifest{"Body manifest schema, exact issue set, bytes, hashes, and convenience copies agree?"}
+    BodyManifest -- No --> ManifestBlocked(["No publication: repair and rereview the tracked source"])
+    BodyManifest -- Yes --> BodyPublication["Primary Sol publishes only reconstructed body bytes and reads back exact 30 normalized bodies/hashes"]
     BodyPublication --> LinkGap["Temporary body-to-main architecture-link gap: no readiness"]
     LinkGap --> PlanningCI{"Normal unfiltered IssueOps and CI green?"}
     PlanningCI -- No --> PlanningBlocked(["No merge or readiness: repair the packet and repeat exact-head review"])
@@ -375,9 +377,9 @@ flowchart TB
     ObjectiveImplementation --> ObjectiveReadback{"Accepted review and exact implementation-main readback?"}
     ObjectiveReadback -- No --> ImplementationBlocked(["No graph bootstrap: Luna repairs the repository integration"])
     ObjectiveReadback -- Yes --> NativeState["Primary Sol applies and reads back the hosted milestone and 29-child native graph"]
-    NativeState --> HostedReadback{"Complete hosted state matches the accepted manifest?"}
+    NativeState --> HostedReadback{"Complete hosted state matches the accepted graph manifest?"}
     HostedReadback -- No --> HostedBlocked(["No promotion or readiness: Sol repairs partial hosted state"])
-    HostedReadback -- Yes --> Promotion["Separate narrow PR atomically promotes the graph and campaign and removes the manifest"]
+    HostedReadback -- Yes --> Promotion["Separate narrow PR promotes graph/campaign and atomically removes both candidate manifests"]
     Promotion --> PublishedReadback{"Exact merged main, live IssueOps, and hosted graph agree?"}
     PublishedReadback -- No --> PromotionBlocked(["No readiness: Sol repairs and rereads promotion state"])
     PublishedReadback -- Yes --> SemanticReadback{"Fresh eight-question Sol reconciliation passes?"}

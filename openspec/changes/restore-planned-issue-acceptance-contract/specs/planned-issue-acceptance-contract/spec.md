@@ -70,10 +70,23 @@ Before readiness, implementation handoff, candidate acceptance, and stable accep
 - **WHEN** #497 is otherwise ready before the #500 structural mechanism and order are accepted
 - **THEN** handoff waits through the readiness gate without misrepresenting #500 as a native product dependency
 
-### Requirement: Candidate graph staging does not become live authority
-The planning change SHALL keep #497-#500 task ownership mapped under `openspec/issue-map.json.changes`, as required for every immediate OpenSpec `tasks.md`, while keeping authoritative `release_graphs.v0.5.0-00` aligned with the current hosted twenty-five-child v0.5 graph. Task mapping alone SHALL NOT assign milestone membership, hierarchy, blockers, or release readiness. One tracked change-local candidate manifest SHALL contain only #499's future campaign declaration and the complete twenty-nine-child replacement graph. IssueOps SHALL ignore the candidate manifest for live reconciliation.
+### Requirement: The tracked body manifest is the sole publication source
+The planning change SHALL track one `candidate-issue-bodies.json` with schema version 1, SHA-256, UTF-8/LF normalization with one trailing LF, and exactly one unique entry for each of issue #500 plus the twenty-nine accepted/current-candidate v0.5 issues. Every entry SHALL contain its issue number, complete sanitized Markdown as `body_lines`, and the SHA-256 of the exact bytes reconstructed by joining those lines with LF. The issue set SHALL be exact and unique. Ignored `.tmp` body copies MAY exist for author convenience but SHALL match the reconstructed body bytes exactly and SHALL NOT authorize review, publication, repair, or readiness.
 
-After independent Sol review and a new hosted Codex review accept the corrected exact planning-PR head, primary Sol SHALL publish and read back the exact thirty bodies while that PR remains open and the authoritative/live graph remains at twenty-five children. The temporary body-to-`main` architecture-link gap SHALL authorize no readiness or downstream transition. Normal unfiltered IssueOps/CI SHALL then pass before primary Sol authorizes the planning merge and reads its exact `main` artifacts back. Only after Luna's objective repository checker/forms/guidance integration lands, is reviewed, and is read back from exact `main` SHALL primary Sol apply and read back the complete hosted milestone/native twenty-nine-child bootstrap. A separate narrow promotion PR SHALL atomically replace only active `release_graphs.v0.5.0-00` with the manifest graph/campaign and remove the manifest. No readiness, handoff, merge authorization for implementation, or release transition SHALL proceed while any required PR, body, implementation, hosted, authoritative-graph, or published-main state differs.
+After independent Sol and hosted Codex review accept an exact planning-PR head, primary Sol SHALL validate the manifest schema, hash algorithm, normalization, exact issue set, uniqueness, complete content, and every digest. It SHALL publish only the exact body bytes reconstructed from the manifest and immediately read back every live body as the same normalized UTF-8/LF bytes and digest. A malformed entry, missing or extra issue, hash mismatch, concurrent mutation, partial write, stale readback, or any byte difference SHALL fail closed. The temporary manifest SHALL remain tracked through exact body and planning-`main` readback and SHALL be removed with the candidate graph manifest only at the later atomic graph-promotion cleanup after hosted relationship bootstrap also agrees; it SHALL NOT become a permanent body store or evidence ledger.
+
+#### Scenario: Every public body byte is reviewable at the accepted head
+- **WHEN** independent Sol or hosted Codex reviews the exact planning-PR head
+- **THEN** the tracked manifest exposes the complete normalized Markdown and digest for the exact thirty-issue set without depending on ignored workspace files
+
+#### Scenario: Publication input or live readback differs
+- **WHEN** manifest validation, ignored-copy comparison, write-time state, or normalized live readback finds a malformed schema, wrong issue set, stale body, byte difference, or digest mismatch
+- **THEN** primary Sol performs no downstream transition and repairs or rereviews the tracked publication source before retrying
+
+### Requirement: Candidate graph staging does not become live authority
+The planning change SHALL keep #497-#500 task ownership mapped under `openspec/issue-map.json.changes`, as required for every immediate OpenSpec `tasks.md`, while keeping authoritative `release_graphs.v0.5.0-00` aligned with the current hosted twenty-five-child v0.5 graph. Task mapping alone SHALL NOT assign milestone membership, hierarchy, blockers, or release readiness. The separate tracked change-local `candidate-issue-map.json` SHALL contain only #499's future campaign declaration and the complete twenty-nine-child replacement graph. IssueOps SHALL ignore that graph manifest for live reconciliation.
+
+After independent Sol review and a new hosted Codex review accept the corrected exact planning-PR head, primary Sol SHALL validate the tracked body manifest, publish only the exact body bytes reconstructed from it, and read back the same normalized bytes and hashes while that PR remains open and the authoritative/live graph remains at twenty-five children. The temporary body-to-`main` architecture-link gap SHALL authorize no readiness or downstream transition. Normal unfiltered IssueOps/CI SHALL then pass before primary Sol authorizes the planning merge and reads its exact `main` artifacts back. Only after Luna's objective repository checker/forms/guidance integration lands, is reviewed, and is read back from exact `main` SHALL primary Sol apply and read back the complete hosted milestone/native twenty-nine-child bootstrap from `candidate-issue-map.json`. After exact body, planning-main, and hosted relationship readback agree, a separate narrow promotion PR SHALL atomically replace only active `release_graphs.v0.5.0-00` with that graph manifest's graph/campaign and remove both candidate manifests. No readiness, handoff, merge authorization for implementation, or release transition SHALL proceed while any required PR, manifest, body, implementation, hosted, authoritative-graph, or published-main state differs.
 
 #### Scenario: Exact planning head is reviewed before body bootstrap
 - **WHEN** the corrected planning-PR head has not received both an independent Sol review and a new hosted Codex review for that exact head
@@ -81,11 +94,11 @@ After independent Sol review and a new hosted Codex review accept the corrected 
 
 #### Scenario: Bodies are published while the reviewed planning PR remains open
 - **WHEN** both exact-head reviews accept the corrected planning PR while #497-#500 remain unmilestoned and without native release relationships
-- **THEN** primary Sol publishes and reads back the exact thirty bodies while the active release graph continues to validate the current twenty-five-child hosted graph
-- **AND** the temporary body-to-`main` architecture-link gap remains fail-closed for readiness while the candidate manifest preserves the future graph without activating live relationship checks
+- **THEN** primary Sol validates the tracked body manifest, publishes only its reconstructed exact thirty bodies, and reads back every normalized byte and hash while the active release graph continues to validate the current twenty-five-child hosted graph
+- **AND** the temporary body-to-`main` architecture-link gap remains fail-closed for readiness while the separate graph manifest preserves the future graph without activating live relationship checks
 
 #### Scenario: Body bootstrap makes the planning PR executable
-- **WHEN** all thirty reviewed bodies exactly mirror their candidate task slices and the active graph still matches live hosted state
+- **WHEN** the tracked body manifest passes schema, exact-set, content, digest, ignored-copy, task-mirror, and normalized live-readback validation while the active graph still matches live hosted state
 - **THEN** normal unfiltered IssueOps/CI passes before primary Sol authorizes the planning merge and reads back its exact `main` artifacts
 
 #### Scenario: Objective implementation precedes hosted graph bootstrap
@@ -97,11 +110,11 @@ After independent Sol review and a new hosted Codex review accept the corrected 
 - **THEN** IssueOps and semantic readiness remain fail-closed and no downstream transition proceeds
 
 #### Scenario: Candidate graph is promoted
-- **WHEN** the accepted Luna implementation is on `main` and every exact body and hosted milestone/native relationship matches the accepted candidate manifest
-- **THEN** a separate narrow PR atomically replaces only `openspec/issue-map.json.release_graphs.v0.5.0-00` with its campaign declaration and replacement graph, removes the candidate manifest, and requires exact merged-main plus live IssueOps/hosted readback before readiness
+- **WHEN** the accepted Luna implementation is on `main`, exact body and planning-main readback agree with the tracked body manifest, and every hosted milestone/native relationship matches the accepted graph manifest
+- **THEN** a separate narrow PR atomically replaces only `openspec/issue-map.json.release_graphs.v0.5.0-00` with the graph manifest's campaign declaration and replacement graph, removes both candidate manifests, and requires exact merged-main plus live IssueOps/hosted readback before readiness
 
 ### Requirement: The complete v0.5 set is migrated and reread semantically
-Sol SHALL migrate issue #500 plus the twenty-nine accepted/current-candidate v0.5.0 bodies from exact live bodies or the latest candidate drafts, preserving authoritative task text and checked state while applying only required explanatory, acceptance, graph, and campaign corrections. #500 publication task 1.3 SHALL own the exact-head reviews, open-PR thirty-body publication/readback, green unfiltered planning CI, planning merge/main readback, post-task-1.2 hosted graph bootstrap, separate atomic candidate-manifest promotion, authoritative/native/live readback, and fresh semantic reconciliation; it SHALL remain unchecked across those phases without depending circularly on its own planning merge. #500 task 1.4 SHALL own the final implementation-versus-diagram review. Only after all #500 tasks and #500 itself are complete SHALL primary Sol independently synchronize shared `complete-v050-release-readiness` task 1.4. No #500 task SHALL check or depend on that shared task. #492 candidate and stable gates SHALL freshly reconcile every accepted issue's explanation, behavior/capability, acceptance, release role, non-goals/failures, diagram meaning, and task mirror in addition to objective IssueOps and published-main readback.
+Sol SHALL derive the tracked body-manifest entries for issue #500 plus the twenty-nine accepted/current-candidate v0.5.0 bodies from exact live bodies or the latest candidate drafts, preserving authoritative task text and checked state while applying only required explanatory, acceptance, graph, and campaign corrections; after review, that manifest SHALL be the sole publication source. #500 publication task 1.3 SHALL own exact-head reviews, strict body-manifest validation, open-PR exact-byte publication and normalized hash readback, green unfiltered planning CI, planning merge/main readback, post-task-1.2 hosted graph bootstrap, separate atomic graph promotion and two-manifest cleanup, authoritative/native/live readback, and fresh semantic reconciliation; it SHALL remain unchecked across those phases without depending circularly on its own planning merge. #500 task 1.4 SHALL own the final implementation-versus-diagram review. Only after all #500 tasks and #500 itself are complete SHALL primary Sol independently synchronize shared `complete-v050-release-readiness` task 1.4. No #500 task SHALL check or depend on that shared task. #492 candidate and stable gates SHALL freshly reconcile every accepted issue's explanation, behavior/capability, acceptance, release role, non-goals/failures, diagram meaning, and task mirror in addition to objective IssueOps and published-main readback.
 
 #### Scenario: Candidate semantic readback
 - **WHEN** the exact RC input is evaluated
@@ -112,11 +125,11 @@ Sol SHALL migrate issue #500 plus the twenty-nine accepted/current-candidate v0.
 - **THEN** #492 repeats full-set semantic and objective readback, requires #499 exact `stable_ready` and closure, and closes last only after every child and hosted stable proof agree
 
 #### Scenario: Migration is partial or raced
-- **WHEN** any body, task mirror, acceptance section, milestone, parent, blocker, diagram, or published-main identity is missing, stale, or inconsistent
+- **WHEN** any manifest entry or digest, body, task mirror, acceptance section, milestone, parent, blocker, diagram, or published-main identity is missing, stale, or inconsistent
 - **THEN** the independent shared planning task remains unchecked and no affected readiness, handoff, candidate, or stable transition proceeds
 
 #### Scenario: #500 publication and shared synchronization do not form a cycle
-- **WHEN** exact-head review, open-PR body publication, green planning merge/readback, accepted task 1.2, hosted bootstrap, atomic candidate-manifest promotion/readback, and semantic reconciliation complete #500 task 1.3
+- **WHEN** exact-head review, strict tracked-manifest validation, open-PR exact-byte body publication/hash readback, green planning merge/readback, accepted task 1.2, hosted bootstrap, atomic graph promotion/two-manifest cleanup readback, and semantic reconciliation complete #500 task 1.3
 - **THEN** #500 proceeds to its own final implementation-versus-diagram review while the independent shared task remains unchecked until every #500 task and #500 itself are complete
 
 ### Requirement: Guidance has one cross-project semantic owner

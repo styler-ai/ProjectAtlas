@@ -53,11 +53,11 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 
 #### Scenario: A planning slice publishes new evidence
 - **WHEN** a planning pull request has no native closing issue, its candidate OpenSpec and Mermaid checks pass, and independent Sol plus a new hosted Codex review accept its corrected exact head
-- **THEN** primary Sol may publish and read back the thirty exact bodies from the reviewed drafts while the PR remains open, required task mappings remain ownership-only, and the authoritative/live graph remains at twenty-five children
+- **THEN** primary Sol validates the tracked body manifest's schema, unique exact issue set, normalized content, and SHA-256 values, publishes only its reconstructed thirty exact bodies, and reads back the same normalized bytes and hashes while the PR remains open, required task mappings remain ownership-only, and the authoritative/live graph remains at twenty-five children
 - **AND** the temporary body-to-main architecture-link gap authorizes no readiness or implementation handoff
 
 #### Scenario: Body bootstrap makes normal planning CI pass
-- **WHEN** the reviewed thirty bodies exactly mirror their candidate tasks while the planning PR remains open
+- **WHEN** the tracked body manifest, ignored-copy comparison, exact task mirrors, write-time state, and normalized live-body hash readback all agree while the planning PR remains open
 - **THEN** normal unfiltered IssueOps/CI passes before primary Sol authorizes the planning merge and reads back exact `main`
 
 #### Scenario: Repository implementation precedes native graph activation
@@ -65,11 +65,11 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 - **THEN** primary Sol does not apply milestone/native relationships and no issue becomes ready
 
 #### Scenario: Candidate graph is promoted after hosted bootstrap
-- **WHEN** the accepted Luna implementation is on `main`, exact bodies are read back, and primary Sol applies and reads the complete hosted milestone/native relationship bootstrap from the accepted manifest
-- **THEN** a separate narrow PR atomically replaces only `openspec/issue-map.json.release_graphs.v0.5.0-00` with the exact #499 campaign declaration and replacement graph, removes the manifest, and requires exact merged-main plus live IssueOps/hosted reconciliation before readiness
+- **WHEN** the accepted Luna implementation is on `main`, exact body and planning-main readback agree with the tracked body manifest, and primary Sol applies and reads the complete hosted milestone/native relationship bootstrap from the accepted graph manifest
+- **THEN** a separate narrow PR atomically replaces only `openspec/issue-map.json.release_graphs.v0.5.0-00` with the exact #499 campaign declaration and replacement graph, removes both candidate manifests, and requires exact merged-main plus live IssueOps/hosted reconciliation before readiness
 
 #### Scenario: Candidate and authoritative graph state differ
-- **WHEN** a required review, body, planning/implementation revision, mapping, milestone, parent, blocker, graph node, manifest removal, or published revision is missing, stale, raced, or mismatched during bootstrap or promotion
+- **WHEN** a required review, manifest entry/hash/removal, body, planning/implementation revision, mapping, milestone, parent, blocker, graph node, or published revision is missing, stale, raced, or mismatched during bootstrap or promotion
 - **THEN** IssueOps remains fail-closed and no readiness, handoff, merge authorization, or release transition proceeds
 
 #### Scenario: IssueOps passes but the packet is not comprehensible
