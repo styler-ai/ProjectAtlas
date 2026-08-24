@@ -562,7 +562,9 @@ stateDiagram-v2
   Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
   HostedReadback --> StableCampaign: accepted candidate then continue intake and run pre-stable audit
   StableCampaign --> StableSemanticReadback: campaign stable-ready, campaign issue closed, every child closed
-  StableSemanticReadback --> StableFinalizationGate: only issue 492 open and only task 26.6 unchecked, exact stable input and prepublication proof
+  StableSemanticReadback --> StableArchitectureReview: complete and check task 26.7 final implementation-versus-diagram review
+  StableArchitectureReview --> StableFinalizationGate: only issue 492 open and only task 26.6 unchecked, exact stable input and prepublication proof
+  StableArchitectureReview --> Remediation: implementation and diagram disagree
   StableFinalizationGate --> StableBuild: package exact stable input
   StableFinalizationGate --> Remediation: extra issue or task, role drift, or stale proof
   StableBuild --> StableInstalledProof: repeat installed public-surface and update proof
