@@ -99,7 +99,7 @@ predicates = "3.1"
 regex = "1.11"
 rayon = "1.10"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
-rmcp = { version = "1.8.0", default-features = false, features = ["server", "transport-io", "macros"] }
+rmcp = { version = "3.1.4", default-features = false, features = ["server", "transport-io", "macros"] }
 rusqlite = { version = "0.40", features = ["backup", "bundled", "hooks"] }
 scraper = "0.27"
 seccompiler = { version = "=0.5.0", default-features = false }

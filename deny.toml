@@ -43,6 +43,9 @@ skip = [
   { crate = "hashbrown@0.16.1", reason = "yaml-rust2 0.11 and ratatui 0.30 resolve hashbrown 0.16; remove when both upstream paths converge on the retained hashbrown line." },
   { crate = "hashlink@0.11.1", reason = "yaml-rust2 0.11 retains hashlink 0.11 while rusqlite 0.40 resolves hashlink 0.12; remove when the upstream graph converges." },
   { crate = "getrandom@0.2.17", reason = "tree-sitter-language-pack 1.13.2 resolves ahash through getrandom 0.2 only in the optional parser worker graph; remove when upstream adopts the retained getrandom line." },
+  { crate = "darling@0.24.1", reason = "rmcp-macros 3.1.x requires darling 0.24 while ratatui 0.30 retains darling 0.23; remove when the upstream macro dependency lines converge." },
+  { crate = "darling_core@0.24.1", reason = "rmcp-macros 3.1.x requires darling_core 0.24 while ratatui 0.30 retains darling_core 0.23; remove when the upstream macro dependency lines converge." },
+  { crate = "darling_macro@0.24.1", reason = "rmcp-macros 3.1.x requires darling_macro 0.24 while ratatui 0.30 retains darling_macro 0.23; remove when the upstream macro dependency lines converge." },
   { crate = "syn@3.0.3", reason = "clap 4.6.6 and serde 1.0.229 resolve syn 3 while existing macro dependencies retain syn 2; remove when the upstream graph converges." },
   { crate = "windows-sys@0.60.2", reason = "notify 8.2 resolves windows-sys 0.60; remove when notify adopts the retained windows-sys line." },
 ]

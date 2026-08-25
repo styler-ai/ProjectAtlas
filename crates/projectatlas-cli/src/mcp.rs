@@ -114,7 +114,7 @@ use projectatlas_service::{
 use rmcp::handler::server::{
     router::tool::ToolRouter, tool::IntoCallToolResult, wrapper::Parameters,
 };
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResponse, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -150,7 +150,7 @@ impl std::fmt::Display for McpToolTextResult {
 }
 
 impl IntoCallToolResult for McpToolTextResult {
-    fn into_call_tool_result(self) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    fn into_call_tool_result(self) -> Result<CallToolResponse, rmcp::ErrorData> {
         self.0.into_call_tool_result()
     }
 }
