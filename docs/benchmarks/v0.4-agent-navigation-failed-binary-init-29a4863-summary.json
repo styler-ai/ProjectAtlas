@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "source_artifact": {
+    "path": "docs/benchmarks/v0.4-agent-navigation-failed-binary-init-29a4863.jsonl",
+    "classification": "binary-init-and-cleanup failure",
+    "retained_disposition": "Fifteen failed rows and cleanup failures remain disclosed; v0.4 handles definite non-UTF-8 ordinary source headers and uses bounded ownership-validated cleanup.",
+    "bytes": 42809126,
+    "sha256": "f1ce8550ed30c9acccbdc1db40a0f3f0f7b0bcb1fd82df759b01802376254baf"
+  },
+  "source_identity": {
+    "candidate_revision": "f274acc1b973da16626e7cbeb7bb9acbaf10f86d",
+    "artifact_introduction_commit": "7985f0d7937438ecd569e5957e17062bfa804b1c",
+    "repository_baseline_revision": "60ca219d66fe68e0ccb12cf865e160656abee38d",
+    "preregistration": "docs/benchmarks/v0.4-agent-navigation-preregistration.json",
+    "preregistration_sha256": "b428bd48b73ad8c1e1b65cfccdc092c0762c4740c022e403e31ef8326189d86a"
+  },
+  "harness": {
+    "path": "docs/benchmarks/harness/agent_navigation.py",
+    "sha256": "d04ded52a0a109da96df5ce1cf5b3370258731b8ccaf54e9d04022a93085fa58",
+    "runtime": "projectatlas 0.4.0",
+    "runtime_sha256": "6c819a272e7d4c258f2f97357b691706b5c2aafca1e5ea5cbbc598d4b7e4e3d3",
+    "codex_model": "gpt-5.6-sol",
+    "codex_cli_sha256": "83751f15cb6a0a7b97df67752c001e3fe1c20e18ffbfec3ff63567296205eb6c"
+  },
+  "observed_record": {
+    "run_id": "r01-small-clean-v0.4",
+    "repeat": 1,
+    "case": "small-clean",
+    "arm": "v0.4",
+    "execution_status": "completed",
+    "trace_events": 22,
+    "successful_mcp_calls": 7,
+    "correctness_passed": true
+  },
+  "reproduction": {
+    "mode": "manual-only",
+    "command": "python docs/benchmarks/harness/agent_navigation.py --preregistration docs/benchmarks/v0.4-agent-navigation-preregistration.json --output <ignored local output> --work-root <ignored local work root> --corpus-cache <ignored local corpus cache> --repeats 3",
+    "sanitization": "Remove runs[].raw_jsonl and replace opaque cursor values with a fixed marker plus byte length before publication."
+  }
+}

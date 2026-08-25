@@ -154,10 +154,10 @@
 
 ## 23. Oversized benchmark artifact retention (#489)
 
-- [ ] 23.1 Confirm the 42,809,126-byte `docs/benchmarks/v0.4-agent-navigation-failed-binary-init-29a4863.jsonl` is reproducible from the retained preregistration/harness and define the smallest tracked benchmark-result size/allowlist rule after checking all current benchmark artifacts, compressed/release artifacts, Git LFS absence, `.gitignore`, and publication alternatives.
-- [ ] 23.2 Remove only that raw JSONL from the current tree without rewriting history; retain a compact sanitized failure summary with candidate/repository revision, harness/runtime identity, failure classification, digest/size, and reproduction command if those facts remain useful.
-- [ ] 23.3 Extend the narrow existing benchmark/repository policy check to reject an accidentally tracked oversized raw benchmark output while allowing normal fixtures, explicitly approved compact results, ignored local outputs, compressed/release assets, and tested false positives; wire it through the existing CI/release policy owner.
-- [ ] 23.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 23.1 Confirm the 42,809,126-byte `docs/benchmarks/v0.4-agent-navigation-failed-binary-init-29a4863.jsonl` is reproducible from the retained preregistration/harness and define the smallest tracked benchmark-result size/allowlist rule after checking all current benchmark artifacts, compressed/release artifacts, Git LFS absence, `.gitignore`, and publication alternatives.
+- [x] 23.2 Remove only that raw JSONL from the current tree without rewriting history; retain a compact sanitized failure summary with candidate/repository revision, harness/runtime identity, failure classification, digest/size, and reproduction command if those facts remain useful.
+- [x] 23.3 Extend the narrow existing benchmark/repository policy check to reject an accidentally tracked oversized raw benchmark output while allowing normal fixtures, explicitly approved compact results, ignored local outputs, compressed/release assets, and tested false positives; wire it through the existing CI/release policy owner.
+- [x] 23.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 24. Repeatable real-task agent evaluation (#490)
 
