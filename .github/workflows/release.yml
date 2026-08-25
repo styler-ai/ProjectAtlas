@@ -160,6 +160,7 @@ jobs:
           cargo test --locked -p projectatlas-cli token_tui::tests -- --nocapture
 
       - name: Filtered custom harness compatibility
+        timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
 
       - name: Doc tests

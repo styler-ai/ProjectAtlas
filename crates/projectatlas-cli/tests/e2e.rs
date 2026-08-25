@@ -125,6 +125,7 @@ const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
 const AUTO_RELEASE_WORKFLOW_FILE_NAME: &str = "03-auto-release.yml";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
+const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled";
 const CODEX_CONFIG_DIR: &str = ".codex";
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 const CODEX_MARKETPLACE_METADATA_DIR: &str = ".agents";
@@ -8459,6 +8460,89 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     Ok(())
 }
 
+fn assert_filtered_custom_harness_step(release: &str) -> Result<(), Box<dyn Error>> {
+    const STEP_NAME: &str = "      - name: Filtered custom harness compatibility";
+    if release.lines().filter(|line| *line == STEP_NAME).count() != 1 {
+        return Err(io::Error::other(
+            "release must contain exactly one filtered custom harness step",
+        )
+        .into());
+    }
+    let step = release
+        .lines()
+        .skip_while(|line| *line != STEP_NAME)
+        .skip(1)
+        .take_while(|line| !line.starts_with("      -"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let timeout_line = step
+        .lines()
+        .find(|line| line.trim_start().starts_with("timeout-minutes:"));
+    let run_line = step
+        .lines()
+        .find(|line| line.trim_start().starts_with("run:"));
+    let expected_run_line = format!("        run: {FILTERED_CUSTOM_HARNESS_COMMAND}");
+    if step.matches("timeout-minutes:").count() != 1
+        || timeout_line != Some("        timeout-minutes: 10")
+        || step.matches("        run:").count() != 1
+        || run_line != Some(expected_run_line.as_str())
+    {
+        return Err(io::Error::other(
+            "filtered custom harness must keep one step-level 10-minute timeout and exact Cargo command",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn filtered_custom_harness_contract_rejects_timeout_drift() {
+    let drifted = format!(
+        "      - name: Filtered custom harness compatibility\n        timeout-minutes: 5\n        run: {FILTERED_CUSTOM_HARNESS_COMMAND}\n"
+    );
+    assert!(assert_filtered_custom_harness_step(&drifted).is_err());
+}
+
+#[test]
+fn filtered_custom_harness_contract_rejects_fractional_timeout() {
+    let drifted = format!(
+        "      - name: Filtered custom harness compatibility\n        timeout-minutes: 10.5\n        run: {FILTERED_CUSTOM_HARNESS_COMMAND}\n"
+    );
+    assert!(assert_filtered_custom_harness_step(&drifted).is_err());
+}
+
+#[test]
+fn filtered_custom_harness_contract_rejects_suffixed_command() {
+    let drifted = format!(
+        "      - name: Filtered custom harness compatibility\n        timeout-minutes: 10\n        run: {FILTERED_CUSTOM_HARNESS_COMMAND} && another-command\n"
+    );
+    assert!(assert_filtered_custom_harness_step(&drifted).is_err());
+}
+
+#[test]
+fn filtered_custom_harness_contract_rejects_suffixed_step_name() {
+    let drifted = format!(
+        "      - name: Filtered custom harness compatibility (release)\n        timeout-minutes: 10\n        run: {FILTERED_CUSTOM_HARNESS_COMMAND}\n"
+    );
+    assert!(assert_filtered_custom_harness_step(&drifted).is_err());
+}
+
+#[test]
+fn filtered_custom_harness_contract_rejects_drift_after_suffixed_step() {
+    let drifted = format!(
+        "      - name: Filtered custom harness compatibility (release)\n        timeout-minutes: 10\n        run: {FILTERED_CUSTOM_HARNESS_COMMAND}\n      - name: Filtered custom harness compatibility\n        timeout-minutes: 5\n        run: {FILTERED_CUSTOM_HARNESS_COMMAND}\n"
+    );
+    assert!(assert_filtered_custom_harness_step(&drifted).is_err());
+}
+
+#[test]
+fn filtered_custom_harness_contract_rejects_timeout_borrowed_from_unnamed_step() {
+    let drifted = format!(
+        "      - name: Filtered custom harness compatibility\n        run: {FILTERED_CUSTOM_HARNESS_COMMAND}\n      - uses: actions/checkout@v4\n        timeout-minutes: 10\n"
+    );
+    assert!(assert_filtered_custom_harness_step(&drifted).is_err());
+}
+
 #[test]
 fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
@@ -8689,9 +8773,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
-        || !release.contains(
-            "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
-        )
+        || !release.contains(FILTERED_CUSTOM_HARNESS_COMMAND)
         || !release.contains("test-optional-parser-proof-inputs.py")
     {
         return Err(io::Error::other(
@@ -8699,6 +8781,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
+    assert_filtered_custom_harness_step(&release)?;
     for required in [
         "def tool_text(name, response):",
         "if not isinstance(response, dict):",
