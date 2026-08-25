@@ -3473,14 +3473,37 @@ impl RepositoryGraphStagingGuard<'_> {
     ///
     /// # Errors
     ///
-    /// Returns an error without partial mutation for duplicate or oversized
-    /// keys, incompatible staged relations, or `SQLite` failures.
+    /// Returns an error without partial mutation for duplicate keys,
+    /// incompatible staged relations, or `SQLite` failures.
     pub fn set_document_unresolved_reasons(
         &mut self,
         reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
     ) -> DbResult<()> {
+        self.set_document_unresolved_reasons_with_control(reasons, None)
+    }
+
+    /// Attach staged document reasons while observing publication cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without partial mutation when cancellation, duplicate
+    /// keys, incompatible staged relations, or `SQLite` failures occur.
+    pub fn set_document_unresolved_reasons_controlled(
+        &mut self,
+        reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
+        control: &IndexWorkControl,
+    ) -> DbResult<()> {
+        self.set_document_unresolved_reasons_with_control(reasons, Some(control))
+    }
+
+    /// Apply staged reasons through one savepoint with optional cancellation checks.
+    fn set_document_unresolved_reasons_with_control(
+        &mut self,
+        reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<()> {
         let savepoint = self.transaction.savepoint()?;
-        write_document_unresolved_reasons(&savepoint, reasons)?;
+        write_document_unresolved_reasons(&savepoint, reasons, control)?;
         savepoint.commit()?;
         Ok(())
     }
@@ -3905,19 +3928,43 @@ impl IndexPublicationGuard<'_> {
     /// Attach closed reasons to unresolved `documents` relations in this publication.
     ///
     /// Call this after the owning graph replacement and before completing the
-    /// parent publication. The batch is bounded by the graph row ceiling and
-    /// every key must select exactly one unresolved `documents` relation.
+    /// parent publication. The complete input is validated before prepared
+    /// chunks at or below the graph row ceiling are applied, and every key must
+    /// select exactly one unresolved `documents` relation.
     ///
     /// # Errors
     ///
-    /// Returns an error before mutation for duplicate or oversized keys, or if
-    /// a key does not identify one compatible relation in the selected project.
+    /// Returns an error before mutation for duplicate keys, or if a key does
+    /// not identify one compatible relation in the selected project.
     pub fn set_document_unresolved_reasons(
         &mut self,
         reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
     ) -> DbResult<()> {
+        self.set_document_unresolved_reasons_with_control(reasons, None)
+    }
+
+    /// Attach document reasons while observing publication cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without partial mutation when cancellation, duplicate
+    /// keys, incompatible relations, or `SQLite` failures occur.
+    pub fn set_document_unresolved_reasons_controlled(
+        &mut self,
+        reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
+        control: &IndexWorkControl,
+    ) -> DbResult<()> {
+        self.set_document_unresolved_reasons_with_control(reasons, Some(control))
+    }
+
+    /// Apply publication reasons through one savepoint with optional cancellation checks.
+    fn set_document_unresolved_reasons_with_control(
+        &mut self,
+        reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<()> {
         let savepoint = self.store.validated_savepoint()?;
-        write_document_unresolved_reasons(&savepoint, reasons)?;
+        write_document_unresolved_reasons(&savepoint, reasons, control)?;
         savepoint.commit()?;
         Ok(())
     }
@@ -3930,19 +3977,38 @@ impl IndexPublicationGuard<'_> {
     }
 }
 
-/// Validate and atomically update one bounded document-reason batch.
+/// Validate and atomically update one complete document-reason publication.
 fn write_document_unresolved_reasons(
     connection: &Connection,
     reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
+    control: Option<&IndexWorkControl>,
 ) -> DbResult<()> {
-    if reasons.len() > GraphLimits::MAX_ROWS as usize {
-        return Err(GraphContractError::InvalidLimits {
-            reason: "document unresolved reason batch exceeds the graph row ceiling",
-        }
-        .into());
+    if let Some(control) = control {
+        control.check(IndexWorkStage::Publication)?;
     }
+    validate_document_unresolved_reasons(connection, reasons, control)?;
+    for chunk in reasons.chunks(GraphLimits::MAX_ROWS as usize) {
+        if let Some(control) = control {
+            control.check(IndexWorkStage::Publication)?;
+        }
+        write_document_unresolved_reason_chunk(connection, chunk, control)?;
+    }
+    Ok(())
+}
+
+/// Validate every document-reason key before any chunk can mutate the graph.
+fn validate_document_unresolved_reasons(
+    connection: &Connection,
+    reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
+    control: Option<&IndexWorkControl>,
+) -> DbResult<()> {
     let mut keys = HashSet::with_capacity(reasons.len());
-    for (key, _) in reasons {
+    for (index, (key, _)) in reasons.iter().enumerate() {
+        if index.is_multiple_of(256)
+            && let Some(control) = control
+        {
+            control.check(IndexWorkStage::Publication)?;
+        }
         if !keys.insert(key.digest_bytes()?) {
             return Err(GraphContractError::InvalidLimits {
                 reason: "document unresolved reason batch repeats a relation key",
@@ -3954,6 +4020,7 @@ fn write_document_unresolved_reasons(
         "SELECT EXISTS(
                  SELECT 1
                    FROM graph_relations
+                        INDEXED BY idx_graph_relations_project_key
                   WHERE relation_key = ?1
                     AND project_instance_id = ?2
                     AND relation_scope = 'extended'
@@ -3961,7 +4028,12 @@ fn write_document_unresolved_reasons(
                     AND resolution_status = 'unresolved'
              )",
     )?;
-    for (key, _) in reasons {
+    for (index, (key, _)) in reasons.iter().enumerate() {
+        if index.is_multiple_of(256)
+            && let Some(control) = control
+        {
+            control.check(IndexWorkStage::Publication)?;
+        }
         let digest = key.digest_bytes()?;
         let compatible = validate
             .query_row(params![&digest[..], &key.project().as_bytes()[..]], |row| {
@@ -3975,6 +4047,15 @@ fn write_document_unresolved_reasons(
         }
     }
     drop(validate);
+    Ok(())
+}
+
+/// Apply one prepared document-reason chunk inside the caller-owned savepoint.
+fn write_document_unresolved_reason_chunk(
+    connection: &Connection,
+    reasons: &[(LogicalRelationKey, DocumentTargetUnresolvedReason)],
+    control: Option<&IndexWorkControl>,
+) -> DbResult<()> {
     let mut statement = connection.prepare_cached(
         "UPDATE graph_relations
                 SET document_unresolved_reason = ?2
@@ -3984,7 +4065,12 @@ fn write_document_unresolved_reasons(
                 AND relation_kind = 'documents'
                 AND resolution_status = 'unresolved'",
     )?;
-    for (key, reason) in reasons {
+    for (index, (key, reason)) in reasons.iter().enumerate() {
+        if index.is_multiple_of(256)
+            && let Some(control) = control
+        {
+            control.check(IndexWorkStage::Publication)?;
+        }
         let digest = key.digest_bytes()?;
         let changed = statement.execute(params![
             &digest[..],
@@ -3992,6 +4078,9 @@ fn write_document_unresolved_reasons(
             &key.project().as_bytes()[..],
         ])?;
         debug_assert_eq!(changed, 1);
+    }
+    if let Some(control) = control {
+        control.check(IndexWorkStage::Publication)?;
     }
     Ok(())
 }
@@ -6904,12 +6993,16 @@ mod tests {
     use super::*;
     use crate::IndexedFileText;
     use projectatlas_core::symbols::{CodeSymbol, ParserKind, SymbolGraph, SymbolRelation};
-    use projectatlas_core::{Node, NodeKind};
+    use projectatlas_core::{IndexCancellation, Node, NodeKind};
     use std::cell::RefCell;
     use std::error::Error;
     use std::fmt::Debug;
     use std::fs;
     use std::io;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::{Duration, Instant};
 
     thread_local! {
@@ -7987,6 +8080,21 @@ mod tests {
                  SELECT relation_key FROM graph_relations
                   WHERE project_instance_id = zeroblob(16)
                     AND relation_key = zeroblob(32)",
+                &["idx_graph_relations_project_key"],
+            ),
+            (
+                "document unresolved reason validation",
+                "EXPLAIN QUERY PLAN
+                 SELECT EXISTS(
+                     SELECT 1
+                       FROM graph_relations
+                            INDEXED BY idx_graph_relations_project_key
+                      WHERE relation_key = zeroblob(32)
+                        AND project_instance_id = zeroblob(16)
+                        AND relation_scope = 'extended'
+                        AND relation_kind = 'documents'
+                        AND resolution_status = 'unresolved'
+                 )",
                 &["idx_graph_relations_project_key"],
             ),
         ];
@@ -10757,6 +10865,408 @@ mod tests {
             &2,
             "reopened document relations",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_unresolved_reasons_publish_across_multiple_graph_row_chunks()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("document-reason-chunks");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("document chunk fixture identity is missing"))?;
+        let baseline_generation = IndexGeneration::new(1);
+        let generation = IndexGeneration::new(2);
+        let baseline_document = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("docs/baseline.md"))?,
+            },
+            baseline_generation,
+        )?;
+        let baseline_relation = LogicalRelation::new(
+            &baseline_document,
+            GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+            RelationResolution::Unresolved {
+                reference: GraphIdentityText::new("baseline-missing.md")?,
+            },
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            baseline_generation,
+        )?;
+        let mut baseline = store.begin_index_publication("document-reason-chunks")?;
+        baseline.upsert_scan_node_batch(&[graph_node(
+            "docs/baseline.md",
+            NodeKind::File,
+            Some("docs"),
+        )])?;
+        baseline.replace_repository_graph(
+            project,
+            std::slice::from_ref(&baseline_document),
+            std::slice::from_ref(&baseline_relation),
+            &[],
+            &[],
+        )?;
+        baseline.set_document_unresolved_reasons(&[(
+            baseline_relation.key().clone(),
+            DocumentTargetUnresolvedReason::Missing,
+        )])?;
+        baseline.complete()?;
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(baseline_generation),
+            "baseline generation was not complete",
+        )?;
+        let document_path = RepositoryFilePath::new(Path::new("docs/index.md"))?;
+        let document = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: document_path,
+            },
+            generation,
+        )?;
+        let total = GraphLimits::MAX_ROWS as usize * 2 + 1;
+        let mut relations = Vec::with_capacity(total);
+        for index in 0..total {
+            relations.push(LogicalRelation::new(
+                &document,
+                GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new(format!("missing-{index:05}.md"))?,
+                },
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
+        let reasons = relations
+            .iter()
+            .map(|relation| {
+                (
+                    relation.key().clone(),
+                    DocumentTargetUnresolvedReason::Missing,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut duplicate_reasons = reasons.clone();
+        duplicate_reasons.push(reasons[0].clone());
+        let mut contradictory_reasons = reasons.clone();
+        contradictory_reasons.push((
+            reasons[0].0.clone(),
+            DocumentTargetUnresolvedReason::Unsupported,
+        ));
+
+        let populate = |publication: &mut IndexPublicationGuard<'_>| -> DbResult<()> {
+            publication.upsert_scan_node_batch(&[graph_node(
+                "docs/index.md",
+                NodeKind::File,
+                Some("docs"),
+            )])?;
+            publication.replace_repository_graph(
+                project,
+                std::slice::from_ref(&document),
+                &relations,
+                &[],
+                &[],
+            )
+        };
+
+        let mut boundaries = store.begin_index_publication("document-reason-chunks")?;
+        populate(&mut boundaries)?;
+        let duplicate = boundaries.set_document_unresolved_reasons(&duplicate_reasons);
+        require(
+            matches!(duplicate, Err(DbError::GraphContract(_))),
+            "duplicate document reason crossing chunks was accepted",
+        )?;
+        let untouched = boundaries.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE document_unresolved_reason IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&untouched, &0, "duplicate batch exposed a partial chunk")?;
+        let contradictory = boundaries.set_document_unresolved_reasons(&contradictory_reasons);
+        require(
+            matches!(contradictory, Err(DbError::GraphContract(_))),
+            "contradictory document reason crossing chunks was accepted",
+        )?;
+        let contradiction_untouched = boundaries.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE document_unresolved_reason IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &contradiction_untouched,
+            &0,
+            "contradictory batch exposed a partial chunk",
+        )?;
+        for count in [
+            GraphLimits::MAX_ROWS as usize - 1,
+            GraphLimits::MAX_ROWS as usize,
+            GraphLimits::MAX_ROWS as usize + 1,
+        ] {
+            boundaries.set_document_unresolved_reasons(&reasons[..count])?;
+            let changed = boundaries.connection.query_row(
+                "SELECT COUNT(*) FROM graph_relations
+                  WHERE document_unresolved_reason IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            require_eq(
+                &changed,
+                &i64::try_from(count)?,
+                "document reason boundary count",
+            )?;
+        }
+        drop(boundaries);
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(baseline_generation),
+            "boundary publication changed the current generation",
+        )?;
+
+        let mut preflight = store.begin_index_publication("document-reason-chunks")?;
+        populate(&mut preflight)?;
+        let preflight_control = IndexWorkControl::with_deadline(
+            IndexCancellation::new(),
+            Instant::now() + Duration::from_millis(10),
+        );
+        let preflight_error =
+            preflight.set_document_unresolved_reasons_controlled(&reasons, &preflight_control);
+        require(
+            matches!(
+                preflight_error,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::Publication
+                    }
+                ))
+            ),
+            "preflight deadline was not observed during document-reason validation",
+        )?;
+        let preflight_untouched = preflight.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE document_unresolved_reason IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &preflight_untouched,
+            &0,
+            "preflight deadline exposed a partial document-reason update",
+        )?;
+        drop(preflight);
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(baseline_generation),
+            "preflight deadline changed the current generation",
+        )?;
+
+        let mut preflight_retry = store.begin_index_publication("document-reason-chunks")?;
+        populate(&mut preflight_retry)?;
+        preflight_retry.set_document_unresolved_reasons(&reasons)?;
+        let retried_count = preflight_retry.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE document_unresolved_reason IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &retried_count,
+            &i64::try_from(total)?,
+            "successful retry did not publish every document reason",
+        )?;
+        drop(preflight_retry);
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(baseline_generation),
+            "successful preflight retry changed the current generation before completion",
+        )?;
+
+        let mut canceled_publication = store.begin_index_publication("document-reason-chunks")?;
+        populate(&mut canceled_publication)?;
+        canceled_publication
+            .set_document_unresolved_reasons(&reasons[..GraphLimits::MAX_ROWS as usize])?;
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        cancellation.cancel();
+        let canceled_control = IndexWorkControl::new(cancellation, None);
+        let canceled = canceled_publication.set_document_unresolved_reasons_controlled(
+            &reasons[GraphLimits::MAX_ROWS as usize..],
+            &canceled_control,
+        );
+        require(
+            matches!(
+                canceled,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::Publication
+                    }
+                ))
+            ),
+            "post-first-chunk cancellation was accepted",
+        )?;
+        let canceled_first_chunk = canceled_publication.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE document_unresolved_reason IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &canceled_first_chunk,
+            &i64::from(GraphLimits::MAX_ROWS),
+            "cancellation did not leave the first chunk observable inside the parent transaction",
+        )?;
+        drop(canceled_publication);
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(baseline_generation),
+            "canceled publication changed the current generation",
+        )?;
+
+        let mut in_chunk_canceled = store.begin_index_publication("document-reason-chunks")?;
+        populate(&mut in_chunk_canceled)?;
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let attempted_updates = Arc::new(AtomicUsize::new(0));
+        let attempted_updates_hook = Arc::clone(&attempted_updates);
+        in_chunk_canceled.connection.update_hook(Some(
+            move |action: rusqlite::hooks::Action, _database: &str, table: &str, _rowid: i64| {
+                if action == rusqlite::hooks::Action::SQLITE_UPDATE
+                    && table == "graph_relations"
+                    && attempted_updates_hook.fetch_add(1, Ordering::Relaxed) == 0
+                {
+                    cancellation.cancel();
+                }
+            },
+        ))?;
+        let in_chunk = in_chunk_canceled.set_document_unresolved_reasons_controlled(
+            &reasons[..GraphLimits::MAX_ROWS as usize],
+            &control,
+        );
+        in_chunk_canceled
+            .connection
+            .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)?;
+        require(
+            matches!(
+                in_chunk,
+                Err(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::Publication
+                    }
+                ))
+            ),
+            "in-chunk cancellation was not typed",
+        )?;
+        require(
+            attempted_updates.load(Ordering::Relaxed) >= 1,
+            "in-chunk cancellation did not follow an attempted update",
+        )?;
+        let in_chunk_untouched = in_chunk_canceled.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE document_unresolved_reason IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &in_chunk_untouched,
+            &0,
+            "in-chunk cancellation exposed a partial document-reason update",
+        )?;
+        drop(in_chunk_canceled);
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(baseline_generation),
+            "in-chunk cancellation changed the current generation",
+        )?;
+
+        let mut in_chunk_retry = store.begin_index_publication("document-reason-chunks")?;
+        populate(&mut in_chunk_retry)?;
+        in_chunk_retry
+            .set_document_unresolved_reasons(&reasons[..GraphLimits::MAX_ROWS as usize])?;
+        let in_chunk_retry_count = in_chunk_retry.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE document_unresolved_reason IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &in_chunk_retry_count,
+            &i64::from(GraphLimits::MAX_ROWS),
+            "writer reuse after in-chunk cancellation did not retry cleanly",
+        )?;
+        drop(in_chunk_retry);
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(baseline_generation),
+            "in-chunk retry changed the current generation before completion",
+        )?;
+
+        let mut publication = store.begin_index_publication("document-reason-chunks")?;
+        populate(&mut publication)?;
+        publication.connection.execute_batch(
+            "CREATE TRIGGER fail_document_reason_chunk
+             BEFORE UPDATE OF document_unresolved_reason ON graph_relations
+             WHEN NEW.reference_text = 'missing-10000.md'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected document reason failure');
+             END;",
+        )?;
+        let fault = publication.set_document_unresolved_reasons(&reasons);
+        require(
+            matches!(fault, Err(DbError::Sqlite(_))),
+            "fault between document-reason chunks was accepted",
+        )?;
+        let rolled_back = publication.connection.query_row(
+            "SELECT COUNT(*) FROM graph_relations
+              WHERE document_unresolved_reason IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &rolled_back,
+            &0,
+            "fault between chunks exposed an earlier chunk",
+        )?;
+        drop(publication);
+        require(
+            store.repository_graph_generation()? == Some(baseline_generation),
+            "fault between chunks replaced the current generation",
+        )?;
+
+        let mut publication = store.begin_index_publication("document-reason-chunks")?;
+        populate(&mut publication)?;
+        let changes_before = publication.connection.total_changes();
+        publication.set_document_unresolved_reasons(&reasons)?;
+        let changes_after = publication.connection.total_changes();
+        require_eq(
+            &changes_after.saturating_sub(changes_before),
+            &u64::try_from(total)?,
+            "bounded reason update changed rows",
+        )?;
+        publication.complete()?;
+        let (relation_count, reason_count): (i64, i64) = store.connection.query_row(
+            "SELECT COUNT(*), COUNT(document_unresolved_reason)
+               FROM graph_relations
+              WHERE relation_scope = 'extended' AND relation_kind = 'documents'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        require_eq(
+            &relation_count,
+            &i64::try_from(total)?,
+            "complete document relation count",
+        )?;
+        require_eq(
+            &reason_count,
+            &i64::try_from(total)?,
+            "complete document reason count",
+        )?;
+        assert_query_indexes(&store)?;
         Ok(())
     }
 
