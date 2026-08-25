@@ -3091,9 +3091,9 @@ mod tests {
                 observed_steps.fetch_add(1, Ordering::Relaxed);
                 false
             }),
-        );
+        )?;
         let result = inspect_connection(&store.connection, None, false);
-        store.connection.progress_handler(0, None::<fn() -> bool>);
+        store.connection.progress_handler(0, None::<fn() -> bool>)?;
         let Err(error) = result else {
             return Err(io::Error::other("newer schema unexpectedly passed inspection").into());
         };
@@ -4282,7 +4282,7 @@ mod tests {
                 observed_prefix_steps.fetch_add(1, Ordering::Relaxed);
                 false
             }),
-        );
+        )?;
         connection.execute_batch("BEGIN IMMEDIATE")?;
         let prefix_result = (|| -> DbResult<()> {
             let inspected = inspect_connection(&connection, Some(&expected_root), false)?;
@@ -4296,7 +4296,7 @@ mod tests {
             Ok(())
         })();
         connection.execute_batch("ROLLBACK")?;
-        connection.progress_handler(0, None::<fn() -> bool>);
+        connection.progress_handler(0, None::<fn() -> bool>)?;
         prefix_result?;
 
         let interrupt_after = prefix_steps
@@ -4310,9 +4310,9 @@ mod tests {
             Some(move || {
                 observed_interrupted_steps.fetch_add(1, Ordering::Relaxed) == interrupt_after
             }),
-        );
+        )?;
         let interrupted_failure = initialize(&connection, Some(&expected_root));
-        connection.progress_handler(0, None::<fn() -> bool>);
+        connection.progress_handler(0, None::<fn() -> bool>)?;
         let interrupted_error = match interrupted_failure {
             Err(DbError::Sqlite(error)) => error,
             Err(error) => {

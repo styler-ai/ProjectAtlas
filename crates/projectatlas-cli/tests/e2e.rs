@@ -3671,12 +3671,12 @@ fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Bo
         .into());
     }
     let connection = Connection::open(db_path)?;
-    let sealed_instances: usize = connection.query_row(
+    let sealed_instances: i64 = connection.query_row(
         "SELECT COUNT(*) FROM usage_instances WHERE owner = 'mcp_process' AND state = 'sealed'",
         [],
         |row| row.get(0),
     )?;
-    if sealed_instances != RESTART_COUNT {
+    if sealed_instances != i64::try_from(RESTART_COUNT)? {
         return Err(io::Error::other(format!(
             "expected {RESTART_COUNT} persisted sealed MCP instances, found {sealed_instances}"
         ))
