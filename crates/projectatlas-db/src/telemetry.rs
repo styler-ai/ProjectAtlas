@@ -1207,16 +1207,43 @@ pub(crate) fn seal_project_usage_instances(
         .map_err(Into::into)
 }
 
+/// Root binding accepted by post-commit maintenance.
+#[derive(Clone, Copy)]
+enum MaintenanceRoot<'a> {
+    /// Legacy display metadata supplied by existing maintenance fixtures.
+    #[cfg(test)]
+    Display(Option<&'a str>),
+    /// Native identity captured by a live store.
+    Native(Option<&'a projectatlas_core::CanonicalProjectRoot>),
+}
+
 /// Run due post-commit maintenance only for the adapter's captured project identity.
+#[cfg(test)]
 pub(crate) fn maintain_after_commit_for_project(
     connection: &Connection,
     expected_root: Option<&str>,
     project: ProjectInstanceId,
     policy: TelemetryRetentionPolicy,
 ) -> DbResult<()> {
-    maintain_after_commit_for_project_with_checkpoint(
+    maintain_after_commit_for_project_with_checkpoint_binding(
         connection,
-        expected_root,
+        MaintenanceRoot::Display(expected_root),
+        project,
+        policy,
+        |connection| Ok(passive_checkpoint_state(connection)),
+    )
+}
+
+/// Run post-commit maintenance through a captured native root identity.
+pub(crate) fn maintain_after_commit_for_native_project(
+    connection: &Connection,
+    expected_root: Option<&projectatlas_core::CanonicalProjectRoot>,
+    project: ProjectInstanceId,
+    policy: TelemetryRetentionPolicy,
+) -> DbResult<()> {
+    maintain_after_commit_for_project_with_checkpoint_binding(
+        connection,
+        MaintenanceRoot::Native(expected_root),
         project,
         policy,
         |connection| Ok(passive_checkpoint_state(connection)),
@@ -1224,9 +1251,27 @@ pub(crate) fn maintain_after_commit_for_project(
 }
 
 /// Run due maintenance with an explicit passive-checkpoint boundary.
+#[cfg(test)]
 fn maintain_after_commit_for_project_with_checkpoint(
     connection: &Connection,
     expected_root: Option<&str>,
+    project: ProjectInstanceId,
+    policy: TelemetryRetentionPolicy,
+    checkpoint: impl FnOnce(&Connection) -> DbResult<TelemetryCheckpointState>,
+) -> DbResult<()> {
+    maintain_after_commit_for_project_with_checkpoint_binding(
+        connection,
+        MaintenanceRoot::Display(expected_root),
+        project,
+        policy,
+        checkpoint,
+    )
+}
+
+/// Run maintenance with the caller's selected root representation.
+fn maintain_after_commit_for_project_with_checkpoint_binding(
+    connection: &Connection,
+    expected_root: MaintenanceRoot<'_>,
     project: ProjectInstanceId,
     policy: TelemetryRetentionPolicy,
     checkpoint: impl FnOnce(&Connection) -> DbResult<TelemetryCheckpointState>,
@@ -1244,70 +1289,93 @@ fn maintain_after_commit_for_project_with_checkpoint(
     if checkpoint_start_writes < policy.checkpoint_write_interval {
         return Ok(());
     }
-    crate::schema::validate_active_binding(connection, expected_root, Some(project))?;
+    match expected_root {
+        #[cfg(test)]
+        MaintenanceRoot::Display(root) => {
+            crate::schema::validate_active_binding(connection, root, Some(project))?;
+        }
+        MaintenanceRoot::Native(root) => {
+            crate::schema::validate_active_native_binding(connection, root, Some(project))?;
+        }
+    }
     let checkpoint_data_version =
         connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
     let state = checkpoint(connection)?;
-    crate::with_validated_write_transaction(
-        connection,
-        expected_root,
-        Some(project),
-        |transaction| {
-            let current_data_version =
-                transaction.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
-            let current_writes = count_usize(
-                "writes_since_checkpoint",
-                transaction.query_row(
-                    "SELECT writes_since_checkpoint
+    with_maintenance_write_transaction(connection, expected_root, project, |transaction| {
+        let current_data_version =
+            transaction.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+        let current_writes = count_usize(
+            "writes_since_checkpoint",
+            transaction.query_row(
+                "SELECT writes_since_checkpoint
                      FROM usage_retention_state WHERE singleton = 1",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?,
-            )?;
-            let retained_writes = writes_after_checkpoint_attempt(
-                state,
-                checkpoint_start_writes,
-                current_writes,
-                current_data_version == checkpoint_data_version,
-            );
-            let now = now_epoch_seconds()?;
-            let (raw_rows, raw_bytes, old_raw) = raw_pressure(transaction, policy, now)?;
-            let retention_pending = raw_rows > policy.max_raw_rows
-                || raw_bytes > policy.max_raw_logical_bytes
-                || old_raw > 0
-                || retention_counter(transaction, RetentionCounter::InstanceRows)?
-                    > policy.max_retained_instances
-                || retention_counter(transaction, RetentionCounter::LabelRows)?
-                    > policy.max_retained_labels
-                || retention_counter(transaction, RetentionCounter::DailyRows)?
-                    > policy.max_daily_rows
-                || retention_counter(transaction, RetentionCounter::LabelTombstoneRows)?
-                    > policy.max_label_tombstones
-                || retention_counter(transaction, RetentionCounter::InstanceTombstoneRows)?
-                    > policy.max_instance_tombstones
-                || aged_maintenance_pending(transaction, policy, now)?;
-            let completed = state == TelemetryCheckpointState::Completed;
-            transaction.execute(
-                "UPDATE usage_retention_state
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+        )?;
+        let retained_writes = writes_after_checkpoint_attempt(
+            state,
+            checkpoint_start_writes,
+            current_writes,
+            current_data_version == checkpoint_data_version,
+        );
+        let now = now_epoch_seconds()?;
+        let (raw_rows, raw_bytes, old_raw) = raw_pressure(transaction, policy, now)?;
+        let retention_pending = raw_rows > policy.max_raw_rows
+            || raw_bytes > policy.max_raw_logical_bytes
+            || old_raw > 0
+            || retention_counter(transaction, RetentionCounter::InstanceRows)?
+                > policy.max_retained_instances
+            || retention_counter(transaction, RetentionCounter::LabelRows)?
+                > policy.max_retained_labels
+            || retention_counter(transaction, RetentionCounter::DailyRows)? > policy.max_daily_rows
+            || retention_counter(transaction, RetentionCounter::LabelTombstoneRows)?
+                > policy.max_label_tombstones
+            || retention_counter(transaction, RetentionCounter::InstanceTombstoneRows)?
+                > policy.max_instance_tombstones
+            || aged_maintenance_pending(transaction, policy, now)?;
+        let completed = state == TelemetryCheckpointState::Completed;
+        transaction.execute(
+            "UPDATE usage_retention_state
                  SET writes_since_checkpoint = ?1,
                      last_checkpoint_epoch = ?2,
                      checkpoint_state = ?3,
                      maintenance_pending = ?4
                  WHERE singleton = 1",
-                params![
-                    to_i64("writes_since_checkpoint", retained_writes)?,
-                    now,
-                    state.as_str(),
-                    i64::from(
-                        !completed
-                            || retention_pending
-                            || retained_writes >= policy.checkpoint_write_interval
-                    ),
-                ],
-            )?;
-            Ok(())
-        },
-    )
+            params![
+                to_i64("writes_since_checkpoint", retained_writes)?,
+                now,
+                state.as_str(),
+                i64::from(
+                    !completed
+                        || retention_pending
+                        || retained_writes >= policy.checkpoint_write_interval
+                ),
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Validate and commit one maintenance transaction using its selected root representation.
+fn with_maintenance_write_transaction<T>(
+    connection: &Connection,
+    expected_root: MaintenanceRoot<'_>,
+    project: ProjectInstanceId,
+    operation: impl FnOnce(&Connection) -> DbResult<T>,
+) -> DbResult<T> {
+    match expected_root {
+        #[cfg(test)]
+        MaintenanceRoot::Display(root) => {
+            crate::with_validated_write_transaction(connection, root, Some(project), operation)
+        }
+        MaintenanceRoot::Native(root) => crate::with_validated_native_write_transaction(
+            connection,
+            root,
+            Some(project),
+            operation,
+        ),
+    }
 }
 
 /// Run one passive checkpoint and classify its bounded `SQLite` result.
@@ -8154,7 +8222,7 @@ mod tests {
     fn worktree_continuity_high_registration_aggregate_has_bounded_sql_and_rows()
     -> Result<(), Box<dyn Error>> {
         const ORIGINS: usize = 128;
-        const EXPECTED_STATEMENTS: usize = 11_279;
+        const EXPECTED_STATEMENTS: usize = 11_151;
         const EXPECTED_CHANGED_ROWS: u64 = 3_203;
 
         let temp = tempfile::tempdir()?;

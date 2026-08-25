@@ -6,9 +6,9 @@ use crate::{
     validate_database_location, verify_project_database,
 };
 use projectatlas_core::graph::ProjectInstanceId;
-use projectatlas_core::{
-    IndexGeneration, IndexWorkControl, IndexWorkStage, normalize_native_path_display,
-};
+#[cfg(test)]
+use projectatlas_core::normalize_native_path_display;
+use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
 use rusqlite::Connection;
 use rusqlite::backup::{Backup, StepResult};
 use std::fs;
@@ -40,7 +40,7 @@ pub struct WorktreeHydrationCandidate {
     /// Exact no-clobber publication path.
     destination_database: PathBuf,
     /// Canonical root the copied database now owns.
-    target_root: PathBuf,
+    target_root: CanonicalProjectRoot,
     /// Source atlas identity retained only for diagnostics.
     source_project_instance_id: ProjectInstanceId,
     /// New target atlas identity.
@@ -98,7 +98,7 @@ impl WorktreeHydrationCandidate {
     /// target source and derivation contract with the candidate.
     pub fn accept_verified_source_state(&mut self, control: &IndexWorkControl) -> DbResult<()> {
         control.check(IndexWorkStage::Publication)?;
-        let store = AtlasStore::open_for_project(self.path()?, &self.target_root)?;
+        let store = AtlasStore::open_for_project(self.path()?, self.target_root.as_path())?;
         let publication = store.index_publication()?;
         if !publication.as_ref().is_some_and(|publication| {
             publication.state == IndexPublicationState::Complete
@@ -125,7 +125,7 @@ impl WorktreeHydrationCandidate {
     ) -> DbResult<PreparedWorktreeHydrationCandidate> {
         control.check(IndexWorkStage::Publication)?;
         let candidate_path = self.path()?.to_path_buf();
-        let store = AtlasStore::open_for_project(&candidate_path, &self.target_root)?;
+        let store = AtlasStore::open_for_project(&candidate_path, self.target_root.as_path())?;
         let publication = store.index_publication()?.filter(|publication| {
             publication.state == IndexPublicationState::Complete
                 && (publication.generation > self.baseline_generation
@@ -158,7 +158,7 @@ impl WorktreeHydrationCandidate {
         }
         drop(store);
 
-        verify_project_database(&candidate_path, &self.target_root)?;
+        verify_project_database(&candidate_path, self.target_root.as_path())?;
         fs::OpenOptions::new()
             .write(true)
             .open(&candidate_path)
@@ -319,7 +319,9 @@ impl AtlasStore {
         control: &IndexWorkControl,
     ) -> DbResult<WorktreeHydrationCandidate> {
         control.check(IndexWorkStage::Publication)?;
-        let source_root = self.project_root()?.ok_or(DbError::ProjectRootMissing)?;
+        let source_root = self
+            .project_root_identity()?
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         let source_project_instance_id = self
             .project_instance_id()?
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
@@ -335,13 +337,14 @@ impl AtlasStore {
             });
         }
 
-        let target_root = canonical_target_root(target_root)?;
-        if normalize_native_path_display(&target_root) == source_root {
+        let target_root_identity = canonical_target_root(target_root)?;
+        if target_root_identity == source_root {
             return Err(DbError::WorktreeHydrationInvalid {
                 reason: "hydration target matches the source project root",
             });
         }
-        let destination_database = validated_target_database(&target_root, destination_database)?;
+        let destination_database =
+            validated_target_database(target_root_identity.as_path(), destination_database)?;
         if destination_database.exists() {
             return Err(DbError::WorktreeHydrationDestinationExists {
                 path: destination_database,
@@ -368,17 +371,18 @@ impl AtlasStore {
         copy_online_backup(&self.connection, &mut capture, control)?;
         drop(capture);
 
-        let copied = AtlasStore::open_for_project(&candidate_path, Path::new(&source_root))?;
+        let copied = AtlasStore::open_for_project(&candidate_path, source_root.as_path())?;
         let snapshot = copied.export_derived_graph_snapshot_from_stable_copy()?;
         drop(copied);
         control.check(IndexWorkStage::Publication)?;
 
         let transition = AtlasStore::transition_project_root(
             &candidate_path,
-            &target_root,
+            target_root_identity.as_path(),
             ProjectRootTransition::Detach,
         )?;
-        let mut target = AtlasStore::open_for_project(&candidate_path, &target_root)?;
+        let mut target =
+            AtlasStore::open_for_project(&candidate_path, target_root_identity.as_path())?;
         clear_nontransferable_state(
             &target,
             source_project_instance_id,
@@ -391,12 +395,12 @@ impl AtlasStore {
             });
         }
         drop(target);
-        verify_project_database(&candidate_path, &target_root)?;
+        verify_project_database(&candidate_path, target_root_identity.as_path())?;
 
         Ok(WorktreeHydrationCandidate {
             path: Some(candidate_path),
             destination_database,
-            target_root,
+            target_root: target_root_identity,
             source_project_instance_id,
             target_project_instance_id: transition.project_instance_id,
             baseline_generation: baseline.published_generation,
@@ -437,23 +441,13 @@ fn copy_online_backup(
 }
 
 /// Canonicalize and require one existing target directory.
-fn canonical_target_root(target_root: &Path) -> DbResult<PathBuf> {
+fn canonical_target_root(target_root: &Path) -> DbResult<CanonicalProjectRoot> {
     if !target_root.is_absolute() {
         return Err(DbError::WorktreeHydrationInvalid {
             reason: "hydration target root is not absolute",
         });
     }
-    let canonical =
-        fs::canonicalize(target_root).map_err(|source| DbError::WorktreeHydrationIo {
-            path: target_root.to_path_buf(),
-            source,
-        })?;
-    if !canonical.is_dir() {
-        return Err(DbError::WorktreeHydrationInvalid {
-            reason: "hydration target root is not a directory",
-        });
-    }
-    Ok(canonical)
+    CanonicalProjectRoot::from_path(target_root).map_err(DbError::from)
 }
 
 /// Normalize an absent database destination below the exact canonical target root.
@@ -472,7 +466,13 @@ fn validated_target_database(target_root: &Path, destination_database: &Path) ->
         path: parent.to_path_buf(),
         source,
     })?;
-    if parent == target_root || !parent.starts_with(target_root) {
+    let target_identity = CanonicalProjectRoot::from_path(target_root)?;
+    let parent_identity = CanonicalProjectRoot::from_path(&parent)?;
+    if parent_identity == target_identity
+        || !parent_identity
+            .as_path()
+            .starts_with(target_identity.as_path())
+    {
         return Err(DbError::WorktreeHydrationInvalid {
             reason: "hydration destination is not inside a target-local subdirectory",
         });
@@ -830,6 +830,65 @@ mod tests {
             matches!(canceled_result, Err(DbError::IndexWork(_))),
             "canceled hydration did not return the shared typed work failure",
         )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hydration_preserves_non_utf8_target_identity_and_display_collisions()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let fixture = tempfile::tempdir()?;
+        let source_root = fixture
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b"s", b"r", b"c", 0x80]));
+        let target_root = fixture
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b"t", b"g", b"t", 0x81]));
+        let collision_root = fixture.path().join("tgt-�");
+        let source_dir = source_root.join(".projectatlas");
+        let target_dir = target_root.join(".projectatlas");
+        let collision_dir = collision_root.join(".projectatlas");
+        fs::create_dir_all(&source_dir)?;
+        fs::create_dir_all(&target_dir)?;
+        fs::create_dir_all(&collision_dir)?;
+        let source_database = source_dir.join("projectatlas.db");
+        let target_database = target_dir.join("projectatlas.db");
+        let collision_database = collision_dir.join("projectatlas.db");
+        let mut source = AtlasStore::open_for_project(&source_database, &source_root)?;
+        seed_source(&mut source, &target_root)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+
+        let mut candidate =
+            source.prepare_worktree_hydration(&target_root, &target_database, &control)?;
+        let target_identity = candidate.target_project_instance_id();
+        candidate.accept_verified_source_state(&control)?;
+        let prepared = candidate.prepare_activation(&control)?;
+        let activation = prepared.activate(&control)?;
+        require(
+            activation.target_project_instance_id == target_identity,
+            "non-UTF-8 hydration changed target identity",
+        )?;
+        verify_project_database(&target_database, &target_root)?;
+        let target = AtlasStore::open_read_only_for_project(&target_database, &target_root)?;
+        require(
+            target.project_root_identity()? == Some(CanonicalProjectRoot::from_path(&target_root)?),
+            "hydrated non-UTF-8 target identity was not persisted",
+        )?;
+        drop(target);
+
+        let mut collision =
+            source.prepare_worktree_hydration(&collision_root, &collision_database, &control)?;
+        let collision_identity = collision.target_project_instance_id();
+        require(
+            collision_identity != target_identity,
+            "hydration collapsed replacement-character target identity",
+        )?;
+        collision.accept_verified_source_state(&control)?;
+        let collision = collision.prepare_activation(&control)?;
+        collision.activate(&control)?;
+        verify_project_database(&collision_database, &collision_root)?;
         Ok(())
     }
 }

@@ -7,6 +7,7 @@ pub mod language;
 pub mod optional_parser_pack;
 pub mod optional_parser_protocol;
 pub mod outline;
+pub mod project_root;
 pub mod relation_capabilities;
 pub mod support_catalog;
 pub mod symbols;
@@ -16,6 +17,7 @@ pub mod toon;
 pub use index_work::{
     IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource, IndexWorkStage,
 };
+pub use project_root::CanonicalProjectRoot;
 
 /// Maximum Git worktree registrations admitted for one repository.
 pub const MAX_GIT_WORKTREE_REGISTRATIONS: usize = 1_024;
@@ -28,6 +30,29 @@ use thiserror::Error;
 /// Core error type for `ProjectAtlas` domain operations.
 #[derive(Debug, Error)]
 pub enum CoreError {
+    /// A project root does not satisfy the native absolute-path contract.
+    #[error("invalid canonical project root {path:?}: {reason}")]
+    InvalidCanonicalProjectRoot {
+        /// Path rejected before it became a native identity.
+        path: PathBuf,
+        /// Stable validation reason.
+        reason: &'static str,
+    },
+    /// Canonicalization of a project root failed.
+    #[error("could not canonicalize project root {path:?}: {source}")]
+    CanonicalProjectRootIo {
+        /// Path passed to the native canonicalizer.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A persisted native-root codec value is not supported or lossless.
+    #[error("invalid canonical project-root codec value: {reason}")]
+    CanonicalProjectRootCodec {
+        /// Stable decoding failure.
+        reason: &'static str,
+    },
     /// A path could not be represented relative to the repository root.
     #[error("path is outside the repository root: {path}")]
     PathOutsideRoot {
@@ -587,7 +612,8 @@ pub fn normalize_repo_path(root: &Path, path: &Path) -> CoreResult<String> {
 ///
 /// The returned path uses forward slashes, strips Windows extended path
 /// prefixes such as `\\?\`, and converts extended UNC paths to `//server/share`
-/// form. This helper is for persisted metadata and agent-facing output; use
+/// form. This helper is for legacy compatibility metadata and agent-facing
+/// output; use [`CanonicalProjectRoot`] for persisted project identity and
 /// `Path`/`PathBuf` for host filesystem access.
 #[must_use]
 pub fn normalize_native_path_display(path: impl AsRef<Path>) -> String {

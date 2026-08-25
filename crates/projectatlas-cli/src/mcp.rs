@@ -73,7 +73,7 @@ use projectatlas_core::toon::{
     render_symbol_relations, render_token_overview, render_token_trends,
 };
 use projectatlas_core::{
-    IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
+    CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
     MAX_GIT_WORKTREE_REGISTRATIONS, NavigationNextCall, NavigationNextCapability, Overview,
     PurposeSource, PurposeStatus, RankedConnection, RankedConnectionCount, RankedConnectionKind,
     RankedConnectionTarget, RankedNode, RankedReasonCode, normalize_native_path_display,
@@ -84,7 +84,7 @@ use projectatlas_db::{
     ActiveWorktreeRegistrationGuard, AtlasStore, DbError, HealthQuery, HealthResolution,
     HealthScope, PreparedWorktreeHydrationCandidate, RepositoryCoverageQuery, WorktreeAlias,
     WorktreeHydrationActivation, WorktreeRegistration, WorktreeRegistrationState,
-    WorktreeUsageSnapshot, WorktreeUsageSyncState, read_project_root_read_only,
+    WorktreeUsageSnapshot, WorktreeUsageSyncState, read_project_root_identity_read_only,
     verify_project_database,
 };
 use projectatlas_fs::worktree::{
@@ -323,6 +323,9 @@ const MCP_CANCELLATION_MONITOR_THREAD_NAME: &str = "projectatlas-mcp-cancel";
 /// Prefix for cancellation-monitor startup failures.
 const MCP_CANCELLATION_MONITOR_START_ERROR_PREFIX: &str =
     "MCP request cancellation monitor could not start: ";
+/// Prefix for invalid registered worktree roots.
+const MCP_ERROR_REGISTERED_WORKTREE_ROOT_INVALID_PREFIX: &str =
+    "registered worktree root is invalid: ";
 /// MCP error lock-poison message.
 const MCP_PROJECT_STATE_LOCK_POISONED: &str = "MCP project state lock poisoned";
 /// Prefix used only if structured MCP error serialization fails.
@@ -6667,7 +6670,16 @@ impl ProjectAtlasMcpServer {
                 MCP_ERROR_CONTROL_ALIAS_REQUIRED.to_string(),
             ));
         }
-        let registration = if normalize_native_path_display(&root) == registration.last_root {
+        let current_root_identity = CanonicalProjectRoot::from_path(&root).map_err(|source| {
+            let mut message = MCP_ERROR_REGISTERED_WORKTREE_ROOT_INVALID_PREFIX.to_string();
+            message.push_str(&source.to_string());
+            CliError::InvalidInput(message)
+        })?;
+        let registration_root_matches = Self::indexed_db_matches_root(
+            &Self::projectatlas_db_path(&root),
+            &current_root_identity,
+        );
+        let registration = if registration_root_matches {
             registration
         } else {
             control.refresh_worktree_root(&registration, &root)?
@@ -7127,8 +7139,11 @@ impl ProjectAtlasMcpServer {
         let Ok(root) = canonical_project_root(candidate) else {
             return None;
         };
+        let Ok(root_identity) = CanonicalProjectRoot::from_path(&root) else {
+            return None;
+        };
         let db_path = Self::projectatlas_db_path(&root);
-        if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root) {
+        if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root_identity) {
             return None;
         }
         Some(McpIndexedRoot { root, db_path })
@@ -7142,11 +7157,17 @@ impl ProjectAtlasMcpServer {
         let Ok(root) = canonical_project_root(candidate) else {
             return None;
         };
-        if normalize_native_path_display(candidate) != normalize_native_path_display(&root) {
+        let Ok(candidate_identity) = CanonicalProjectRoot::from_path(candidate) else {
+            return None;
+        };
+        let Ok(root_identity) = CanonicalProjectRoot::from_path(&root) else {
+            return None;
+        };
+        if candidate_identity != root_identity {
             return None;
         }
         let db_path = Self::projectatlas_db_path(&root);
-        if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root) {
+        if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root_identity) {
             return None;
         }
         Some(McpIndexedRoot { root, db_path })
@@ -7269,20 +7290,11 @@ impl ProjectAtlasMcpServer {
     }
 
     /// Return whether an existing DB records the same canonical project root.
-    fn indexed_db_matches_root(db_path: &Path, root: &Path) -> bool {
-        let Ok(stored_root) = read_project_root_read_only(db_path) else {
+    fn indexed_db_matches_root(db_path: &Path, root: &CanonicalProjectRoot) -> bool {
+        let Ok(Some(stored_root)) = read_project_root_identity_read_only(db_path) else {
             return false;
         };
-        let Some(stored_root) = stored_root else {
-            return false;
-        };
-        let Ok(stored_root) = canonical_project_root(Path::new(&stored_root)) else {
-            return false;
-        };
-        let Ok(candidate_root) = canonical_project_root(root) else {
-            return false;
-        };
-        stored_root == candidate_root
+        stored_root == *root
     }
 
     /// Return the standard `ProjectAtlas` DB path for one project root.
@@ -8111,8 +8123,10 @@ impl ProjectAtlasMcpServer {
                 None => None,
             };
             let retired_at_epoch = Self::current_epoch_seconds()?;
-            let (root, active_root) = match entry.map(|entry| &entry.state) {
-                Some(GitWorktreeState::Active { root, .. }) => (root.clone(), Some(root.as_path())),
+            let (root_display, active_root) = match entry.map(|entry| &entry.state) {
+                Some(GitWorktreeState::Active { root, .. }) => {
+                    (normalize_native_path_display(root), Some(root.as_path()))
+                }
                 Some(GitWorktreeState::Invalid { issue }) => {
                     return Err(CliError::InvalidInput(format!(
                         "cannot retire worktree '{}' while its Git evidence is invalid at '{}': {:?}",
@@ -8124,7 +8138,7 @@ impl ProjectAtlasMcpServer {
                 Some(GitWorktreeState::Missing { .. }) | None => {
                     blocker
                         .get_or_insert_with(|| MCP_WORKTREE_MISSING_RETENTION_REASON.to_string());
-                    (PathBuf::from(&registration.last_root), None)
+                    (registration.last_root.clone(), None)
                 }
             };
             let (retired, telemetry_sync, final_blocker) = Self::retire_registered_worktree(
@@ -8141,7 +8155,7 @@ impl ProjectAtlasMcpServer {
                     status: McpWorktreeMutationStatus::Retired,
                     selector: entry.map(Self::worktree_candidate_selector),
                     alias: Some(alias.to_string()),
-                    root: Some(normalize_native_path_display(root)),
+                    root: Some(root_display),
                     registration_id: Some(retired.registration_id),
                     telemetry_sync,
                     candidates: Vec::new(),
@@ -8221,7 +8235,7 @@ impl ProjectAtlasMcpServer {
             let state = self.admin_project_root(params.project_path, params.worktree)?;
             let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
             if params.verify.unwrap_or(false) && report.verified {
-                verify_project_database(&state.db_path, Path::new(&report.root))?;
+                verify_project_database(&state.db_path, &state.root)?;
             }
             Self::with_selected_project_audit(
                 &state,
@@ -12909,9 +12923,10 @@ mod tests {
         predecessor.execute_batch(
             "DROP TABLE usage_instance_worktree_origins;
              DROP TABLE worktree_usage_aggregates;
-             DROP TABLE worktree_registrations;
-             DROP TABLE usage_aggregate_revisions;
-             UPDATE metadata SET value = '17' WHERE key = 'schema_version';",
+            DROP TABLE worktree_registrations;
+            DROP TABLE usage_aggregate_revisions;
+            DROP TABLE project_root_identity;
+            UPDATE metadata SET value = '17' WHERE key = 'schema_version';",
         )?;
         drop(predecessor);
         let migratable_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {

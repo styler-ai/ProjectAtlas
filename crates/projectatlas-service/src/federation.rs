@@ -6,16 +6,14 @@ use super::relations::{
     DetailedRelationReport, ExternalRelationIdentity, external_relation_identities,
     relation_request_control, serialized_equivalent_bytes,
 };
-use super::{ServiceError, ServiceResult, selected_project_binding};
+use super::{ServiceError, ServiceResult, canonical_root_digest, selected_project_binding};
 use projectatlas_core::graph::{
     ExtendedRelationKind, ExternalSelector, GraphLimitKind, GraphRelationKind, LogicalRelation,
     ProjectInstanceId, RelationResolution,
 };
 use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::RelationKind;
-use projectatlas_core::{
-    IndexGeneration, IndexWorkControl, IndexWorkStage, normalize_native_path_display,
-};
+use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
 use projectatlas_db::{AtlasStore, DbError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -164,7 +162,9 @@ impl FederatedStore {
             ));
         }
         let binding = selected_project_binding(&store)?;
-        if binding.project_root != normalize_native_path_display(&root) {
+        let explicit_root = CanonicalProjectRoot::from_path(&root)
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        if binding.project_root_identity != explicit_root {
             return Err(ServiceError::InvalidInput(
                 "federated store does not match its explicit root".to_string(),
             ));
@@ -739,7 +739,7 @@ fn capture_federation(
             ));
         }
         let binding = selected_project_binding(&participant.store)?;
-        let root_digest = federated_root_digest(&binding.project_root);
+        let root_digest = federated_root_digest(&binding.project_root_identity)?;
         if !roots.insert(root_digest) || projects.contains(&binding.project_instance_id) {
             return Err(ServiceError::InvalidInput(
                 "federated roots or project identities must be unique".to_string(),
@@ -978,16 +978,20 @@ fn close_participants(
         drop(participant.store);
         match (binding, generation, purpose_revision) {
             (Ok(binding), Ok(Some(generation)), Ok(authored_purpose_revision)) => {
-                closed.push(ClosedParticipant {
-                    database_path: participant.database_path,
-                    root: participant.root,
-                    cursor: FederatedCursorParticipant {
-                        project: binding.project_instance_id,
-                        root_digest: federated_root_digest(&binding.project_root),
-                        generation,
-                        authored_purpose_revision,
-                    },
-                });
+                match federated_root_digest(&binding.project_root_identity) {
+                    Ok(root_digest) => closed.push(ClosedParticipant {
+                        database_path: participant.database_path,
+                        root: participant.root,
+                        cursor: FederatedCursorParticipant {
+                            project: binding.project_instance_id,
+                            root_digest,
+                            generation,
+                            authored_purpose_revision,
+                        },
+                    }),
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
             }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error))
                 if first_error.is_none() =>
@@ -1030,7 +1034,7 @@ fn revalidate_participants(
         let purpose_revision = store.authored_purpose_revision()?;
         let current = FederatedCursorParticipant {
             project: binding.project_instance_id,
-            root_digest: federated_root_digest(&binding.project_root),
+            root_digest: federated_root_digest(&binding.project_root_identity)?,
             generation,
             authored_purpose_revision: purpose_revision,
         };
@@ -1200,12 +1204,8 @@ fn aggregate_row_limit(budget: DetailedRelationBudget) -> u64 {
 }
 
 /// Bind a root without returning its machine-local path.
-fn federated_root_digest(root: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(FEDERATED_ROOT_DIGEST_DOMAIN.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(root.as_bytes());
-    *hasher.finalize().as_bytes()
+fn federated_root_digest(root: &CanonicalProjectRoot) -> ServiceResult<[u8; 32]> {
+    canonical_root_digest(FEDERATED_ROOT_DIGEST_DOMAIN, root)
 }
 
 /// Observe request cancellation at a repository-traversal boundary.
@@ -1255,6 +1255,27 @@ mod tests {
     use std::io;
     use std::path::Path;
     use std::rc::Rc;
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_root_digest_preserves_non_utf8_root_collisions() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let native = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b"r", b"o", b"o", 0x80]));
+        let replacement = temp.path().join("roo�");
+        fs::create_dir(&native)?;
+        fs::create_dir(&replacement)?;
+        let native_root = CanonicalProjectRoot::from_path(&native)?;
+        let replacement_root = CanonicalProjectRoot::from_path(&replacement)?;
+        require(
+            federated_root_digest(&native_root)? != federated_root_digest(&replacement_root)?,
+            "federation identity collapsed non-UTF-8 and replacement roots",
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn federation_is_project_qualified_fresh_bounded_and_handle_free() -> Result<(), Box<dyn Error>>

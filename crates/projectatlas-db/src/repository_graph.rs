@@ -7,10 +7,10 @@ use super::{
 use crate::content_classification::parse_classification;
 use crate::derived_snapshot::{CapturedGraph, SnapshotBudget};
 use crate::project_identity::{
-    load_graph_generation, load_project_identity, require_bound_project_identity,
-    set_graph_generation, set_project_identity, verify_project_identity,
+    load_graph_generation, load_project_identity, load_project_root_identity,
+    require_bound_project_identity, set_graph_generation, set_project_identity,
+    verify_project_identity,
 };
-use crate::schema::PROJECT_ROOT_KEY;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
     CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
@@ -25,7 +25,6 @@ use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
 use projectatlas_core::{
     IndexGeneration, IndexWorkControl, IndexWorkStage, NodeKind, RankedConnection,
     RankedConnectionCount, RankedConnectionDirection, RankedConnectionKind, RankedConnectionTarget,
-    normalize_native_path_display,
 };
 use rusqlite::types::Value;
 use rusqlite::{
@@ -3305,13 +3304,6 @@ impl AtlasStore {
         project: ProjectInstanceId,
     ) -> DbResult<bool> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let project_root = connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key = ?1",
-                [PROJECT_ROOT_KEY],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
         let marker = connection
             .query_row(
                 "SELECT value FROM metadata WHERE key = ?1",
@@ -3319,8 +3311,9 @@ impl AtlasStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
+        let expected_root = projectatlas_core::CanonicalProjectRoot::from_path(root)?;
         Ok(
-            project_root.as_deref() == Some(normalize_native_path_display(root).as_str())
+            load_project_root_identity(&connection)?.as_ref() == Some(&expected_root)
                 && load_project_identity(&connection)? == Some(project)
                 && marker.as_deref() == Some(GRAPH_STAGING_MARKER_VALUE),
         )
@@ -11274,7 +11267,7 @@ mod tests {
     fn high_fanout_document_refresh_has_bounded_sql_and_changed_rows() -> Result<(), Box<dyn Error>>
     {
         const FANOUT: usize = 256;
-        const EXPECTED_STATEMENTS: usize = 2_081;
+        const EXPECTED_STATEMENTS: usize = 2_080;
         const EXPECTED_CHANGED_ROWS: u64 = 1_031;
 
         let temp = tempfile::tempdir()?;

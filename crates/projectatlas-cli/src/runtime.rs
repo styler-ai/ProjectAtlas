@@ -57,8 +57,8 @@ use projectatlas_core::telemetry::{
 };
 use projectatlas_core::toon::{encode_agent_payload, render_ranked_node_rows, render_symbol_rows};
 use projectatlas_core::{
-    IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
-    IndexWorkStage, Node, NodeKind, Overview, PurposeSource, PurposeStatus,
+    CanonicalProjectRoot, IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure,
+    IndexWorkResource, IndexWorkStage, Node, NodeKind, Overview, PurposeSource, PurposeStatus,
     normalize_native_path_display, normalize_native_path_display_str, normalize_repo_path,
     purpose_review_signal, repo_path_to_native, validated_repo_file_key, validated_repo_node_key,
 };
@@ -69,7 +69,7 @@ use projectatlas_db::{
     IndexPublicationState, IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
     MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
     TelemetryRetentionState, WorktreeRegistration, WorktreeUsageSnapshot, database_settings_report,
-    read_project_root_read_only, validate_database_location,
+    read_project_root_identity_read_only, validate_database_location,
 };
 use projectatlas_fs::worktree::{
     GitManagerSourceSelection, GitRepositorySelection, GitWorktreeState, RepositoryStructure,
@@ -1288,34 +1288,26 @@ fn source_node_delta(
 
 /// Verify that the opened database belongs to the selected canonical root.
 fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result<(), CliError> {
-    let Some(indexed_root) = store.project_root()? else {
+    let Some(indexed_root) = store.project_root_identity()? else {
         return Err(verification_incomplete(
             selected_root,
             IndexVerificationReason::ProjectIdentityUnavailable,
             &CliError::InvalidInput("index project root metadata is missing".to_string()),
         ));
     };
-    let indexed_root_path = PathBuf::from(&indexed_root);
-    let indexed_root = canonical_project_root(&indexed_root_path).map_err(|source| {
-        verification_incomplete(
-            selected_root,
-            IndexVerificationReason::ProjectIdentityUnavailable,
-            &source,
-        )
-    })?;
-    let selected_root = canonical_project_root(selected_root).map_err(|source| {
+    let selected_root = CanonicalProjectRoot::from_path(selected_root).map_err(|source| {
         verification_incomplete(
             selected_root,
             IndexVerificationReason::SourceInspectionFailed,
-            &source,
+            &CliError::InvalidInput(source.to_string()),
         )
     })?;
     if indexed_root != selected_root {
         return Err(CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
             status: IndexReadStatus::ProjectMismatch,
             worktree: None,
-            selected_project_root: normalize_native_path_display(selected_root),
-            indexed_project_root: normalize_native_path_display(indexed_root),
+            selected_project_root: selected_root.display_string(),
+            indexed_project_root: indexed_root.display_string(),
         })));
     }
     Ok(())
@@ -2663,9 +2655,9 @@ pub(crate) fn default_mcp_project_root(
         return Ok(config_root);
     }
     if db.exists()
-        && let Some(project_root) = read_project_root_read_only(db)?
+        && let Some(project_root) = read_project_root_identity_read_only(db)?
     {
-        return canonical_source_project_root(Path::new(&project_root));
+        return canonical_source_project_root(project_root.as_path());
     }
     if let Some(project_root) = project_root_from_db_path(db) {
         return canonical_source_project_root(&project_root);
@@ -5512,9 +5504,9 @@ pub(crate) fn resolved_mcp_config_path(
     }
     let mut candidate_roots = Vec::new();
     if db.exists()
-        && let Some(project_root) = read_project_root_read_only(db)?
+        && let Some(project_root) = read_project_root_identity_read_only(db)?
     {
-        candidate_roots.push(PathBuf::from(project_root));
+        candidate_roots.push(project_root.into_path());
     }
     let absolute_db = absolute_path(db)?;
     if let Some(project_root) = project_root_from_db_path(&absolute_db) {
@@ -7101,12 +7093,15 @@ pub(crate) fn validated_indexed_file_key(
 
 /// Load the project root recorded by the latest scan.
 pub(crate) fn indexed_project_root(store: &AtlasStore) -> Result<PathBuf, CliError> {
-    store.project_root()?.map(PathBuf::from).ok_or_else(|| {
-        CliError::InvalidInput(
-            "indexed project root is missing; run projectatlas scan <project-root> first"
-                .to_string(),
-        )
-    })
+    store
+        .project_root_identity()?
+        .map(CanonicalProjectRoot::into_path)
+        .ok_or_else(|| {
+            CliError::InvalidInput(
+                "indexed project root is missing; run projectatlas scan <project-root> first"
+                    .to_string(),
+            )
+        })
 }
 
 /// Build an absolute native path for a previously validated indexed file key.

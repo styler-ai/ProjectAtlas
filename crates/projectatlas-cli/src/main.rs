@@ -2539,7 +2539,8 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
                 let verified = report.verified;
                 if verified {
-                    verify_project_database(&cli.db, Path::new(&report.root))?;
+                    let root = cli.project_root()?;
+                    verify_project_database(&cli.db, &root)?;
                 }
                 print_output(cli.format, &render_root_report(&report), &report)?;
                 if !verified {

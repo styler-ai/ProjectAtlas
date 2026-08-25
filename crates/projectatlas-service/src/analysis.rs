@@ -80,7 +80,9 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::language::ContentSelection;
 use projectatlas_core::symbols::{CodeSymbol, RelationKind};
-use projectatlas_core::{IndexCancellation, IndexWorkControl, IndexWorkStage};
+use projectatlas_core::{
+    CanonicalProjectRoot, IndexCancellation, IndexWorkControl, IndexWorkStage,
+};
 use projectatlas_db::{
     AtlasStore, DbError, MAX_REPOSITORY_GRAPH_FRONTIER, MAX_SYMBOL_BATCH_DECODED_BYTES,
     MAX_SYMBOL_BATCH_PATHS, MAX_SYMBOL_BATCH_ROWS, RepositoryGraphAdjacencyContinuation,
@@ -90,11 +92,12 @@ use projectatlas_db::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Current closed relation-analysis cursor schema.
 const ANALYSIS_CURSOR_VERSION: u16 = 1;
+/// Domain separator for the native project-root continuation binding.
+const ANALYSIS_ROOT_DOMAIN: &str = "projectatlas:analysis-root:v1";
 /// Maximum decoded cursor bytes accepted from an adapter.
 const ANALYSIS_CURSOR_MAX_BYTES: usize = 256 * 1024;
 /// Maximum nodes retained by one analysis projection.
@@ -682,7 +685,7 @@ fn load_relation_analysis_with_closure_deadline(
     let control = Some(&analysis_control);
     check_control(control)?;
     let selected_binding = selected_project_binding(store)?;
-    let cursor_binding = analysis_cursor_binding(query, &selected_binding.project_root);
+    let cursor_binding = analysis_cursor_binding(query, &selected_binding.project_root_identity)?;
     let decoded_cursor = query
         .relations
         .cursor
@@ -740,7 +743,7 @@ fn load_relation_analysis_with_closure_deadline(
     let vcs_load = if query.mode == RelationAnalysisMode::Impact {
         let selection = query.vcs.clone().unwrap_or(GitImpactSelection::WorkingTree);
         load_vcs_paths(
-            Path::new(&selected_binding.project_root),
+            selected_binding.project_root_identity.as_path(),
             selection,
             query.relations.budget.intermediate_bytes().saturating_sub(
                 relations
@@ -1068,13 +1071,10 @@ fn bounded_analysis_budget(
 /// Normalize every result-defining request field for cursor identity.
 fn analysis_cursor_binding(
     query: &RelationAnalysisQuery,
-    project_root: &str,
-) -> AnalysisCursorBinding {
-    AnalysisCursorBinding {
-        root_digest: *blake3::hash(
-            format!("projectatlas:analysis-root:v1\0{project_root}").as_bytes(),
-        )
-        .as_bytes(),
+    project_root: &CanonicalProjectRoot,
+) -> ServiceResult<AnalysisCursorBinding> {
+    Ok(AnalysisCursorBinding {
+        root_digest: super::canonical_root_digest(ANALYSIS_ROOT_DOMAIN, project_root)?,
         anchor: query.relations.anchor.clone(),
         direction: query.relations.direction,
         relation: query.relations.relation,
@@ -1098,7 +1098,7 @@ fn analysis_cursor_binding(
         trace_target: query.trace_target.clone(),
         vcs: (query.mode == RelationAnalysisMode::Impact)
             .then(|| query.vcs.clone().unwrap_or(GitImpactSelection::WorkingTree)),
-    }
+    })
 }
 
 /// Decode and validate one analysis continuation against its request.

@@ -11,7 +11,7 @@ use crate::CliError;
 use blake3::Hasher;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use projectatlas_core::graph::ProjectInstanceId;
-use projectatlas_core::{IndexGeneration, IndexWorkControl, IndexWorkStage};
+use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
 use projectatlas_db::{AtlasStore, CapturedProjectBinding, IndexPublicationState};
 use std::collections::HashMap;
 use std::fmt;
@@ -573,14 +573,22 @@ fn is_database_runtime_path(candidate: &Path, database: &Path) -> bool {
         })
 }
 
-/// Compare normalized native paths using platform case semantics.
+/// Compare native paths without converting identity through display text.
 fn same_native_path(left: &Path, right: &Path) -> bool {
-    let left = projectatlas_core::normalize_native_path_display(left);
-    let right = projectatlas_core::normalize_native_path_display(right);
-    if cfg!(windows) {
-        left.eq_ignore_ascii_case(&right)
-    } else {
-        left == right
+    if left == right {
+        return true;
+    }
+    let canonical = |path: &Path| -> Option<PathBuf> {
+        if let Ok(identity) = CanonicalProjectRoot::from_path(path) {
+            return Some(identity.into_path());
+        }
+        let parent = path.parent()?;
+        let identity = CanonicalProjectRoot::from_path(parent).ok()?;
+        Some(identity.as_path().join(path.file_name()?))
+    };
+    match (canonical(left), canonical(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -1143,7 +1151,12 @@ fn source_policy_witness(
         "contract",
         plan.publication_contract_fingerprint().as_bytes(),
     );
-    hash_field(&mut hasher, "root", plan.root.to_string_lossy().as_bytes());
+    let root_identity = CanonicalProjectRoot::from_path(&plan.root)
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let root_identity_bytes = root_identity
+        .encode()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    hash_field(&mut hasher, "root", &root_identity_bytes);
     for path in source_policy_paths(plan, control)? {
         control.check(IndexWorkStage::Publication)?;
         hash_field(&mut hasher, "path", path.to_string_lossy().as_bytes());
@@ -2071,6 +2084,37 @@ mod tests {
                 .load_node_by_path("source.rs")?
                 .is_none_or(|node| node.purpose.purpose.as_deref() != Some("Canceled purpose")),
             "canceled mutation changed the purpose row",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn same_native_path_rejects_distinct_unresolved_paths() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let left = temp.path().join("missing-left").join("leaf");
+        let right = temp.path().join("missing-right").join("leaf");
+
+        require(
+            !super::same_native_path(&left, &right),
+            "unresolved distinct paths were treated as equal",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn same_native_path_matches_paths_below_a_canonicalizable_parent() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("canonical-parent");
+        let nested = parent.join("nested");
+        fs::create_dir(&parent)?;
+        fs::create_dir(&nested)?;
+        let left = parent.join("missing");
+        let right = nested.join("..").join("missing");
+
+        require(
+            super::same_native_path(&left, &right),
+            "equivalent paths below a canonicalizable parent diverged",
         )?;
         Ok(())
     }

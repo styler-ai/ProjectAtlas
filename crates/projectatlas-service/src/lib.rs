@@ -42,10 +42,10 @@ use projectatlas_core::telemetry::{
     AgentEfficiencyComparison, TokenOverview, TokenTrendReport, TokenTrendWindow,
 };
 use projectatlas_core::{
-    IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
-    IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind, RankedConnectionKind,
-    RankedConnectionTarget, RankedNode, RankedReasonCode, repo_path_to_native,
-    validated_repo_file_key,
+    CanonicalProjectRoot, IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure,
+    IndexWorkStage, IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind,
+    RankedConnectionKind, RankedConnectionTarget, RankedNode, RankedReasonCode,
+    repo_path_to_native, validated_repo_file_key,
 };
 use projectatlas_db::{
     AtlasStore, CapturedProjectBinding, DbError, FileTextAdmission, FileTextFtsQuery,
@@ -192,6 +192,21 @@ pub enum ServiceError {
 
 /// Convenient result alias for service operations.
 pub type ServiceResult<T> = Result<T, ServiceError>;
+
+/// Hash a native canonical root for an opaque service continuation identity.
+pub(crate) fn canonical_root_digest(
+    domain: &str,
+    root: &CanonicalProjectRoot,
+) -> ServiceResult<[u8; 32]> {
+    let encoded = root
+        .encode()
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&encoded);
+    Ok(*hasher.finalize().as_bytes())
+}
 
 /// Closed token-report request selected by CLI and MCP adapters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3283,8 +3298,8 @@ fn validated_indexed_file_key(store: &AtlasStore, file: &Path) -> ServiceResult<
 }
 
 /// Load the project root recorded by the latest scan.
-fn indexed_project_root(store: &AtlasStore) -> ServiceResult<PathBuf> {
-    store.project_root()?.map(PathBuf::from).ok_or_else(|| {
+fn indexed_project_root(store: &AtlasStore) -> ServiceResult<CanonicalProjectRoot> {
+    store.project_root_identity()?.ok_or_else(|| {
         ServiceError::InvalidInput(
             "indexed project root is missing; run projectatlas scan <project-root> first"
                 .to_string(),
@@ -3294,7 +3309,9 @@ fn indexed_project_root(store: &AtlasStore) -> ServiceResult<PathBuf> {
 
 /// Build an absolute native path for a previously validated indexed file key.
 fn indexed_native_path(store: &AtlasStore, file_key: &str) -> ServiceResult<PathBuf> {
-    Ok(indexed_project_root(store)?.join(repo_path_to_native(file_key)))
+    Ok(indexed_project_root(store)?
+        .as_path()
+        .join(repo_path_to_native(file_key)))
 }
 
 /// Read source text for a selected file.
@@ -4057,6 +4074,34 @@ mod tests {
     use projectatlas_core::{Node, Purpose, PurposeSource, PurposeStatus, normalized_parent};
     use std::error::Error;
     use std::io;
+
+    #[cfg(unix)]
+    #[test]
+    fn file_summary_reads_non_utf8_native_root_without_display_reconstruction()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b"s", b"r", b"c", 0x80]));
+        fs::create_dir(&root)?;
+        fs::write(root.join("entry.rs"), "pub fn native_root() {}\n")?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        let node = test_node("entry.rs", "native-root-hash");
+        store.replace_scan(std::slice::from_ref(&node))?;
+        index_test_file_texts(&mut store, &root, std::slice::from_ref(&node))?;
+
+        let report = build_file_summary(&store, Path::new("entry.rs"), 10)?;
+        require_eq(
+            &report.source_status,
+            &SOURCE_STATUS_LIVE.to_string(),
+            "non-UTF-8 root source status",
+        )?;
+        require_eq(&report.line_count, &1, "non-UTF-8 root source line count")?;
+        Ok(())
+    }
 
     #[test]
     fn token_report_service_selects_typed_reports_and_requires_a_project_binding()
