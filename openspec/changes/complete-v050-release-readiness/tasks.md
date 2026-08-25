@@ -105,10 +105,10 @@
 
 ## 16. Rust 1.98.0 deterministic upgrade (#482)
 
-- [ ] 16.1 Record Rust 1.93.1 as the historical reproduction baseline, update the sole repository toolchain declaration to exact stable Rust 1.98.0, and define the explicit stable-upgrade policy: evaluate each intended stable release in an issue/PR, pin a numeric version only after all gates pass, and never use floating stable in CI or release inputs.
-- [ ] 16.2 Route local developer validation, CI, optional-parser construction, packaging, installer-developer paths, and release workflows through the repository declaration; add one early preflight that reports expected and actual rustc, cargo, clippy, and rustfmt identity and fails before expensive or mutating jobs, with no duplicated version literals or host-global default change.
-- [ ] 16.3 Reconcile Rust 1.98.0-owned lock/build output and pass format, workspace/all-target/all-feature check, pedantic Clippy, unit/integration/doc/E2E, cargo-deny, feature/target, parser-pack, packaging, and installer smoke gates on Linux, Windows, macOS x64, and macOS Apple Silicon; cover missing Rustup, Homebrew/system Cargo precedence, explicit override, 1.93.1, and other mismatches.
-- [ ] 16.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 16.1 Record Rust 1.93.1 as the historical reproduction baseline, update the sole repository toolchain declaration to exact stable Rust 1.98.0, and define the explicit stable-upgrade policy: evaluate each intended stable release in an issue/PR, pin a numeric version only after all gates pass, and never use floating stable in CI or release inputs.
+- [x] 16.2 Route local developer validation, CI, optional-parser construction, packaging, installer-developer paths, and release workflows through the repository declaration; add one early preflight that reports expected and actual rustc, cargo, clippy, and rustfmt identity and fails before expensive or mutating jobs, with no duplicated version literals or host-global default change.
+- [x] 16.3 Reconcile Rust 1.98.0-owned lock/build output and pass format, workspace/all-target/all-feature check, pedantic Clippy, unit/integration/doc/E2E, cargo-deny, feature/target, parser-pack, packaging, and installer smoke gates on Linux, Windows, macOS x64, and macOS Apple Silicon; cover missing Rustup, Homebrew/system Cargo precedence, explicit override, 1.93.1, and other mismatches.
+- [x] 16.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 17. Truthful macOS Apple Silicon optional parser (#483)
 

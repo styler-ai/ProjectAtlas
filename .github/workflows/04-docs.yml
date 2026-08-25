@@ -25,10 +25,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup Rust
+      - name: Rust toolchain preflight
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          python3 .github/scripts/verify-rust-toolchain.py --install
 
       - name: Repository source policy lints
         timeout-minutes: 2

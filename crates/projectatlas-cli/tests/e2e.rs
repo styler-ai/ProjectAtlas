@@ -123,6 +123,7 @@ const OPENSPEC_DIR_NAME: &str = "openspec";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
+const DOCS_WORKFLOW_FILE_NAME: &str = "04-docs.yml";
 const AUTO_RELEASE_WORKFLOW_FILE_NAME: &str = "03-auto-release.yml";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled";
@@ -7403,7 +7404,7 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         workspace_root
             .join(".github")
             .join("workflows")
-            .join("04-docs.yml"),
+            .join(DOCS_WORKFLOW_FILE_NAME),
     )?;
     let auto_release_workflow = fs::read_to_string(
         workspace_root
@@ -8553,6 +8554,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
     let ci = fs::read_to_string(workflows.join("ci.yml"))?;
+    let docs_workflow = fs::read_to_string(workflows.join(DOCS_WORKFLOW_FILE_NAME))?;
+    let optional_parser_workflow = fs::read_to_string(workflows.join("optional-parser-pack.yml"))?;
     let release = fs::read_to_string(workflows.join("release.yml"))?;
     let issueops_workflow = fs::read_to_string(workflows.join("issueops.yml"))?;
     let hook = fs::read_to_string(
@@ -8573,6 +8576,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let workflow_docs =
         fs::read_to_string(workspace_root.join("docs").join(WORKFLOW_DOC_FILE_NAME))?;
     let toolchain = fs::read_to_string(workspace_root.join("rust-toolchain.toml"))?;
+    let rust_toolchain_preflight =
+        fs::read_to_string(github.join("scripts").join("verify-rust-toolchain.py"))?;
     let issue_map = fs::read_to_string(
         workspace_root
             .join(OPENSPEC_DIR_NAME)
@@ -8638,6 +8643,60 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
                 "IssueOps is missing lean checklist behavior {required:?}"
+            ))
+            .into());
+        }
+    }
+    let rust_preflight_command = "python3 .github/scripts/verify-rust-toolchain.py --install";
+    for (name, workflow) in [
+        ("CI", ci.as_str()),
+        ("Docs", docs_workflow.as_str()),
+        ("optional-parser-pack", optional_parser_workflow.as_str()),
+        ("release", release.as_str()),
+    ] {
+        if !workflow.contains(rust_preflight_command) {
+            return Err(io::Error::other(format!(
+                "{name} workflow omitted the shared Rust toolchain preflight"
+            ))
+            .into());
+        }
+        let preflight = workflow
+            .find("- name: Rust toolchain preflight")
+            .ok_or_else(|| io::Error::other(format!("{name} omitted Rust preflight step")))?;
+        let first_cargo = workflow
+            .find("cargo ")
+            .ok_or_else(|| io::Error::other(format!("{name} omitted Rust command")))?;
+        if preflight > first_cargo {
+            return Err(
+                io::Error::other(format!("{name} Rust preflight must precede Rust work")).into(),
+            );
+        }
+        if workflow.contains("RUSTUP_TOOLCHAIN")
+            || workflow.contains("rustup default")
+            || workflow.contains("rustup toolchain install stable")
+        {
+            return Err(io::Error::other(format!(
+                "{name} retains a duplicated or floating Rust toolchain selection"
+            ))
+            .into());
+        }
+    }
+    if !hook.contains("python3 .github/scripts/verify-rust-toolchain.py") {
+        return Err(io::Error::other(
+            "local pre-push validation omitted the shared Rust toolchain preflight",
+        )
+        .into());
+    }
+    for required in [
+        "read_declared_channel",
+        "RUSTUP_TOOLCHAIN override",
+        "rustup is missing from PATH",
+        "Rust toolchain preflight passed",
+        "Rust toolchain preflight self-test passed",
+    ] {
+        if !rust_toolchain_preflight.contains(required) {
+            return Err(io::Error::other(format!(
+                "Rust toolchain preflight is missing boundary {required:?}"
             ))
             .into());
         }
@@ -9242,8 +9301,23 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
-    if !toolchain.contains("channel = \"1.93.1\"") {
-        return Err(io::Error::other("Rust toolchain must be repository-owned and pinned").into());
+    let declared_channel = toolchain
+        .lines()
+        .find(|line| line.trim_start().starts_with("channel ="))
+        .and_then(|line| line.split('"').nth(1));
+    let declared_parts = declared_channel.map(|channel| channel.split('.').collect::<Vec<_>>());
+    if toolchain.matches("channel =").count() != 1
+        || declared_parts.as_ref().is_none_or(|parts| {
+            parts.len() != 3
+                || parts
+                    .iter()
+                    .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+    {
+        return Err(io::Error::other(
+            "Rust toolchain must be repository-owned and pinned exactly once",
+        )
+        .into());
     }
 
     let rejected_terms = [
@@ -24938,10 +25012,7 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
             if child.try_wait()?.is_none() {
                 child.kill()?;
             }
-            match child.wait() {
-                Ok(_status) => {}
-                Err(error) => return Err(error.into()),
-            }
+            let _status = child.wait()?;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "projectatlas watch did not exit after file change",
@@ -33165,10 +33236,7 @@ fn run_mcp_stdio_with_env(
             if child.try_wait()?.is_none() {
                 child.kill()?;
             }
-            match child.wait() {
-                Ok(_status) => {}
-                Err(error) => return Err(error.into()),
-            }
+            let _status = child.wait()?;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "projectatlas mcp did not exit after stdin closed",

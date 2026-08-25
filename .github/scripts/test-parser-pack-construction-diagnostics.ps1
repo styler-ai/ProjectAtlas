@@ -150,6 +150,8 @@ foreach ($name in @(
     "Invoke-Checked",
     "Write-ConstructionStatus",
     "Assert-CargoConstructionEnvironment",
+    "Get-CargoCacheTag",
+    "Write-CargoCacheTag",
     "Assert-ReusableCargoTarget",
     "Initialize-ReusableCargoTarget"
 )) {
@@ -282,7 +284,10 @@ try {
         -MaximumBytes 1024
     Require `
         ($miss.disposition -eq "miss" -and
-            [System.IO.Directory]::Exists($cacheBuild)) `
+            [System.IO.Directory]::Exists($cacheBuild) -and
+            [System.IO.File]::ReadAllText(
+                [System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG")
+            ) -ceq (Get-CargoCacheTag)) `
         "Absent reusable Cargo target did not produce a clean miss."
     $cacheDependency = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($cacheBuild, "release", "deps")
@@ -298,9 +303,44 @@ try {
         -MaximumBytes 1024
     Require `
         ($hit.disposition -eq "hit" -and
-            $hit.entries -eq 3 -and
-            $hit.bytes -eq 10) `
+            $hit.entries -eq 4 -and
+            $hit.bytes -eq (
+                10 + [System.Text.Encoding]::UTF8.GetByteCount((Get-CargoCacheTag))
+            )) `
         "Valid reusable Cargo target was not admitted with exact metrics."
+
+    Remove-Item `
+        -LiteralPath ([System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG")) `
+        -Force
+    $missingTagRejected = Initialize-ReusableCargoTarget `
+        -OutputDirectory $cacheOutput `
+        -BuildDirectory $cacheBuild `
+        -MaximumEntries 8 `
+        -MaximumBytes 1024
+    Require `
+        ($missingTagRejected.disposition -eq "rejected" -and
+            [System.IO.File]::ReadAllText(
+                [System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG")
+            ) -ceq (Get-CargoCacheTag) -and
+            @(Get-ChildItem -LiteralPath $cacheBuild -Force).Count -eq 1) `
+        "Missing reusable Cargo cache tag was not quarantined and recreated."
+
+    [System.IO.File]::WriteAllText(
+        [System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG"),
+        "invalid cache tag"
+    )
+    $invalidTagRejected = Initialize-ReusableCargoTarget `
+        -OutputDirectory $cacheOutput `
+        -BuildDirectory $cacheBuild `
+        -MaximumEntries 8 `
+        -MaximumBytes 1024
+    Require `
+        ($invalidTagRejected.disposition -eq "rejected" -and
+            [System.IO.File]::ReadAllText(
+                [System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG")
+            ) -ceq (Get-CargoCacheTag) -and
+            @(Get-ChildItem -LiteralPath $cacheBuild -Force).Count -eq 1) `
+        "Invalid reusable Cargo cache tag was not quarantined and recreated."
 
     $fileRootOutput = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($testRoot, "cargo-cache-file-root")
@@ -323,6 +363,7 @@ try {
     $entryLimitBuild = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($entryLimitOutput, "build")
     ).FullName
+    Write-CargoCacheTag -BuildDirectory $entryLimitBuild
     [System.IO.File]::WriteAllText(
         [System.IO.Path]::Combine($entryLimitBuild, "first"),
         "1"
@@ -351,6 +392,7 @@ try {
     $byteLimitBuild = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($byteLimitOutput, "build")
     ).FullName
+    Write-CargoCacheTag -BuildDirectory $byteLimitBuild
     [System.IO.File]::WriteAllText(
         [System.IO.Path]::Combine($byteLimitBuild, "oversized"),
         "12"
@@ -375,6 +417,7 @@ try {
     $linkBuild = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($linkOutput, "build")
     ).FullName
+    Write-CargoCacheTag -BuildDirectory $linkBuild
     $linkTarget = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($testRoot, "cargo-cache-link-target")
     ).FullName
@@ -399,8 +442,11 @@ try {
         ($link.disposition -eq "rejected" -and
             $quarantines.Count -eq 1 -and
             [System.IO.Directory]::Exists($linkBuild) -and
-            @(Get-ChildItem -LiteralPath $linkBuild -Force).Count -eq 0) `
-        "Path-indirected reusable Cargo target did not fall back to an empty build."
+            @(Get-ChildItem -LiteralPath $linkBuild -Force).Count -eq 1 -and
+            [System.IO.File]::Exists(
+                [System.IO.Path]::Combine($linkBuild, "CACHEDIR.TAG")
+            )) `
+        "Path-indirected reusable Cargo target did not fall back to a tagged build."
 
     Require `
         ($workflowText.Contains("clean_construction:") -and

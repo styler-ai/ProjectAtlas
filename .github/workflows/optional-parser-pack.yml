@@ -28,9 +28,6 @@ concurrency:
   group: optional-parser-pack-${{ github.sha }}
   cancel-in-progress: false
 
-env:
-  RUSTUP_TOOLCHAIN: 1.93.1
-
 jobs:
   construct:
     if: >-
@@ -49,12 +46,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install pinned Rust toolchain
+      - name: Rust toolchain preflight
         shell: pwsh
         run: |
-          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup default $env:RUSTUP_TOOLCHAIN
+          python3 .github/scripts/verify-rust-toolchain.py --install
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Repository source policy lints
@@ -909,12 +906,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install pinned Rust toolchain
+      - name: Rust toolchain preflight
         shell: pwsh
         run: |
-          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup default $env:RUSTUP_TOOLCHAIN
+          python3 .github/scripts/verify-rust-toolchain.py --install
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Bind exact clean candidate identity

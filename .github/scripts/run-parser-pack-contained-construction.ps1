@@ -64,6 +64,23 @@ $constructionDiagnosticMaxBytes = 64 * 1024
 $reusableCargoTargetMaxEntries = 200000
 $reusableCargoTargetMaxBytes = [uint64](8GB)
 
+function Get-CargoCacheTag {
+    return "Signature: 8a477f597d28d172789f06886806bc55`n# This file is a cache directory tag created by cargo.`n# For information about cache directory tags see https://bford.info/cachedir/`n"
+}
+
+function Write-CargoCacheTag {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDirectory
+    )
+
+    [System.IO.File]::WriteAllText(
+        [System.IO.Path]::Combine($BuildDirectory, "CACHEDIR.TAG"),
+        (Get-CargoCacheTag),
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
 function Get-CanonicalDirectory {
     param(
         [Parameter(Mandatory = $true)]
@@ -136,6 +153,16 @@ function Assert-ReusableCargoTarget {
         (($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
         throw "Reusable Cargo target root is not one direct non-reparse directory."
     }
+    $cacheTag = Get-Item `
+        -LiteralPath ([System.IO.Path]::Combine($root.FullName, "CACHEDIR.TAG")) `
+        -Force `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $cacheTag -or
+        $cacheTag.PSIsContainer -or
+        (($cacheTag.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
+        [System.IO.File]::ReadAllText($cacheTag.FullName) -cne (Get-CargoCacheTag)) {
+        throw "Reusable Cargo target is missing a valid Cargo cache tag."
+    }
     $prefix = "$($root.FullName.TrimEnd(
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
@@ -190,6 +217,7 @@ function Initialize-ReusableCargoTarget {
     $existing = Get-Item -LiteralPath $BuildDirectory -Force -ErrorAction SilentlyContinue
     if ($null -eq $existing) {
         [System.IO.Directory]::CreateDirectory($BuildDirectory) | Out-Null
+        Write-CargoCacheTag -BuildDirectory $BuildDirectory
         return [pscustomobject]@{
             disposition = "miss"
             entries = 0
@@ -229,6 +257,7 @@ function Initialize-ReusableCargoTarget {
         }
         Write-Warning "Reusable Cargo target rejected: $rejection"
         [System.IO.Directory]::CreateDirectory($BuildDirectory) | Out-Null
+        Write-CargoCacheTag -BuildDirectory $BuildDirectory
         return [pscustomobject]@{
             disposition = "rejected"
             entries = 0

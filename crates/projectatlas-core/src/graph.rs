@@ -164,7 +164,7 @@ impl TryFrom<&str> for ProjectInstanceId {
             });
         }
         let mut bytes = [0_u8; 16];
-        for (index, pair) in compact.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in compact.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = decode_hex(pair[0]).ok_or(GraphContractError::InvalidProjectInstanceId {
                 reason: "identifier contains a non-hexadecimal digit",
             })?;

@@ -29,7 +29,6 @@ permissions:
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
-  RUSTUP_TOOLCHAIN: "1.93.1"
 
 concurrency:
   group: projectatlas-release-${{ inputs.version }}
@@ -113,10 +112,10 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Rust
+      - name: Rust toolchain preflight
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
-          rustup default "$RUSTUP_TOOLCHAIN"
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          python3 .github/scripts/verify-rust-toolchain.py --install
 
       - name: Repository source policy lints
         timeout-minutes: 2
@@ -227,10 +226,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup Rust
+      - name: Rust toolchain preflight
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-          rustup default "$RUSTUP_TOOLCHAIN"
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          python3 .github/scripts/verify-rust-toolchain.py --install
 
       - name: Build
         run: cargo build --locked -p projectatlas-cli --release
@@ -280,11 +279,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup Rust
+      - name: Rust toolchain preflight
         shell: pwsh
         run: |
-          rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal
-          rustup default "$env:RUSTUP_TOOLCHAIN"
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python3 .github/scripts/verify-rust-toolchain.py --install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
         shell: pwsh
