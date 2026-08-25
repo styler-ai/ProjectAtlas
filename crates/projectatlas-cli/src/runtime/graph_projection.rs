@@ -319,12 +319,13 @@ pub(super) fn stage_full_repository_graph(
     )?;
     let candidates = resolution_registry_from_exports(&entity_projection, control)?;
     enforce_resolution_staging_budget(&entity_projection, &candidates)?;
+    let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
     let graph_work_bytes = symbols
         .retained_bytes
         .saturating_add(entity_projection.retained_bytes)
         .saturating_add(candidates.retained_bytes)
         .saturating_add(document_fact_map_retained_bytes(&document_facts))
-        .saturating_add(document_projection_retained_bytes(&document_facts));
+        .saturating_add(document_projection_bytes);
     if graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
         finish_projection_in_database_with_documents(
             root,
@@ -533,6 +534,7 @@ pub(super) fn stage_incremental_repository_graph(
         resolution_registry_from_exports(&entity_projection, control)?,
         control,
     )?;
+    let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
     enforce_incremental_projection_budget(
         root,
         &affected_paths,
@@ -541,7 +543,7 @@ pub(super) fn stage_incremental_repository_graph(
             .retained_bytes
             .saturating_add(candidates.retained_bytes)
             .saturating_add(document_fact_map_retained_bytes(&document_facts))
-            .saturating_add(document_projection_retained_bytes(&document_facts)),
+            .saturating_add(document_projection_bytes),
     )?;
     let staged = finish_projection_with_documents(
         project,
@@ -3586,22 +3588,35 @@ fn document_fact_map_retained_bytes(facts: &BTreeMap<String, Cow<'_, MarkdownFac
     })
 }
 
-/// Count generated document rows, reason maps, and duplicate-validation keys.
-fn document_projection_retained_bytes(facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>) -> u64 {
-    facts.values().fold(0_u64, |bytes, facts| {
-        facts
-            .link_candidates
-            .iter()
-            .fold(bytes, |bytes, candidate| {
-                bytes
-                    .saturating_add(DOCUMENT_PROJECTION_ROW_BYTES)
-                    .saturating_add(candidate.selector.len() as u64)
-                    .saturating_add(candidate.label.as_ref().map_or(0, String::len) as u64)
-                    .saturating_add(
-                        candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64
-                    )
-            })
-    })
+/// Count document projection state that can survive the per-candidate filters.
+///
+/// Same-file links without a fragment are discarded before resolution and never
+/// enter the emitted relation, occurrence, dependency, or reason state. Keep
+/// those candidates out of the preflight estimate so incremental admission and
+/// the post-projection aggregate use the same ownership boundary.
+fn document_projection_retained_bytes(
+    facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
+    control: &IndexWorkControl,
+) -> Result<u64, CliError> {
+    let mut retained_bytes = 0_u64;
+    let mut candidate_index = 0_usize;
+    for (document_path, facts) in facts {
+        for candidate in &facts.link_candidates {
+            check_graph_work(control, candidate_index)?;
+            candidate_index = candidate_index.saturating_add(1);
+            if normalize_document_target(document_path, &candidate.selector).is_ok_and(|target| {
+                target.path == document_path.as_str() && target.fragment.is_none()
+            }) {
+                continue;
+            }
+            retained_bytes = retained_bytes
+                .saturating_add(DOCUMENT_PROJECTION_ROW_BYTES)
+                .saturating_add(candidate.selector.len() as u64)
+                .saturating_add(candidate.label.as_ref().map_or(0, String::len) as u64)
+                .saturating_add(candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64);
+        }
+    }
+    Ok(retained_bytes)
 }
 
 /// One normalized repository-local document target and optional heading fragment.
@@ -4260,6 +4275,7 @@ mod tests {
     #[test]
     fn document_projection_memory_budget_includes_reason_validation_state()
     -> Result<(), Box<dyn Error>> {
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let facts: BTreeMap<String, Cow<'static, projectatlas_symbols::MarkdownFacts>> = (0..12)
             .map(|document| {
                 let source = (0..1_024)
@@ -4278,7 +4294,7 @@ mod tests {
             .sum::<usize>();
         require_eq(&candidate_count, &12_288, "document candidate fixture size")?;
         let fact_bytes = document_fact_map_retained_bytes(&facts);
-        let projection_bytes = document_projection_retained_bytes(&facts);
+        let projection_bytes = document_projection_retained_bytes(&facts, &control)?;
         require(
             projection_bytes >= u64::try_from(candidate_count)? * DOCUMENT_PROJECTION_ROW_BYTES,
             "generated document projection state was under-accounted",
@@ -4286,6 +4302,155 @@ mod tests {
         require(
             fact_bytes.saturating_add(projection_bytes) < 512 * 1_024 * 1_024,
             "bounded document projection fixture exceeded the in-memory envelope",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_projection_estimator_deadline_preserves_generation_and_allows_retry()
+    -> Result<(), Box<dyn Error>> {
+        const DOCUMENT_COUNT: usize = 513;
+        const CANDIDATES_PER_DOCUMENT: usize = 1_024;
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("estimator cancellation project identity is missing")?;
+        let publication_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let baseline_graph = function_graph("src/lib.rs", 1);
+        let baseline_packages = PackageIndex::from_graphs(std::slice::from_ref(&baseline_graph))?;
+        let baseline_entities = build_entity_projection(
+            project,
+            IndexGeneration::new(1),
+            &[],
+            std::slice::from_ref(&baseline_graph),
+            &baseline_packages,
+            true,
+            &publication_control,
+        )?;
+        let baseline_candidates =
+            resolution_registry_from_exports(&baseline_entities, &publication_control)?;
+        let baseline_staged = finish_projection(
+            project,
+            IndexGeneration::new(1),
+            RepositoryGraphMutation::Full,
+            std::slice::from_ref(&baseline_graph),
+            baseline_entities,
+            &baseline_candidates,
+            &publication_control,
+        )?;
+        let baseline_node = test_file_node("src/lib.rs", "rust");
+        {
+            let mut publication = store.begin_index_publication("estimator-cancellation")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(std::slice::from_ref(&baseline_node))?;
+            publication.finish_scan_replacement()?;
+            baseline_staged.apply(&mut publication, &publication_control)?;
+            publication.complete()?;
+        }
+        let publication_before = store
+            .index_publication()?
+            .ok_or("estimator cancellation baseline publication is missing")?;
+
+        let document_facts: BTreeMap<String, Cow<'_, projectatlas_symbols::MarkdownFacts>> = (0
+            ..DOCUMENT_COUNT)
+            .map(|document| {
+                let path = format!("content/source-{document:03}.md");
+                let file_name = path
+                    .rsplit_once('/')
+                    .map_or(path.as_str(), |(_parent, file_name)| file_name);
+                let source = (0..CANDIDATES_PER_DOCUMENT)
+                    .map(|index| format!("[self-{index:04}]({file_name})"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (
+                    path,
+                    Cow::Owned(projectatlas_symbols::extract_markdown_facts(&source)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let candidate_count = document_facts
+            .values()
+            .map(|facts| facts.link_candidates.len())
+            .sum::<usize>();
+        require_eq(
+            &candidate_count,
+            &(DOCUMENT_COUNT * CANDIDATES_PER_DOCUMENT),
+            "estimator cancellation candidate count",
+        )?;
+
+        let expired_control =
+            IndexWorkControl::with_deadline(IndexCancellation::new(), Instant::now());
+        let error = document_projection_retained_bytes(&document_facts, &expired_control)
+            .err()
+            .ok_or("expired estimator unexpectedly traversed all candidates")?;
+        require(
+            matches!(
+                error,
+                CliError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::SymbolParsing,
+                })
+            ),
+            "estimator deadline did not return its typed graph-work failure",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &Some(publication_before.clone()),
+            "estimator deadline changed the current generation",
+        )?;
+
+        let retry_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let retained_bytes = document_projection_retained_bytes(&document_facts, &retry_control)?;
+        require_eq(
+            &retained_bytes,
+            &0,
+            "same-file candidates entered the retained projection estimate",
+        )?;
+        let retry_graphs = document_facts
+            .iter()
+            .map(|(path, facts)| facts.symbol_graph(path, Some("markdown")))
+            .collect::<Vec<_>>();
+        let retry_nodes = document_facts
+            .keys()
+            .map(|path| test_file_node(path, "markdown"))
+            .collect::<Vec<_>>();
+        let retry_scan_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &retry_control)?;
+        let retry_packages = PackageIndex::from_graphs(&retry_graphs)?;
+        let retry_entities = build_entity_projection(
+            project,
+            IndexGeneration::new(2),
+            &retry_nodes,
+            &retry_graphs,
+            &retry_packages,
+            false,
+            &retry_control,
+        )?;
+        let retry_candidates = resolution_registry_from_exports(&retry_entities, &retry_control)?;
+        let retried_projection = finish_projection_with_documents(
+            project,
+            IndexGeneration::new(2),
+            RepositoryGraphMutation::Full,
+            &retry_graphs,
+            &root,
+            &retry_nodes,
+            &document_facts,
+            retry_entities,
+            &retry_candidates,
+            &retry_scan_policy,
+            &retry_control,
+        )?;
+        require(
+            retried_projection.relations.is_empty()
+                && retried_projection.document_unresolved_reasons.is_empty(),
+            "same-file retry emitted document projection rows",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &Some(publication_before),
+            "estimator retry changed the current generation without publication",
         )?;
         Ok(())
     }
@@ -4354,7 +4519,8 @@ mod tests {
             .retained_bytes
             .saturating_add(candidates.retained_bytes)
             .saturating_add(document_fact_map_retained_bytes(&projected_facts));
-        let document_projection_bytes = document_projection_retained_bytes(&projected_facts);
+        let document_projection_bytes =
+            document_projection_retained_bytes(&projected_facts, &control)?;
         require(
             pre_document_bytes < MAX_IN_MEMORY_GRAPH_WORK_BYTES,
             "pre-document incremental state already exceeded the staging budget",
@@ -7072,15 +7238,16 @@ mod tests {
 
     #[test]
     fn incremental_document_admission_uses_emitted_rows() -> Result<(), Box<dyn Error>> {
-        const DOCUMENT_COUNT: usize = 10;
+        const DISCARDED_DOCUMENT_COUNT: usize = 513;
+        const EMITTED_DOCUMENT_COUNT: usize = 10;
         const CANDIDATES_PER_DOCUMENT: usize = 1_024;
         let temp = tempfile::tempdir()?;
         let root = fs::canonicalize(temp.path())?;
         fs::create_dir_all(root.join("content"))?;
         let database = root.join("projectatlas.db");
         let mut store = AtlasStore::open_for_project(&database, &root)?;
-        let paths = (0..DOCUMENT_COUNT)
-            .map(|index| format!("content/links-{index:02}.md"))
+        let paths = (0..DISCARDED_DOCUMENT_COUNT)
+            .map(|index| format!("content/links-{index:03}.md"))
             .collect::<Vec<_>>();
         let mut nodes = paths
             .iter()
@@ -7140,7 +7307,12 @@ mod tests {
             "incremental admission test unexpectedly published a generation",
         )?;
 
-        for path in &paths {
+        let emitted_paths = paths
+            .iter()
+            .take(EMITTED_DOCUMENT_COUNT)
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in &emitted_paths {
             let unsupported_source = (0..CANDIDATES_PER_DOCUMENT)
                 .map(|index| format!("[external-{index:05}](target-{index:05}.md#invalid?)"))
                 .collect::<Vec<_>>()
@@ -7165,7 +7337,7 @@ mod tests {
             &root,
             IndexGeneration::new(0),
             &nodes,
-            &paths,
+            &emitted_paths,
             &scan_policy,
             &symbols,
             &control,
