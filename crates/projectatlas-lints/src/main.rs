@@ -3,7 +3,7 @@
 
 use proc_macro2::{TokenStream, TokenTree};
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
@@ -348,6 +348,7 @@ fn lint_repository_private_paths(root: &Path) -> Result<Vec<StringLiteralViolati
     }
     let rules = private_path_rules()?;
     let mut violations = Vec::new();
+    let mut missing_worktree_paths = BTreeSet::new();
     for raw_path in output
         .stdout
         .split(|byte| *byte == 0)
@@ -355,10 +356,20 @@ fn lint_repository_private_paths(root: &Path) -> Result<Vec<StringLiteralViolati
     {
         let relative_path = std::str::from_utf8(raw_path).map_err(LintError::NonUtf8GitPath)?;
         let path = root.join(relative_path);
-        let metadata = fs::symlink_metadata(&path).map_err(|source| LintError::ReadFile {
-            path: relative_path.to_string(),
-            source,
-        })?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                lint_committed_private_path(root, relative_path, &rules, &mut violations)?;
+                missing_worktree_paths.insert(relative_path.to_string());
+                continue;
+            }
+            Err(source) => {
+                return Err(LintError::ReadFile {
+                    path: relative_path.to_string(),
+                    source,
+                });
+            }
+        };
         let source = if metadata.file_type().is_symlink() {
             let target = fs::read_link(&path).map_err(|source| LintError::ReadFile {
                 path: relative_path.to_string(),
@@ -395,20 +406,33 @@ fn lint_repository_private_paths(root: &Path) -> Result<Vec<StringLiteralViolati
         .filter(|path| !path.is_empty())
     {
         let relative_path = std::str::from_utf8(raw_path).map_err(LintError::NonUtf8GitPath)?;
-        let committed = Command::new("git")
-            .args(["cat-file", "blob"])
-            .arg(format!("HEAD:{relative_path}"))
-            .current_dir(root)
-            .output()
-            .map_err(LintError::ListGitFiles)?;
-        let Ok(source) = String::from_utf8(committed.stdout) else {
-            continue;
-        };
-        if committed.status.success() {
-            violations.extend(lint_private_path_source(relative_path, &source, &rules));
+        if !missing_worktree_paths.contains(relative_path) {
+            lint_committed_private_path(root, relative_path, &rules, &mut violations)?;
         }
     }
     Ok(violations)
+}
+
+/// Lint the committed `HEAD` source for a path unavailable in the worktree.
+fn lint_committed_private_path(
+    root: &Path,
+    relative_path: &str,
+    rules: &[Regex],
+    violations: &mut Vec<StringLiteralViolation>,
+) -> Result<(), LintError> {
+    let committed = Command::new("git")
+        .args(["cat-file", "blob"])
+        .arg(format!("HEAD:{relative_path}"))
+        .current_dir(root)
+        .output()
+        .map_err(LintError::ListGitFiles)?;
+    let Ok(source) = String::from_utf8(committed.stdout) else {
+        return Ok(());
+    };
+    if committed.status.success() {
+        violations.extend(lint_private_path_source(relative_path, &source, rules));
+    }
+    Ok(())
 }
 
 /// Compile the fixed repository-private path rules.
@@ -1035,7 +1059,15 @@ mod tests {
                     .success(),
                 "temporary Git repository commit failed",
             )?;
-            fs::write(repo.join("private.txt"), "checkout = <project-root>\n")?;
+            require(
+                Command::new("git")
+                    .args(["update-index", "--skip-worktree", "private.txt"])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary skip-worktree setup failed",
+            )?;
+            fs::remove_file(repo.join("private.txt"))?;
             require(
                 Command::new("git")
                     .args(["rm", "--cached", "--quiet", "private-link"])
