@@ -891,6 +891,93 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  verify-unsupported-macos:
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.target == 'all' ||
+      inputs.target == 'x86_64-unknown-linux-gnu'
+    name: verify unsupported parser-pack ${{ matrix.label }}
+    needs: construct
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-x64
+            runner: macos-15-intel
+          - label: macos-arm64
+            runner: macos-14
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          python3 .github/scripts/verify-rust-toolchain.py --install
+
+      - name: Build native release verifier
+        shell: bash
+        run: cargo build --locked --release --bin optional_parser_pack_release
+
+      - name: Download supported Linux construction output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: parser-pack-x86_64-unknown-linux-gnu-construction
+          path: ${{ runner.temp }}/parser-pack-macos-download
+
+      - name: Prove unsupported refusal precedes archive and state access
+        shell: bash
+        run: |
+          set -euo pipefail
+          download="$RUNNER_TEMP/parser-pack-macos-download"
+          verifier="$GITHUB_WORKSPACE/target/release/optional_parser_pack_release"
+          archive="$download/projectatlas-broad-parser-x86_64-unknown-linux-gnu.tar.zst"
+          output="$RUNNER_TEMP/parser-pack-macos-output"
+          temp="$RUNNER_TEMP/parser-pack-macos-temp"
+          home="$RUNNER_TEMP/parser-pack-macos-home"
+          logs="$RUNNER_TEMP/parser-pack-macos-logs"
+          context="$RUNNER_TEMP/parser-pack-macos-runner-context.json"
+          mkdir -p "$output" "$temp" "$home" "$logs"
+          printf '%s\n' '{"fresh_host":"verified","payload_state":"sentinel"}' > "$context"
+          archive_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          context_sha256="$(shasum -a 256 "$context" | awk '{print $1}')"
+
+          set +e
+          HOME="$home" TMPDIR="$temp" "$verifier" verify \
+            "$archive" "$context" "$output/platform-proof.json" \
+            >"$logs/stdout" 2>"$logs/stderr"
+          status=$?
+          set -e
+          if [[ "$status" -eq 0 ]]; then
+            echo "unsupported macOS verifier unexpectedly succeeded" >&2
+            exit 1
+          fi
+          if ! grep -q 'unsupported_containment' "$logs/stderr"; then
+            echo "unsupported macOS verifier did not return typed containment refusal" >&2
+            cat "$logs/stderr" >&2
+            exit 1
+          fi
+          if [[ -e "$output/platform-proof.json" ]] || find "$output" -mindepth 1 -print -quit | grep -q .; then
+            echo "unsupported macOS verifier created proof output" >&2
+            exit 1
+          fi
+          if find "$temp" -mindepth 1 -print -quit | grep -q . ||
+             find "$home" -mindepth 1 -print -quit | grep -q .; then
+            echo "unsupported macOS verifier created temporary or home payload state" >&2
+            exit 1
+          fi
+          if [[ "$(shasum -a 256 "$archive" | awk '{print $1}')" != "$archive_sha256" ||
+                "$(shasum -a 256 "$context" | awk '{print $1}')" != "$context_sha256" ]]; then
+            echo "unsupported macOS verifier changed archive or runner context" >&2
+            exit 1
+          fi
+
   runtime-e2e:
     name: normal runtime lifecycle ${{ matrix.target }}
     needs: [construct, verify]
@@ -1182,7 +1269,7 @@ jobs:
 
   aggregate:
     name: aggregate exact supported-platform proof
-    needs: [verify, runtime-e2e]
+    needs: [verify, verify-unsupported-macos, runtime-e2e]
     if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'
     runs-on: ubuntu-24.04
     timeout-minutes: 15

@@ -1821,6 +1821,95 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
     fs::create_dir(&repo)?;
     fs::create_dir(&home)?;
 
+    let release_root = temp.path().join("release-verifier");
+    fs::create_dir(&release_root)?;
+    for (label, archive, context, proof) in [
+        (
+            "missing archive and context",
+            release_root.join("missing/archive.tar.zst"),
+            release_root.join("missing/runner-context.json"),
+            release_root.join("missing/output/platform-proof.json"),
+        ),
+        (
+            "invalid archive and context",
+            release_root.join("invalid/archive.tar.zst"),
+            release_root.join("invalid/runner-context.json"),
+            release_root.join("invalid/output/platform-proof.json"),
+        ),
+        (
+            "unreadable archive and context",
+            release_root.join("unreadable/archive.tar.zst"),
+            release_root.join("unreadable/runner-context.json"),
+            release_root.join("unreadable/output/platform-proof.json"),
+        ),
+    ] {
+        let case_root = archive
+            .parent()
+            .ok_or_else(|| io::Error::other("release verifier case has no parent"))?;
+        fs::create_dir_all(case_root)?;
+        let temp_root = case_root.join("temp");
+        let home_root = case_root.join("home");
+        fs::create_dir(&temp_root)?;
+        fs::create_dir(&home_root)?;
+        match label {
+            "invalid archive and context" => {
+                fs::write(&archive, b"not a parser-pack archive")?;
+                fs::write(&context, b"not runner context")?;
+                fs::create_dir(
+                    proof
+                        .parent()
+                        .ok_or_else(|| io::Error::other("invalid release proof has no parent"))?,
+                )?;
+            }
+            "unreadable archive and context" => {
+                fs::create_dir(&archive)?;
+                fs::create_dir(&context)?;
+            }
+            _ => {}
+        }
+        let output = Command::cargo_bin("optional_parser_pack_release")?
+            .current_dir(&release_root)
+            .env("HOME", &home_root)
+            .env("TMPDIR", &temp_root)
+            .args([
+                OsStr::new("verify"),
+                archive.as_os_str(),
+                context.as_os_str(),
+                proof.as_os_str(),
+            ])
+            .output()?;
+        if output.status.success()
+            || !String::from_utf8_lossy(&output.stderr).contains("unsupported_containment")
+        {
+            return Err(io::Error::other(format!(
+                "macOS release verifier {label} did not refuse typed unsupported containment: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if proof.exists()
+            || fs::read_dir(&temp_root)?.next().is_some()
+            || fs::read_dir(&home_root)?.next().is_some()
+        {
+            return Err(io::Error::other(format!(
+                "macOS release verifier {label} touched proof, temporary, or payload state"
+            ))
+            .into());
+        }
+        if archive.is_file() && fs::read(&archive)?.as_slice() != b"not a parser-pack archive" {
+            return Err(io::Error::other(format!(
+                "macOS release verifier {label} changed the invalid archive"
+            ))
+            .into());
+        }
+        if context.is_file() && fs::read(&context)?.as_slice() != b"not runner context" {
+            return Err(io::Error::other(format!(
+                "macOS release verifier {label} changed runner context"
+            ))
+            .into());
+        }
+    }
+
     let commands = [
         (
             "verify",
@@ -1950,6 +2039,78 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
             .into());
         }
     }
+
+    let host_state = temp.path().join("builtin-host-state");
+    fs::create_dir_all(&host_state)?;
+    let _init = projectatlas_json(&repo, &host_state, &[OsStr::new("init")])?;
+    let files = projectatlas_json(
+        &repo,
+        &host_state,
+        &[OsStr::new("files"), OsStr::new("main")],
+    )?;
+    if !files.to_string().contains("src/main.rs") {
+        return Err(
+            io::Error::other("macOS built-in parser navigation omitted src/main.rs").into(),
+        );
+    }
+    let summary = projectatlas_json(
+        &repo,
+        &host_state,
+        &[OsStr::new("summary"), OsStr::new("src/main.rs")],
+    )?;
+    require_json_contains(&summary, &["content_summary"], "untouched")?;
+    let settings = projectatlas_json(&repo, &host_state, &[OsStr::new("settings")])?;
+    let lifecycle = settings
+        .pointer("/optional_parser_pack/lifecycle")
+        .ok_or_else(|| io::Error::other("macOS settings omitted parser-pack lifecycle"))?;
+    if lifecycle
+        .pointer("/capability/mode")
+        .and_then(Value::as_str)
+        != Some("built_in_only")
+        || lifecycle.get("platform").is_some()
+    {
+        return Err(
+            io::Error::other("macOS settings overstated optional parser-pack support").into(),
+        );
+    }
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let mut mcp = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_result = (|| -> Result<(), Box<dyn Error>> {
+        let mcp_settings_text = mcp.call_tool("atlas_settings", &json!({}))?;
+        let mcp_settings: Value = toon_format::decode_default(&mcp_settings_text)?;
+        let mcp_lifecycle = mcp_settings
+            .pointer("/settings/optional_parser_pack/lifecycle")
+            .ok_or_else(|| io::Error::other("macOS MCP settings omitted parser-pack lifecycle"))?;
+        if mcp_lifecycle
+            .pointer("/capability/mode")
+            .and_then(Value::as_str)
+            != Some("built_in_only")
+            || mcp_lifecycle.pointer("/platform").is_some()
+            || mcp_lifecycle.pointer("/supported").and_then(Value::as_bool) != Some(false)
+        {
+            return Err(io::Error::other(format!(
+                "macOS MCP settings overstated optional parser-pack support: {mcp_settings}"
+            ))
+            .into());
+        }
+        let mcp_summary = mcp.call_tool(
+            "atlas_file_summary",
+            &json!({
+                "project_path": repo.to_string_lossy(),
+                "file": "src/main.rs",
+                "compact": true
+            }),
+        )?;
+        if !mcp_summary.contains("file_summary:") || !mcp_summary.contains("untouched") {
+            return Err(io::Error::other(format!(
+                "macOS MCP lost built-in parser summary evidence: {mcp_summary}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(mcp_result, || mcp.shutdown())?;
     Ok(())
 }
 

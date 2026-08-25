@@ -6,7 +6,7 @@
     any(target_os = "linux", target_os = "windows")
 ))]
 
-use projectatlas_core::optional_parser_pack::PackPlatform;
+use projectatlas_core::optional_parser_pack::{OptionalParserCapability, PackPlatform};
 use projectatlas_core::symbols::ParserKind;
 use projectatlas_db::{AtlasStore, verify_project_database};
 use serde::Deserialize;
@@ -1639,14 +1639,10 @@ fn is_worker_name(name: &str) -> bool {
 }
 
 /// Return the accepted optional-pack platform for this compiled test.
-const fn host_pack_platform() -> PackPlatform {
-    #[cfg(target_os = "linux")]
-    {
-        PackPlatform::LinuxX86_64
-    }
-    #[cfg(target_os = "windows")]
-    {
-        PackPlatform::WindowsX86_64
+fn host_pack_platform() -> PackPlatform {
+    match OptionalParserCapability::current().pack_platform() {
+        Some(platform) => platform,
+        None => std::process::exit(1),
     }
 }
 

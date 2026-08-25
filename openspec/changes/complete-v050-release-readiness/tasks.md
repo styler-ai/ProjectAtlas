@@ -112,10 +112,10 @@
 
 ## 17. Truthful macOS Apple Silicon optional parser (#483)
 
-- [ ] 17.1 Consolidate containment, platform tuple, parser-pack, installer, lifecycle, supervisor, runtime/MCP capability, built-in fallback, feature gating, and tests behind one closed typed `PackPlatform`/capability authority with exhaustive matching and no provider framework.
-- [ ] 17.2 Define macOS Apple Silicon optional parsing as typed unavailable for v0.5.0; fail install, update, verify, selection, and worker startup before mutation, expose documented built-in-parser fallback, and make no unsupported containment or pack claim.
-- [ ] 17.3 Cover capability truth, pre-mutation refusal, built-in parsing/navigation, stale and wrong packs, supported-platform install/update/startup/parsing, resource limits, cancellation, crash, cleanup, and Linux/Windows/unsupported-tuple compatibility behavior.
-- [ ] 17.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 17.1 Consolidate containment, platform tuple, parser-pack, installer, lifecycle, supervisor, runtime/MCP capability, built-in fallback, feature gating, and tests behind one closed typed `PackPlatform`/capability authority with exhaustive matching and no provider framework.
+- [x] 17.2 Define macOS Apple Silicon optional parsing as typed unavailable for v0.5.0; fail install, update, verify, selection, and worker startup before mutation, expose documented built-in-parser fallback, and make no unsupported containment or pack claim.
+- [x] 17.3 Cover capability truth, pre-mutation refusal, built-in parsing/navigation, stale and wrong packs, supported-platform install/update/startup/parsing, resource limits, cancellation, crash, cleanup, and Linux/Windows/unsupported-tuple compatibility behavior.
+- [x] 17.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 18. Native non-UTF-8 worktree identity (#484)
 

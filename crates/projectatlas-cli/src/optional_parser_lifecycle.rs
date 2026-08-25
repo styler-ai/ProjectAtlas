@@ -7,8 +7,9 @@ use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_ID, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES,
     OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES, OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES,
     OPTIONAL_PARSER_PACK_MAX_FILE_BYTES, OPTIONAL_PARSER_PACK_MAX_FILE_ENTRIES,
-    OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION, OptionalParserPackArtifactManifest,
-    OptionalParserPackManifest, OptionalParserPackManifestError, PackPlatform, PackRelativePath,
+    OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION, OptionalParserCapability,
+    OptionalParserPackArtifactManifest, OptionalParserPackManifest,
+    OptionalParserPackManifestError, PackPlatform, PackRelativePath,
 };
 use projectatlas_core::optional_parser_protocol::{ParserArtifactIdentity, ParserContentDigest};
 use serde::{Deserialize, Serialize};
@@ -237,6 +238,8 @@ pub struct OptionalParserPackLifecycleReport {
     pub pack_id: &'static str,
     /// Whether the current host has an accepted containment adapter.
     pub supported: bool,
+    /// Closed host capability, including built-in-only fallback on unsupported tuples.
+    pub capability: OptionalParserCapability,
     /// Accepted target triple for this host, when supported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<&'static str>,
@@ -335,8 +338,8 @@ pub struct OptionalParserPackLifecycle {
     project_root: PathBuf,
     /// User-owned root containing versioned immutable slots.
     storage_root: OnceLock<Option<PathBuf>>,
-    /// Accepted containment target for the current host.
-    platform: Option<PackPlatform>,
+    /// Closed host capability retained for every lifecycle report.
+    capability: OptionalParserCapability,
     /// Test-only failure seam proving admission precedes lifecycle mutation.
     #[cfg(test)]
     admission_failure: Option<fn(&Path) -> ParserSupervisorError>,
@@ -489,10 +492,11 @@ impl OptionalParserPackLifecycle {
         {
             return Err(OptionalParserPackLifecycleError::StorageRootUnavailable);
         }
+        let capability = OptionalParserCapability::current();
         Ok(Self {
             project_root: project_root.into(),
             storage_root: deferred_storage_root,
-            platform: host_pack_platform(),
+            capability,
             #[cfg(test)]
             admission_failure: None,
             #[cfg(test)]
@@ -651,7 +655,7 @@ impl OptionalParserPackLifecycle {
     pub fn remove(
         &self,
     ) -> Result<OptionalParserPackLifecycleReport, OptionalParserPackLifecycleError> {
-        let acquire_pack_lease = if self.platform.is_none() {
+        let acquire_pack_lease = if self.capability.pack_platform().is_none() {
             let storage_root = self.storage_root()?;
             match direct_directory_state(storage_root)? {
                 DirectDirectoryState::Missing => false,
@@ -755,11 +759,15 @@ impl OptionalParserPackLifecycle {
 
     /// Refuse unsupported hosts before callers access archives, state, or storage.
     fn require_supported(&self) -> Result<PackPlatform, OptionalParserPackLifecycleError> {
-        self.platform
-            .ok_or(OptionalParserPackLifecycleError::UnsupportedContainment {
-                os: env::consts::OS,
-                architecture: env::consts::ARCH,
-            })
+        match self.capability {
+            OptionalParserCapability::Pack { platform } => Ok(platform),
+            OptionalParserCapability::BuiltInOnly => {
+                Err(OptionalParserPackLifecycleError::UnsupportedContainment {
+                    os: env::consts::OS,
+                    architecture: env::consts::ARCH,
+                })
+            }
+        }
     }
 
     /// Install after the unsupported-host guard has already passed.
@@ -974,7 +982,7 @@ impl OptionalParserPackLifecycle {
         &self,
         slot: &InstalledSlotPath,
     ) -> Result<bool, OptionalParserPackLifecycleError> {
-        if self.platform == Some(PackPlatform::WindowsX86_64) {
+        if self.capability.pack_platform() == Some(PackPlatform::WindowsX86_64) {
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             {
                 return Self::remove_windows_slot(slot);
@@ -1071,7 +1079,7 @@ impl OptionalParserPackLifecycle {
             OptionalParserPackState::Enabled
         } else if installed_slots > 0 {
             OptionalParserPackState::InstalledDisabled
-        } else if self.platform.is_none() {
+        } else if self.capability.pack_platform().is_none() {
             OptionalParserPackState::UnsupportedContainment
         } else {
             OptionalParserPackState::Absent
@@ -1080,8 +1088,9 @@ impl OptionalParserPackLifecycle {
             operation,
             state,
             pack_id: OPTIONAL_PARSER_PACK_ID,
-            supported: self.platform.is_some(),
-            platform: self.platform.map(PackPlatform::as_str),
+            supported: self.capability.pack_platform().is_some(),
+            capability: self.capability,
+            platform: self.capability.pack_platform().map(PackPlatform::as_str),
             installed_slots,
             installed_slots_truncated,
             selected,
@@ -1346,10 +1355,13 @@ impl OptionalParserPackLifecycle {
         storage_root: PathBuf,
         platform: Option<PackPlatform>,
     ) -> Self {
+        let capability = platform.map_or(OptionalParserCapability::BuiltInOnly, |platform| {
+            OptionalParserCapability::Pack { platform }
+        });
         Self {
             project_root,
             storage_root: OnceLock::from(Some(storage_root)),
-            platform,
+            capability,
             admission_failure: None,
             selection_publication_failure: false,
         }
@@ -3248,12 +3260,9 @@ fn default_storage_root() -> Result<PathBuf, OptionalParserPackLifecycleError> {
 }
 
 /// Current accepted optional-pack target, if any.
+#[cfg(test)]
 fn host_pack_platform() -> Option<PackPlatform> {
-    match (env::consts::OS, env::consts::ARCH) {
-        ("linux", "x86_64") => Some(PackPlatform::LinuxX86_64),
-        ("windows", "x86_64") => Some(PackPlatform::WindowsX86_64),
-        _ => None,
-    }
+    OptionalParserCapability::current().pack_platform()
 }
 
 /// Canonical lowercase hexadecimal without another dependency.
@@ -3708,7 +3717,7 @@ mod tests {
             lifecycle.storage_root.get().is_none(),
             "public constructor eagerly resolved the user storage root",
         )?;
-        lifecycle.platform = None;
+        lifecycle.capability = OptionalParserCapability::BuiltInOnly;
         let archive = root.path().join("missing.tar.zst");
         let error = require_lifecycle_error(
             lifecycle.verify(&archive),
