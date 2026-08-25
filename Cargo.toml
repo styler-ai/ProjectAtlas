@@ -110,7 +110,7 @@ syn = { version = "2.0", features = ["full", "visit"] }
 tar = "=0.4.46"
 tempfile = "3.14"
 thiserror = "2.0"
-tiktoken = "3.5.1"
+tiktoken = "4.1.2"
 tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
 toml = "0.8"
 toml_edit = "0.22"
