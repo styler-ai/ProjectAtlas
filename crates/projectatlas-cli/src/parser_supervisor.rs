@@ -72,7 +72,7 @@ const SUPERVISOR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Absolute deadline shared by both fixtures for one artifact grammar admission.
 const ARTIFACT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Aggregate ceiling for one complete lifecycle/release artifact admission.
-const ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT: Duration = Duration::from_mins(20);
 /// Maximum interval without meaningful worker progress during artifact admission.
 const ARTIFACT_ADMISSION_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Test-only launch allowance for hostile fixtures that do not stall admission.
@@ -5846,7 +5846,7 @@ mod tests {
         assert_eq!(ARTIFACT_ADMISSION_TIMEOUT, Duration::from_secs(15));
         assert_eq!(
             ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT,
-            Duration::from_secs(20 * 60)
+            Duration::from_mins(20)
         );
         assert_eq!(
             ARTIFACT_ADMISSION_NO_PROGRESS_TIMEOUT,

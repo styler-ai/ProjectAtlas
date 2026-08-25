@@ -8,6 +8,7 @@ for git_variable in $(git rev-parse --local-env-vars); do
   unset "$git_variable"
 done
 
+python3 .github/scripts/verify-rust-toolchain.py
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 python3 docs/benchmarks/harness/mcp_composition.py --self-test
 python3 .github/scripts/verify-manual-benchmark-policy.py

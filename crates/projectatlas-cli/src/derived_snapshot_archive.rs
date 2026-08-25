@@ -553,7 +553,7 @@ fn decode_hex_array<const N: usize>(value: &str, label: &str) -> Result<[u8; N],
         )));
     }
     let mut decoded = [0_u8; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         decoded[index] = decode_nibble(pair[0])
             .and_then(|high| decode_nibble(pair[1]).map(|low| (high << 4) | low))
             .ok_or_else(|| CliError::InvalidInput(format!("{label} is not hexadecimal")))?;

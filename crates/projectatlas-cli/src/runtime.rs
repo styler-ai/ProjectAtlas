@@ -121,7 +121,7 @@ pub(crate) const MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES: u64 = 2 * 1_024 * 1_024;
 /// Stable serialized recommendation for host-owned purpose curator selection.
 pub(crate) const PURPOSE_CURATOR_RECOMMENDED_REASONING: &str = "lowest_reliable_host_supported";
 /// Default whole-operation deadline when no narrower parser limit is supplied.
-const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_mins(30);
 /// Maximum UTF-8 source bytes retained while one publication is staged.
 const MAX_STAGED_TEXT_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum aggregate retained string bytes across one in-memory publication batch.

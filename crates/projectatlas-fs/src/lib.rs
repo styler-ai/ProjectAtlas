@@ -43,7 +43,7 @@ const DEFAULT_SCAN_MAX_ENTRIES: u64 = 1_000_000;
 /// Default maximum source bytes hashed by one scan.
 const DEFAULT_SCAN_MAX_SOURCE_BYTES: u64 = 16 * 1_024 * 1_024 * 1_024;
 /// Default deadline for the compatibility repository scan.
-const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_mins(30);
 /// Exact-byte hash read buffer size.
 const HASH_BUFFER_BYTES: usize = 8_192;
 /// Maximum linked-worktree `.git` pointer bytes inspected for policy discovery.

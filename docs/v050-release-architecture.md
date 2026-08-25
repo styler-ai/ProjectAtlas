@@ -208,6 +208,11 @@ flowchart LR
 
 ## Rust 1.98.0 toolchain upgrade and verification
 
+Rust 1.93.1 is retained only as historical reproduction evidence. Each intended
+stable upgrade is evaluated in its own issue and pull request; the repository
+pins a numeric version only after the complete local and hosted gates pass.
+Floating `stable` and workflow-local numeric pins are not release inputs.
+
 ```mermaid
 flowchart LR
   History["Historical reproduction<br/>Rust 1.93.1"] -. evidence only .-> Decision["Issue/PR selects intended stable"]

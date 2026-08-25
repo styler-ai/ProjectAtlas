@@ -2108,10 +2108,9 @@ fn parse_windows_tombstone_name(name: &str) -> Option<(InstalledSlotCleanupState
     let (state, remainder) =
         if let Some(remainder) = name.strip_prefix(WINDOWS_REMOVING_TOMBSTONE_PREFIX) {
             (InstalledSlotCleanupState::ProfilePending, remainder)
-        } else if let Some(remainder) = name.strip_prefix(WINDOWS_CLEANED_TOMBSTONE_PREFIX) {
-            (InstalledSlotCleanupState::ProfileCleaned, remainder)
         } else {
-            return None;
+            let remainder = name.strip_prefix(WINDOWS_CLEANED_TOMBSTONE_PREFIX)?;
+            (InstalledSlotCleanupState::ProfileCleaned, remainder)
         };
     if remainder.len() <= WINDOWS_TOMBSTONE_ARTIFACT_PREFIX_HEX_CHARS {
         return None;

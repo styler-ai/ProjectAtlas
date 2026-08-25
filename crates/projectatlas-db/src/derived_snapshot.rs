@@ -1325,10 +1325,7 @@ fn required_index(
 
 /// Validate that a portable index addresses the supplied vector.
 fn require_vector_index(index: u32, length: usize, reason: &'static str) -> DbResult<()> {
-    if usize::try_from(index)
-        .ok()
-        .is_some_and(|index| index < length)
-    {
+    if usize::try_from(index).is_ok_and(|index| index < length) {
         Ok(())
     } else {
         invalid(reason)
