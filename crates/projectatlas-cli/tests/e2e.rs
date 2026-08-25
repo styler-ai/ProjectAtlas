@@ -23307,6 +23307,517 @@ fn cli_navigation_rows_propagate_nonempty_typed_graph_evidence() -> Result<(), B
 }
 
 #[test]
+fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    let relative_path = "src/page.ts";
+    let source = "import './LeakedIdentity\0one';\nimport './LeakedIdentity\0two';\nimport * as worker from './worker';\nexport function caller() { worker.run(); }\n";
+    fs::write(repo.join(relative_path), source)?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("worker.ts"),
+        "export function run() {}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["init", "--no-scan"])
+        .assert()
+        .success();
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    assert_identity_navigation_survives_invalid_siblings(&db, relative_path)?;
+    assert_identity_relation_surfaces(&repo, &db, relative_path)?;
+    fs::write(
+        repo.join(relative_path),
+        format!("{source}// watch refresh\n"),
+    )?;
+    run_watch_once(&repo, &db)?;
+    assert_identity_navigation_survives_invalid_siblings(&db, relative_path)?;
+    assert_identity_relation_surfaces(&repo, &db, relative_path)?;
+    let repaired_source =
+        "import * as worker from './worker';\nexport function caller() { worker.run(); }\n";
+    fs::write(repo.join(relative_path), repaired_source)?;
+    run_watch_once(&repo, &db)?;
+    assert_identity_navigation_survives_invalid_siblings(&db, relative_path)?;
+    assert_identity_relation_surfaces(&repo, &db, relative_path)?;
+    let repaired_health = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            relative_path,
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !repaired_health.status.success() {
+        return Err(io::Error::other(format!(
+            "repaired identity coverage failed: {}",
+            String::from_utf8_lossy(&repaired_health.stderr)
+        ))
+        .into());
+    }
+    let repaired_report: Value = serde_json::from_slice(&repaired_health.stdout)?;
+    let repaired_rejections_empty = repaired_report["rows"][0]
+        .get("identity_rejections")
+        .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty));
+    if repaired_report["rows"][0]["omitted"] != 0 || !repaired_rejections_empty {
+        return Err(io::Error::other(format!(
+            "repaired identity coverage retained rejection detail: {repaired_report}"
+        ))
+        .into());
+    }
+    fs::write(repo.join(relative_path), source)?;
+    run_watch_once(&repo, &db)?;
+    assert_identity_navigation_survives_invalid_siblings(&db, relative_path)?;
+    assert_identity_relation_surfaces(&repo, &db, relative_path)?;
+    let cli_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            relative_path,
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !cli_output.status.success() {
+        return Err(io::Error::other(format!(
+            "typed identity CLI coverage failed: {}",
+            String::from_utf8_lossy(&cli_output.stderr)
+        ))
+        .into());
+    }
+    let cli_report: Value = serde_json::from_slice(&cli_output.stdout)?;
+    let identity_rejections = cli_report["rows"][0]["identity_rejections"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("CLI coverage omitted identity rejection rows"))?;
+    let has_first_import_rejection = identity_rejections
+        .iter()
+        .any(|row| row["span"]["start_line"].as_u64() == Some(1));
+    let has_second_import_rejection = identity_rejections
+        .iter()
+        .any(|row| row["span"]["start_line"].as_u64() == Some(2));
+    if cli_report["returned"] != 1
+        || cli_report["rows"][0]["reason"] != "parser does not prove complete relationship coverage"
+        || cli_report["rows"][0]["omitted"] != 2
+        || identity_rejections.len() != 2
+        || !has_first_import_rejection
+        || !has_second_import_rejection
+        || !identity_rejections.iter().all(|row| {
+            row["path"] == relative_path
+                && row["field"] == "relation.target"
+                && row["reason"] == "control-characters"
+                && row["parser"] == "tree-sitter"
+                && matches!(row["span"]["start_line"].as_u64(), Some(1 | 2))
+        })
+    {
+        return Err(io::Error::other(format!(
+            "CLI coverage omitted typed identity rejection detail: {cli_report}"
+        ))
+        .into());
+    }
+    if String::from_utf8_lossy(&cli_output.stdout).contains("LeakedIdentity") {
+        return Err(
+            io::Error::other("CLI coverage serialized the rejected raw identity value").into(),
+        );
+    }
+
+    let toon_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("toon")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            relative_path,
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !toon_output.status.success() {
+        return Err(io::Error::other(format!(
+            "typed identity TOON coverage failed: {}",
+            String::from_utf8_lossy(&toon_output.stderr)
+        ))
+        .into());
+    }
+    let toon_text = String::from_utf8_lossy(&toon_output.stdout);
+    let toon_report: Value = toon_format::decode_default(&toon_text)?;
+    let toon_coverage = &toon_report["coverage"];
+    let toon_rejections = toon_coverage["rows"][0]["identity_rejections"]
+        .as_array()
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "CLI TOON omitted identity rejection rows: {toon_report}"
+            ))
+        })?;
+    if toon_coverage["rows"][0]["omitted"] != 2
+        || toon_rejections.len() != 2
+        || toon_rejections != identity_rejections
+    {
+        return Err(io::Error::other(format!(
+            "CLI TOON identity rejection detail did not match JSON: {toon_report}"
+        ))
+        .into());
+    }
+    if toon_text.contains("LeakedIdentity") {
+        return Err(io::Error::other("CLI TOON serialized the rejected raw identity value").into());
+    }
+
+    let messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"identity-rejection-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_health",
+                "arguments": {
+                    "coverage": true,
+                    "path_prefix": relative_path,
+                    "limit": 10
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let stdout = run_mcp_stdio(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+    )?;
+    let mcp_text = mcp_tool_text(&stdout, 2)?;
+    let mcp_report: Value = toon_format::decode_default(&mcp_text)?;
+    let mcp_coverage = &mcp_report["coverage"];
+    let mcp_rejections = mcp_coverage["rows"][0]["identity_rejections"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("MCP coverage omitted identity rejection rows"))?;
+    if mcp_coverage["rows"][0]["omitted"] != 2
+        || mcp_rejections.len() != 2
+        || mcp_rejections != identity_rejections
+        || mcp_coverage["rows"][0]["reason"]
+            != "parser does not prove complete relationship coverage"
+    {
+        return Err(io::Error::other(format!(
+            "MCP coverage identity rejection detail did not match JSON: {mcp_report}"
+        ))
+        .into());
+    }
+    if mcp_text.contains("LeakedIdentity") {
+        return Err(
+            io::Error::other("MCP coverage serialized the rejected raw identity value").into(),
+        );
+    }
+    Ok(())
+}
+
+fn assert_identity_relation_surfaces(
+    repo: &Path,
+    db: &Path,
+    caller_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let raw_identity = "%LeakedIdentity%";
+    let connection = Connection::open(db)?;
+    for (label, query) in [
+        (
+            "symbols",
+            "SELECT COUNT(*) FROM symbols WHERE name LIKE ?1 OR signature LIKE ?1 OR parent LIKE ?1",
+        ),
+        (
+            "symbol_relations",
+            "SELECT COUNT(*) FROM symbol_relations WHERE source_name LIKE ?1 OR target_name LIKE ?1 OR context LIKE ?1",
+        ),
+        (
+            "summaries",
+            "SELECT COUNT(*) FROM summaries WHERE summary LIKE ?1",
+        ),
+    ] {
+        let count: i64 = connection.query_row(query, [raw_identity], |row| row.get(0))?;
+        if count != 0 {
+            return Err(io::Error::other(format!(
+                "rejected raw identity survived in {label}: count={count}"
+            ))
+            .into());
+        }
+    }
+    drop(connection);
+
+    let detailed = Command::cargo_bin("projectatlas")?
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "--db",
+            &db.display().to_string(),
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            caller_path,
+            "--relation",
+            "imports",
+            "--direction",
+            "outbound",
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !detailed.status.success() {
+        return Err(io::Error::other(format!(
+            "detailed identity relation CLI failed: {}",
+            String::from_utf8_lossy(&detailed.stderr)
+        ))
+        .into());
+    }
+    let detailed_report: Value = serde_json::from_slice(&detailed.stdout)?;
+    if detailed_report["symbol_relations"]["returned"] != 1
+        || detailed_report.to_string().contains("LeakedIdentity")
+        || !detailed_report.to_string().contains("worker")
+    {
+        return Err(io::Error::other(format!(
+            "detailed identity relation CLI lost the valid worker import: {detailed_report}"
+        ))
+        .into());
+    }
+
+    for format in ["json", "toon"] {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args([
+                "--format",
+                format,
+                "--db",
+                &db.display().to_string(),
+                "symbols",
+                "relations",
+                "--view",
+                "legacy",
+                "--file",
+                caller_path,
+                "--relation",
+                "imports",
+                "--limit",
+                "10",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "legacy {format} identity relation CLI failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.contains("LeakedIdentity") || !text.contains("worker") {
+            return Err(io::Error::other(format!(
+                "legacy {format} identity relation CLI exposed or lost identities: {text}"
+            ))
+            .into());
+        }
+    }
+
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    for (label, view) in [("legacy", Some("legacy")), ("default", None)] {
+        let mut arguments = serde_json::json!({
+            "file": caller_path,
+            "relation": "imports",
+            "direction": "outbound",
+            "limit": 10
+        });
+        if let Some(view) = view {
+            arguments["view"] = serde_json::json!(view);
+        }
+        let messages = vec![
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"identity-relation-e2e","version":"0.1.0"}}}"#.to_string(),
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "atlas_symbol_relations",
+                    "arguments": arguments
+                }
+            })
+            .to_string(),
+        ];
+        let stdout = run_mcp_stdio(
+            &executable,
+            repo,
+            &[
+                "--db".to_string(),
+                db.display().to_string(),
+                "mcp".to_string(),
+            ],
+            &messages,
+        )?;
+        let mcp_relations_text = mcp_tool_text(&stdout, 2)?;
+        let mcp_relations: Value = toon_format::decode_default(&mcp_relations_text)?;
+        let rows = mcp_relations["symbol_relations"]
+            .as_array()
+            .ok_or_else(|| io::Error::other(format!(
+                "MCP {label} relation surface omitted its structured symbol_relations rows: {mcp_relations}"
+            )))?;
+        if rows.iter().filter(|row| row["kind"] == "imports").count() != 1
+            || mcp_relations.to_string().contains("LeakedIdentity")
+            || !rows.iter().any(|row| {
+                row["kind"] == "imports"
+                    && row["target"]
+                        .as_str()
+                        .is_some_and(|target| target.contains("worker"))
+            })
+        {
+            return Err(io::Error::other(format!(
+                "MCP {label} identity relation surface lost the valid worker import: {mcp_relations}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn assert_identity_navigation_survives_invalid_siblings(
+    db: &Path,
+    caller_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let require = |condition: bool, message: &str| -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message).into())
+        }
+    };
+    let store = AtlasStore::open(db)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("identity navigation project identity missing"))?;
+    let caller_path = RepositoryNodePath::new(Path::new(caller_path))?;
+    let worker_path = RepositoryNodePath::new(Path::new("src/worker.ts"))?;
+    let caller_entities = store.repository_graph_entities_by_path(project, &caller_path, 100)?;
+    let worker_entities = store.repository_graph_entities_by_path(project, &worker_path, 100)?;
+    require(
+        !caller_entities.truncated && !worker_entities.truncated,
+        "identity navigation entity snapshot was truncated",
+    )?;
+    require(
+        caller_entities.rows.iter().any(|entity| {
+            matches!(
+                entity.selector(),
+                EntitySelector::Symbol { symbol } if symbol.name.as_str() == "caller"
+            )
+        }),
+        "valid caller export was dropped beside invalid imports",
+    )?;
+    require(
+        worker_entities.rows.iter().any(|entity| {
+            matches!(
+                entity.selector(),
+                EntitySelector::Symbol { symbol } if symbol.name.as_str() == "run"
+            )
+        }),
+        "valid worker.run export was dropped beside invalid imports",
+    )?;
+    let caller_export_path = caller_path.as_str().to_owned();
+    let worker_export_path = worker_path.as_str().to_owned();
+    let caller_exports = store.repository_export_keys_for_paths(
+        project,
+        std::slice::from_ref(&caller_export_path),
+        100,
+    )?;
+    let worker_exports = store.repository_export_keys_for_paths(
+        project,
+        std::slice::from_ref(&worker_export_path),
+        100,
+    )?;
+    require(
+        !caller_exports.truncated
+            && !worker_exports.truncated
+            && !caller_exports.rows.is_empty()
+            && !worker_exports.rows.is_empty(),
+        "valid caller/run resolution exports were dropped beside invalid imports",
+    )?;
+
+    let imports = store.repository_graph_relation_rows(
+        RepositoryGraphRelationQuery::Family {
+            relation: GraphRelationKind::Legacy(RelationKind::Imports),
+        },
+        100,
+        None,
+    )?;
+    require(
+        !imports.truncated
+            && imports.rows.iter().any(|row| {
+                matches!(row.source.selector(), EntitySelector::File { path } if path.as_str() == caller_path.as_str())
+                    && matches!(
+                        row.target.as_ref().map(GraphEntity::selector),
+                        Some(EntitySelector::File { path }) if path.as_str() == worker_path.as_str()
+                    )
+                    && matches!(row.relation.resolution(), RelationResolution::Resolved { .. })
+            }),
+        "valid ./worker import relation was dropped or unresolved",
+    )?;
+
+    let calls = store.repository_graph_relation_rows(
+        RepositoryGraphRelationQuery::Family {
+            relation: GraphRelationKind::Legacy(RelationKind::Calls),
+        },
+        100,
+        None,
+    )?;
+    require(
+        !calls.truncated
+            && calls.rows.iter().any(|row| {
+                (matches!(row.source.selector(), EntitySelector::File { path } if path.as_str() == caller_path.as_str())
+                    || matches!(
+                        row.source.selector(),
+                        EntitySelector::Symbol { symbol }
+                            if symbol.file.as_str() == caller_path.as_str()
+                    ))
+                    && matches!(
+                        row.target.as_ref().map(GraphEntity::selector),
+                        Some(EntitySelector::Symbol { symbol })
+                            if symbol.file.as_str() == worker_path.as_str()
+                                && symbol.name.as_str() == "run"
+                    )
+                    && matches!(row.relation.resolution(), RelationResolution::Resolved { .. })
+            }),
+        "valid caller -> worker.run call was dropped or unresolved",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn cli_federation_is_explicit_read_only_and_fails_closed_on_a_stale_late_root()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;

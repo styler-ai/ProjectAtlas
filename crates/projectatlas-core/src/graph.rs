@@ -1,6 +1,6 @@
 //! Typed, project-qualified repository graph contracts.
 
-use crate::symbols::{RelationKind, SymbolKind};
+use crate::symbols::{ParserKind, RelationKind, SymbolKind};
 use crate::{CoreError, IndexGeneration, validated_repo_file_key, validated_repo_node_key};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -96,6 +96,124 @@ pub enum GraphContractError {
         /// Stable explanation suitable for diagnostics.
         reason: &'static str,
     },
+}
+
+/// Parser-derived identity field that failed strict graph admission.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphIdentityField {
+    /// Cargo package name.
+    Package,
+    /// Symbol name.
+    Symbol,
+    /// Containing symbol name.
+    Parent,
+    /// Symbol signature used by the entity selector.
+    Signature,
+    /// Relation source name.
+    #[serde(rename = "relation.source")]
+    RelationSource,
+    /// Relation target name.
+    #[serde(rename = "relation.target")]
+    RelationTarget,
+    /// Derived canonical resolution key component.
+    ResolutionKey,
+}
+
+impl fmt::Display for GraphIdentityField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Package => "package",
+            Self::Symbol => "symbol",
+            Self::Parent => "parent",
+            Self::Signature => "signature",
+            Self::RelationSource => "relation.source",
+            Self::RelationTarget => "relation.target",
+            Self::ResolutionKey => "resolution-key",
+        })
+    }
+}
+
+/// Stable coarse category for a rejected parser-derived graph identity.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphIdentityRejectionReason {
+    /// The identity was empty or whitespace-only.
+    Empty,
+    /// The identity had surrounding whitespace.
+    SurroundingWhitespace,
+    /// The identity contained a control character.
+    ControlCharacters,
+    /// The identity exceeded the graph identity byte bound.
+    Oversized,
+    /// The identity used the reserved derived-scope namespace.
+    ReservedNamespace,
+    /// A derived identity contract failed for another reason.
+    Contract,
+}
+
+impl GraphIdentityRejectionReason {
+    /// Classify one graph-contract failure without retaining rejected text.
+    #[must_use]
+    pub fn from_error(error: &GraphContractError) -> Self {
+        match error {
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason == "identity text must not be empty" =>
+            {
+                Self::Empty
+            }
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason == "identity text must not contain surrounding whitespace" =>
+            {
+                Self::SurroundingWhitespace
+            }
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason == "identity text contains control characters" =>
+            {
+                Self::ControlCharacters
+            }
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason == "identity text exceeds the byte limit" =>
+            {
+                Self::Oversized
+            }
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason
+                    == "source symbol identity uses the reserved derived-scope namespace" =>
+            {
+                Self::ReservedNamespace
+            }
+            _ => Self::Contract,
+        }
+    }
+}
+
+impl fmt::Display for GraphIdentityRejectionReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Empty => "empty",
+            Self::SurroundingWhitespace => "surrounding-whitespace",
+            Self::ControlCharacters => "control-characters",
+            Self::Oversized => "oversized",
+            Self::ReservedNamespace => "reserved-namespace",
+            Self::Contract => "contract",
+        })
+    }
+}
+
+/// One bounded, generation-owned parser identity rejection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GraphIdentityRejection {
+    /// Repository-relative source path containing the rejected fact.
+    pub path: RepositoryNodePath,
+    /// Exact bounded source span of the rejected fact.
+    pub span: SourceSpan,
+    /// Parser strategy that produced the rejected fact.
+    pub parser: ParserKind,
+    /// Identity field that failed admission.
+    pub field: GraphIdentityField,
+    /// Stable rejection category without the rejected raw value.
+    pub reason: GraphIdentityRejectionReason,
 }
 
 /// Stable identity of one `ProjectAtlas` index across supported moves and upgrades.
@@ -210,13 +328,12 @@ impl<'de> Deserialize<'de> for ProjectInstanceId {
 pub struct GraphIdentityText(String);
 
 impl GraphIdentityText {
-    /// Validate one graph identity component.
+    /// Validate one borrowed graph identity without allocating or changing it.
     ///
     /// # Errors
     ///
     /// Returns an error for blank, padded, oversized, or control-bearing text.
-    pub fn new(value: impl Into<String>) -> Result<Self, GraphContractError> {
-        let value = value.into();
+    pub fn validate(value: &str) -> Result<(), GraphContractError> {
         if value.trim().is_empty() {
             return Err(GraphContractError::InvalidIdentityText {
                 reason: "identity text must not be empty",
@@ -237,6 +354,17 @@ impl GraphIdentityText {
                 reason: "identity text contains control characters",
             });
         }
+        Ok(())
+    }
+
+    /// Validate one graph identity component.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for blank, padded, oversized, or control-bearing text.
+    pub fn new(value: impl Into<String>) -> Result<Self, GraphContractError> {
+        let value = value.into();
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 
@@ -2358,13 +2486,14 @@ mod tests {
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
         CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
         ExtendedRelationKind, ExternalSelector, GraphContractError, GraphEntity, GraphEntityKey,
+        GraphIdentityField, GraphIdentityRejection, GraphIdentityRejectionReason,
         GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation,
         PackageSelector, PortableResolutionKey, ProjectInstanceId, RelationDependencyKey,
         RelationOccurrence, RelationResolution, RepositoryFilePath, RepositoryNodePath,
         ResolutionKeyDomain, ReusableTargetSelector, SourceSpan, StableKey, SymbolSelector,
     };
     use crate::IndexGeneration;
-    use crate::symbols::{RelationKind, SymbolKind};
+    use crate::symbols::{ParserKind, RelationKind, SymbolKind};
     use std::io;
     use std::num::NonZeroU32;
     use std::path::Path;
@@ -2895,6 +3024,33 @@ mod tests {
         require(
             package == serde_json::from_str(&serde_json::to_string(&package)?)?,
             "package selector did not round-trip",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_identity_rejection_wire_names_are_typed_and_stable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        require(
+            serde_json::to_string(&GraphIdentityField::RelationSource)? == r#""relation.source""#,
+            "relation-source field changed its dotted wire name",
+        )?;
+        require(
+            serde_json::from_str::<GraphIdentityField>(r#""relation.target""#)?
+                == GraphIdentityField::RelationTarget,
+            "relation-target field lost its dotted wire name",
+        )?;
+        let rejection = GraphIdentityRejection {
+            path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+            span: SourceSpan::new(2, 0, 2, 8)?,
+            parser: ParserKind::TreeSitter,
+            field: GraphIdentityField::RelationTarget,
+            reason: GraphIdentityRejectionReason::ControlCharacters,
+        };
+        require(
+            serde_json::from_str::<GraphIdentityRejection>(&serde_json::to_string(&rejection)?)?
+                == rejection,
+            "typed graph rejection did not round-trip",
         )?;
         Ok(())
     }

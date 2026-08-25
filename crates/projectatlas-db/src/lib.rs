@@ -12384,7 +12384,8 @@ mod tests {
              DROP TABLE worktree_usage_aggregates;
              DROP TABLE worktree_registrations;
              DROP TABLE usage_aggregate_revisions;
-             DROP TABLE project_root_identity;",
+             DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;",
         )?;
         crate::schema::recreate_disposable_graph_projection(&store.connection, false)?;
         crate::schema::recreate_pre_selector_symbol_storage_for_test(&store.connection)?;

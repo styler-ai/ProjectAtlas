@@ -302,6 +302,9 @@ fn apply_root_transition_in_transaction(
             store.connection.execute("DELETE FROM graph_coverage", [])?;
             store
                 .connection
+                .execute("DELETE FROM graph_identity_rejections", [])?;
+            store
+                .connection
                 .execute("DELETE FROM graph_relations", [])?;
             store.connection.execute("DELETE FROM graph_entities", [])?;
             let identity = generate_project_identity(&store.connection, found_identity)?;
@@ -1646,6 +1649,7 @@ mod tests {
         seed_authored_and_graph_state(&mut store, previous_project)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(store);
@@ -1673,7 +1677,7 @@ mod tests {
         )?;
         require_eq(
             &schema_version,
-            &"20".to_string(),
+            &schema::SCHEMA_VERSION.to_string(),
             "schema-19 detach schema",
         )?;
         require_eq(
@@ -1700,7 +1704,7 @@ mod tests {
         let missing_store = AtlasStore::open_for_project(&missing_database, &source_root)?;
         missing_store
             .connection
-            .execute_batch("DROP TABLE project_root_identity; UPDATE metadata SET value = '19' WHERE key = 'schema_version';")?;
+            .execute_batch("DROP TABLE project_root_identity; DROP TABLE IF EXISTS graph_identity_rejections; UPDATE metadata SET value = '19' WHERE key = 'schema_version';")?;
         drop(missing_store);
         let missing_before = fs::read(&missing_database)?;
         fs::remove_dir(&source_root)?;
@@ -1745,6 +1749,7 @@ mod tests {
         let overview_before = store.token_overview(Some("identity-test"))?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';
              PRAGMA wal_checkpoint(TRUNCATE);",
         )?;
@@ -1911,6 +1916,7 @@ mod tests {
         assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(store);
@@ -2221,6 +2227,7 @@ mod tests {
 
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';
              PRAGMA wal_checkpoint(TRUNCATE);",
         )?;

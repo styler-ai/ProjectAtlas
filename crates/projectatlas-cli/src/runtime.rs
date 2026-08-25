@@ -3149,7 +3149,7 @@ fn publish_index_batch(
         text_paths,
         text,
         content_classifications,
-        symbols,
+        mut symbols,
         graph,
         structural_summaries,
     } = batch;
@@ -3200,7 +3200,7 @@ fn publish_index_batch(
         || Ok(PurposeImportReport::default()),
         |snapshot| apply_purpose_import_snapshot(&publication, &indexed_nodes, &snapshot, control),
     )?;
-    apply_symbol_build_stage(&mut publication, &symbols, control)?;
+    apply_symbol_build_stage(&mut publication, &mut symbols, control)?;
     graph.apply(&mut publication, control)?;
     apply_structural_summary_stage(&mut publication, &structural_summaries, control)?;
     complete_index_publication(publication, control)?;
@@ -3389,7 +3389,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
             .saturating_add(staged_node_bytes(&nodes));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let staged = stage_symbols_for_nodes_with_limits(
+    let mut staged = stage_symbols_for_nodes_with_limits(
         store,
         &plan.root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -3422,7 +3422,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     control.check(IndexWorkStage::Publication)?;
     let mut publication =
         store.begin_index_projection_refresh_from(&contract_fingerprint, base_generation)?;
-    apply_symbol_build_stage(&mut publication, &staged, control)?;
+    apply_symbol_build_stage(&mut publication, &mut staged, control)?;
     graph.apply(&mut publication, control)?;
     complete_index_publication(publication, control)?;
     Ok(staged.report)
@@ -4923,6 +4923,8 @@ struct SymbolBuildStage {
     changes: Vec<SymbolProjectionChange>,
     /// Retained parser-output string bytes admitted by the resource boundary.
     retained_bytes: u64,
+    /// Source identity details captured while sanitizing parser output.
+    identity_admission: graph_projection::GraphIdentityAdmission,
 }
 
 /// One closed symbol projection mutation.
@@ -6158,7 +6160,8 @@ fn build_symbols_for_paths_with_limits(
         control,
         limits,
     )?;
-    apply_symbol_build_stage(store, &staged, control)?;
+    let mut staged = staged;
+    apply_symbol_build_stage(store, &mut staged, control)?;
     Ok(staged.report)
 }
 
@@ -6395,11 +6398,14 @@ fn stage_symbols_for_nodes_with_limits(
         }
     }
     control.check(IndexWorkStage::SymbolParsing)?;
-    Ok(SymbolBuildStage {
+    let mut staged = SymbolBuildStage {
         report,
         changes,
         retained_bytes: output_bytes,
-    })
+        identity_admission: graph_projection::GraphIdentityAdmission::default(),
+    };
+    staged.identity_admission = graph_projection::admit_symbol_build_stage(&mut staged, control)?;
+    Ok(staged)
 }
 
 /// Parse all built-in symbol jobs in bounded Rayon batches.
@@ -6421,9 +6427,12 @@ fn parse_symbol_job_batches_controlled(
 /// Apply prepared symbol mutations inside the parent publication transaction.
 fn apply_symbol_build_stage(
     store: &mut AtlasStore,
-    staged: &SymbolBuildStage,
+    staged: &mut SymbolBuildStage,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
+    if !staged.identity_admission.source_admitted() {
+        staged.identity_admission = graph_projection::admit_symbol_build_stage(staged, control)?;
+    }
     for change in &staged.changes {
         control.check(IndexWorkStage::Publication)?;
         match change {
@@ -8872,6 +8881,7 @@ mod tests {
             let connection = rusqlite::Connection::open(&database)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
+                 DROP TABLE IF EXISTS graph_identity_rejections;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
         }
@@ -8964,6 +8974,7 @@ mod tests {
             let connection = rusqlite::Connection::open(&database)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
+                 DROP TABLE IF EXISTS graph_identity_rejections;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
         }
@@ -9030,6 +9041,7 @@ mod tests {
             let connection = rusqlite::Connection::open(&database)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
+                 DROP TABLE IF EXISTS graph_identity_rejections;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
             connection.execute(
@@ -10529,10 +10541,11 @@ mod tests {
             "approved-purpose suggestion suppression",
         )?;
         let retained_bytes = symbol_parse_output_bytes(&parsed);
-        let symbols = SymbolBuildStage {
+        let mut symbols = SymbolBuildStage {
             report: empty_symbol_build_report(),
             changes: vec![SymbolProjectionChange::Parsed(parsed)],
             retained_bytes,
+            identity_admission: graph_projection::GraphIdentityAdmission::default(),
         };
         let protected_purpose_paths = HashSet::from(["package.json".to_string()]);
         let control = standalone_index_work_control();
@@ -10561,7 +10574,7 @@ mod tests {
             "duplicate structural mutations",
         )?;
 
-        apply_symbol_build_stage(&mut store, &symbols, &control)?;
+        apply_symbol_build_stage(&mut store, &mut symbols, &control)?;
         apply_structural_summary_stage(&mut store, &structural, &control)?;
         let indexed = store
             .load_node_by_path("package.json")?

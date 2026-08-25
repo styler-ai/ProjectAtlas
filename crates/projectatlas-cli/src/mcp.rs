@@ -16505,6 +16505,7 @@ mod tests {
         let predecessor = rusqlite::Connection::open(&database)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(predecessor);
@@ -16644,6 +16645,7 @@ mod tests {
         let predecessor = rusqlite::Connection::open(&database)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         predecessor.execute(
@@ -16805,6 +16807,7 @@ mod tests {
             let connection = rusqlite::Connection::open(&database)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
+                 DROP TABLE IF EXISTS graph_identity_rejections;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
         }
@@ -16912,6 +16915,7 @@ mod tests {
         let predecessor = rusqlite::Connection::open(&raw_database)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(predecessor);
@@ -16972,6 +16976,7 @@ mod tests {
         )?;
         collision_predecessor.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(collision_predecessor);

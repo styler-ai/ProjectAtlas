@@ -30,8 +30,8 @@ use agent_efficiency::load_agent_efficiency_comparison as load_agent_efficiency_
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::graph::{
-    CoverageScope, CoverageState, ExtendedRelationKind, GraphLimitKind, GraphLimits,
-    GraphRelationKind,
+    CoverageScope, CoverageState, ExtendedRelationKind, GraphIdentityRejection, GraphLimitKind,
+    GraphLimits, GraphRelationKind,
 };
 use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::outline::estimate_tokens;
@@ -483,6 +483,9 @@ pub struct CoverageDiscoveryRow {
     pub parser: Option<ParserKind>,
     /// Fact provider pass for path-scoped coverage.
     pub provider: Option<ParserKind>,
+    /// Bounded typed identity rejections for this path.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub identity_rejections: Vec<GraphIdentityRejection>,
     /// Existing selected-file summary or health surface to call next.
     pub next_call: NavigationNextCall,
 }
@@ -623,10 +626,30 @@ pub fn load_coverage_discovery_controlled(
         .ok_or(ServiceError::SelectedProjectUnavailable)?;
     let control = control.with_timeout_ceiling(COVERAGE_DISCOVERY_TIMEOUT);
     let page = store.repository_coverage_page_controlled(project, &query, Some(&control))?;
-    let rows = page
-        .rows
+    let page_rows = page.rows;
+    let paths = page_rows
+        .iter()
+        .filter_map(|row| match row.coverage.scope() {
+            CoverageScope::Path { path } => Some(path.clone()),
+            CoverageScope::Project => None,
+        })
+        .collect::<Vec<_>>();
+    let rejections = store.repository_graph_identity_rejections(
+        project,
+        &paths,
+        GraphLimits::MAX_ROWS,
+        Some(&control),
+    )?;
+    let mut rejections_by_path = HashMap::<String, Vec<GraphIdentityRejection>>::new();
+    for rejection in rejections {
+        rejections_by_path
+            .entry(rejection.path.as_str().to_owned())
+            .or_default()
+            .push(rejection);
+    }
+    let rows = page_rows
         .into_iter()
-        .map(coverage_discovery_row)
+        .map(|row| coverage_discovery_row(row, &mut rejections_by_path))
         .collect::<Vec<_>>();
     let returned = u32::try_from(rows.len()).map_err(|error| {
         ServiceError::InvalidInput(format!("coverage row count did not fit u32: {error}"))
@@ -658,13 +681,17 @@ pub fn load_coverage_discovery_controlled(
 }
 
 /// Project one validated storage row into the agent-facing coverage contract.
-fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
+fn coverage_discovery_row(
+    row: RepositoryCoverageRow,
+    rejections_by_path: &mut HashMap<String, Vec<GraphIdentityRejection>>,
+) -> CoverageDiscoveryRow {
     let coverage = row.coverage;
     let path = match coverage.scope() {
         CoverageScope::Project => ".".to_string(),
         CoverageScope::Path { path } => path.as_str().to_string(),
     };
     let relation = coverage.relation();
+    let identity_rejections = rejections_by_path.remove(&path).unwrap_or_default();
     CoverageDiscoveryRow {
         next_call: NavigationNextCall {
             capability: if matches!(coverage.scope(), CoverageScope::Path { .. }) {
@@ -691,6 +718,7 @@ fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
         active_generation: coverage.generation(),
         parser: row.parser,
         provider: row.provider,
+        identity_rejections,
     }
 }
 
@@ -4067,7 +4095,8 @@ fn exported_symbol_names(symbols: &[CodeSymbol]) -> Vec<String> {
 mod tests {
     use super::*;
     use projectatlas_core::graph::{
-        CoverageRecord, GraphIdentityText, GraphLimitKind, RepositoryNodePath,
+        CoverageRecord, GraphIdentityField, GraphIdentityRejectionReason, GraphIdentityText,
+        GraphLimitKind, RepositoryNodePath, SourceSpan,
     };
     use projectatlas_core::symbols::{ParserKind, SymbolGraph};
     use projectatlas_core::telemetry::{
@@ -4383,6 +4412,16 @@ mod tests {
             )?);
         }
         publication.replace_repository_graph(project, &[], &[], &[], &coverage)?;
+        publication.replace_graph_identity_rejections(
+            project,
+            &[GraphIdentityRejection {
+                path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+                span: SourceSpan::new(1, 0, 1, 2)?,
+                parser: ParserKind::TreeSitter,
+                field: GraphIdentityField::Symbol,
+                reason: GraphIdentityRejectionReason::Empty,
+            }],
+        )?;
         publication.complete()?;
         drop(store);
 
@@ -4472,6 +4511,13 @@ mod tests {
             "truncated coverage lower bound",
         )?;
         require_eq(&truncated.continuation, &Some(1), "coverage continuation")?;
+        require(
+            truncated
+                .rows
+                .iter()
+                .any(|row| row.path == "src/lib.rs" && row.identity_rejections.len() == 1),
+            "structured coverage omitted typed identity rejection details",
+        )?;
         let exhausted = load_coverage_discovery(
             &store,
             RepositoryCoverageQuery {
