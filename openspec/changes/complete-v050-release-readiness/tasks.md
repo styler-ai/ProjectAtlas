@@ -35,10 +35,10 @@
 
 ## 6. Filtered custom-harness timeout (#372)
 
-- [ ] 6.1 Confirm `.github/workflows/release.yml` `Filtered custom harness compatibility` is the reported unbounded owner and select the existing step-level `timeout-minutes` mechanism and value consistent with neighboring release verification steps.
-- [ ] 6.2 Add only that step timeout, preserving the exact Cargo command, output, exit status, and workflow artifacts; do not add a timeout wrapper or child-process framework.
-- [ ] 6.3 Extend the existing workflow-contract assertion to cover the step name, command, and timeout and run the locked YAML/parser, targeted Cargo test, and workflow/IssueOps checks.
-- [ ] 6.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 6.1 Confirm `.github/workflows/release.yml` `Filtered custom harness compatibility` is the reported unbounded owner and select the existing step-level `timeout-minutes` mechanism and value consistent with neighboring release verification steps.
+- [x] 6.2 Add only that step timeout, preserving the exact Cargo command, output, exit status, and workflow artifacts; do not add a timeout wrapper or child-process framework.
+- [x] 6.3 Extend the existing workflow-contract assertion to cover the step name, command, and timeout and run the locked YAML/parser, targeted Cargo test, and workflow/IssueOps checks.
+- [x] 6.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 7. Entrypoint-aware dead-code profiles (#384)
 
