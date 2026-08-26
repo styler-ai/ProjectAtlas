@@ -6030,12 +6030,17 @@ mod tests {
         let atlas_dir = raw_root.join(".projectatlas");
         fs::create_dir_all(&atlas_dir)?;
         fs::create_dir(&replacement_root)?;
-        // Make the second generated host config fail after the native bind commits.
-        fs::create_dir(atlas_dir.join("projectatlas.claude.mcp.json"))?;
         let raw_db = atlas_dir.join("projectatlas.db");
 
-        let error = bind_project_root(&raw_root, RootTransition::Bind, false)
-            .expect_err("generated configuration should fail at the blocked host path");
+        let error = match bind_project_root(&raw_root, RootTransition::Bind, false) {
+            Err(error) => error,
+            Ok(_) => {
+                return Err(io::Error::other(
+                    "generated configuration unexpectedly succeeded for a raw native root",
+                )
+                .into());
+            }
+        };
         let message = error.to_string();
         require_condition(
             !message.contains("repo-�")
