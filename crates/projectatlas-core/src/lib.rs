@@ -610,11 +610,13 @@ pub fn normalize_repo_path(root: &Path, path: &Path) -> CoreResult<String> {
 
 /// Normalize a native filesystem path for stable diagnostics and metadata.
 ///
-/// The returned path uses forward slashes, strips Windows extended path
-/// prefixes such as `\\?\`, and converts extended UNC paths to `//server/share`
-/// form. This helper is for legacy compatibility metadata and agent-facing
-/// output; use [`CanonicalProjectRoot`] for persisted project identity and
-/// `Path`/`PathBuf` for host filesystem access.
+/// On Windows, the returned path uses forward slashes, strips extended path
+/// prefixes such as `\\?\`, and converts extended UNC paths to
+/// `//server/share` form. On Unix, native backslashes are preserved because
+/// they are valid filename characters rather than separators. This helper is
+/// for legacy compatibility metadata and agent-facing output; use
+/// [`CanonicalProjectRoot`] for persisted project identity and `Path`/`PathBuf`
+/// for host filesystem access.
 #[must_use]
 pub fn normalize_native_path_display(path: impl AsRef<Path>) -> String {
     normalize_native_path_display_str(&path.as_ref().to_string_lossy())
@@ -626,13 +628,20 @@ pub fn normalize_native_path_display(path: impl AsRef<Path>) -> String {
 /// before they are converted back into a platform `Path`.
 #[must_use]
 pub fn normalize_native_path_display_str(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = normalized.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        normalized
+    #[cfg(windows)]
+    {
+        let normalized = path.replace('\\', "/");
+        if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+            format!("//{rest}")
+        } else if let Some(rest) = normalized.strip_prefix("//?/") {
+            rest.to_string()
+        } else {
+            normalized
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_owned()
     }
 }
 
@@ -868,6 +877,7 @@ mod tests {
         assert!(is_high_impact_file_path(".github/workflows/release.yml"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn native_path_display_removes_windows_extended_prefixes() {
         assert_eq!(
@@ -886,6 +896,14 @@ mod tests {
             normalize_native_path_display_str("src\\main.rs"),
             "src/main.rs"
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn native_path_display_preserves_unix_backslashes() {
+        let path = r"/tmp/repo\name";
+        assert_eq!(normalize_native_path_display_str(path), path);
+        assert_eq!(super::normalize_native_path_display(Path::new(path)), path);
     }
 
     fn require_eq(left: &str, right: &str) -> Result<(), Box<dyn std::error::Error>> {
