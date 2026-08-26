@@ -5483,7 +5483,7 @@ mod tests {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
-        fn create_predecessor(database: &Path, root: &Path) -> DbResult<()> {
+        fn create_predecessor(database: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
             fs::create_dir_all(root)?;
             let store = AtlasStore::open_for_project(database, root)?;
             store.connection.execute_batch(
