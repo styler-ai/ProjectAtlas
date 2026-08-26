@@ -105,7 +105,12 @@ impl CanonicalProjectRoot {
         let value = self.0.to_str().ok_or_else(|| CoreError::NonUtf8Path {
             path: self.0.clone(),
         })?;
-        Ok(crate::normalize_native_path_display_str(value))
+        let normalized = crate::normalize_native_path_display_str(value);
+        if Path::new(&normalized).is_absolute() {
+            Ok(normalized)
+        } else {
+            Ok(value.to_owned())
+        }
     }
 
     /// Return an explicitly lossy rendering for terminal-only diagnostics.
@@ -483,6 +488,10 @@ mod tests {
         let decoded = CanonicalProjectRoot::decode(&encoded)?;
         if !decoded.as_path().is_absolute() || decoded.as_path() != path {
             return Err("volume-GUID identity lost its native absolute path".into());
+        }
+        let display = decoded.display_string()?;
+        if !PathBuf::from(&display).is_absolute() || display != path.to_string_lossy() {
+            return Err("volume-GUID display projection lost its absolute native spelling".into());
         }
         if CanonicalProjectRoot::decode(&decoded.encode()?)? != decoded {
             return Err("volume-GUID identity codec round-trip changed its native path".into());
