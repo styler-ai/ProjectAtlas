@@ -209,6 +209,10 @@ fn native_path_bytes(path: &OsStr) -> CoreResult<Vec<u8>> {
 
 #[cfg(unix)]
 /// Decode an operating-system path without UTF-8 conversion.
+///
+/// The Unix conversion is infallible, but this result remains `CoreResult` to
+/// match the fallible Windows codec helper at the shared decode call site.
+#[allow(clippy::unnecessary_wraps)]
 fn native_path_from_bytes(bytes: &[u8]) -> CoreResult<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
     Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())))
@@ -255,8 +259,7 @@ fn is_canonical_lexical_path(path: &Path) -> bool {
     {
         use std::os::unix::ffi::OsStrExt;
         let bytes = path.as_os_str().as_bytes();
-        return (bytes.len() == 1 || !bytes.ends_with(b"/"))
-            && !bytes.windows(2).any(|pair| pair == b"//");
+        (bytes.len() == 1 || !bytes.ends_with(b"/")) && !bytes.windows(2).any(|pair| pair == b"//")
     }
     #[cfg(windows)]
     {
