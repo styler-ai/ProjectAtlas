@@ -23,7 +23,7 @@ fn analysis_cursor_identity_preserves_non_utf8_root_collisions() -> Result<(), B
     let temp = tempfile::tempdir()?;
     let native = temp
         .path()
-        .join(std::ffi::OsString::from_vec(vec![b"r", b"o", b"o", 0x80]));
+        .join(std::ffi::OsString::from_vec(vec![b'r', b'o', b'o', 0x80]));
     let replacement = temp.path().join("roo�");
     fs::create_dir(&native)?;
     fs::create_dir(&replacement)?;

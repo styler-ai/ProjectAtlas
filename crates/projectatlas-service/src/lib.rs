@@ -4084,7 +4084,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp
             .path()
-            .join(std::ffi::OsString::from_vec(vec![b"s", b"r", b"c", 0x80]));
+            .join(std::ffi::OsString::from_vec(vec![b's', b'r', b'c', 0x80]));
         fs::create_dir(&root)?;
         fs::write(root.join("entry.rs"), "pub fn native_root() {}\n")?;
         let mut store = AtlasStore::in_memory()?;
