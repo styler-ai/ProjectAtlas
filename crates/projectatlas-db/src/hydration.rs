@@ -840,9 +840,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let fixture = tempfile::tempdir()?;
-        let source_root = fixture
-            .path()
-            .join(std::ffi::OsString::from_vec(vec![b's', b'r', b'c', 0x80]));
+        let source_root = fixture.path().join("src");
         let target_root = fixture
             .path()
             .join(std::ffi::OsString::from_vec(vec![b't', b'g', b't', 0x81]));
