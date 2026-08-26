@@ -1477,6 +1477,210 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn schema_nineteen_case_sensitive_sibling_refuses_before_migration_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        use rusqlite::OpenFlags;
+        use std::process::Command;
+
+        let temp = tempfile::tempdir()?;
+        let case_sensitive_parent = temp.path().join("schema-19-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            // Case-sensitive directory support is filesystem/host-policy
+            // dependent; skip this negative proof when it cannot be enabled.
+            return Ok(());
+        }
+
+        let upper_path = case_sensitive_parent.join("Repo");
+        let lower_path = case_sensitive_parent.join("repo");
+        if fs::create_dir(&upper_path).is_err() || fs::create_dir(&lower_path).is_err() {
+            return Ok(());
+        }
+        let upper_identity = CanonicalProjectRoot::from_path(&upper_path)?;
+        let lower_identity = CanonicalProjectRoot::from_path(&lower_path)?;
+        if upper_identity == lower_identity {
+            return Ok(());
+        }
+
+        let database = temp.path().join("schema-19-case-sensitive.db");
+        let mut store = AtlasStore::open_for_project(&database, &upper_path)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-19 root fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, project)?;
+        let publication_before = store.index_publication()?;
+        let usage_before = store.usage_events(Some("identity-test"))?;
+        let overview_before = store.token_overview(Some("identity-test"))?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_runtime_scope(&store, project, 1, 0, 1)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+
+        let schema_before = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let legacy_root_before = store
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'project_root'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let (project_bytes_before, generation_before) = store.connection.query_row(
+            "SELECT project_instance_id, active_generation
+             FROM project_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let identity_table_before = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'project_root_identity'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &schema_before,
+            &"19".to_string(),
+            "schema-19 fixture marker",
+        )?;
+        require_eq(
+            &identity_table_before,
+            &0,
+            "schema-19 fixture identity table absence",
+        )?;
+
+        // Keep a read-only connection open while taking the byte and inventory
+        // snapshots. The rejected legacy admission must not create or remove
+        // SQLite sidecars while it is still in read-only preflight.
+        let read_guard = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-case-sensitive.db{suffix}"))).ok()
+        });
+        let mut inventory_before = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_before.sort();
+
+        let Some(error) = AtlasStore::open_for_project(&database, &lower_path).err() else {
+            return Err(io::Error::other(
+                "schema-19 case-sensitive sibling reached migration or was admitted",
+            )
+            .into());
+        };
+        if !matches!(error, DbError::ProjectRootMismatch { .. }) {
+            return Err(io::Error::other(format!(
+                "schema-19 case-sensitive sibling returned the wrong error: {error}"
+            ))
+            .into());
+        }
+
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "schema-19 case-sensitive refusal database bytes",
+        )?;
+        let sidecars_after = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-case-sensitive.db{suffix}"))).ok()
+        });
+        require_eq(
+            &sidecars_after,
+            &sidecars_before,
+            "schema-19 case-sensitive refusal sidecar bytes",
+        )?;
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        require_eq(
+            &inventory_after,
+            &inventory_before,
+            "schema-19 case-sensitive refusal inventory",
+        )?;
+
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            &schema_before,
+            "schema-19 refusal schema marker",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = 'project_root'",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )?,
+            &legacy_root_before,
+            "schema-19 refusal legacy root metadata",
+        )?;
+        let (project_bytes_after, generation_after) = store.connection.query_row(
+            "SELECT project_instance_id, active_generation
+             FROM project_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        require_eq(
+            &project_bytes_after,
+            &project_bytes_before,
+            "schema-19 refusal project instance",
+        )?;
+        require_eq(
+            &generation_after,
+            &generation_before,
+            "schema-19 refusal generation",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication_before,
+            "schema-19 refusal publication",
+        )?;
+        require_eq(
+            &store.usage_events(Some("identity-test"))?,
+            &usage_before,
+            "schema-19 refusal usage events",
+        )?;
+        require_eq(
+            &store.token_overview(Some("identity-test"))?,
+            &overview_before,
+            "schema-19 refusal usage overview",
+        )?;
+        let identity_table_after = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'project_root_identity'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &identity_table_after,
+            &identity_table_before,
+            "schema-19 refusal identity table",
+        )?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_runtime_scope(&store, project, 1, 0, 1)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        drop(read_guard);
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn non_utf8_root_transitions_use_native_identity_not_display_projection()
