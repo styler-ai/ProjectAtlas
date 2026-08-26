@@ -40,7 +40,7 @@ jobs:
         run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2
         with:
           tool: cargo-deny@0.20.2
 
