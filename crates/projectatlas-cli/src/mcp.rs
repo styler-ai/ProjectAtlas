@@ -11179,17 +11179,20 @@ mod tests {
         ];
         for (error, displayable) in init_errors {
             let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+            let value: serde_json::Value = toon_format::decode_default(&payload)?;
             if displayable {
+                let expected = serde_json::Value::String(replacement_display.clone());
                 require(
-                    payload.contains(replacement_display.as_str())
-                        && payload.contains("project_root")
-                        && payload.contains("project_path"),
+                    value.pointer("/error/init_required/project_root") == Some(&expected)
+                        && value.pointer("/error/next/project_path") == Some(&expected),
                     "MCP init recovery lost a displayable root selector",
                 )?;
             } else {
                 require(
-                    payload.contains("project_root: null")
-                        && !payload.contains("project_path:")
+                    value
+                        .pointer("/error/init_required/project_root")
+                        .is_some_and(serde_json::Value::is_null)
+                        && value.pointer("/error/next/project_path").is_none()
                         && !payload.contains("repo-�"),
                     "MCP init recovery exposed a lossy raw-root selector",
                 )?;
@@ -11230,16 +11233,20 @@ mod tests {
         ];
         for (error, displayable) in refresh_errors {
             let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+            let value: serde_json::Value = toon_format::decode_default(&payload)?;
             if displayable {
+                let expected = serde_json::Value::String(replacement_display.clone());
                 require(
-                    payload.contains("project_root: repo-�")
-                        && payload.contains("project_path: repo-�"),
+                    value.pointer("/error/refresh_required/project_root") == Some(&expected)
+                        && value.pointer("/error/next/project_path") == Some(&expected),
                     "MCP refresh recovery lost a displayable root selector",
                 )?;
             } else {
                 require(
-                    payload.contains("project_root: null")
-                        && !payload.contains("project_path:")
+                    value
+                        .pointer("/error/refresh_required/project_root")
+                        .is_some_and(serde_json::Value::is_null)
+                        && value.pointer("/error/next/project_path").is_none()
                         && !payload.contains("repo-�"),
                     "MCP refresh recovery exposed a lossy raw-root selector",
                 )?;

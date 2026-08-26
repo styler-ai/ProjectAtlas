@@ -5946,15 +5946,20 @@ mod tests {
                 "CLI init recovery selector did not fail closed for a raw root",
             )?;
             let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            let toon_value: Value = toon_format::decode_default(&toon)?;
             if displayable {
+                let expected = Value::String(replacement_display.clone());
                 require_condition(
-                    toon.contains(replacement_display.as_str()) && toon.contains("project_path"),
+                    toon_value.pointer("/error/init_required/project_root") == Some(&expected)
+                        && toon_value.pointer("/error/next/project_path") == Some(&expected),
                     "CLI TOON init recovery lost a displayable root selector",
                 )?;
             } else {
                 require_condition(
-                    toon.contains("project_root: null")
-                        && !toon.contains("project_path")
+                    toon_value
+                        .pointer("/error/init_required/project_root")
+                        .is_some_and(Value::is_null)
+                        && toon_value.pointer("/error/next/project_path").is_none()
                         && !toon.contains("repo-�"),
                     "CLI TOON init recovery exposed a lossy raw-root selector",
                 )?;
@@ -6010,6 +6015,25 @@ mod tests {
                         == expected_root,
                 "CLI refresh recovery did not preserve lossless root selector state",
             )?;
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            let toon_value: Value = toon_format::decode_default(&toon)?;
+            if displayable {
+                let expected = Value::String(replacement_display.clone());
+                require_condition(
+                    toon_value.pointer("/error/refresh_required/project_root") == Some(&expected)
+                        && toon_value.pointer("/error/next/project_path") == Some(&expected),
+                    "CLI TOON refresh recovery lost a displayable root selector",
+                )?;
+            } else {
+                require_condition(
+                    toon_value
+                        .pointer("/error/refresh_required/project_root")
+                        .is_some_and(Value::is_null)
+                        && toon_value.pointer("/error/next/project_path").is_none()
+                        && !toon.contains("repo-�"),
+                    "CLI TOON refresh recovery exposed a lossy raw-root selector",
+                )?;
+            }
         }
         let control_report = build_repository_control_report(&raw_root)?;
         let control_value = serde_json::to_value(control_report)?;
