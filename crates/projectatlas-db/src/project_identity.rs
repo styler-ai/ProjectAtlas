@@ -1309,6 +1309,51 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn case_only_root_rename_reopens_same_persisted_identity() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original_path = temp.path().join("CaseOnlyRoot");
+        let staging_path = temp.path().join("CaseOnlyRootStaging");
+        let renamed_path = temp.path().join("caseonlyroot");
+        fs::create_dir(&original_path)?;
+        let database = temp.path().join("case-only-root.db");
+
+        let initial = AtlasStore::open_for_project(&database, &original_path)?;
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("case-only root fixture identity is missing"))?;
+        let initial_root = initial
+            .project_root_identity()?
+            .ok_or_else(|| io::Error::other("case-only root fixture native identity is missing"))?;
+        drop(initial);
+
+        fs::rename(&original_path, &staging_path)?;
+        fs::rename(&staging_path, &renamed_path)?;
+        let renamed_root = CanonicalProjectRoot::from_path(&renamed_path)?;
+        if initial_root.encode()? == renamed_root.encode()? {
+            return Err("case-only root rename did not retain distinct native spelling".into());
+        }
+
+        let reopened = AtlasStore::open_for_project(&database, &renamed_path)?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project),
+            "case-only root project identity",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(renamed_root),
+            "case-only root native identity",
+        )?;
+        require_eq(
+            &reopened.project_root()?,
+            &Some(normalize_metadata_path(&renamed_path)),
+            "case-only root display metadata",
+        )?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn non_utf8_root_transitions_use_native_identity_not_display_projection()

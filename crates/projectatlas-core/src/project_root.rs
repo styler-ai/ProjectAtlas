@@ -4,6 +4,7 @@ use crate::{CoreError, CoreResult, normalize_native_path_display};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 /// Version of the durable native project-root codec.
@@ -14,8 +15,25 @@ pub const CANONICAL_PROJECT_ROOT_CODEC_VERSION: u8 = 1;
 /// Equality is native-path equality after filesystem canonicalization. The
 /// value is the authority for routing and persistence; its display projection
 /// is only for terminal diagnostics and compatibility metadata.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CanonicalProjectRoot(PathBuf);
+
+impl PartialEq for CanonicalProjectRoot {
+    fn eq(&self, other: &Self) -> bool {
+        native_identity_paths_equal(&self.0, &other.0)
+    }
+}
+
+impl Eq for CanonicalProjectRoot {}
+
+impl Hash for CanonicalProjectRoot {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        #[cfg(windows)]
+        windows_identity::ordinal_key(&self.0).hash(state);
+        #[cfg(not(windows))]
+        self.0.hash(state);
+    }
+}
 
 impl CanonicalProjectRoot {
     /// Canonicalize an existing absolute directory into a native identity.
@@ -171,6 +189,112 @@ fn normalize_native_identity_path(path: PathBuf) -> PathBuf {
 /// Preserve the canonical path unchanged on non-Windows hosts.
 fn normalize_native_identity_path(path: PathBuf) -> PathBuf {
     path
+}
+
+#[cfg(windows)]
+/// Compare Windows native paths with Windows' invariant ordinal case rules.
+fn native_identity_paths_equal(left: &Path, right: &Path) -> bool {
+    windows_identity::ordinal_key(left) == windows_identity::ordinal_key(right)
+}
+
+#[cfg(not(windows))]
+/// Compare native paths without applying a platform-specific case rule.
+fn native_identity_paths_equal(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "the stable standard library does not expose Windows invariant ordinal case mapping; this bounded native query keeps identity lossless"
+)]
+/// Windows-native ordinal casing shared by root equality and hashing.
+mod windows_identity {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    /// Windows flag for invariant uppercase mapping.
+    const LCMAP_UPPERCASE: u32 = 0x0000_0200;
+    /// Null-terminated invariant locale name passed to the Windows mapper.
+    const INVARIANT_LOCALE: [u16; 1] = [0];
+
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        /// Map UTF-16 units using the Windows invariant locale.
+        fn LCMapStringEx(
+            locale_name: *const u16,
+            map_flags: u32,
+            source: *const u16,
+            source_length: i32,
+            destination: *mut u16,
+            destination_length: i32,
+            version_information: *const c_void,
+            reserved: *mut c_void,
+            sort_handle: isize,
+        ) -> i32;
+    }
+
+    /// Return the invariant ordinal-uppercase UTF-16 units for one native path.
+    pub(super) fn ordinal_key(path: &Path) -> Vec<u16> {
+        let source = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        let Ok(source_length) = i32::try_from(source.len()) else {
+            return source;
+        };
+        if source_length == 0 {
+            return source;
+        }
+
+        // SAFETY: `source` is a live UTF-16 slice with an explicit length; the
+        // null destination asks Windows only for the required output units.
+        let required = unsafe {
+            LCMapStringEx(
+                INVARIANT_LOCALE.as_ptr(),
+                LCMAP_UPPERCASE,
+                source.as_ptr(),
+                source_length,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        let Ok(required_length) = usize::try_from(required) else {
+            return source;
+        };
+        if required_length == 0 {
+            return source;
+        }
+
+        let Ok(destination_length) = i32::try_from(required_length) else {
+            return source;
+        };
+        let mut destination = vec![0; required_length];
+        // SAFETY: `destination` has exactly the size returned by the sizing
+        // call, and both UTF-16 buffers use explicit lengths without NUL reads.
+        let written = unsafe {
+            LCMapStringEx(
+                INVARIANT_LOCALE.as_ptr(),
+                LCMAP_UPPERCASE,
+                source.as_ptr(),
+                source_length,
+                destination.as_mut_ptr(),
+                destination_length,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        let Ok(written_length) = usize::try_from(written) else {
+            return source;
+        };
+        if written_length == 0 || written_length > destination.len() {
+            return source;
+        }
+        destination.truncate(written_length);
+        destination
+    }
 }
 
 impl fmt::Display for CanonicalProjectRoot {
@@ -561,6 +685,49 @@ mod tests {
             {
                 return Err("extended Windows identity compatibility changed".into());
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_root_case_only_rename_preserves_identity_collections_and_codec()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::collections::{HashMap, HashSet};
+
+        let directory = tempdir()?;
+        let original_path = directory.path().join("CaseOnlyRoot");
+        let staging_path = directory.path().join("CaseOnlyRootStaging");
+        let renamed_path = directory.path().join("caseonlyroot");
+        std::fs::create_dir(&original_path)?;
+        let original = CanonicalProjectRoot::from_path(&original_path)?;
+
+        std::fs::rename(&original_path, &staging_path)?;
+        std::fs::rename(&staging_path, &renamed_path)?;
+        let renamed = CanonicalProjectRoot::from_path(&renamed_path)?;
+        if original.encode()? == renamed.encode()? {
+            return Err("case-only rename did not retain distinct native spellings".into());
+        }
+        if original != renamed {
+            return Err("case-only rename changed the native project identity".into());
+        }
+
+        let mut identities = HashSet::new();
+        identities.insert(original.clone());
+        identities.insert(renamed.clone());
+        if identities.len() != 1 {
+            return Err("case-equivalent roots were not deduplicated".into());
+        }
+        let mut values = HashMap::new();
+        values.insert(original, "case-only root");
+        if values.get(&renamed).copied() != Some("case-only root") {
+            return Err("case-equivalent root was not found by HashMap lookup".into());
+        }
+
+        let encoded = renamed.encode()?;
+        let decoded = CanonicalProjectRoot::decode(&encoded)?;
+        if decoded.as_path() != renamed.as_path() || decoded.encode()? != encoded {
+            return Err("case-only root codec round-trip changed native UTF-16".into());
         }
         Ok(())
     }
