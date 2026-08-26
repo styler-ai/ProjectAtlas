@@ -139,7 +139,10 @@ impl CanonicalProjectRoot {
 /// Normalize Windows extended-path prefixes for native identity equality.
 fn normalize_native_identity_path(path: PathBuf) -> PathBuf {
     if let Some(value) = path.to_str() {
-        return PathBuf::from(crate::normalize_native_path_display_str(value));
+        let normalized = PathBuf::from(crate::normalize_native_path_display_str(value));
+        if normalized.is_absolute() {
+            return normalized;
+        }
     }
     path
 }
@@ -396,6 +399,53 @@ mod tests {
         let root = CanonicalProjectRoot::from_path(&path)?;
         if root != CanonicalProjectRoot::decode(&root.encode()?)? {
             return Err("non-UTF-8 root codec changed the native path".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_root_codec_preserves_volume_guid_paths() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let path = PathBuf::from(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\repo");
+        let mut encoded = vec![
+            super::CANONICAL_PROJECT_ROOT_CODEC_VERSION,
+            super::platform_tag(),
+        ];
+        encoded.extend(super::native_path_bytes(path.as_os_str())?);
+        let decoded = CanonicalProjectRoot::decode(&encoded)?;
+        if !decoded.as_path().is_absolute() || decoded.as_path() != path {
+            return Err("volume-GUID identity lost its native absolute path".into());
+        }
+        if CanonicalProjectRoot::decode(&decoded.encode()?)? != decoded {
+            return Err("volume-GUID identity codec round-trip changed its native path".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_root_codec_keeps_extended_drive_and_unc_compatibility()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (encoded_path, expected_path) in [
+            (r"\\?\C:\repo", PathBuf::from("C:/repo")),
+            (
+                r"\\?\UNC\server\share\repo",
+                PathBuf::from("//server/share/repo"),
+            ),
+        ] {
+            let path = PathBuf::from(encoded_path);
+            let mut encoded = vec![
+                super::CANONICAL_PROJECT_ROOT_CODEC_VERSION,
+                super::platform_tag(),
+            ];
+            encoded.extend(super::native_path_bytes(path.as_os_str())?);
+            let decoded = CanonicalProjectRoot::decode(&encoded)?;
+            if decoded.as_path() != expected_path
+                || CanonicalProjectRoot::decode(&decoded.encode()?)? != decoded
+            {
+                return Err("extended Windows identity compatibility changed".into());
+            }
         }
         Ok(())
     }
