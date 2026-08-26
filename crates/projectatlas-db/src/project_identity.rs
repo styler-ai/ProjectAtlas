@@ -68,6 +68,14 @@ impl AtlasStore {
         };
         let previous_root_identity = if preflight.state == SchemaState::Current {
             read_current_project_root_identity(database_path)?
+        } else if transition == ProjectRootTransition::Detach
+            && preflight.state == SchemaState::UpgradeRequired
+        {
+            previous_root
+                .as_deref()
+                .map(Path::new)
+                .map(CanonicalProjectRoot::from_path)
+                .transpose()?
         } else {
             None
         };
@@ -1102,6 +1110,101 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )?;
         require_eq(&active_generation, &0, "moved graph generation")?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_nineteen_detach_migrates_legacy_identity_before_transition()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let source_root = temp.path().join("schema-19-detach-source");
+        let destination_root = temp.path().join("schema-19-detach-destination");
+        fs::create_dir(&source_root)?;
+        fs::create_dir(&destination_root)?;
+        let database = temp.path().join("schema-19-detach.db");
+
+        let mut store = AtlasStore::open_for_project(&database, &source_root)?;
+        let previous_project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-19 detach fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, previous_project)?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(store);
+
+        let detached = AtlasStore::transition_project_root(
+            &database,
+            &destination_root,
+            ProjectRootTransition::Detach,
+        )?;
+        require(
+            detached.identity_changed && detached.project_instance_id != previous_project,
+            "schema-19 detach did not rotate the project identity",
+        )?;
+        require_eq(
+            &detached.project_root,
+            &normalize_metadata_path(&destination_root),
+            "schema-19 detach destination",
+        )?;
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &destination_root)?;
+        let schema_version = reopened.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &schema_version,
+            &"20".to_string(),
+            "schema-19 detach schema",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(CanonicalProjectRoot::from_path(&destination_root)?),
+            "schema-19 detach native destination identity",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(detached.project_instance_id),
+            "schema-19 detach project identity",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, false)?;
+        assert_runtime_scope(&reopened, previous_project, 0, 1, 0)?;
+        assert_graph_counts(&reopened, [0, 0, 0, 0, 0, 0, 0])?;
+        require(
+            reopened.index_publication()?.is_none(),
+            "schema-19 detach retained derived publication",
+        )?;
+        drop(reopened);
+
+        let missing_database = temp.path().join("schema-19-detach-missing.db");
+        let missing_store = AtlasStore::open_for_project(&missing_database, &source_root)?;
+        missing_store
+            .connection
+            .execute_batch("DROP TABLE project_root_identity; UPDATE metadata SET value = '19' WHERE key = 'schema_version';")?;
+        drop(missing_store);
+        let missing_before = fs::read(&missing_database)?;
+        fs::remove_dir(&source_root)?;
+        let missing_error = require_error(
+            AtlasStore::transition_project_root(
+                &missing_database,
+                &destination_root,
+                ProjectRootTransition::Detach,
+            ),
+            "schema-19 detach repaired a missing legacy root",
+        )?;
+        require(
+            !matches!(missing_error, DbError::ProjectRootTransitionChanged { .. }),
+            "schema-19 missing-root detach reached mutable transition validation",
+        )?;
+        assert_database_unchanged(
+            &missing_database,
+            &missing_before,
+            "schema-19 missing-root detach",
+        )?;
         Ok(())
     }
 

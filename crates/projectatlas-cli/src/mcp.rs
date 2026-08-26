@@ -77,8 +77,8 @@ use projectatlas_core::{
     MAX_GIT_WORKTREE_REGISTRATIONS, NavigationNextCall, NavigationNextCapability, Overview,
     PurposeSource, PurposeStatus, RankedConnection, RankedConnectionCount, RankedConnectionKind,
     RankedConnectionTarget, RankedNode, RankedReasonCode, normalize_native_path_display,
-    normalize_repo_path, normalize_repo_path_prefix, validated_repo_file_key,
-    validated_repo_node_key,
+    normalize_native_path_display_str, normalize_repo_path, normalize_repo_path_prefix,
+    validated_repo_file_key, validated_repo_node_key,
 };
 use projectatlas_db::{
     ActiveWorktreeRegistrationGuard, AtlasStore, DbError, HealthQuery, HealthResolution,
@@ -6675,10 +6675,15 @@ impl ProjectAtlasMcpServer {
             message.push_str(&source.to_string());
             CliError::InvalidInput(message)
         })?;
-        let registration_root_matches = Self::indexed_db_matches_root(
-            &Self::projectatlas_db_path(&root),
-            &current_root_identity,
-        );
+        let current_registry_root = root
+            .to_str()
+            .map(normalize_native_path_display_str)
+            .ok_or_else(|| CliError::InvalidInput(MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string()))?;
+        let registration_root_matches = current_registry_root == registration.last_root
+            && Self::indexed_db_matches_root(
+                &Self::projectatlas_db_path(&root),
+                &current_root_identity,
+            );
         let registration = if registration_root_matches {
             registration
         } else {
@@ -10144,6 +10149,7 @@ mod tests {
         IndexCancellation, IndexWorkStage, RankedConnectionDirection, RankedConnectionKind,
         RankedConnectionTarget,
     };
+    use projectatlas_db::ProjectRootTransition;
     use std::collections::BTreeSet;
     use std::fs;
     use std::io;
@@ -12473,6 +12479,131 @@ mod tests {
                     .project_instance_id
                     .is_none(),
             "guarded reset deleted replacement lifecycle database, sidecars, or MCP config",
+        )
+    }
+
+    #[test]
+    fn registered_worktree_move_refreshes_registry_root_after_local_rebind()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = registered_worktree_race_fixture("moved-root")?;
+        let original_root = fixture.state.root.clone();
+        let original_root_display = normalize_native_path_display(&original_root);
+        let target_config = fixture
+            .linked
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_CONFIG_FILE_NAME);
+        init_project_with_config(&fixture.linked, Some(&target_config))?;
+        let target_store = AtlasStore::open_for_project(&fixture.target_db, &fixture.linked)?;
+        let target_project = target_store
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        drop(target_store);
+
+        let registered = {
+            let control = AtlasStore::open_for_project(&fixture.control_db, &fixture.control_root)?;
+            control.register_worktree(
+                &fixture.alias,
+                &fixture.control_root.join(".git"),
+                &fixture.administrative_directory,
+                &fixture.registration.git_administrative_identity,
+                &original_root,
+                Some(target_project),
+                1,
+            )?
+        };
+        require(
+            registered.project_instance_id == Some(target_project),
+            "moved worktree fixture remained unbound",
+        )?;
+        let original_registration = registered;
+
+        let moved = fixture
+            .primary
+            .parent()
+            .ok_or_else(|| io::Error::other("moved worktree has no parent"))?
+            .join("moved-worktree");
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&fixture.primary)
+                .args(["worktree", "move"])
+                .arg(&fixture.linked)
+                .arg(&moved),
+        )?;
+        let moved_root = moved.canonicalize()?;
+        let moved_db = moved_root
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_DB_FILE_NAME);
+        let moved_binding = AtlasStore::transition_project_root(
+            &moved_db,
+            &moved_root,
+            ProjectRootTransition::Move,
+        )?;
+        require(
+            moved_binding.project_instance_id == target_project,
+            "local root rebind changed the registered project identity",
+        )?;
+        require(
+            read_project_root_identity_read_only(&moved_db)?
+                == Some(CanonicalProjectRoot::from_path(&moved_root)?),
+            "local root rebind did not establish the moved native identity",
+        )?;
+
+        let resolved = fixture
+            .server
+            .state_for_target(None, Some(fixture.alias.to_string()))?;
+        require(
+            resolved.root == moved_root,
+            "alias resolution did not use the moved Git root",
+        )?;
+        let control = AtlasStore::open_for_project(&fixture.control_db, &fixture.control_root)?;
+        let refreshed = control.worktree_registration(&fixture.alias)?;
+        require(
+            refreshed.last_root == normalize_native_path_display(&moved_root)
+                && refreshed.last_root != original_root_display,
+            "alias resolution retained the stale registry root",
+        )?;
+        require(
+            refreshed.registration_id == original_registration.registration_id
+                && refreshed.alias == original_registration.alias
+                && refreshed.git_common_directory == original_registration.git_common_directory
+                && refreshed.git_administrative_directory
+                    == original_registration.git_administrative_directory
+                && refreshed.git_administrative_identity
+                    == original_registration.git_administrative_identity
+                && refreshed.project_instance_id == original_registration.project_instance_id
+                && refreshed.accepted_telemetry_revision
+                    == original_registration.accepted_telemetry_revision,
+            "moved root refresh changed administrative identity or telemetry state",
+        )?;
+        drop(control);
+
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&fixture.primary)
+                .args(["worktree", "remove", "--force"])
+                .arg(&moved),
+        )?;
+        let missing = fixture
+            .server
+            .atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+                include_retired: Some(false),
+            }));
+        require(
+            missing.contains(&normalize_native_path_display(&moved_root))
+                && !missing.contains(&original_root_display)
+                && missing.contains("\"moved-root\",linked,missing,registered"),
+            &format!("missing worktree reporting regressed to the pre-move root: {missing}"),
+        )?;
+        let retired = fixture
+            .server
+            .atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+                worktree: fixture.alias.to_string(),
+            }));
+        require(
+            retired.contains("status: retired")
+                && retired.contains(&normalize_native_path_display(&moved_root))
+                && !retired.contains(&original_root_display),
+            &format!("retirement did not preserve the moved root: {retired}"),
         )
     }
 
