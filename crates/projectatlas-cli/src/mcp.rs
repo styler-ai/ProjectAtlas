@@ -15682,6 +15682,104 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn mcp_settings_reports_native_root_equivalence() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let original = temp.path().join("McpCaseRoot");
+        let staging = temp.path().join("McpCaseRootStaging");
+        let renamed = temp.path().join("mcpcaseroot");
+        fs::create_dir(&original)?;
+        let database = original.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("MCP case-only database has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &original)?);
+        fs::rename(&original, &staging)?;
+        fs::rename(&staging, &renamed)?;
+        let renamed_database = renamed.join(".projectatlas/projectatlas.db");
+        let positive_config = temp.path().join("mcp-case-only-config.toml");
+        fs::write(
+            &positive_config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(&renamed.to_string_lossy())?
+            ),
+        )?;
+        let positive_server = ProjectAtlasMcpServer::new(
+            renamed_database.clone(),
+            None,
+            "mcp-settings-test".to_string(),
+            false,
+        );
+        let positive_state = McpProjectState {
+            root: renamed,
+            db_path: renamed_database,
+            config_path: Some(positive_config),
+            worktree: None,
+        };
+        let positive: serde_json::Value = toon_format::decode_default(
+            &positive_server.render_settings_with_capabilities(&positive_state)?,
+        )?;
+        require(
+            positive.pointer("/settings/root_verified") == Some(&serde_json::json!(true)),
+            "MCP settings rejected case-only root rename",
+        )?;
+
+        let case_sensitive_parent = temp.path().join("mcp-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = StdCommand::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let stored_root = case_sensitive_parent.join("Repo");
+        let selected_root = case_sensitive_parent.join("repo");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        let database = stored_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("MCP case-sensitive database has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &stored_root)?);
+        let negative_config = temp.path().join("mcp-case-sensitive-config.toml");
+        fs::write(
+            &negative_config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(&selected_root.to_string_lossy())?
+            ),
+        )?;
+        let negative_server = ProjectAtlasMcpServer::new(
+            database.clone(),
+            None,
+            "mcp-settings-test".to_string(),
+            false,
+        );
+        let negative_state = McpProjectState {
+            root: selected_root,
+            db_path: database,
+            config_path: Some(negative_config),
+            worktree: None,
+        };
+        let negative: serde_json::Value = toon_format::decode_default(
+            &negative_server.render_settings_with_capabilities(&negative_state)?,
+        )?;
+        require(
+            negative.pointer("/settings/root_verified") == Some(&serde_json::json!(false)),
+            "MCP settings accepted a case-sensitive sibling",
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn task_progress_status_and_cancel_are_typed() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

@@ -2494,6 +2494,26 @@ impl AtlasStore {
         project_identity::load_project_root_identity(&self.connection)
     }
 
+    /// Return whether a selected canonical root resolves to this store's
+    /// captured native root identity.
+    ///
+    /// The comparison re-canonicalizes both existing roots through the
+    /// admission proof, so case-only spelling changes on case-insensitive
+    /// filesystems are accepted while distinct case-sensitive roots remain
+    /// different. An unavailable or unresolvable persisted root fails closed.
+    #[must_use]
+    pub fn project_root_identity_matches(&self, selected: &CanonicalProjectRoot) -> bool {
+        self.validated_project_root_identity
+            .as_ref()
+            .is_some_and(|persisted| {
+                project_identity::prove_existing_root_equivalence(
+                    selected.as_path(),
+                    persisted.as_path(),
+                )
+                .is_ok()
+            })
+    }
+
     /// Revalidate the captured binding against a fresh database snapshot.
     ///
     /// File-backed stores open an independent read-only snapshot so a report

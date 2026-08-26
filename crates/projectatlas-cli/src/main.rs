@@ -5198,8 +5198,8 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
     push_check(
         &mut checks,
         "project-root",
-        store.project_root()?.is_some(),
-        "scan metadata records the canonical project root",
+        store.project_root_identity()?.is_some(),
+        "database records the authoritative native project root",
     );
     push_check(
         &mut checks,
@@ -5522,6 +5522,38 @@ mod tests {
             "{context} missing selected project audit root/db: {text}"
         ))
         .into())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parity_uses_native_identity_for_non_utf8_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp
+            .path()
+            .join(OsString::from_vec(b"parity-root-\x80".to_vec()));
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("native parity database has no parent"))?,
+        )?;
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        require_condition(
+            store.project_root()?.is_none() && store.project_root_identity()?.is_some(),
+            "parity fixture did not create a native-only root binding",
+        )?;
+
+        let report = super::build_parity_report(&store, super::REPOSITORY_INTELLIGENCE_PROFILE)?;
+        let root_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "project-root")
+            .ok_or_else(|| io::Error::other("parity report omitted project-root check"))?;
+        require_condition(
+            root_check.status == super::ParityCheckStatus::Pass,
+            "parity report rejected a valid native-only root binding",
+        )?;
+        Ok(())
     }
 
     #[test]

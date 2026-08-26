@@ -5241,14 +5241,18 @@ pub(crate) fn build_settings_report(
         let project_root = default_mcp_project_root(&absolute_db, None)?;
         load_atlas_config_for_root(&project_root)?
     };
+    let config_root_identity = CanonicalProjectRoot::from_path(&config.root).ok();
     let cache_dir = absolute_db
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let database = database_settings_report(&absolute_db)?;
-    let (index, telemetry, file_text_fts, db_root_identity) =
+    let (index, telemetry, file_text_fts, db_root_identity, db_root_matches_config) =
         if database.schema.compatibility == DatabaseSchemaCompatibility::Current {
             let store = AtlasStore::open_read_only(&absolute_db)?;
             let db_root_identity = store.project_root_identity()?;
+            let db_root_matches_config = config_root_identity
+                .as_ref()
+                .is_some_and(|config_root| store.project_root_identity_matches(config_root));
             let snapshot_publication = store.index_publication()?;
             if settings_publication_matches(
                 database.publication.as_ref(),
@@ -5259,14 +5263,14 @@ pub(crate) fn build_settings_report(
                     Some(store.telemetry_retention_state()?),
                     Some(store.file_text_fts_state()?),
                     db_root_identity,
+                    db_root_matches_config,
                 )
             } else {
-                (None, None, None, db_root_identity)
+                (None, None, None, db_root_identity, db_root_matches_config)
             }
         } else {
-            (None, None, None, None)
+            (None, None, None, None, false)
         };
-    let config_root_identity = CanonicalProjectRoot::from_path(&config.root).ok();
     let repo_root = config_root_identity
         .as_ref()
         .and_then(|root| root.display_string().ok());
@@ -5274,7 +5278,7 @@ pub(crate) fn build_settings_report(
     if let (Some(db_root), Some(config_root)) =
         (db_root_identity.as_ref(), config_root_identity.as_ref())
     {
-        if db_root != config_root {
+        if !db_root_matches_config {
             root_mismatches.push(format!(
                 "db root {:?} does not match config root {:?}",
                 db_root
@@ -9382,6 +9386,124 @@ mod tests {
             &serialized.contains('\u{fffd}'),
             &false,
             "serialized settings fabricated a replacement root",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_report_accepts_case_only_root_rename() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original = temp.path().join("CaseOnlyRoot");
+        let staging = temp.path().join("CaseOnlyRootStaging");
+        let renamed = temp.path().join("caseonlyroot");
+        fs::create_dir(&original)?;
+        let database = original.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-only database has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &original)?);
+
+        fs::rename(&original, &staging)?;
+        fs::rename(&staging, &renamed)?;
+        let renamed_database = renamed.join(".projectatlas/projectatlas.db");
+        let config = temp.path().join("case-only-config.toml");
+        fs::write(
+            &config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(&renamed.to_string_lossy())?
+            ),
+        )?;
+
+        let report = build_settings_report(&renamed_database, Some(&config), OutputFormat::Json)?;
+        require_eq(
+            &report.root_verified,
+            &true,
+            "settings accepted case-only root rename",
+        )?;
+        require_eq(
+            &report.root_mismatches.is_empty(),
+            &true,
+            "case-only root rename mismatch diagnostics",
+        )?;
+        let json = serde_json::to_value(&report)?;
+        require_eq(
+            &json.get("root_verified"),
+            &Some(&Value::Bool(true)),
+            "JSON settings root verification",
+        )?;
+        let toon = crate::render_settings_report(&report);
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_eq(
+            &toon_value.pointer("/settings/root_verified"),
+            &Some(&Value::Bool(true)),
+            "TOON settings root verification",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_report_rejects_case_sensitive_sibling() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("case-sensitive-parent");
+        fs::create_dir(&parent)?;
+        let enabled = StdCommand::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+
+        let stored_root = parent.join("Repo");
+        let selected_root = parent.join("repo");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        let database = stored_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-sensitive database has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &stored_root)?);
+        let config = temp.path().join("case-sensitive-config.toml");
+        fs::write(
+            &config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(&selected_root.to_string_lossy())?
+            ),
+        )?;
+
+        let report = build_settings_report(&database, Some(&config), OutputFormat::Json)?;
+        require_eq(
+            &report.root_verified,
+            &false,
+            "settings rejected case-sensitive sibling",
+        )?;
+        require_eq(
+            &report.root_mismatches.is_empty(),
+            &false,
+            "case-sensitive sibling mismatch diagnostics",
+        )?;
+        let json = serde_json::to_value(&report)?;
+        require_eq(
+            &json.get("root_verified"),
+            &Some(&Value::Bool(false)),
+            "JSON case-sensitive sibling verification",
+        )?;
+        let toon = crate::render_settings_report(&report);
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_eq(
+            &toon_value.pointer("/settings/root_verified"),
+            &Some(&Value::Bool(false)),
+            "TOON case-sensitive sibling verification",
         )?;
         Ok(())
     }
