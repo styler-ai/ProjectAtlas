@@ -857,7 +857,7 @@ mod tests {
         let target_database = target_dir.join("projectatlas.db");
         let collision_database = collision_dir.join("projectatlas.db");
         let mut source = AtlasStore::open_for_project(&source_database, &source_root)?;
-        seed_source(&mut source, &target_root)?;
+        seed_source(&mut source, &collision_root)?;
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
 
         let mut candidate =

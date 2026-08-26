@@ -678,7 +678,7 @@ mod tests {
         let Err(error) = AtlasStore::open_for_project(&database, &alias) else {
             return Err(io::Error::other("repair unexpectedly succeeded").into());
         };
-        assert!(matches!(error, DbError::Sqlite(_)));
+        assert!(matches!(error, DbError::SchemaShape { .. }));
         let connection = Connection::open(&database)?;
         let metadata = connection.query_row(
             "SELECT value FROM metadata WHERE key = ?1",
