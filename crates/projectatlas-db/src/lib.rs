@@ -1721,7 +1721,6 @@ impl AtlasStore {
         if expected_identity.is_none()
             && identity_requirement.is_required()
             && preflight.state == SchemaState::UpgradeRequired
-            && preflight.schema_version == Some(schema::CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION)
             && preflight
                 .project_root
                 .as_deref()

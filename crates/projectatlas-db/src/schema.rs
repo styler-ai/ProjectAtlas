@@ -40,7 +40,7 @@ const CLASSIFIED_GRAPH_SCHEMA_VERSION: i64 = 17;
 /// First schema with local worktree registration and aggregate telemetry control state.
 const WORKTREE_CONTROL_SCHEMA_VERSION: i64 = 18;
 /// Schema immediately before the canonical native-root identity migration.
-pub(crate) const CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION: i64 = 19;
+const CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION: i64 = 19;
 /// First schema with a lossless native project-root identity.
 const CANONICAL_ROOT_SCHEMA_VERSION: i64 = 20;
 /// Metadata key for the durable schema version.
@@ -5680,10 +5680,144 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn schema_eighteen_rootless_open_rejects_ambiguous_root_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        fn sidecar_bytes(database: &Path) -> [Option<Vec<u8>>; 3] {
+            ["-wal", "-shm", "-journal"]
+                .map(|suffix| fs::read(sqlite_sidecar_path(database, suffix)).ok())
+        }
+
+        fn read_snapshot(database: &Path) -> Result<CurrentSchemaSnapshot, Box<dyn Error>> {
+            let connection =
+                Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let snapshot = current_schema_snapshot(&connection)?;
+            drop(connection);
+            Ok(snapshot)
+        }
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"schema-18-rootless-raw-\x80".to_vec()));
+        let raw_database = raw_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(&raw_root)?;
+        if let Some(parent) = raw_database.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let store = AtlasStore::open_for_project(&raw_database, &raw_root)?;
+        store.connection.execute(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'schema-18 authored purpose', 'agent', 'approved', 'schema-test'
+               FROM nodes WHERE path = 'src/lib.rs'",
+            [],
+        )?;
+        store.connection.execute(
+            "UPDATE project_identity SET active_generation = 11 WHERE singleton = 1",
+            [],
+        )?;
+        for (key, value) in [
+            (INDEX_PUBLICATION_STATE_KEY, "complete"),
+            (INDEX_PUBLICATION_FINGERPRINT_KEY, "schema-18-rootless"),
+            (INDEX_PUBLICATION_GENERATION_KEY, "11"),
+        ] {
+            set_metadata(&store.connection, key, value)?;
+        }
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '18' WHERE key = 'schema_version';",
+        )?;
+        drop(store);
+
+        let snapshot = read_snapshot(&raw_database)?;
+        let database_before = fs::read(&raw_database)?;
+        let sidecars_before = sidecar_bytes(&raw_database);
+        let inventory_before = directory_entry_names(
+            raw_database
+                .parent()
+                .ok_or_else(|| io::Error::other("schema-18 raw predecessor has no parent"))?,
+        )?;
+        if !matches!(
+            AtlasStore::open(&raw_database),
+            Err(DbError::ProjectRootIdentityMissing)
+        ) {
+            return Err(io::Error::other("schema-18 rootless raw predecessor was admitted").into());
+        }
+        let snapshot_after = read_snapshot(&raw_database)?;
+        if fs::read(&raw_database)? != database_before
+            || sidecar_bytes(&raw_database) != sidecars_before
+            || directory_entry_names(
+                raw_database
+                    .parent()
+                    .ok_or_else(|| io::Error::other("schema-18 raw predecessor has no parent"))?,
+            )? != inventory_before
+            || snapshot_after != snapshot
+        {
+            return Err(
+                io::Error::other("schema-18 raw refusal changed durable or sidecar state").into(),
+            );
+        }
+
+        let replacement_root = PathBuf::from(raw_root.to_string_lossy().into_owned());
+        if replacement_root == raw_root {
+            return Err(io::Error::other(
+                "schema-18 fixture did not create a replacement-character sibling",
+            )
+            .into());
+        }
+        let replacement_database = replacement_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            replacement_database
+                .parent()
+                .ok_or_else(|| io::Error::other("schema-18 replacement has no parent"))?,
+        )?;
+        fs::copy(&raw_database, &replacement_database)?;
+        let replacement_snapshot = read_snapshot(&replacement_database)?;
+        let replacement_before = fs::read(&replacement_database)?;
+        let replacement_sidecars = sidecar_bytes(&replacement_database);
+        let replacement_inventory = directory_entry_names(
+            replacement_database
+                .parent()
+                .ok_or_else(|| io::Error::other("schema-18 replacement has no parent"))?,
+        )?;
+        if !matches!(
+            AtlasStore::open(&replacement_database),
+            Err(DbError::ProjectRootIdentityMissing)
+        ) {
+            return Err(io::Error::other("schema-18 replacement predecessor was admitted").into());
+        }
+        if fs::read(&replacement_database)? != replacement_before
+            || sidecar_bytes(&replacement_database) != replacement_sidecars
+            || directory_entry_names(
+                replacement_database
+                    .parent()
+                    .ok_or_else(|| io::Error::other("schema-18 replacement has no parent"))?,
+            )? != replacement_inventory
+            || read_snapshot(&replacement_database)? != replacement_snapshot
+            || replacement_snapshot != snapshot
+        {
+            return Err(io::Error::other(
+                "schema-18 replacement refusal changed durable or sidecar state",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     #[test]
     fn resolution_schema_migrates_parser_provenance_without_weakening_existing_facts()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
+        let root = temp.path().join("resolution-root");
+        fs::create_dir_all(&root)?;
         let database = temp.path().join("projectatlas.db");
         let connection = Connection::open(&database)?;
         configure_writable(&connection)?;
@@ -5697,6 +5831,11 @@ mod tests {
             &connection,
             SCHEMA_VERSION_KEY,
             &RESOLUTION_SCHEMA_VERSION.to_string(),
+        )?;
+        set_metadata(
+            &connection,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(&root),
         )?;
         set_metadata(&connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
         set_metadata(
