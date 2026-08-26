@@ -5948,7 +5948,7 @@ mod tests {
             let toon = render_cli_error(OutputFormat::Toon, &error)?;
             if displayable {
                 require_condition(
-                    toon.contains("repo-�") && toon.contains("project_path"),
+                    toon.contains(replacement_display.as_str()) && toon.contains("project_path"),
                     "CLI TOON init recovery lost a displayable root selector",
                 )?;
             } else {

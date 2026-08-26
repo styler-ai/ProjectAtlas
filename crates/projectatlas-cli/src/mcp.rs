@@ -11181,8 +11181,9 @@ mod tests {
             let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
             if displayable {
                 require(
-                    payload.contains("project_root: repo-�")
-                        && payload.contains("project_path: repo-�"),
+                    payload.contains(replacement_display.as_str())
+                        && payload.contains("project_root")
+                        && payload.contains("project_path"),
                     "MCP init recovery lost a displayable root selector",
                 )?;
             } else {
@@ -12207,8 +12208,8 @@ mod tests {
 
         let first_selector = ProjectAtlasMcpServer::worktree_candidate_selector(&entries[0]);
         require(
-            first_selector == ProjectAtlasMcpServer::worktree_candidate_selector(&entries[1]),
-            "regression fixture did not reproduce the lossy selector collision",
+            first_selector != ProjectAtlasMcpServer::worktree_candidate_selector(&entries[1]),
+            "native administrative identities collapsed into one selector",
         )?;
         let repository = GitRepositoryStructure {
             common_directory: common_directory.clone(),
