@@ -69,7 +69,8 @@ use projectatlas_db::{
     IndexPublicationState, IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
     MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
     TelemetryRetentionState, WorktreeRegistration, WorktreeUsageSnapshot, database_settings_report,
-    read_project_root_identity_read_only, validate_database_location,
+    read_legacy_project_root_candidate_read_only, read_project_root_identity_read_only,
+    validate_database_location,
 };
 use projectatlas_fs::worktree::{
     GitManagerSourceSelection, GitRepositorySelection, GitWorktreeState, RepositoryStructure,
@@ -2658,6 +2659,11 @@ pub(crate) fn default_mcp_project_root(
         && let Some(project_root) = read_project_root_identity_read_only(db)?
     {
         return canonical_source_project_root(project_root.as_path());
+    }
+    if db.exists()
+        && let Some(project_root) = read_legacy_project_root_candidate_read_only(db)?
+    {
+        return canonical_source_project_root(Path::new(&project_root));
     }
     if let Some(project_root) = project_root_from_db_path(db) {
         return canonical_source_project_root(&project_root);
@@ -5507,6 +5513,11 @@ pub(crate) fn resolved_mcp_config_path(
         && let Some(project_root) = read_project_root_identity_read_only(db)?
     {
         candidate_roots.push(project_root.into_path());
+    }
+    if db.exists()
+        && let Some(project_root) = read_legacy_project_root_candidate_read_only(db)?
+    {
+        candidate_roots.push(canonical_source_project_root(Path::new(&project_root))?);
     }
     let absolute_db = absolute_path(db)?;
     if let Some(project_root) = project_root_from_db_path(&absolute_db) {
@@ -8731,6 +8742,32 @@ mod tests {
             &true,
             "replacement control identity rejection",
         )
+    }
+
+    #[test]
+    fn default_mcp_project_root_recovers_custom_predecessor_candidate() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("legacy-project");
+        let database = temp.path().join("custom-projectatlas.db");
+        fs::create_dir(&root)?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        {
+            let connection = rusqlite::Connection::open(&database)?;
+            connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+        }
+
+        let resolved = default_mcp_project_root(&database, None)?;
+        require_eq(
+            &resolved,
+            &canonical_source_project_root(&root)?,
+            "custom predecessor root recovery",
+        )?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        Ok(())
     }
 
     #[test]

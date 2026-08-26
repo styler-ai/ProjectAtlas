@@ -6351,6 +6351,26 @@ pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
     schema::read_project_root(path)
 }
 
+/// Read an untrusted predecessor root candidate without creating, migrating,
+/// or repairing a database.
+///
+/// This is recovery evidence for selecting a filesystem candidate only. It is
+/// never an authoritative project identity and callers must canonicalize the
+/// candidate through the live filesystem before opening a project database.
+/// Current databases intentionally return no candidate because their typed
+/// native identity is the only authority.
+///
+/// # Errors
+///
+/// Returns an error when the database cannot be inspected read-only or its
+/// predecessor schema is incompatible or malformed.
+pub fn read_legacy_project_root_candidate_read_only(path: &Path) -> DbResult<Option<String>> {
+    let (preflight, _) = schema::inspect_compatibility(path, None)?;
+    Ok((preflight.state == SchemaState::UpgradeRequired)
+        .then_some(preflight.project_root)
+        .flatten())
+}
+
 /// Read the authoritative native project-root identity without mutation.
 ///
 /// # Errors
@@ -9953,6 +9973,11 @@ mod tests {
             &read_project_root_read_only(&db_path)?,
             &Some(normalize_native_path_display(&root)),
             "read-only project root",
+        )?;
+        require_eq(
+            &read_legacy_project_root_candidate_read_only(&db_path)?,
+            &None,
+            "current schema has no legacy recovery candidate",
         )?;
         require_eq(
             &fs::read(&db_path)?,

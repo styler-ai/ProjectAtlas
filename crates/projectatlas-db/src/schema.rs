@@ -1430,8 +1430,9 @@ pub(crate) fn preflight(
 /// Inspect one database against a native project root before writable access.
 ///
 /// Current databases use the typed root identity. A missing typed identity is
-/// admitted only for the narrow recovery path that proves the legacy metadata
-/// names the same existing native root; no binding is created by this helper.
+/// admitted only for the narrow recovery path that proves unambiguous legacy
+/// metadata names the same existing native root; no binding is created by this
+/// helper.
 pub(crate) fn preflight_for_project(
     path: &Path,
     expected_root: &CanonicalProjectRoot,
@@ -1446,24 +1447,47 @@ pub(crate) fn preflight_for_project(
     } else {
         None
     };
-    let identity_matches = if let Some(found) = found_identity.as_ref() {
-        found == expected_root
+    if let Some(found) = found_identity.as_ref() {
+        if found != expected_root {
+            return Err(DbError::ProjectRootMismatch {
+                expected: expected_root.display_string(),
+                found: found.display_string(),
+            });
+        }
     } else {
-        let legacy =
-            read_metadata(&connection, PROJECT_ROOT_KEY)?.ok_or(DbError::ProjectRootMissing)?;
-        CanonicalProjectRoot::from_path(Path::new(&legacy))? == *expected_root
-    };
-    if !identity_matches {
-        let found = found_identity
-            .map(|root| root.display_string())
-            .or(preflight.project_root)
-            .unwrap_or_default();
-        return Err(DbError::ProjectRootMismatch {
-            expected: expected_root.display_string(),
-            found,
-        });
+        validate_legacy_project_root_binding(&connection, expected_root)?;
     }
     Ok((preflight, location))
+}
+
+/// Revalidate a predecessor's legacy root against the caller's native root.
+///
+/// This check is intentionally repeated from the writer connection after its
+/// transaction begins. The outer read-only preflight is only an admission
+/// hint; it cannot authorize a database or metadata replacement raced between
+/// preflight and migration.
+fn validate_legacy_project_root_binding(
+    connection: &Connection,
+    expected_root: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    let legacy = read_metadata(connection, PROJECT_ROOT_KEY)?.ok_or(DbError::ProjectRootMissing)?;
+    if legacy.contains('\u{fffd}') {
+        // A replacement character may represent either a real character or a
+        // lossy raw path byte. Without a native predecessor authority, the
+        // spelling is ambiguous and must be rejected to prevent a collision.
+        return Err(DbError::ProjectRootMismatch {
+            expected: expected_root.display_string(),
+            found: legacy,
+        });
+    }
+    let found = CanonicalProjectRoot::from_path(Path::new(&legacy))?;
+    if found != *expected_root {
+        return Err(DbError::ProjectRootMismatch {
+            expected: expected_root.display_string(),
+            found: found.display_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Inspect compatibility without the full migration-admission integrity scan.
@@ -1586,6 +1610,15 @@ pub(crate) fn initialize_with_project_root(
         } else {
             inspect_connection(connection, expected_root, false)?
         };
+        let predecessor_native_identity_admitted = if let Some(expected_identity) =
+            expected_identity
+            && preflight.state == SchemaState::UpgradeRequired
+        {
+            validate_legacy_project_root_binding(connection, expected_identity)?;
+            true
+        } else {
+            false
+        };
         match preflight.state {
             SchemaState::Fresh => create_fresh(connection, expected_root, expected_identity)?,
             SchemaState::Current => {}
@@ -1597,9 +1630,18 @@ pub(crate) fn initialize_with_project_root(
         if let Some(expected_root) = expected_root {
             crate::project_identity::ensure_project_identity(connection)?;
             if let Some(expected) = expected_identity {
-                crate::project_identity::ensure_project_root_identity_in_transaction(
-                    connection, expected,
-                )?;
+                if predecessor_native_identity_admitted {
+                    // The writer-connection legacy binding recheck above
+                    // proved the predecessor metadata still names this root.
+                    // Seed from the caller's native authority rather than
+                    // reconstructing a possibly lossy display.
+                    crate::project_identity::set_project_root_identity(connection, expected)?;
+                    set_metadata(connection, PROJECT_ROOT_KEY, &expected.display_string())?;
+                } else {
+                    crate::project_identity::ensure_project_root_identity_in_transaction(
+                        connection, expected,
+                    )?;
+                }
             } else {
                 let expected = CanonicalProjectRoot::from_path(Path::new(expected_root))?;
                 crate::project_identity::ensure_project_root_identity_in_transaction(
@@ -5320,6 +5362,214 @@ mod tests {
     }
 
     #[test]
+    fn schema_nineteen_conventional_copy_refuses_historical_rebinding() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root_a = temp.path().join("root-a");
+        let root_b = temp.path().join("root-b");
+        fs::create_dir_all(root_a.join(".projectatlas"))?;
+        fs::create_dir_all(root_b.join(".projectatlas"))?;
+        let database_a = root_a.join(".projectatlas/projectatlas.db");
+        let database_b = root_b.join(".projectatlas/projectatlas.db");
+
+        let store = AtlasStore::open_for_project(&database_a, &root_a)?;
+        store.connection.execute(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'authored purpose', 'agent', 'approved', 'schema-test'
+               FROM nodes WHERE path = 'src/lib.rs'",
+            [],
+        )?;
+        store.record_usage(&usage_from_estimates(
+            "conventional-copy",
+            "migration",
+            Some("src/lib.rs".to_string()),
+            None,
+            10,
+            4,
+        ))?;
+        store.connection.execute(
+            "UPDATE project_identity SET active_generation = 9 WHERE singleton = 1",
+            [],
+        )?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+        drop(store);
+
+        let source_before = fs::read(&database_a)?;
+        let source_inventory = directory_entry_names(&root_a)?;
+        fs::copy(&database_a, &database_b)?;
+        let destination_before = fs::read(&database_b)?;
+        let destination_inventory = directory_entry_names(&root_b)?;
+        let result = AtlasStore::open_for_project(&database_b, &root_b);
+        if !matches!(result, Err(DbError::ProjectRootMismatch { .. })) {
+            return Err(io::Error::other(
+                "copied conventional schema-19 database was admitted under a new root",
+            )
+            .into());
+        }
+        require_unchanged(&root_a, &database_a, &source_before, &source_inventory)?;
+        require_unchanged(
+            &root_b,
+            &database_b,
+            &destination_before,
+            &destination_inventory,
+        )?;
+
+        let connection = Connection::open(&database_b)?;
+        let preserved = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM purposes WHERE purpose = 'authored purpose'),
+                (SELECT COUNT(*) FROM usage_events),
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT COUNT(*) FROM sqlite_master WHERE name = 'project_root_identity')",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+        if preserved != ("19".to_string(), 1, 1, 9, 0) {
+            return Err(io::Error::other(
+                "copied conventional predecessor changed durable state while refusing",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_nineteen_unicode_replacement_root_is_intentionally_ambiguous()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("unicode-�-root");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("unicode-replacement.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(store);
+
+        let before = fs::read(&database)?;
+        let inventory = directory_entry_names(temp.path())?;
+        if AtlasStore::open_for_project(&database, &root).is_ok() {
+            return Err(io::Error::other(
+                "genuine Unicode replacement-character predecessor was admitted",
+            )
+            .into());
+        }
+        require_unchanged(temp.path(), &database, &before, &inventory)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_nineteen_recovery_rejects_lossy_conventional_root_without_authority()
+    -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        fn create_predecessor(database: &Path, root: &Path) -> DbResult<()> {
+            fs::create_dir_all(root)?;
+            let store = AtlasStore::open_for_project(database, root)?;
+            store.connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+            Ok(())
+        }
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"raw-root-\x80".to_vec()));
+        let raw_database = raw_root.join(".projectatlas/projectatlas.db");
+        create_predecessor(&raw_database, &raw_root)?;
+        let raw_database_before = fs::read(&raw_database)?;
+        let raw_inventory = directory_entry_names(&raw_root)?;
+        if AtlasStore::open_for_project(&raw_database, &raw_root).is_ok() {
+            return Err(io::Error::other(
+                "lossy conventional predecessor was admitted without historical authority",
+            )
+            .into());
+        }
+        require_unchanged(
+            &raw_root,
+            &raw_database,
+            &raw_database_before,
+            &raw_inventory,
+        )?;
+
+        let replacement_root = PathBuf::from(raw_root.to_string_lossy().into_owned());
+        fs::create_dir_all(replacement_root.join(".projectatlas"))?;
+        let replacement_database = replacement_root.join(".projectatlas/projectatlas.db");
+        fs::copy(&raw_database, &replacement_database)?;
+        let replacement_before = fs::read(&replacement_database)?;
+        let replacement_inventory = directory_entry_names(&replacement_root)?;
+        if AtlasStore::open_for_project(&replacement_database, &replacement_root).is_ok() {
+            return Err(io::Error::other(
+                "copied predecessor beneath a replacement-character sibling was admitted",
+            )
+            .into());
+        }
+        require_unchanged(
+            &replacement_root,
+            &replacement_database,
+            &replacement_before,
+            &replacement_inventory,
+        )?;
+
+        let ambiguous_root = temp
+            .path()
+            .join(OsString::from_vec(b"ambiguous-root-\x81".to_vec()));
+        let ambiguous_database = temp.path().join("custom-predecessor.db");
+        create_predecessor(&ambiguous_database, &ambiguous_root)?;
+        let ambiguous_before = fs::read(&ambiguous_database)?;
+        let ambiguous_replacement = PathBuf::from(ambiguous_root.to_string_lossy().into_owned());
+        fs::create_dir_all(&ambiguous_replacement)?;
+        let ambiguous_inventory = directory_entry_names(temp.path())?;
+        if AtlasStore::open_for_project(&ambiguous_database, &ambiguous_root).is_ok() {
+            return Err(io::Error::other(
+                "ambiguous custom predecessor was admitted without native authority",
+            )
+            .into());
+        }
+        if AtlasStore::open_for_project(&ambiguous_database, &ambiguous_replacement).is_ok() {
+            return Err(io::Error::other(
+                "ambiguous custom predecessor was admitted under a replacement sibling",
+            )
+            .into());
+        }
+        require_unchanged(
+            temp.path(),
+            &ambiguous_database,
+            &ambiguous_before,
+            &ambiguous_inventory,
+        )?;
+        if fs::read(&raw_database)? != raw_database_before {
+            return Err(io::Error::other(
+                "rejected conventional predecessor changed durable state",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn resolution_schema_migrates_parser_provenance_without_weakening_existing_facts()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -5907,6 +6157,71 @@ mod tests {
         }
         if read_metadata(&writer, PROJECT_ROOT_KEY)? != Some(replacement_root) {
             return Err(io::Error::other("rejected binding changed the database").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn predecessor_writer_revalidates_legacy_binding_inside_transaction()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root_a = temp.path().join("predecessor-root-a");
+        let root_b = temp.path().join("predecessor-root-b");
+        fs::create_dir_all(&root_a)?;
+        fs::create_dir_all(&root_b)?;
+        let database = temp.path().join("predecessor.db");
+        let store = AtlasStore::open_for_project(&database, &root_a)?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(store);
+
+        let expected = CanonicalProjectRoot::from_path(&root_a)?;
+        let (preflight, location) = preflight_for_project(&database, &expected)?;
+        if preflight.state != SchemaState::UpgradeRequired {
+            return Err(io::Error::other("predecessor preflight did not require migration").into());
+        }
+        let replacement_metadata = crate::normalize_metadata_path(&root_b);
+        let transition = Connection::open(&database)?;
+        set_metadata(&transition, PROJECT_ROOT_KEY, &replacement_metadata)?;
+        drop(transition);
+
+        let before_failure = fs::read(&database)?;
+        let inventory_before = directory_entry_names(temp.path())?;
+        let writer = crate::sqlite_profile::open_writable_connection(
+            &database,
+            crate::writable_open_flags(preflight.state, location.database_exists),
+            &location,
+            crate::SQLITE_BUSY_TIMEOUT,
+            crate::writable_journal_policy(preflight.state),
+        )?;
+        let result = initialize_with_project_root(
+            &writer,
+            Some(&expected.display_string()),
+            Some(&expected),
+        );
+        if !matches!(result, Err(DbError::ProjectRootMismatch { .. })) {
+            return Err(io::Error::other(
+                "predecessor writer accepted metadata changed after preflight",
+            )
+            .into());
+        }
+        drop(writer);
+        require_unchanged(temp.path(), &database, &before_failure, &inventory_before)?;
+
+        let connection = Connection::open(&database)?;
+        let state = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM sqlite_master WHERE name = 'project_root_identity')",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        if state != ("19".to_string(), 0) {
+            return Err(
+                io::Error::other("predecessor writer exposed partial schema-20 state").into(),
+            );
         }
         Ok(())
     }
