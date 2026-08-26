@@ -329,6 +329,8 @@ fn native_path_has_interior_nul(path: &Path) -> bool {
 mod tests {
     use super::CanonicalProjectRoot;
     #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
     use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;

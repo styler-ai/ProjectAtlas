@@ -5432,6 +5432,8 @@ mod tests {
     };
     #[cfg(feature = "optional-parser-supervisor")]
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
+    #[cfg(unix)]
+    use super::{RootTransition, bind_project_root, build_repository_control_report};
     use clap::Parser as _;
     use notify::EventKind;
     #[cfg(unix)]
