@@ -14,11 +14,15 @@ use projectatlas_core::graph::ProjectInstanceId;
 use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
 use projectatlas_db::{AtlasStore, CapturedProjectBinding, IndexPublicationState};
 use std::collections::HashMap;
+#[cfg(windows)]
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{Read, Take};
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
@@ -559,8 +563,64 @@ fn is_database_runtime_path(candidate: &Path, database: &Path) -> bool {
     ["-wal", "-shm", "-journal"].into_iter().any(|suffix| {
         let mut sidecar = database.as_os_str().to_os_string();
         sidecar.push(suffix);
-        same_native_path(candidate, Path::new(&sidecar))
+        let sidecar = Path::new(&sidecar);
+        same_native_path(candidate, sidecar) || {
+            #[cfg(windows)]
+            {
+                missing_windows_sidecar_matches(candidate, sidecar, database, suffix)
+            }
+            #[cfg(not(windows))]
+            {
+                false
+            }
+        }
     })
+}
+
+/// Match a removed sidecar through its existing database leaf on ordinary
+/// case-insensitive Windows directories. The base-file proof keeps a
+/// case-sensitive directory's distinct spelling fail-closed.
+#[cfg(windows)]
+fn missing_windows_sidecar_matches(
+    candidate: &Path,
+    sidecar: &Path,
+    database: &Path,
+    suffix: &str,
+) -> bool {
+    if candidate.exists() || sidecar.exists() {
+        return false;
+    }
+    let (Some(parent), Some(leaf)) = (candidate.parent(), candidate.file_name()) else {
+        return false;
+    };
+    let suffix_units: Vec<u16> = OsStr::new(suffix).encode_wide().collect();
+    let leaf_units: Vec<u16> = leaf.encode_wide().collect();
+    if leaf_units.len() <= suffix_units.len()
+        || !leaf_units[leaf_units.len() - suffix_units.len()..]
+            .iter()
+            .zip(&suffix_units)
+            .all(|(actual, expected)| {
+                let actual = *actual;
+                let expected = *expected;
+                let fold_ascii = |unit: u16| {
+                    if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+                        unit + (u16::from(b'a') - u16::from(b'A'))
+                    } else {
+                        unit
+                    }
+                };
+                actual == expected || fold_ascii(actual) == fold_ascii(expected)
+            })
+    {
+        return false;
+    }
+    let base = parent.join(OsString::from_wide(
+        &leaf_units[..leaf_units.len() - suffix_units.len()],
+    ));
+    // An unresolved candidate whose base spelling is already exact has no
+    // native evidence that the missing suffix belongs to a case-insensitive
+    // namespace; leave that event observable instead of guessing.
+    base != database && same_native_path(&base, database)
 }
 
 /// Compare native paths without converting identity through display text.
@@ -1308,6 +1368,8 @@ mod tests {
     use notify::{EventKind, event::AccessKind};
     use projectatlas_core::{IndexCancellation, PurposeSource};
     use std::error::Error;
+    #[cfg(windows)]
+    use std::process::Command;
 
     /// Create and publish a minimal indexed repository for observer tests.
     fn indexed_project(root: &Path) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
@@ -2148,6 +2210,17 @@ mod tests {
             )?;
         }
 
+        for sidecar in &sidecars {
+            fs::remove_file(sidecar)?;
+            let event = Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(differently_cased(sidecar)?);
+            let changes = super::observer_event_changes(&binding, &scan_options, &event);
+            require(
+                !changes.has_changes(),
+                "case-variant removed SQLite sidecar event triggered a rescan",
+            )?;
+        }
+
         let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source);
         let changes = super::observer_event_changes(&binding, &scan_options, &event);
         require(
@@ -2155,6 +2228,48 @@ mod tests {
             "non-runtime source event was incorrectly filtered",
         )?;
         Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn observer_keeps_case_variant_sidecar_event_in_case_sensitive_directory()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("case-sensitive-observer");
+        fs::create_dir(&parent)?;
+        let enabled = Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let root = parent.join("Root");
+        let metadata = root.join(".projectatlas");
+        fs::create_dir_all(&metadata)?;
+        let database = metadata.join("ProjectAtlas.db");
+        fs::write(&database, b"SQLite format 3\0")?;
+        let binding = SourceBinding::new(&database, &root, None)?;
+        let mut sidecar = database.as_os_str().to_os_string();
+        sidecar.push("-WAL");
+        let event_path = PathBuf::from(
+            sidecar
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("fixture path was not UTF-8"))?
+                .to_ascii_uppercase(),
+        );
+        let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(event_path);
+        let changes = super::observer_event_changes(
+            &binding,
+            &projectatlas_fs::ScanOptions::default(),
+            &event,
+        );
+        require(
+            changes.has_changes(),
+            "case-variant sidecar event was suppressed in a case-sensitive directory",
+        )
     }
 
     #[test]

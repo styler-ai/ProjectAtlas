@@ -8,8 +8,8 @@ use crate::content_classification::parse_classification;
 use crate::derived_snapshot::{CapturedGraph, SnapshotBudget};
 use crate::project_identity::{
     load_graph_generation, load_project_identity, load_project_root_identity,
-    require_bound_project_identity, set_graph_generation, set_project_identity,
-    verify_project_identity,
+    prove_existing_root_equivalence, require_bound_project_identity, set_graph_generation,
+    set_project_identity, verify_project_identity,
 };
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
@@ -3312,11 +3312,12 @@ impl AtlasStore {
             )
             .optional()?;
         let expected_root = projectatlas_core::CanonicalProjectRoot::from_path(root)?;
-        Ok(
-            load_project_root_identity(&connection)?.as_ref() == Some(&expected_root)
-                && load_project_identity(&connection)? == Some(project)
-                && marker.as_deref() == Some(GRAPH_STAGING_MARKER_VALUE),
-        )
+        let roots_match = load_project_root_identity(&connection)?.is_some_and(|stored_root| {
+            prove_existing_root_equivalence(expected_root.as_path(), stored_root.as_path()).is_ok()
+        });
+        Ok(roots_match
+            && load_project_identity(&connection)? == Some(project)
+            && marker.as_deref() == Some(GRAPH_STAGING_MARKER_VALUE))
     }
 
     /// Create a new disposable graph staging store with the selected project identity.
@@ -9123,6 +9124,39 @@ mod tests {
                 project,
             )?,
             "staging ownership depended on WAL sidecars before graph writes",
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repository_graph_staging_accepts_case_only_root_rename() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original_root = temp.path().join("CaseOnlyStageRoot");
+        let intermediate_root = temp.path().join("CaseOnlyStageRoot-intermediate");
+        let renamed_root = temp.path().join("caseonlystageroot");
+        let stage = original_root.join(".projectatlas").join("graph-stage-case");
+        fs::create_dir_all(&stage)?;
+        let database = stage.join("projectatlas.db");
+        let project = ProjectInstanceId::from_bytes([8; 16])?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &database,
+            &original_root,
+            project,
+        )?);
+
+        fs::rename(&original_root, &intermediate_root)?;
+        fs::rename(&intermediate_root, &renamed_root)?;
+        let renamed_database = renamed_root
+            .join(".projectatlas")
+            .join("graph-stage-case")
+            .join("projectatlas.db");
+        require(
+            AtlasStore::repository_graph_staging_belongs_to(
+                &renamed_database,
+                &renamed_root,
+                project,
+            )?,
+            "case-only renamed staging root was not re-canonicalized",
         )
     }
 

@@ -6690,7 +6690,7 @@ impl ProjectAtlasMcpServer {
                 MCP_ERROR_CONTROL_ALIAS_REQUIRED.to_string(),
             ));
         }
-        let current_root_identity = CanonicalProjectRoot::from_path(&root).map_err(|source| {
+        CanonicalProjectRoot::from_path(&root).map_err(|source| {
             let mut message = MCP_ERROR_REGISTERED_WORKTREE_ROOT_INVALID_PREFIX.to_string();
             message.push_str(&source.to_string());
             CliError::InvalidInput(message)
@@ -6699,16 +6699,10 @@ impl ProjectAtlasMcpServer {
             .to_str()
             .map(normalize_native_path_display_str)
             .ok_or_else(|| CliError::InvalidInput(MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string()))?;
-        let registration_root_matches = current_registry_root == registration.last_root
-            && Self::indexed_db_matches_root(
-                &Self::projectatlas_db_path(&root),
-                &current_root_identity,
-            );
-        let registration = if registration_root_matches {
-            registration
-        } else {
-            control.refresh_worktree_root(&registration, &root)?
-        };
+        // Validate a bound local atlas before any control-catalog refresh. A Git
+        // move alone is not enough evidence to rewrite `last_root`; the local
+        // atlas must first be opened through its native admission boundary and
+        // retain the captured project identity.
         if let Some(expected) = registration.project_instance_id {
             let store = Self::open_local_worktree_atlas(&root)?.ok_or_else(|| {
                 CliError::InvalidInput(MCP_ERROR_BOUND_WORKTREE_ATLAS_MISSING.to_string())
@@ -6721,6 +6715,13 @@ impl ProjectAtlasMcpServer {
                 ));
             }
         }
+        let registration_root_matches = current_registry_root == registration.last_root
+            || registration.project_instance_id.is_none();
+        let registration = if registration_root_matches {
+            registration
+        } else {
+            control.refresh_worktree_root(&registration, &root)?
+        };
         let mut state = Self::project_state_from_root_with_config_validation(&root, validation)?;
         state.worktree = Some(McpWorktreeSelection {
             alias: alias.to_string(),
@@ -7312,14 +7313,6 @@ impl ProjectAtlasMcpServer {
         message.push_str(MCP_ERROR_GUIDANCE_FRAGMENT);
         message.push_str(OUTSIDE_SELECTED_PROJECT_GUIDANCE);
         CliError::InvalidInput(message)
-    }
-
-    /// Return whether an existing DB records the same canonical project root.
-    fn indexed_db_matches_root(db_path: &Path, root: &CanonicalProjectRoot) -> bool {
-        let Ok(Some(stored_root)) = read_project_root_identity_read_only(db_path) else {
-            return false;
-        };
-        stored_root == *root
     }
 
     /// Return whether nearest routing can safely associate one DB with a live root.
@@ -12779,6 +12772,47 @@ mod tests {
                     .is_none(),
             "guarded reset deleted replacement lifecycle database, sidecars, or MCP config",
         )
+    }
+
+    #[test]
+    fn registered_worktree_missing_atlas_does_not_refresh_control_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = registered_worktree_race_fixture("missing-atlas")?;
+        let expected_project = ProjectInstanceId::from_bytes([0xA; 16])?;
+        let control = AtlasStore::open_for_project(&fixture.control_db, &fixture.control_root)?;
+        control.bind_worktree_project(
+            fixture.registration.registration_id,
+            &fixture.alias,
+            &fixture.state.root,
+            expected_project,
+        )?;
+        drop(control);
+
+        let sidecars = ["-wal", "-shm", "-journal"].map(|suffix| {
+            let mut path = fixture.control_db.as_os_str().to_os_string();
+            path.push(suffix);
+            PathBuf::from(path)
+        });
+        let before = std::iter::once(&fixture.control_db)
+            .chain(sidecars.iter())
+            .map(|path| fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let result = fixture
+            .server
+            .state_for_target(None, Some(fixture.alias.to_string()));
+        require(
+            result.is_err(),
+            "missing bound atlas was accepted during registered resolution",
+        )?;
+        let after = std::iter::once(&fixture.control_db)
+            .chain(sidecars.iter())
+            .map(|path| fs::read(path).ok())
+            .collect::<Vec<_>>();
+        require(
+            before == after,
+            "failed atlas validation refreshed the control registration",
+        )?;
+        Ok(())
     }
 
     #[test]
