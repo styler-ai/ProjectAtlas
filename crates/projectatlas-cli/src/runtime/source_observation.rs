@@ -1149,7 +1149,7 @@ fn source_policy_witness(
     hash_field(&mut hasher, "root", &root_identity_bytes);
     for path in source_policy_paths(plan, control)? {
         control.check(IndexWorkStage::Publication)?;
-        hash_field(&mut hasher, "path", path.to_string_lossy().as_bytes());
+        hash_field(&mut hasher, "path", path.as_os_str().as_encoded_bytes());
         match path.metadata() {
             Ok(metadata) if metadata.is_file() => {
                 let file = File::open(&path).map_err(|source| CliError::Io {

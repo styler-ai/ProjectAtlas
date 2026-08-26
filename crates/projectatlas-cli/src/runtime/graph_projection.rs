@@ -4,8 +4,8 @@ use super::{
     CliError, INDEX_FRESHNESS_SAMPLE_LIMIT, IndexReadStatus, IndexRefreshReason,
     IndexRefreshRequired, IndexRefreshScope, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
     IndexWorkStage, MAX_SYMBOL_FILE_BYTES, Node, NodeKind, SourceReadFailure, SymbolBuildStage,
-    SymbolProjectionChange, normalize_native_path_display, read_source_bytes_controlled,
-    source_changed_during_derivation,
+    SymbolProjectionChange, lossless_project_root_display, normalize_native_path_display,
+    read_source_bytes_controlled, source_changed_during_derivation,
 };
 use projectatlas_core::IndexGeneration;
 use projectatlas_core::graph::{
@@ -1320,7 +1320,7 @@ fn finish_projection_in_database_with_documents(
     database.store()?.begin_index_read_snapshot()?;
     let _staged_generation = database.store()?.repository_graph_generation()?;
     let document_target_states = document_index.observed_absent_states();
-    let retained_bytes = normalize_native_path_display(&database_path).len() as u64
+    let retained_bytes = database_path.as_os_str().as_encoded_bytes().len() as u64
         + document_target_states
             .iter()
             .map(|(path, _reason)| path.len() as u64 + STAGED_GRAPH_ROW_BYTES)
@@ -3996,7 +3996,7 @@ fn dependency_closure_limit(
     observed: usize,
 ) -> CliError {
     CliError::RefreshRequired(Box::new(IndexRefreshRequired {
-        project_root: normalize_native_path_display(root),
+        project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::DependencyClosureLimit,

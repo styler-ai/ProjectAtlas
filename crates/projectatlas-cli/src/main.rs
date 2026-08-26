@@ -35,7 +35,7 @@ use projectatlas_core::toon::{
 };
 use projectatlas_core::{
     IndexWorkControl, IndexWorkStage, PurposeSource, PurposeStatus, normalize_native_path_display,
-    normalize_repo_path_prefix,
+    normalize_native_path_display_str, normalize_repo_path_prefix,
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
@@ -70,15 +70,16 @@ use runtime::{
     config_root_mismatch_error, default_cli_project_root, default_mcp_project_root,
     defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, index_work_control, init_config_path, init_path_status,
-    lint_project, load_synchronized_repository_token_report, next_step_report_payload,
-    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
-    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_folder_nodes_with_reasons,
-    read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
-    record_usage_text, render_classified_ranked_file_rows, render_classified_symbol_rows,
-    render_coverage_report, render_health_page, render_purpose_curation_page,
-    render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
-    run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
+    lint_project, load_synchronized_repository_token_report, lossless_native_path_display,
+    lossless_project_root_display, next_step_report_payload, next_step_report_with_selection,
+    normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
+    purpose_curation_page, ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    render_classified_ranked_file_rows, render_classified_symbol_rows, render_coverage_report,
+    render_health_page, render_purpose_curation_page, render_purpose_review_report,
+    reset_index_files, resolved_mcp_config_path, review_purposes, run_init_bootstrap,
+    run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
     run_symbol_build_pipeline_controlled, run_watch_loop, standalone_index_work_control,
     strip_legacy_purpose, validate_purpose_review_admission, validated_indexed_file_key,
     watcher_status_report,
@@ -347,7 +348,7 @@ enum AgentErrorKind {
 #[derive(Clone, Debug, Serialize)]
 struct DatabaseFilesystemErrorPayload {
     /// Database path rejected before mutation.
-    path: String,
+    path: Option<String>,
     /// Resolved owning mount when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     mount_point: Option<String>,
@@ -454,7 +455,8 @@ struct CliNextCall<'a> {
     /// Command family accepted by the current runtime.
     command: &'static str,
     /// Selected project root to refresh.
-    project_path: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_path: Option<&'a str>,
     /// Run exactly one refresh cycle.
     #[serde(skip_serializing_if = "Option::is_none")]
     once: Option<bool>,
@@ -3161,7 +3163,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             search_capability: None,
             next: Some(CliNextCall {
                 command: CLI_INIT_COMMAND,
-                project_path: &report.project_root,
+                project_path: report.project_root.as_deref(),
                 once: None,
             }),
         }),
@@ -3189,7 +3191,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             search_capability: None,
             next: Some(CliNextCall {
                 command: CLI_REFRESH_COMMAND,
-                project_path: &report.project_root,
+                project_path: report.project_root.as_deref(),
                 once: Some(true),
             }),
         }),
@@ -3299,10 +3301,10 @@ fn database_filesystem_error_payload(
     Some((
         kind,
         DatabaseFilesystemErrorPayload {
-            path: path.display().to_string(),
+            path: lossless_native_path_display(path),
             mount_point: mount_point
                 .as_deref()
-                .map(|mount| mount.display().to_string()),
+                .and_then(lossless_native_path_display),
             filesystem_type: filesystem_type.clone(),
             reason,
             recovery: DATABASE_FILESYSTEM_RECOVERY,
@@ -3480,12 +3482,12 @@ fn build_mcp_config_report(
         "--require-version".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
         "--db".to_string(),
-        mcp_launch_path(&absolute_db),
+        mcp_launch_path(&absolute_db)?,
     ];
     let resolved_config = resolved_mcp_config_path(&absolute_db, config)?;
     if let Some(config_path) = resolved_config.as_ref() {
         args.push("--config".to_string());
-        args.push(mcp_launch_path(config_path));
+        args.push(mcp_launch_path(config_path)?);
     }
     args.push("mcp".to_string());
     if nearest_project {
@@ -3496,9 +3498,9 @@ fn build_mcp_config_report(
     mcp_servers.insert(
         server_name.to_string(),
         McpServerConfig {
-            command: mcp_launch_path(&executable),
+            command: mcp_launch_path(&executable)?,
             args,
-            cwd: mcp_launch_path(&project_root),
+            cwd: mcp_launch_path(&project_root)?,
         },
     );
     Ok(McpConfigDocument { mcp_servers })
@@ -3518,8 +3520,15 @@ fn validate_required_runtime_version(required_version: &str) -> Result<(), CliEr
 }
 
 /// Render a native path for MCP launch config without Windows extended prefixes.
-fn mcp_launch_path(path: &Path) -> String {
-    native_launch_path(&normalize_native_path_display(path))
+fn mcp_launch_path(path: &Path) -> Result<String, CliError> {
+    let value = path.to_str().ok_or_else(|| {
+        CliError::InvalidInput(
+            "native MCP configuration path has no lossless UTF-8 representation".to_string(),
+        )
+    })?;
+    Ok(native_launch_path(&normalize_native_path_display_str(
+        value,
+    )))
 }
 
 /// Render a normalized diagnostic path as a Windows-native launcher path.
@@ -3551,7 +3560,7 @@ fn build_runtime_info() -> RuntimeInfoReport {
         version: env!("CARGO_PKG_VERSION").to_string(),
         executable: std::env::current_exe()
             .ok()
-            .map(|path| normalize_native_path_display(&path)),
+            .and_then(|path| lossless_native_path_display(&path)),
         repository: env!("CARGO_PKG_REPOSITORY").to_string(),
         capabilities: vec![
             "cli".to_string(),
@@ -3686,7 +3695,7 @@ fn write_init_mcp_config_files(
         report.host_configs.push(InitHostConfigStatus {
             harness: harness_name,
             status,
-            path: normalize_native_path_display(path),
+            path: lossless_native_path_display(&path),
             error,
         });
     }
@@ -3779,7 +3788,8 @@ fn build_root_report_with_transition(
         .index
         .as_ref()
         .and_then(|index| index.project_root.clone());
-    let atlas_dir = Path::new(&settings.db.path)
+    let absolute_db = absolute_path(db)?;
+    let atlas_dir = absolute_db
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let runtime = build_runtime_info();
@@ -3798,14 +3808,14 @@ fn build_root_report_with_transition(
         config_project_root: settings
             .config_path
             .as_ref()
-            .map(|_| settings.repo_root.clone()),
+            .and(settings.repo_root.clone()),
         db_project_root,
         mcp_config_path: settings.mcp_config.path.clone(),
-        claude_mcp_config_path: normalize_native_path_display(
-            atlas_dir.join("projectatlas.claude.mcp.json"),
+        claude_mcp_config_path: lossless_native_path_display(
+            &atlas_dir.join("projectatlas.claude.mcp.json"),
         ),
-        opencode_config_path: normalize_native_path_display(
-            atlas_dir.join("projectatlas.opencode.json"),
+        opencode_config_path: lossless_native_path_display(
+            &atlas_dir.join("projectatlas.opencode.json"),
         ),
         runtime_executable: runtime.executable,
         runtime_version: runtime.version,
@@ -4744,7 +4754,7 @@ struct RuntimeInfoReport {
 #[derive(Debug, Serialize)]
 pub(crate) struct RepositoryControlReport {
     /// Canonical checkout or Git common directory that owns the inventory.
-    control_root: String,
+    control_root: Option<String>,
     /// How the supplied path selected source.
     source_selection: &'static str,
     /// Exact source root selected without guessing, when available.
@@ -4788,14 +4798,14 @@ pub(crate) fn build_repository_control_report(
     let structure = discover_repository_structure(path)?;
     match structure {
         RepositoryStructure::NonGit { selected_root } => Ok(RepositoryControlReport {
-            control_root: normalize_native_path_display(&selected_root),
+            control_root: lossless_project_root_display(&selected_root),
             source_selection: "exact_non_git",
-            selected_root: Some(normalize_native_path_display(&selected_root)),
+            selected_root: lossless_project_root_display(&selected_root),
             worktree_required: false,
             worktrees: vec![RepositoryWorktreeReport {
                 role: "non_git",
                 state: "active",
-                root: Some(normalize_native_path_display(&selected_root)),
+                root: lossless_project_root_display(&selected_root),
                 administrative_directory: None,
                 blocker: None,
             }],
@@ -4806,7 +4816,7 @@ pub(crate) fn build_repository_control_report(
             selected_root,
             issue,
         } => Ok(RepositoryControlReport {
-            control_root: normalize_native_path_display(&selected_root),
+            control_root: lossless_project_root_display(&selected_root),
             source_selection: "invalid_git",
             selected_root: None,
             worktree_required: true,
@@ -4823,7 +4833,7 @@ pub(crate) fn build_repository_control_report(
                 match repository.selection {
                     GitRepositorySelection::Worktree { root, .. } => (
                         "exact_worktree",
-                        Some(normalize_native_path_display(root)),
+                        lossless_project_root_display(&root),
                         false,
                         Vec::new(),
                     ),
@@ -4831,7 +4841,7 @@ pub(crate) fn build_repository_control_report(
                         source_selection: GitManagerSourceSelection::Unambiguous { root },
                     } => (
                         "single_worktree",
-                        Some(normalize_native_path_display(root)),
+                        lossless_project_root_display(&root),
                         false,
                         Vec::new(),
                     ),
@@ -4862,14 +4872,13 @@ pub(crate) fn build_repository_control_report(
                         GitWorktreeRole::Primary => "primary",
                         GitWorktreeRole::Linked => "linked",
                     };
-                    let administrative_directory = Some(normalize_native_path_display(
-                        entry.administrative_directory,
-                    ));
+                    let administrative_directory =
+                        lossless_native_path_display(&entry.administrative_directory);
                     match entry.state {
                         GitWorktreeState::Active { root, .. } => RepositoryWorktreeReport {
                             role,
                             state: "active",
-                            root: Some(normalize_native_path_display(root)),
+                            root: lossless_project_root_display(&root),
                             administrative_directory,
                             blocker: None,
                         },
@@ -4877,7 +4886,9 @@ pub(crate) fn build_repository_control_report(
                             RepositoryWorktreeReport {
                                 role,
                                 state: "missing",
-                                root: git_control_path.parent().map(normalize_native_path_display),
+                                root: git_control_path
+                                    .parent()
+                                    .and_then(lossless_project_root_display),
                                 administrative_directory,
                                 blocker: None,
                             }
@@ -4899,7 +4910,7 @@ pub(crate) fn build_repository_control_report(
             blockers.sort();
             blockers.dedup();
             Ok(RepositoryControlReport {
-                control_root: normalize_native_path_display(repository.common_directory),
+                control_root: lossless_project_root_display(&repository.common_directory),
                 source_selection,
                 selected_root,
                 worktree_required,
@@ -4920,11 +4931,11 @@ pub(crate) fn render_repository_control_report(report: &RepositoryControlReport)
 #[derive(Debug, Serialize)]
 struct RootReport {
     /// Canonical project root `ProjectAtlas` will use.
-    root: String,
+    root: Option<String>,
     /// Detection source for the selected root.
     detection_source: String,
     /// Durable `SQLite` database path.
-    db_path: String,
+    db_path: Option<String>,
     /// Config path used for project policy.
     config_path: Option<String>,
     /// Root stored in config, when config exists.
@@ -4932,11 +4943,11 @@ struct RootReport {
     /// Root stored in the DB metadata, when the DB exists.
     db_project_root: Option<String>,
     /// Generated generic MCP config path.
-    mcp_config_path: String,
+    mcp_config_path: Option<String>,
     /// Generated Claude Code MCP config path.
-    claude_mcp_config_path: String,
+    claude_mcp_config_path: Option<String>,
     /// Generated `OpenCode` MCP config path.
-    opencode_config_path: String,
+    opencode_config_path: Option<String>,
     /// Current runtime executable path, when available.
     runtime_executable: Option<String>,
     /// Current runtime version.
@@ -5382,7 +5393,10 @@ mod tests {
         required_mcp_surface_present,
     };
     #[cfg(unix)]
-    use super::runtime::IndexProjectMismatch;
+    use super::runtime::{
+        IndexProjectMismatch, IndexReadStatus, IndexRefreshReason, IndexRefreshRequired,
+        IndexRefreshScope, lossless_project_root_display,
+    };
     use super::runtime::{
         TextIndexOptions, byte_count_to_tokens, estimated_source_tokens_for_file_node,
         event_kind_affects_index, is_symbol_candidate, primary_symbol_names,
@@ -5865,6 +5879,127 @@ mod tests {
                     .and_then(Value::as_str)
                     .is_some_and(|message| message.contains("does not match")),
             "CLI promoted lossy store mismatch text into structured roots",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_recovery_reports_omit_unavailable_native_root_selectors() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let replacement_root = temp.path().join("repo-�");
+        fs::create_dir_all(raw_root.join(".projectatlas"))?;
+        fs::create_dir_all(replacement_root.join(".projectatlas"))?;
+        let raw_db = raw_root.join(".projectatlas").join("projectatlas.db");
+        let replacement_db = replacement_root
+            .join(".projectatlas")
+            .join("projectatlas.db");
+        let replacement_display = lossless_project_root_display(&replacement_root)
+            .ok_or_else(|| io::Error::other("replacement root lost its UTF-8 display"))?;
+
+        let init_errors = [
+            (
+                super::runtime::index_init_required(&raw_root, &raw_db),
+                false,
+            ),
+            (
+                super::runtime::index_init_required(&replacement_root, &replacement_db),
+                true,
+            ),
+        ];
+        for (error, displayable) in init_errors {
+            let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+            let expected_root = if displayable {
+                Some(replacement_display.as_str())
+            } else {
+                None
+            };
+            require_condition(
+                json.pointer("/error/init_required/project_root")
+                    .and_then(Value::as_str)
+                    == expected_root,
+                "CLI init report did not preserve unavailable/displayable root state",
+            )?;
+            require_condition(
+                json.pointer("/error/next/project_path")
+                    .and_then(Value::as_str)
+                    == expected_root,
+                "CLI init recovery selector did not fail closed for a raw root",
+            )?;
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            if displayable {
+                require_condition(
+                    toon.contains("repo-�") && toon.contains("project_path"),
+                    "CLI TOON init recovery lost a displayable root selector",
+                )?;
+            } else {
+                require_condition(
+                    toon.contains("project_root: null")
+                        && !toon.contains("project_path")
+                        && !toon.contains("repo-�"),
+                    "CLI TOON init recovery exposed a lossy raw-root selector",
+                )?;
+            }
+        }
+
+        let refresh_errors = [
+            (
+                CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: lossless_project_root_display(&raw_root),
+                    worktree: None,
+                    status: IndexReadStatus::RefreshRequired,
+                    reason: IndexRefreshReason::SourceChanged,
+                    scope: IndexRefreshScope::Incremental,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                })),
+                false,
+            ),
+            (
+                CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: lossless_project_root_display(&replacement_root),
+                    worktree: None,
+                    status: IndexReadStatus::RefreshRequired,
+                    reason: IndexRefreshReason::SourceChanged,
+                    scope: IndexRefreshScope::Incremental,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                })),
+                true,
+            ),
+        ];
+        for (error, displayable) in refresh_errors {
+            let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+            let expected_root = if displayable {
+                Some(replacement_display.as_str())
+            } else {
+                None
+            };
+            require_condition(
+                json.pointer("/error/refresh_required/project_root")
+                    .and_then(Value::as_str)
+                    == expected_root
+                    && json
+                        .pointer("/error/next/project_path")
+                        .and_then(Value::as_str)
+                        == expected_root,
+                "CLI refresh recovery did not preserve lossless root selector state",
+            )?;
+        }
+        let control_report = build_repository_control_report(&raw_root)?;
+        let control_value = serde_json::to_value(control_report)?;
+        require_condition(
+            control_value.get("control_root") == Some(&Value::Null)
+                && control_value.get("selected_root") == Some(&Value::Null)
+                && !control_value.to_string().contains("repo-�"),
+            "CLI repository-control report exposed a lossy raw-root projection",
         )?;
         Ok(())
     }

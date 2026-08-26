@@ -366,9 +366,9 @@ pub(crate) enum IndexVerificationReason {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexInitRequired {
     /// Canonical selected project root that needs initialization.
-    pub(crate) project_root: String,
+    pub(crate) project_root: Option<String>,
     /// Project-local durable index path that initialization will create.
-    pub(crate) database: String,
+    pub(crate) database: Option<String>,
     /// Registered MCP alias when the selected root came from worktree routing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) worktree: Option<String>,
@@ -380,7 +380,7 @@ pub(crate) struct IndexInitRequired {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ProjectWorktreeRequired {
     /// Canonical bare/common Git directory that was selected.
-    pub(crate) project_root: String,
+    pub(crate) project_root: Option<String>,
     /// Stable source-selection state for adapters.
     pub(crate) status: IndexReadStatus,
 }
@@ -389,7 +389,7 @@ pub(crate) struct ProjectWorktreeRequired {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexRefreshRequired {
     /// Canonical selected project root for a reusable recovery call.
-    pub(crate) project_root: String,
+    pub(crate) project_root: Option<String>,
     /// Registered MCP alias when the selected root came from worktree routing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) worktree: Option<String>,
@@ -415,7 +415,7 @@ pub(crate) struct IndexRefreshRequired {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexVerificationIncomplete {
     /// Selected project root whose current source could not be verified.
-    pub(crate) project_root: String,
+    pub(crate) project_root: Option<String>,
     /// Registered alias when one selected this project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) worktree: Option<String>,
@@ -504,13 +504,21 @@ impl fmt::Display for IndexInitRequired {
             return write!(
                 formatter,
                 "init_required: ProjectAtlas index '{}' is missing for registered worktree '{}'; call `atlas_init` with `worktree: {alias}`",
-                self.database, alias,
+                self.database
+                    .as_deref()
+                    .unwrap_or("<native display unavailable>"),
+                alias,
             );
         }
         write!(
             formatter,
             "init_required: ProjectAtlas index '{}' is missing for selected project root '{}'; run `projectatlas init` from that exact root or call `atlas_init` with that exact `project_path`",
-            self.database, self.project_root
+            self.database
+                .as_deref()
+                .unwrap_or("<native display unavailable>"),
+            self.project_root
+                .as_deref()
+                .unwrap_or("<native display unavailable>")
         )
     }
 }
@@ -521,6 +529,8 @@ impl fmt::Display for ProjectWorktreeRequired {
             formatter,
             "worktree_required: '{}' is a bare/common Git directory without checked-out source; select a checked-out worktree and initialize that exact root",
             self.project_root
+                .as_deref()
+                .unwrap_or("<native display unavailable>")
         )
     }
 }
@@ -976,10 +986,11 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
         .worktrees
         .iter()
         .filter_map(|entry| match &entry.state {
-            GitWorktreeState::Active { root, .. } => Some((
-                normalize_native_path_display(&entry.administrative_directory),
-                root.as_path(),
-            )),
+            GitWorktreeState::Active { root, .. } => entry
+                .administrative_directory
+                .to_str()
+                .map(normalize_native_path_display_str)
+                .map(|administrative_directory| (administrative_directory, root.as_path())),
             GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
         })
         .collect::<HashMap<_, _>>();
@@ -1162,7 +1173,7 @@ fn automatic_refresh_write_is_unavailable(error: &CliError) -> bool {
 /// Return the typed full-refresh state for a changed derivation contract.
 fn index_policy_refresh_required(root: &Path) -> IndexRefreshRequired {
     IndexRefreshRequired {
-        project_root: normalize_native_path_display(root),
+        project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::PolicyDrift,
@@ -1294,7 +1305,7 @@ fn source_node_delta(
         .collect();
     Some(IndexFreshnessDelta {
         report: IndexRefreshRequired {
-            project_root: normalize_native_path_display(root),
+            project_root: lossless_project_root_display(root),
             worktree: None,
             status: IndexReadStatus::RefreshRequired,
             reason: if added_paths.is_empty() && removed_paths.is_empty() {
@@ -1639,7 +1650,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
         FsError::IndexWork(failure) => failure.into(),
         FsError::RepositoryBoundary { .. } => {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
-                project_root: normalize_native_path_display(root),
+                project_root: lossless_project_root_display(root),
                 worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,
                 reason: IndexVerificationReason::PolicyUnavailable,
@@ -1648,7 +1659,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
             }))
         }
         other => CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
-            project_root: normalize_native_path_display(root),
+            project_root: lossless_project_root_display(root),
             worktree: None,
             status: IndexReadStatus::VerificationIncomplete,
             reason: IndexVerificationReason::SourceInspectionFailed,
@@ -1676,6 +1687,14 @@ fn hash_index_contract_value(hasher: &mut Hasher, field: &str, value: &str) {
     hasher.update(&[0xff]);
 }
 
+/// Add one native path to a fingerprint without a lossy text projection.
+fn hash_index_contract_native_path(hasher: &mut Hasher, field: &str, path: &Path) {
+    hasher.update(field.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(path.as_os_str().as_encoded_bytes());
+    hasher.update(&[0xff]);
+}
+
 /// Convert a policy/root preflight failure into a non-destructive read refusal.
 fn verification_incomplete(
     root: &Path,
@@ -1683,7 +1702,7 @@ fn verification_incomplete(
     source: &CliError,
 ) -> CliError {
     CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
-        project_root: normalize_native_path_display(root),
+        project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::VerificationIncomplete,
         reason,
@@ -1706,7 +1725,7 @@ fn same_indexed_source(current: &Node, indexed: &Node) -> bool {
 /// Refuse publication when source bytes no longer match their staged node.
 fn source_changed_during_derivation(root: &Path, path: &str) -> CliError {
     CliError::RefreshRequired(Box::new(IndexRefreshRequired {
-        project_root: normalize_native_path_display(root),
+        project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::SourceChanged,
@@ -2161,7 +2180,7 @@ fn hash_publication_input_file_controlled(
     path: &Path,
     reader: &mut PurposeInputReader<'_>,
 ) -> Result<(), CliError> {
-    hash_index_contract_value(hasher, role, &normalize_native_path_display(path));
+    hash_index_contract_native_path(hasher, role, path);
     if !path.exists() {
         hash_index_contract_value(hasher, "input_state", "missing");
         return Ok(());
@@ -2238,7 +2257,7 @@ pub(crate) struct InitSetupReport {
     /// Whether every init phase completed successfully.
     pub(crate) ok: bool,
     /// Canonical project root initialized by this command.
-    pub(crate) root: String,
+    pub(crate) root: Option<String>,
     /// Project-local directory status.
     pub(crate) project_dir: InitPathStatus,
     /// Project-local config status.
@@ -2265,8 +2284,8 @@ pub(crate) struct InitSetupReport {
 pub(crate) struct InitPathStatus {
     /// Path status.
     pub(crate) status: InitPhaseStatus,
-    /// Normalized native display path.
-    pub(crate) path: String,
+    /// Lossless UTF-8 path, when one is available.
+    pub(crate) path: Option<String>,
 }
 
 /// Status for one generated host integration config.
@@ -2276,8 +2295,8 @@ pub(crate) struct InitHostConfigStatus {
     pub(crate) harness: &'static str,
     /// File status.
     pub(crate) status: InitPhaseStatus,
-    /// Normalized native display path.
-    pub(crate) path: String,
+    /// Lossless UTF-8 path, when one is available.
+    pub(crate) path: Option<String>,
     /// Error text when this host config could not be generated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
@@ -2369,6 +2388,18 @@ pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf, CliError> {
     })
 }
 
+/// Return a lossless UTF-8 display for one existing canonical project root.
+pub(crate) fn lossless_project_root_display(root: &Path) -> Option<String> {
+    CanonicalProjectRoot::from_path(root)
+        .ok()
+        .and_then(|root| root.display_string().ok())
+}
+
+/// Return a lossless UTF-8 display for one native path.
+pub(crate) fn lossless_native_path_display(path: &Path) -> Option<String> {
+    path.to_str().map(normalize_native_path_display_str)
+}
+
 /// Return one exact source root from structural Git or non-Git evidence.
 pub(crate) fn canonical_source_project_root(root: &Path) -> Result<PathBuf, CliError> {
     match projectatlas_fs::worktree::discover_repository_structure(root)? {
@@ -2380,7 +2411,7 @@ pub(crate) fn canonical_source_project_root(root: &Path) -> Result<PathBuf, CliE
             } => Ok(root),
             GitRepositorySelection::CommonManager { .. } => Err(CliError::WorktreeRequired(
                 Box::new(ProjectWorktreeRequired {
-                    project_root: normalize_native_path_display(repository.common_directory),
+                    project_root: lossless_project_root_display(&repository.common_directory),
                     status: IndexReadStatus::WorktreeRequired,
                 }),
             )),
@@ -2400,8 +2431,8 @@ pub(crate) fn canonical_source_project_root(root: &Path) -> Result<PathBuf, CliE
 /// Return a typed, non-mutating first-use handoff for one selected root.
 pub(crate) fn index_init_required(root: &Path, database: &Path) -> CliError {
     CliError::InitRequired(Box::new(IndexInitRequired {
-        project_root: normalize_native_path_display(root),
-        database: normalize_native_path_display(database),
+        project_root: lossless_project_root_display(root),
+        database: lossless_native_path_display(database),
         worktree: None,
         status: IndexReadStatus::InitRequired,
     }))
@@ -2549,22 +2580,22 @@ pub(crate) fn run_init_bootstrap(
 
     Ok(InitSetupReport {
         ok,
-        root: normalize_native_path_display(&root),
+        root: lossless_project_root_display(&root),
         project_dir: InitPathStatus {
             status: init_path_status(project_dir_existed),
-            path: normalize_native_path_display(project_dir),
+            path: lossless_native_path_display(&project_dir),
         },
         config: InitPathStatus {
             status: init_path_status(config_existed),
-            path: normalize_native_path_display(config_file),
+            path: lossless_native_path_display(&config_file),
         },
         nonsource_files: InitPathStatus {
             status: init_path_status(nonsource_existed),
-            path: normalize_native_path_display(nonsource_file),
+            path: lossless_native_path_display(&nonsource_file),
         },
         db: InitPathStatus {
             status: init_path_status(db_existed),
-            path: normalize_native_path_display(db_path),
+            path: lossless_native_path_display(db_path),
         },
         host_configs: Vec::new(),
         scan: InitScanPhase {
@@ -3004,7 +3035,7 @@ fn staged_string_bytes(values: &[String]) -> u64 {
 
 /// Count the selected root and derivation identity retained by one batch.
 fn staged_publication_identity_bytes(root: &Path, contract_fingerprint: &str) -> u64 {
-    (normalize_native_path_display(root).len() as u64)
+    (root.as_os_str().as_encoded_bytes().len() as u64)
         .saturating_add(contract_fingerprint.len() as u64)
 }
 
@@ -4996,7 +5027,7 @@ pub(crate) struct SettingsReport {
     /// Config file used for map/lint/scan imports, when discovered.
     pub(crate) config_path: Option<String>,
     /// Repository root used by map/lint config.
-    pub(crate) repo_root: String,
+    pub(crate) repo_root: Option<String>,
     /// Source that selected the repository root.
     pub(crate) root_detection_source: String,
     /// Whether config and DB root metadata agree.
@@ -5004,9 +5035,9 @@ pub(crate) struct SettingsReport {
     /// Root mismatches that should be fixed before trusting the binding.
     pub(crate) root_mismatches: Vec<String>,
     /// Generated map path.
-    pub(crate) map_path: String,
+    pub(crate) map_path: Option<String>,
     /// Non-source summary path.
-    pub(crate) nonsource_files_path: String,
+    pub(crate) nonsource_files_path: Option<String>,
     /// Default output format.
     pub(crate) default_format: String,
     /// Default search case sensitivity.
@@ -5131,8 +5162,8 @@ pub(crate) struct OptionalParserSettingsReport {
 /// Filesystem status for a diagnostic path.
 #[derive(Debug, Serialize)]
 pub(crate) struct PathStatus {
-    /// Normalized native path.
-    pub(crate) path: String,
+    /// Lossless UTF-8 path, when one is available.
+    pub(crate) path: Option<String>,
     /// Whether the path exists.
     pub(crate) exists: bool,
     /// File size in bytes when the path is an existing file.
@@ -5214,9 +5245,10 @@ pub(crate) fn build_settings_report(
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let database = database_settings_report(&absolute_db)?;
-    let (index, telemetry, file_text_fts) =
+    let (index, telemetry, file_text_fts, db_root_identity) =
         if database.schema.compatibility == DatabaseSchemaCompatibility::Current {
             let store = AtlasStore::open_read_only(&absolute_db)?;
+            let db_root_identity = store.project_root_identity()?;
             let snapshot_publication = store.index_publication()?;
             if settings_publication_matches(
                 database.publication.as_ref(),
@@ -5226,25 +5258,39 @@ pub(crate) fn build_settings_report(
                     Some(settings_index_stats(&store)?),
                     Some(store.telemetry_retention_state()?),
                     Some(store.file_text_fts_state()?),
+                    db_root_identity,
                 )
             } else {
-                (None, None, None)
+                (None, None, None, db_root_identity)
             }
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
-    let repo_root = normalize_display_path(&config.root);
-    let db_project_root = index
+    let config_root_identity = CanonicalProjectRoot::from_path(&config.root).ok();
+    let repo_root = config_root_identity
         .as_ref()
-        .and_then(|stats| stats.project_root.as_ref())
-        .cloned();
+        .and_then(|root| root.display_string().ok());
+    let db_project_root = db_root_identity
+        .as_ref()
+        .and_then(|root| root.display_string().ok());
     let mut root_mismatches = Vec::new();
-    if let Some(db_root) = db_project_root.as_ref()
-        && db_root != &repo_root
+    if let (Some(db_root), Some(config_root)) =
+        (db_root_identity.as_ref(), config_root_identity.as_ref())
     {
-        root_mismatches.push(format!(
-            "db root {db_root:?} does not match config root {repo_root:?}"
-        ));
+        if db_root != config_root {
+            root_mismatches.push(format!(
+                "db root {:?} does not match config root {:?}",
+                db_root
+                    .display_string()
+                    .unwrap_or_else(|_| "<native display unavailable>".to_string()),
+                config_root
+                    .display_string()
+                    .unwrap_or_else(|_| "<native display unavailable>".to_string())
+            ));
+        }
+    } else if db_root_identity.is_some() != config_root_identity.is_some() {
+        root_mismatches
+            .push("db root and config root do not both have a usable native identity".to_string());
     }
     let root_detection_source = if resolved_config.is_some() {
         "config"
@@ -5302,13 +5348,15 @@ pub(crate) fn build_settings_report(
         db_shm: path_status(&db_sidecar_path(&absolute_db, "shm"))?,
         db_journal: path_status(&db_sidecar_path(&absolute_db, "journal"))?,
         mcp_config: path_status(&mcp_config_path_for_db(&absolute_db))?,
-        config_path: resolved_config.map(|path| normalize_display_path(&path)),
+        config_path: resolved_config
+            .as_deref()
+            .and_then(lossless_native_path_display),
         repo_root,
         root_detection_source,
         root_verified: root_mismatches.is_empty(),
         root_mismatches,
-        map_path: normalize_display_path(&config.map_path),
-        nonsource_files_path: normalize_display_path(&config.nonsource_files_path),
+        map_path: lossless_native_path_display(&config.map_path),
+        nonsource_files_path: lossless_native_path_display(&config.nonsource_files_path),
         default_format: format!("{format:?}").to_ascii_lowercase(),
         default_search_case_sensitive: false,
         search_source: "sqlite-file-text".to_string(),
@@ -5358,8 +5406,8 @@ pub(crate) fn settings_index_stats(store: &AtlasStore) -> Result<SettingsIndexSt
     let health_findings = store.unresolved_health_finding_count_current()?;
     Ok(SettingsIndexStats {
         project_root: store
-            .project_root()?
-            .map(|path| normalize_native_path_display_str(&path)),
+            .project_root_identity()?
+            .and_then(|root| root.display_string().ok()),
         files: overview.files,
         folders: overview.folders,
         missing_purposes: overview.missing_purposes,
@@ -5591,7 +5639,7 @@ pub(crate) fn path_status(path: &Path) -> Result<PathStatus, CliError> {
     let absolute = absolute_path(path)?;
     let metadata = fs::metadata(&absolute).ok();
     Ok(PathStatus {
-        path: normalize_display_path(&absolute),
+        path: lossless_native_path_display(&absolute),
         exists: metadata.is_some(),
         size_bytes: metadata
             .as_ref()
@@ -5601,7 +5649,9 @@ pub(crate) fn path_status(path: &Path) -> Result<PathStatus, CliError> {
 
 /// Return the path to a `SQLite` sidecar file.
 pub(crate) fn db_sidecar_path(db: &Path, suffix: &str) -> PathBuf {
-    PathBuf::from(format!("{}-{suffix}", db.display()))
+    let mut sidecar = db.as_os_str().to_os_string();
+    sidecar.push(format!("-{suffix}"));
+    PathBuf::from(sidecar)
 }
 
 /// Return the project-local MCP config path associated with a database path.
@@ -5610,11 +5660,6 @@ pub(crate) fn mcp_config_path_for_db(db: &Path) -> PathBuf {
         || PathBuf::from("projectatlas.mcp.json"),
         |parent| parent.join("projectatlas.mcp.json"),
     )
-}
-
-/// Normalize a path for JSON/TOON diagnostics.
-pub(crate) fn normalize_display_path(path: &Path) -> String {
-    normalize_native_path_display(path)
 }
 
 /// Build a watcher status report from a lightweight runtime probe.
@@ -7162,7 +7207,7 @@ pub(crate) fn read_indexed_file_content(
     let indexed = store.load_node_by_path(file_key)?.ok_or_else(|| {
         CliError::InvalidInput(format!("indexed file {file_key:?} was not found"))
     })?;
-    let project_root = normalize_native_path_display(indexed_project_root(store)?);
+    let project_root = lossless_project_root_display(&indexed_project_root(store)?);
     let metadata = match fs::metadata(&native) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
@@ -7908,7 +7953,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
             Err(source) => {
                 return Err(CliError::VerificationIncomplete(Box::new(
                     IndexVerificationIncomplete {
-                        project_root: normalize_native_path_display(root),
+                        project_root: lossless_project_root_display(root),
                         worktree: None,
                         status: IndexReadStatus::VerificationIncomplete,
                         reason: IndexVerificationReason::SourceInspectionFailed,

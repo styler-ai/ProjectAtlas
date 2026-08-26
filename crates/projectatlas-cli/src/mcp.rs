@@ -20,10 +20,11 @@ use crate::runtime::{
     estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
     federated_worktree_error, index_init_required, index_work_control, init_config_path,
     init_next_steps, lint_project, load_synchronized_repository_token_report,
-    next_step_report_payload, next_step_report_with_selection, normalized_folder_filter,
-    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
-    open_federated_atlas_stores_for_project, purpose_curation_page, purpose_curator_handoff,
-    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    lossless_native_path_display, lossless_project_root_display, next_step_report_payload,
+    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
+    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
+    purpose_curation_page, purpose_curator_handoff, ranked_file_nodes_with_reasons,
+    ranked_folder_nodes_with_reasons, read_indexed_file_content,
     reconcile_hydrated_index_controlled, record_directory_walk_usage_estimate,
     record_usage_estimate, record_usage_text, render_classified_ranked_file_rows,
     render_classified_symbol_rows, render_health_page, render_purpose_curation_page,
@@ -34,6 +35,8 @@ use crate::runtime::{
     strip_legacy_purpose, telemetry_disabled, validate_purpose_review_admission,
     validated_indexed_file_key, watcher_status_report,
 };
+#[cfg(all(test, unix))]
+use crate::runtime::{IndexReadStatus, IndexRefreshReason, IndexRefreshScope};
 #[cfg(test)]
 use crate::runtime::{
     PURPOSE_CURATOR_RECOMMENDED_REASONING, db_sidecar_path, mcp_config_path_for_db,
@@ -1816,9 +1819,9 @@ enum McpConfigValidation {
 #[derive(Debug, Serialize)]
 struct McpMapReport {
     /// Canonical project root used for map generation.
-    root: String,
+    root: Option<String>,
     /// Map path from the effective config.
-    map_path: String,
+    map_path: Option<String>,
     /// Whether a map file was written by this call.
     written: bool,
     /// Whether JSON compatibility output was requested.
@@ -1833,9 +1836,9 @@ struct McpWorktreeListReport {
     /// Reserved alias for the selected control checkout.
     control_alias: &'static str,
     /// Exact selected control checkout root.
-    control_root: String,
+    control_root: Option<String>,
     /// Structurally validated Git common directory.
-    common_directory: String,
+    common_directory: Option<String>,
     /// Active Git inventory, bounded for one agent response.
     worktrees: Vec<McpWorktreeRow>,
     /// Optional retired `ProjectAtlas` registrations retained for telemetry history.
@@ -1860,7 +1863,7 @@ struct McpWorktreeRow {
     /// `ProjectAtlas` registration relationship.
     registration: McpWorktreeRegistrationState,
     /// Stable Git administrative identity.
-    administrative_directory: String,
+    administrative_directory: Option<String>,
     /// Exact current source root when active.
     root: Option<String>,
     /// Exact atlas availability for the current source root.
@@ -1883,7 +1886,7 @@ struct McpRetiredWorktreeRow {
     /// Last human/agent-facing alias.
     alias: String,
     /// Last structurally validated source root.
-    last_root: String,
+    last_root: Option<String>,
     /// Exact initialized project identity when one was bound.
     project_instance_id: Option<String>,
     /// Last local aggregate revision accepted before retirement.
@@ -1896,7 +1899,7 @@ struct McpWorktreeCandidate {
     /// Stable selector accepted by a later add call.
     selector: String,
     /// Exact active source root.
-    root: String,
+    root: Option<String>,
     /// Structural primary/linked role.
     role: McpGitWorktreeRole,
 }
@@ -2216,9 +2219,9 @@ struct McpProjectStatePayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     registration_id: Option<i64>,
     /// Canonical repository root.
-    root: String,
+    root: Option<String>,
     /// Selected durable `SQLite` index path.
-    db: String,
+    db: Option<String>,
     /// Selected configuration path when present.
     config: Option<String>,
     /// Active selection status.
@@ -2287,9 +2290,9 @@ struct McpSelectedProjectCapability {
     #[serde(skip_serializing_if = "Option::is_none")]
     registration_id: Option<i64>,
     /// Canonical repository root.
-    root: String,
+    root: Option<String>,
     /// Selected durable `SQLite` index path.
-    db: String,
+    db: Option<String>,
     /// Selected configuration path when present.
     config: Option<String>,
     /// Whether the selected durable index exists.
@@ -3131,7 +3134,7 @@ struct McpCompactBriefProject {
     #[serde(skip_serializing_if = "Option::is_none")]
     registration_id: Option<i64>,
     /// Canonical repository root.
-    root: String,
+    root: Option<String>,
     /// Whether the durable index is available.
     index_status: McpIndexStatus,
 }
@@ -4521,7 +4524,7 @@ impl ProjectAtlasMcpServer {
                     run_init_bootstrap(&state.root, &state.db_path, Some(config_path), options)?;
                 report.hydration = Some(InitHydrationPhase {
                     status: InitHydrationStatus::Fallback,
-                    source_root: Some(normalize_native_path_display(&self.control_state.root)),
+                    source_root: lossless_project_root_display(&self.control_state.root),
                     source_project_instance_id: None,
                     target_project_instance_id: None,
                     baseline_generation: None,
@@ -4621,7 +4624,7 @@ impl ProjectAtlasMcpServer {
         Ok(McpWorktreeHydration::Activated {
             hydration: InitHydrationPhase {
                 status: InitHydrationStatus::Hydrated,
-                source_root: Some(normalize_native_path_display(&self.control_state.root)),
+                source_root: lossless_project_root_display(&self.control_state.root),
                 source_project_instance_id: Some(activation.source_project_instance_id.to_string()),
                 target_project_instance_id: Some(activation.target_project_instance_id.to_string()),
                 baseline_generation: Some(activation.baseline_generation.get()),
@@ -4909,8 +4912,8 @@ impl ProjectAtlasMcpServer {
             None
         };
         Ok(McpMapReport {
-            root: normalize_native_path_display(&config.root),
-            map_path: normalize_native_path_display(&config.map_path),
+            root: lossless_project_root_display(&config.root),
+            map_path: lossless_native_path_display(&config.map_path),
             written: skipped_reason.is_none(),
             json,
             skipped_reason,
@@ -4985,12 +4988,12 @@ impl ProjectAtlasMcpServer {
                 .worktree
                 .as_ref()
                 .and_then(|selection| selection.registration_id),
-            root: normalize_native_path_display(&state.root),
-            db: normalize_native_path_display(&state.db_path),
+            root: lossless_project_root_display(&state.root),
+            db: lossless_native_path_display(&state.db_path),
             config: state
                 .config_path
                 .as_ref()
-                .map(normalize_native_path_display),
+                .and_then(|path| lossless_native_path_display(path)),
             index_status: if state.db_path.exists() {
                 McpIndexStatus::Available
             } else {
@@ -5046,7 +5049,8 @@ impl ProjectAtlasMcpServer {
         if !state.db_path.exists() {
             let init_project_path = selected_worktree
                 .is_none()
-                .then(|| normalize_native_path_display(&state.root));
+                .then(|| lossless_project_root_display(&state.root))
+                .flatten();
             return Ok(McpSessionBrief {
                 project,
                 policy: self.brief_policy(),
@@ -5924,13 +5928,27 @@ impl ProjectAtlasMcpServer {
 
     /// Derive one stable, short candidate selector from Git administrative identity.
     fn worktree_candidate_selector(entry: &GitWorktreeEntry) -> String {
-        let identity = normalize_native_path_display(&entry.administrative_directory);
-        Self::worktree_candidate_selector_from_identity(&identity)
+        if let Some(identity) = entry.administrative_directory.to_str() {
+            return Self::worktree_candidate_selector_from_identity(
+                &normalize_native_path_display_str(identity),
+            );
+        }
+        Self::worktree_candidate_selector_from_native_identity(
+            entry
+                .administrative_directory
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
     }
 
     /// Derive one stable, short candidate selector from normalized Git identity text.
     fn worktree_candidate_selector_from_identity(identity: &str) -> String {
-        let digest = blake3::hash(identity.as_bytes()).to_hex();
+        Self::worktree_candidate_selector_from_native_identity(identity.as_bytes())
+    }
+
+    /// Derive a selector from exact native administrative-directory bytes.
+    fn worktree_candidate_selector_from_native_identity(identity: &[u8]) -> String {
+        let digest = blake3::hash(identity).to_hex();
         let mut selector = String::with_capacity(
             MCP_WORKTREE_SELECTOR_PREFIX.len() + MCP_WORKTREE_SELECTOR_DIGEST_CHARS,
         );
@@ -6038,7 +6056,7 @@ impl ProjectAtlasMcpServer {
         }
         Some(McpWorktreeCandidate {
             selector: Self::worktree_candidate_selector(entry),
-            root: normalize_native_path_display(Self::active_worktree_root(entry)?),
+            root: lossless_project_root_display(Self::active_worktree_root(entry)?),
             role: entry.role.into(),
         })
     }
@@ -6362,14 +6380,16 @@ impl ProjectAtlasMcpServer {
         registrations: &[WorktreeRegistration],
     ) -> McpWorktreeRow {
         let administrative_directory =
-            normalize_native_path_display(&entry.administrative_directory);
+            lossless_native_path_display(&entry.administrative_directory);
         let registration_paths_are_utf8 =
             Self::worktree_registration_paths_are_utf8(common_directory, entry);
         let registration = registration_paths_are_utf8
             .then(|| {
-                registrations.iter().find(|registration| {
-                    registration.state == WorktreeRegistrationState::Active
-                        && registration.git_administrative_directory == administrative_directory
+                administrative_directory.as_deref().and_then(|directory| {
+                    registrations.iter().find(|registration| {
+                        registration.state == WorktreeRegistrationState::Active
+                            && registration.git_administrative_directory == directory
+                    })
                 })
             })
             .flatten();
@@ -6478,7 +6498,7 @@ impl ProjectAtlasMcpServer {
             administrative_directory,
             root: root
                 .filter(|_| registration_paths_are_utf8)
-                .map(normalize_native_path_display),
+                .and_then(lossless_project_root_display),
             atlas_state,
             telemetry_state,
             accepted_telemetry_revision: registration
@@ -6499,7 +6519,7 @@ impl ProjectAtlasMcpServer {
             role: McpGitWorktreeRole::Linked,
             git_state: McpGitWorktreeState::Missing,
             registration: McpWorktreeRegistrationState::Registered,
-            administrative_directory: registration.git_administrative_directory.clone(),
+            administrative_directory: Some(registration.git_administrative_directory.clone()),
             root: Some(registration.last_root.clone()),
             atlas_state: McpWorktreeAtlasState::Unavailable,
             telemetry_state: McpWorktreeTelemetryState::Unavailable,
@@ -7372,12 +7392,12 @@ impl ProjectAtlasMcpServer {
                 .worktree
                 .as_ref()
                 .and_then(|selection| selection.registration_id),
-            root: normalize_native_path_display(&state.root),
-            db: normalize_native_path_display(&state.db_path),
+            root: lossless_project_root_display(&state.root),
+            db: lossless_native_path_display(&state.db_path),
             config: state
                 .config_path
                 .as_ref()
-                .map(normalize_native_path_display),
+                .and_then(|path| lossless_native_path_display(path)),
             status: McpProjectStatus::Active,
         }
     }
@@ -7556,7 +7576,8 @@ impl ProjectAtlasMcpServer {
                     project_path: report
                         .worktree
                         .is_none()
-                        .then(|| report.project_root.clone()),
+                        .then(|| report.project_root.clone())
+                        .flatten(),
                     worktree: report.worktree.clone(),
                 }),
             ),
@@ -7585,7 +7606,8 @@ impl ProjectAtlasMcpServer {
                     project_path: report
                         .worktree
                         .is_none()
-                        .then(|| report.project_root.clone()),
+                        .then(|| report.project_root.clone())
+                        .flatten(),
                     worktree: report.worktree.clone(),
                 }),
             ),
@@ -7912,7 +7934,7 @@ impl ProjectAtlasMcpServer {
                 .filter(|registration| registration.state == WorktreeRegistrationState::Retired)
                 .map(|registration| McpRetiredWorktreeRow {
                     alias: registration.alias.to_string(),
-                    last_root: registration.last_root.clone(),
+                    last_root: Some(registration.last_root.clone()),
                     project_instance_id: registration
                         .project_instance_id
                         .map(|identity| identity.to_string()),
@@ -7923,8 +7945,8 @@ impl ProjectAtlasMcpServer {
                 MCP_PAYLOAD_WORKTREES,
                 &McpWorktreeListReport {
                     control_alias: MCP_MAIN_WORKTREE_ALIAS,
-                    control_root: normalize_native_path_display(&self.control_state.root),
-                    common_directory: normalize_native_path_display(&repository.common_directory),
+                    control_root: lossless_project_root_display(&self.control_state.root),
+                    common_directory: lossless_native_path_display(&repository.common_directory),
                     worktrees,
                     retired,
                     total_worktrees,
@@ -8079,7 +8101,7 @@ impl ProjectAtlasMcpServer {
                     status: McpWorktreeMutationStatus::Registered,
                     selector: Some(Self::worktree_candidate_selector(&entry)),
                     alias: Some(alias.to_string()),
-                    root: Some(normalize_native_path_display(root)),
+                    root: lossless_project_root_display(root),
                     registration_id: Some(registration.registration_id),
                     telemetry_sync,
                     candidates: Vec::new(),
@@ -8130,7 +8152,7 @@ impl ProjectAtlasMcpServer {
             let retired_at_epoch = Self::current_epoch_seconds()?;
             let (root_display, active_root) = match entry.map(|entry| &entry.state) {
                 Some(GitWorktreeState::Active { root, .. }) => {
-                    (normalize_native_path_display(root), Some(root.as_path()))
+                    (lossless_project_root_display(root), Some(root.as_path()))
                 }
                 Some(GitWorktreeState::Invalid { issue }) => {
                     return Err(CliError::InvalidInput(format!(
@@ -8143,7 +8165,7 @@ impl ProjectAtlasMcpServer {
                 Some(GitWorktreeState::Missing { .. }) | None => {
                     blocker
                         .get_or_insert_with(|| MCP_WORKTREE_MISSING_RETENTION_REASON.to_string());
-                    (registration.last_root.clone(), None)
+                    (Some(registration.last_root.clone()), None)
                 }
             };
             let (retired, telemetry_sync, final_blocker) = Self::retire_registered_worktree(
@@ -8160,7 +8182,7 @@ impl ProjectAtlasMcpServer {
                     status: McpWorktreeMutationStatus::Retired,
                     selector: entry.map(Self::worktree_candidate_selector),
                     alias: Some(alias.to_string()),
-                    root: Some(root_display),
+                    root: root_display,
                     registration_id: Some(retired.registration_id),
                     telemetry_sync,
                     candidates: Vec::new(),
@@ -11124,6 +11146,201 @@ mod tests {
                 && mapped_payload.contains("indexed_project_root: null")
                 && mapped_payload.contains("does not match"),
             "MCP promoted lossy store mismatch text into structured roots",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_recovery_and_session_reports_omit_unavailable_native_root_selectors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"repo-\x80".to_vec()));
+        let replacement_root = temp.path().join("repo-�");
+        fs::create_dir(&raw_root)?;
+        fs::create_dir(&replacement_root)?;
+        let raw_db = raw_root.join(".projectatlas").join("projectatlas.db");
+        let replacement_db = replacement_root
+            .join(".projectatlas")
+            .join("projectatlas.db");
+        let replacement_display = lossless_project_root_display(&replacement_root)
+            .ok_or_else(|| io::Error::other("replacement root lost its UTF-8 display"))?;
+
+        let init_errors = [
+            (
+                crate::runtime::index_init_required(&raw_root, &raw_db),
+                false,
+            ),
+            (
+                crate::runtime::index_init_required(&replacement_root, &replacement_db),
+                true,
+            ),
+        ];
+        for (error, displayable) in init_errors {
+            let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+            if displayable {
+                require(
+                    payload.contains("project_root: repo-�")
+                        && payload.contains("project_path: repo-�"),
+                    "MCP init recovery lost a displayable root selector",
+                )?;
+            } else {
+                require(
+                    payload.contains("project_root: null")
+                        && !payload.contains("project_path:")
+                        && !payload.contains("repo-�"),
+                    "MCP init recovery exposed a lossy raw-root selector",
+                )?;
+            }
+        }
+
+        let refresh_errors = [
+            (
+                CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: lossless_project_root_display(&raw_root),
+                    worktree: None,
+                    status: IndexReadStatus::RefreshRequired,
+                    reason: IndexRefreshReason::SourceChanged,
+                    scope: IndexRefreshScope::Incremental,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                })),
+                false,
+            ),
+            (
+                CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: lossless_project_root_display(&replacement_root),
+                    worktree: None,
+                    status: IndexReadStatus::RefreshRequired,
+                    reason: IndexRefreshReason::SourceChanged,
+                    scope: IndexRefreshScope::Incremental,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                })),
+                true,
+            ),
+        ];
+        for (error, displayable) in refresh_errors {
+            let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+            if displayable {
+                require(
+                    payload.contains("project_root: repo-�")
+                        && payload.contains("project_path: repo-�"),
+                    "MCP refresh recovery lost a displayable root selector",
+                )?;
+            } else {
+                require(
+                    payload.contains("project_root: null")
+                        && !payload.contains("project_path:")
+                        && !payload.contains("repo-�"),
+                    "MCP refresh recovery exposed a lossy raw-root selector",
+                )?;
+            }
+        }
+
+        let raw_server = ProjectAtlasMcpServer::new(raw_db, None, "raw-session".to_string(), false);
+        let raw_project = serde_json::to_value(ProjectAtlasMcpServer::project_state_payload(
+            &raw_server.control_state,
+        ))?;
+        let raw_capability = serde_json::to_value(
+            ProjectAtlasMcpServer::selected_project_capability(&raw_server.control_state),
+        )?;
+        require(
+            raw_project.get("root") == Some(&serde_json::Value::Null)
+                && raw_project.get("db") == Some(&serde_json::Value::Null)
+                && raw_capability.get("root") == Some(&serde_json::Value::Null)
+                && raw_capability.get("db") == Some(&serde_json::Value::Null)
+                && !raw_project.to_string().contains("repo-�")
+                && !raw_capability.to_string().contains("repo-�"),
+            "MCP selected-project reports exposed a lossy raw-root projection",
+        )?;
+        let raw_brief = raw_server.build_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                worktree: None,
+                query: None,
+                purpose_task: None,
+                compact: None,
+                folder_limit: None,
+                file_limit: None,
+                blocker_limit: None,
+                purpose_limit: None,
+            },
+            None,
+        )?;
+        let raw_value = serde_json::to_value(&raw_brief)?;
+        require(
+            raw_value.pointer("/project/root") == Some(&serde_json::Value::Null)
+                && raw_value
+                    .pointer("/recommendations/0/arguments/project_path")
+                    .is_none()
+                && raw_value
+                    .pointer("/recommendations/0/arguments/worktree")
+                    .is_none()
+                && !raw_value.to_string().contains("repo-�"),
+            "MCP session brief offered a lossy sibling selector for a raw root",
+        )?;
+
+        let replacement_server = ProjectAtlasMcpServer::new(
+            replacement_db,
+            None,
+            "replacement-session".to_string(),
+            false,
+        );
+        let replacement_project = serde_json::to_value(
+            ProjectAtlasMcpServer::project_state_payload(&replacement_server.control_state),
+        )?;
+        let replacement_capability = serde_json::to_value(
+            ProjectAtlasMcpServer::selected_project_capability(&replacement_server.control_state),
+        )?;
+        require(
+            replacement_project
+                .get("root")
+                .and_then(|value| value.as_str())
+                == Some(replacement_display.as_str())
+                && replacement_capability
+                    .get("root")
+                    .and_then(|value| value.as_str())
+                    == Some(replacement_display.as_str()),
+            "MCP selected-project reports lost the displayable root",
+        )?;
+        let replacement_brief = replacement_server.build_session_brief(
+            AtlasSessionBriefParams {
+                project_path: None,
+                worktree: None,
+                query: None,
+                purpose_task: None,
+                compact: None,
+                folder_limit: None,
+                file_limit: None,
+                blocker_limit: None,
+                purpose_limit: None,
+            },
+            None,
+        )?;
+        let replacement_value = serde_json::to_value(&replacement_brief)?;
+        require(
+            replacement_value
+                .pointer("/project/root")
+                .and_then(|value| value.as_str())
+                == Some(replacement_display.as_str())
+                && replacement_value
+                    .pointer("/recommendations/0/arguments/project_path")
+                    .and_then(|value| value.as_str())
+                    == Some(replacement_display.as_str()),
+            "MCP session brief lost the displayable root recovery selector",
+        )?;
+        require(
+            !raw_root.join(".projectatlas").exists()
+                && !replacement_root.join(".projectatlas").exists(),
+            "MCP missing-index recovery mutated a project root",
         )
     }
 
