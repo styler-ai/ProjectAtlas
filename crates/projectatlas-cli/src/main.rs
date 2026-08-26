@@ -5381,6 +5381,8 @@ mod tests {
         ProjectAtlasMcpServer, REQUIRED_MCP_TOOL_NAMES, mcp_tool_route_present,
         required_mcp_surface_present,
     };
+    #[cfg(unix)]
+    use super::runtime::IndexProjectMismatch;
     use super::runtime::{
         TextIndexOptions, byte_count_to_tokens, estimated_source_tokens_for_file_node,
         event_kind_affects_index, is_symbol_candidate, primary_symbol_names,
@@ -5402,6 +5404,8 @@ mod tests {
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
     use clap::Parser as _;
     use notify::EventKind;
+    #[cfg(unix)]
+    use projectatlas_core::CanonicalProjectRoot;
     use projectatlas_core::graph::{
         Completeness, ConfidenceClass, EntitySelector, GraphEntity, GraphIdentityText,
         LogicalRelation, RelationResolution, RepositoryFilePath,
@@ -5421,8 +5425,12 @@ mod tests {
     use serde_json::{Map, Value, json};
     use std::collections::BTreeMap;
     use std::error::Error;
+    #[cfg(unix)]
+    use std::ffi::OsString;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
@@ -5800,6 +5808,63 @@ mod tests {
                 && toon.contains("unknown-local")
                 && toon.contains("supported local filesystem"),
             "CLI TOON lost typed filesystem details",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_project_mismatch_keeps_native_display_unavailable_typed() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"raw-root-\x80".to_vec()));
+        let replacement_root = temp.path().join("raw-root-�");
+        fs::create_dir(&raw_root)?;
+        fs::create_dir(&replacement_root)?;
+        let raw_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let replacement_identity = CanonicalProjectRoot::from_path(&replacement_root)?;
+        let replacement_display = replacement_identity.display_string()?;
+        let error = CliError::ProjectMismatch(Box::new(IndexProjectMismatch::from_native_roots(
+            &raw_identity,
+            &replacement_identity,
+        )));
+
+        let json_text = render_cli_error(OutputFormat::Json, &error)?;
+        let json: Value = serde_json::from_str(&json_text)?;
+        require_condition(
+            json.pointer("/error/project_mismatch/selected_project_root") == Some(&Value::Null)
+                && json
+                    .pointer("/error/project_mismatch/indexed_project_root")
+                    .and_then(Value::as_str)
+                    == Some(replacement_display.as_str()),
+            "CLI JSON collapsed native-unavailable and replacement-character roots",
+        )?;
+
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        require_condition(
+            toon.contains("selected_project_root: null")
+                && toon.contains("indexed_project_root: ")
+                && toon.contains("raw-root-�"),
+            "CLI TOON lost the typed unavailable root projection",
+        )?;
+
+        let mapped = super::runtime::project_store_error(DbError::ProjectRootMismatch {
+            expected: raw_root.to_string_lossy().into_owned(),
+            found: replacement_root.to_string_lossy().into_owned(),
+        });
+        let mapped_json: Value =
+            serde_json::from_str(&render_cli_error(OutputFormat::Json, &mapped)?)?;
+        require_condition(
+            mapped_json.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::Null)
+                && mapped_json.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::Null)
+                && mapped_json
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("does not match")),
+            "CLI promoted lossy store mismatch text into structured roots",
         )?;
         Ok(())
     }

@@ -437,10 +437,35 @@ pub(crate) struct IndexProjectMismatch {
     /// Registered alias when one selected this project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) worktree: Option<String>,
-    /// Canonical project root selected for this read.
-    pub(crate) selected_project_root: String,
-    /// Canonical project root recorded by the opened index.
-    pub(crate) indexed_project_root: String,
+    /// Lossless UTF-8 display of the canonical root selected for this read.
+    ///
+    /// `None` means that the native identity is valid but has no UTF-8 display
+    /// projection. Adapters must not use this field as identity authority.
+    pub(crate) selected_project_root: Option<String>,
+    /// Lossless UTF-8 display of the canonical root recorded by the opened index.
+    ///
+    /// `None` means that the native identity is valid but has no UTF-8 display
+    /// projection. Adapters must not use this field as identity authority.
+    pub(crate) indexed_project_root: Option<String>,
+    /// Terminal-only diagnostic retained when a lower layer supplied lossy text.
+    #[serde(skip)]
+    diagnostic: Option<String>,
+}
+
+impl IndexProjectMismatch {
+    /// Build adapter fields from native identities without lossy conversion.
+    pub(crate) fn from_native_roots(
+        selected: &CanonicalProjectRoot,
+        indexed: &CanonicalProjectRoot,
+    ) -> Self {
+        Self {
+            status: IndexReadStatus::ProjectMismatch,
+            worktree: None,
+            selected_project_root: selected.display_string().ok(),
+            indexed_project_root: indexed.display_string().ok(),
+            diagnostic: None,
+        }
+    }
 }
 
 impl fmt::Display for IndexRefreshRequired {
@@ -512,10 +537,18 @@ impl fmt::Display for IndexVerificationIncomplete {
 
 impl fmt::Display for IndexProjectMismatch {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(diagnostic) = self.diagnostic.as_deref() {
+            return formatter.write_str(diagnostic);
+        }
         write!(
             formatter,
             "project_mismatch: selected project root '{}' does not match index root '{}'",
-            self.selected_project_root, self.indexed_project_root
+            self.selected_project_root
+                .as_deref()
+                .unwrap_or("<native display unavailable>"),
+            self.indexed_project_root
+                .as_deref()
+                .unwrap_or("<native display unavailable>"),
         )
     }
 }
@@ -1304,12 +1337,9 @@ fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result
         )
     })?;
     if indexed_root != selected_root {
-        return Err(CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
-            status: IndexReadStatus::ProjectMismatch,
-            worktree: None,
-            selected_project_root: selected_root.display_string_lossy(),
-            indexed_project_root: indexed_root.display_string_lossy(),
-        })));
+        return Err(CliError::ProjectMismatch(Box::new(
+            IndexProjectMismatch::from_native_roots(&selected_root, &indexed_root),
+        )));
     }
     Ok(())
 }
@@ -2433,8 +2463,11 @@ pub(crate) fn project_store_error(source: projectatlas_db::DbError) -> CliError 
             CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
                 status: IndexReadStatus::ProjectMismatch,
                 worktree: None,
-                selected_project_root: expected,
-                indexed_project_root: found,
+                selected_project_root: None,
+                indexed_project_root: None,
+                diagnostic: Some(format!(
+                    "database project root {found:?} does not match selected root {expected:?}"
+                )),
             }))
         }
         other => CliError::Db(other),

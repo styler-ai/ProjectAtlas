@@ -27,7 +27,8 @@ pub enum ProjectRootTransition {
 pub struct ProjectRootTransitionResult {
     /// Transition selected by the caller.
     pub transition: ProjectRootTransition,
-    /// Root stored before the transition, when one existed.
+    /// Lossless UTF-8 display of the native root stored before the transition,
+    /// when one existed and had a display projection.
     pub previous_root: Option<String>,
     /// Lossless UTF-8 display of the canonical root stored after the
     /// transition, when one exists.
@@ -84,8 +85,8 @@ impl AtlasStore {
         };
         match transition {
             ProjectRootTransition::Bind => {
-                if let Some(found) = previous_root_identity {
-                    if found != destination_identity {
+                if let Some(found) = previous_root_identity.as_ref() {
+                    if found != &destination_identity {
                         return Err(DbError::ProjectRootMismatch {
                             expected: destination_identity.display_string_lossy(),
                             found: found.display_string_lossy(),
@@ -106,7 +107,9 @@ impl AtlasStore {
                     .ok_or(DbError::ProjectInstanceIdentityMissing)?;
                 Ok(ProjectRootTransitionResult {
                     transition,
-                    previous_root,
+                    previous_root: previous_root_identity
+                        .as_ref()
+                        .and_then(|root| root.display_string().ok()),
                     project_root: destination,
                     project_instance_id,
                     identity_changed: previous_identity != Some(project_instance_id),
@@ -114,12 +117,14 @@ impl AtlasStore {
                 })
             }
             ProjectRootTransition::Move | ProjectRootTransition::Detach => {
-                let previous_root =
-                    previous_root.ok_or(DbError::ProjectRootTransitionRequiresExistingRoot)?;
+                let previous_root_identity = match previous_root_identity.as_ref() {
+                    Some(identity) => identity,
+                    None if preflight.state == SchemaState::UpgradeRequired => {
+                        return Err(DbError::ProjectRootIdentityMissing);
+                    }
+                    None => return Err(DbError::ProjectRootTransitionRequiresExistingRoot),
+                };
                 if transition == ProjectRootTransition::Move {
-                    let previous_root_identity = previous_root_identity
-                        .as_ref()
-                        .ok_or(DbError::ProjectRootIdentityMissing)?;
                     if previous_root_identity == &destination_identity {
                         return Err(DbError::ProjectRootTransitionRequiresDifferentRoot {
                             root: destination_identity.display_string_lossy(),
@@ -132,7 +137,7 @@ impl AtlasStore {
                 let opened_identity = store.project_instance_id()?;
                 if previous_identity.is_some() && opened_identity != previous_identity {
                     return Err(project_transition_changed(
-                        Some(previous_root),
+                        previous_root_identity.display_string().ok(),
                         store.project_root()?,
                         previous_identity,
                         opened_identity,
@@ -141,7 +146,7 @@ impl AtlasStore {
                 let mut result = apply_root_transition(
                     &mut store,
                     transition,
-                    previous_root_identity.as_ref(),
+                    Some(previous_root_identity),
                     opened_identity,
                     &destination_identity,
                 )?;
@@ -1253,9 +1258,13 @@ mod tests {
         let root = temp.path().join(&native_name);
         let display_collision = temp.path().join("root-�");
         let destination_collision = temp.path().join("dest-�");
+        let destination_native_name =
+            std::ffi::OsString::from_vec(vec![b'd', b'e', b's', b't', 0x81]);
+        let destination_native = temp.path().join(&destination_native_name);
         fs::create_dir(&root)?;
         fs::create_dir(&display_collision)?;
         fs::create_dir(&destination_collision)?;
+        fs::create_dir(&destination_native)?;
 
         let database = temp.path().join("non-utf8-root.db");
         let bound =
@@ -1299,6 +1308,7 @@ mod tests {
         crate::verify_project_database(&database, &root)?;
 
         let mut stale = AtlasStore::open_for_project(&database, &root)?;
+        seed_authored_and_graph_state(&mut stale, bound.project_instance_id)?;
         stale
             .begin_index_publication("non-utf8-before-move")?
             .complete()?;
@@ -1313,6 +1323,11 @@ mod tests {
             &bound.project_instance_id,
             "non-UTF-8 move identity",
         )?;
+        require_eq(
+            &moved.previous_root,
+            &None,
+            "non-UTF-8 move previous display availability",
+        )?;
         let destination_identity = CanonicalProjectRoot::from_path(&display_collision)?;
         let moved_store = AtlasStore::open_read_only_for_project(&database, &display_collision)?;
         require_eq(
@@ -1320,6 +1335,8 @@ mod tests {
             &Some(destination_identity),
             "non-UTF-8 moved native identity",
         )?;
+        assert_authored_state(&moved_store)?;
+        assert_usage_report(&moved_store, true)?;
         drop(moved_store);
         crate::verify_project_database(&database, &display_collision)?;
 
@@ -1373,20 +1390,37 @@ mod tests {
 
         let detached = AtlasStore::transition_project_root(
             &database,
-            &destination_collision,
+            &destination_native,
             ProjectRootTransition::Detach,
         )?;
         require(
             detached.project_instance_id != bound.project_instance_id,
             "non-UTF-8 detach did not rotate project identity",
         )?;
+        require_eq(
+            &detached.previous_root,
+            &Some(normalize_metadata_path(&display_collision)),
+            "non-UTF-8 detach previous display",
+        )?;
+        require(
+            detached.project_root.is_none(),
+            "non-UTF-8 detach exposed a lossy destination display",
+        )?;
         let detached_store =
-            AtlasStore::open_read_only_for_project(&database, &destination_collision)?;
+            AtlasStore::open_read_only_for_project(&database, &destination_native)?;
         require_eq(
             &detached_store.project_root_identity()?,
-            &Some(CanonicalProjectRoot::from_path(&destination_collision)?),
+            &Some(CanonicalProjectRoot::from_path(&destination_native)?),
             "non-UTF-8 detached native identity",
         )?;
+        require_eq(
+            &detached_store.captured_project_binding()?.project_root,
+            &None,
+            "non-UTF-8 detached display availability",
+        )?;
+        assert_authored_state(&detached_store)?;
+        assert_usage_report(&detached_store, false)?;
+        assert_graph_counts(&detached_store, [0, 0, 0, 0, 0, 0, 0])?;
         Ok(())
     }
 

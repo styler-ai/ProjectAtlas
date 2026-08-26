@@ -10146,8 +10146,8 @@ mod tests {
     };
     use projectatlas_core::symbols::RelationKind;
     use projectatlas_core::{
-        IndexCancellation, IndexWorkStage, RankedConnectionDirection, RankedConnectionKind,
-        RankedConnectionTarget,
+        CanonicalProjectRoot, IndexCancellation, IndexWorkStage, RankedConnectionDirection,
+        RankedConnectionKind, RankedConnectionTarget,
     };
     use projectatlas_db::ProjectRootTransition;
     use std::collections::BTreeSet;
@@ -11086,6 +11086,44 @@ mod tests {
                 && payload.contains("filesystem_type: nfs")
                 && payload.contains("supported local filesystem"),
             "MCP TOON lost typed filesystem details or recovery guidance",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_project_mismatch_keeps_native_display_unavailable_typed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"raw-root-\x80".to_vec()));
+        let replacement_root = temp.path().join("raw-root-�");
+        fs::create_dir(&raw_root)?;
+        fs::create_dir(&replacement_root)?;
+        let raw_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let replacement_identity = CanonicalProjectRoot::from_path(&replacement_root)?;
+        let error = CliError::ProjectMismatch(Box::new(IndexProjectMismatch::from_native_roots(
+            &raw_identity,
+            &replacement_identity,
+        )));
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        require(
+            payload.contains("selected_project_root: null")
+                && payload.contains("indexed_project_root:")
+                && payload.contains("raw-root-�"),
+            "MCP promoted a lossy native root into an ambiguous structured value",
+        )?;
+
+        let mapped = crate::runtime::project_store_error(DbError::ProjectRootMismatch {
+            expected: raw_root.to_string_lossy().into_owned(),
+            found: replacement_root.to_string_lossy().into_owned(),
+        });
+        let mapped_payload = ProjectAtlasMcpServer::encode_error_payload(&mapped);
+        require(
+            mapped_payload.contains("selected_project_root: null")
+                && mapped_payload.contains("indexed_project_root: null")
+                && mapped_payload.contains("does not match"),
+            "MCP promoted lossy store mismatch text into structured roots",
         )
     }
 
