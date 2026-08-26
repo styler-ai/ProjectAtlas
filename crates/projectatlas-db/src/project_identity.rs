@@ -65,14 +65,11 @@ impl AtlasStore {
         let destination = destination_identity.display_string().ok();
         let (preflight, _) = schema::preflight(database_path, None)?;
         let previous_root = preflight.project_root.clone();
-        let previous_identity = if preflight.state == SchemaState::Current {
-            read_current_project_identity(database_path)?
-        } else {
-            None
-        };
+        let previous_identity = preflight.project_instance_id;
         let previous_root_identity = if preflight.state == SchemaState::Current {
             read_current_project_root_identity(database_path)?
-        } else if transition == ProjectRootTransition::Detach
+        } else if (transition == ProjectRootTransition::Bind
+            || transition == ProjectRootTransition::Detach)
             && preflight.state == SchemaState::UpgradeRequired
         {
             previous_root
@@ -295,12 +292,6 @@ fn classify_root_absence(root: &str, result: std::io::Result<()>) -> DbResult<()
             source,
         }),
     }
-}
-
-/// Load identity through a validated current read-only snapshot.
-fn read_current_project_identity(path: &Path) -> DbResult<Option<ProjectInstanceId>> {
-    let (connection, _) = schema::open_current_read_only(path, None)?;
-    load_project_identity(&connection)
 }
 
 /// Load a current database's native project-root identity without mutation.
@@ -1244,6 +1235,77 @@ mod tests {
             &missing_before,
             "schema-19 missing-root detach",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_nineteen_same_root_bind_reports_preserved_identity_and_state()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-19-bind-root");
+        let database = temp.path().join("schema-19-bind.db");
+        fs::create_dir(&root)?;
+
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-19 bind fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, project)?;
+        let publication = store.index_publication()?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_runtime_scope(&store, project, 1, 0, 1)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(store);
+
+        let bound =
+            AtlasStore::transition_project_root(&database, &root, ProjectRootTransition::Bind)?;
+        let expected_display = normalize_metadata_path(&root);
+        require_eq(
+            &bound.previous_root,
+            &Some(expected_display.clone()),
+            "schema-19 bind previous root",
+        )?;
+        require_eq(
+            &bound.project_root,
+            &Some(expected_display),
+            "schema-19 bind destination root",
+        )?;
+        require_eq(
+            &bound.project_instance_id,
+            &project,
+            "schema-19 bind identity",
+        )?;
+        require(!bound.identity_changed, "schema-19 bind changed identity")?;
+        require(
+            !bound.publication_invalidated,
+            "schema-19 bind invalidated publication",
+        )?;
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(CanonicalProjectRoot::from_path(&root)?),
+            "schema-19 bind native root",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project),
+            "schema-19 bind reopened identity",
+        )?;
+        require_eq(
+            &reopened.index_publication()?,
+            &publication,
+            "schema-19 bind publication",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, true)?;
+        assert_runtime_scope(&reopened, project, 1, 0, 1)?;
+        assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
         Ok(())
     }
 

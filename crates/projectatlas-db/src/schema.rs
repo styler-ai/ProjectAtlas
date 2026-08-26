@@ -84,6 +84,10 @@ pub(crate) struct SchemaPreflight {
     pub(crate) schema_version: Option<i64>,
     /// Existing normalized project identity, when present.
     pub(crate) project_root: Option<String>,
+    /// Existing project instance identity, when the predecessor schema owns
+    /// the singleton. This is captured in the same read-only snapshot so
+    /// transition reporting never infers it from migrated state.
+    pub(crate) project_instance_id: Option<ProjectInstanceId>,
 }
 
 /// One append-only supported schema transition.
@@ -1575,6 +1579,7 @@ fn preflight_with_integrity(
                 state: SchemaState::Fresh,
                 schema_version: None,
                 project_root: None,
+                project_instance_id: None,
             },
             location,
         ));
@@ -1911,6 +1916,11 @@ fn inspect_connection(
     } else {
         read_metadata(connection, PROJECT_ROOT_KEY)?
     };
+    let project_instance_id = if state == SchemaState::Fresh {
+        None
+    } else {
+        read_project_instance_id_if_present(connection)?
+    };
     if let Some(expected) = expected_root {
         match project_root.as_deref() {
             Some(found) if project_roots_match(Some(expected), Some(found)) => {}
@@ -1936,7 +1946,22 @@ fn inspect_connection(
             .then(|| stored_schema_version(connection))
             .transpose()?,
         project_root,
+        project_instance_id,
     })
+}
+
+/// Read the predecessor project identity only when its singleton table exists.
+///
+/// Schema 19 still owns this identity even though it predates the native-root
+/// table. Older released schemas do not, so absence remains a truthful
+/// "created/changed" transition result rather than a fabricated identity.
+fn read_project_instance_id_if_present(
+    connection: &Connection,
+) -> DbResult<Option<ProjectInstanceId>> {
+    if object_kind(connection, "project_identity")?.as_deref() != Some("table") {
+        return Ok(None);
+    }
+    crate::project_identity::load_project_identity(connection)
 }
 
 /// Inspect schema state without deriving identity from a display projection.

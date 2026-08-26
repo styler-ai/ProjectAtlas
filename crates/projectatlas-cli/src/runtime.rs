@@ -5270,9 +5270,6 @@ pub(crate) fn build_settings_report(
     let repo_root = config_root_identity
         .as_ref()
         .and_then(|root| root.display_string().ok());
-    let db_project_root = db_root_identity
-        .as_ref()
-        .and_then(|root| root.display_string().ok());
     let mut root_mismatches = Vec::new();
     if let (Some(db_root), Some(config_root)) =
         (db_root_identity.as_ref(), config_root_identity.as_ref())
@@ -5294,7 +5291,7 @@ pub(crate) fn build_settings_report(
     }
     let root_detection_source = if resolved_config.is_some() {
         "config"
-    } else if db_project_root.is_some() {
+    } else if db_root_identity.is_some() {
         "db"
     } else {
         "db-path-or-cwd"
@@ -9349,6 +9346,44 @@ mod tests {
             Some(&invalid),
             Some(&matching)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_report_uses_native_db_identity_when_display_is_unavailable()
+    -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_name = OsString::from_vec(vec![b'r', b'o', b'o', b't', 0x80]);
+        let root = temp.path().join(&raw_name);
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("raw-root database has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+
+        let report = build_settings_report(&database, None, OutputFormat::Json)?;
+        require_eq(
+            &report.root_detection_source,
+            &"db".to_string(),
+            "native database root detection source",
+        )?;
+        require_eq(
+            &report.repo_root,
+            &None,
+            "unavailable native database root display",
+        )?;
+        let serialized = serde_json::to_string(&report)?;
+        require_eq(
+            &serialized.contains('\u{fffd}'),
+            &false,
+            "serialized settings fabricated a replacement root",
+        )?;
+        Ok(())
     }
 
     #[test]
