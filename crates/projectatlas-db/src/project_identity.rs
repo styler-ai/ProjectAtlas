@@ -1499,7 +1499,7 @@ mod tests {
         )?;
         require_eq(
             &reopened.project_root_identity()?,
-            &Some(native_identity.clone()),
+            &Some(native_identity),
             "reopened native identity after rejected set_project_root",
         )?;
         require_eq(
