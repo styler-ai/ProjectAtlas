@@ -842,10 +842,10 @@ mod tests {
         let fixture = tempfile::tempdir()?;
         let source_root = fixture
             .path()
-            .join(std::ffi::OsString::from_vec(vec![b"s", b"r", b"c", 0x80]));
+            .join(std::ffi::OsString::from_vec(vec![b's', b'r', b'c', 0x80]));
         let target_root = fixture
             .path()
-            .join(std::ffi::OsString::from_vec(vec![b"t", b"g", b"t", 0x81]));
+            .join(std::ffi::OsString::from_vec(vec![b't', b'g', b't', 0x81]));
         let collision_root = fixture.path().join("tgt-�");
         let source_dir = source_root.join(".projectatlas");
         let target_dir = target_root.join(".projectatlas");

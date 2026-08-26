@@ -1215,7 +1215,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let temp = tempfile::tempdir()?;
-        let native_name = std::ffi::OsString::from_vec(vec![b"r", b"o", b"o", b"t", 0x80]);
+        let native_name = std::ffi::OsString::from_vec(vec![b'r', b'o', b'o', b't', 0x80]);
         let root = temp.path().join(&native_name);
         let display_collision = temp.path().join("root-�");
         let destination_collision = temp.path().join("dest-�");
