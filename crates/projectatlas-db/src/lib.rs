@@ -1760,6 +1760,12 @@ impl AtlasStore {
                     expected_identity,
                     identity_requirement.is_required(),
                 )?
+            } else if identity_requirement == ProjectIdentityRequirement::TransitionOwned {
+                // Move/Detach revalidate the recorded native identity and
+                // transition state in apply_root_transition. Their recorded
+                // root may intentionally be absent, so do not run the
+                // existing-root admission proof here.
+                project_identity::load_project_identity(&connection)?
             } else if let Some(stored_identity) =
                 project_identity::load_project_root_identity(&connection)?
             {
@@ -1867,12 +1873,8 @@ impl AtlasStore {
         }
         if let (Some(expected), Some(found)) =
             (expected_identity, validated_project_root_identity.as_ref())
-            && expected != found
         {
-            return Err(DbError::ProjectRootMismatch {
-                expected: expected.display_string_lossy(),
-                found: found.display_string_lossy(),
-            });
+            project_identity::prove_existing_root_equivalence(expected.as_path(), found.as_path())?;
         }
         if validated_project_root_identity.is_none() {
             schema::validate_binding_completeness(

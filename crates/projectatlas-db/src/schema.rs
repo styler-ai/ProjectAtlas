@@ -1452,12 +1452,10 @@ pub(crate) fn preflight_for_project(
         None
     };
     if let Some(found) = found_identity.as_ref() {
-        if found != expected_root {
-            return Err(DbError::ProjectRootMismatch {
-                expected: expected_root.display_string_lossy(),
-                found: found.display_string_lossy(),
-            });
-        }
+        crate::project_identity::prove_existing_root_equivalence(
+            expected_root.as_path(),
+            found.as_path(),
+        )?;
     } else {
         validate_legacy_project_root_binding(&connection, expected_root)?;
     }
@@ -1473,7 +1471,7 @@ pub(crate) fn preflight_for_project(
 fn validate_legacy_project_root_binding(
     connection: &Connection,
     expected_root: &CanonicalProjectRoot,
-) -> DbResult<()> {
+) -> DbResult<CanonicalProjectRoot> {
     let legacy = read_metadata(connection, PROJECT_ROOT_KEY)?.ok_or(DbError::ProjectRootMissing)?;
     if legacy.contains('\u{fffd}') {
         // A replacement character may represent either a real character or a
@@ -1484,14 +1482,10 @@ fn validate_legacy_project_root_binding(
             found: legacy,
         });
     }
-    let found = CanonicalProjectRoot::from_path(Path::new(&legacy))?;
-    if found != *expected_root {
-        return Err(DbError::ProjectRootMismatch {
-            expected: expected_root.display_string_lossy(),
-            found: found.display_string_lossy(),
-        });
-    }
-    Ok(())
+    crate::project_identity::prove_existing_root_equivalence(
+        expected_root.as_path(),
+        Path::new(&legacy),
+    )
 }
 
 /// Inspect compatibility without the full migration-admission integrity scan.
@@ -1514,12 +1508,10 @@ pub(crate) fn verify_current_integrity(path: &Path, expected_root: Option<&str>)
                 let connection = open_read_only_connection(path, &location)?;
                 let found = crate::project_identity::load_project_root_identity(&connection)?
                     .ok_or(DbError::ProjectRootIdentityMissing)?;
-                if found != expected {
-                    return Err(DbError::ProjectRootMismatch {
-                        expected: expected.display_string_lossy(),
-                        found: found.display_string_lossy(),
-                    });
-                }
+                crate::project_identity::prove_existing_root_equivalence(
+                    expected.as_path(),
+                    found.as_path(),
+                )?;
             }
             Ok(())
         }
@@ -1557,12 +1549,10 @@ pub(crate) fn verify_current_integrity_for_project(
     let connection = open_read_only_connection(path, &location)?;
     let found = crate::project_identity::load_project_root_identity(&connection)?
         .ok_or(DbError::ProjectRootIdentityMissing)?;
-    if &found != expected_root {
-        return Err(DbError::ProjectRootMismatch {
-            expected: expected_root.display_string_lossy(),
-            found: found.display_string_lossy(),
-        });
-    }
+    crate::project_identity::prove_existing_root_equivalence(
+        expected_root.as_path(),
+        found.as_path(),
+    )?;
     Ok(())
 }
 
@@ -1615,14 +1605,15 @@ pub(crate) fn initialize_with_project_root(
         } else {
             inspect_connection(connection, expected_root, false)?
         };
-        let predecessor_native_identity_admitted = if let Some(expected_identity) =
-            expected_identity
+        let predecessor_native_identity = if let Some(expected_identity) = expected_identity
             && preflight.state == SchemaState::UpgradeRequired
         {
-            validate_legacy_project_root_binding(connection, expected_identity)?;
-            true
+            Some(validate_legacy_project_root_binding(
+                connection,
+                expected_identity,
+            )?)
         } else {
-            false
+            None
         };
         match preflight.state {
             SchemaState::Fresh => create_fresh(connection, expected_root, expected_identity)?,
@@ -1634,13 +1625,19 @@ pub(crate) fn initialize_with_project_root(
         }
         if let Some(expected) = expected_identity {
             crate::project_identity::ensure_project_identity(connection)?;
-            if predecessor_native_identity_admitted {
+            if let Some(predecessor_identity) = predecessor_native_identity {
                 // The writer-connection legacy binding recheck above proved
                 // the predecessor metadata still names this root. Seed from
                 // the caller's native authority rather than reconstructing a
                 // possibly lossy display.
-                crate::project_identity::set_project_root_identity(connection, expected)?;
-                crate::project_identity::set_project_root_metadata(connection, expected)?;
+                crate::project_identity::set_project_root_identity(
+                    connection,
+                    &predecessor_identity,
+                )?;
+                crate::project_identity::set_project_root_metadata(
+                    connection,
+                    &predecessor_identity,
+                )?;
             } else {
                 crate::project_identity::ensure_project_root_identity_in_transaction(
                     connection, expected,
@@ -1738,12 +1735,10 @@ pub(crate) fn revalidate_current_native_binding(
     let result = (|| {
         let found_root = crate::project_identity::load_project_root_identity(&transaction)?
             .ok_or(DbError::ProjectRootIdentityMissing)?;
-        if &found_root != expected_root {
-            return Err(DbError::ProjectRootMismatch {
-                expected: expected_root.display_string_lossy(),
-                found: found_root.display_string_lossy(),
-            });
-        }
+        crate::project_identity::prove_existing_root_equivalence(
+            expected_root.as_path(),
+            found_root.as_path(),
+        )?;
         let identity = crate::project_identity::load_project_identity(&transaction)?;
         if require_identity && identity.is_none() {
             return Err(DbError::ProjectInstanceIdentityMissing);
@@ -1791,7 +1786,22 @@ pub(crate) fn validate_active_native_binding(
     expected_identity: Option<ProjectInstanceId>,
 ) -> DbResult<()> {
     let found_root = crate::project_identity::load_project_root_identity(connection)?;
-    if found_root.as_ref() != expected_root {
+    if let (Some(expected), Some(found)) = (expected_root, found_root.as_ref()) {
+        if crate::project_identity::prove_existing_root_equivalence(
+            expected.as_path(),
+            found.as_path(),
+        )
+        .is_err()
+        {
+            return Err(DbError::ProjectRootTransitionChanged {
+                expected_root: expected_root.map(CanonicalProjectRoot::display_string_lossy),
+                found_root: found_root.map(|root| root.display_string_lossy()),
+                expected_identity: expected_identity.map(|identity| identity.to_string()),
+                found_identity: crate::project_identity::load_project_identity(connection)?
+                    .map(|identity| identity.to_string()),
+            });
+        }
+    } else if found_root.as_ref() != expected_root {
         return Err(DbError::ProjectRootTransitionChanged {
             expected_root: expected_root.map(CanonicalProjectRoot::display_string_lossy),
             found_root: found_root.map(|root| root.display_string_lossy()),
@@ -1976,12 +1986,10 @@ fn inspect_connection_native(
     {
         let found_root = crate::project_identity::load_project_root_identity(connection)?
             .ok_or(DbError::ProjectRootIdentityMissing)?;
-        if &found_root != expected_root {
-            return Err(DbError::ProjectRootMismatch {
-                expected: expected_root.display_string_lossy(),
-                found: found_root.display_string_lossy(),
-            });
-        }
+        crate::project_identity::prove_existing_root_equivalence(
+            expected_root.as_path(),
+            found_root.as_path(),
+        )?;
     }
     Ok(preflight)
 }
@@ -1991,16 +1999,11 @@ fn inspect_connection_native(
 fn project_roots_match(expected: Option<&str>, found: Option<&str>) -> bool {
     match (expected, found) {
         (None, None) => true,
-        (Some(expected), Some(found)) if expected == found => true,
-        (Some(expected), Some(found)) => {
-            let Ok(expected) = CanonicalProjectRoot::from_path(Path::new(expected)) else {
-                return false;
-            };
-            let Ok(found) = CanonicalProjectRoot::from_path(Path::new(found)) else {
-                return false;
-            };
-            expected == found
-        }
+        (Some(expected), Some(found)) => crate::project_identity::prove_existing_root_equivalence(
+            Path::new(expected),
+            Path::new(found),
+        )
+        .is_ok(),
         _ => false,
     }
 }

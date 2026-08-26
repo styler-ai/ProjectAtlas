@@ -83,20 +83,15 @@ impl AtlasStore {
         match transition {
             ProjectRootTransition::Bind => {
                 if let Some(found) = previous_root_identity.as_ref() {
-                    if found != &destination_identity {
-                        return Err(DbError::ProjectRootMismatch {
-                            expected: destination_identity.display_string_lossy(),
-                            found: found.display_string_lossy(),
-                        });
-                    }
+                    prove_existing_root_equivalence(
+                        destination_identity.as_path(),
+                        found.as_path(),
+                    )?;
                 } else if let Some(found) = previous_root.as_deref() {
-                    let found = CanonicalProjectRoot::from_path(Path::new(found))?;
-                    if found != destination_identity {
-                        return Err(DbError::ProjectRootMismatch {
-                            expected: destination_identity.display_string_lossy(),
-                            found: found.display_string_lossy(),
-                        });
-                    }
+                    prove_existing_root_equivalence(
+                        destination_identity.as_path(),
+                        Path::new(found),
+                    )?;
                 }
                 let store = Self::open_for_project(database_path, destination_identity.as_path())?;
                 let project_instance_id = store
@@ -365,6 +360,27 @@ pub(crate) fn set_project_root_identity(
     Ok(())
 }
 
+/// Re-canonicalize two existing roots and return the fresh selected identity
+/// only when their native paths are exactly equal.
+///
+/// This is intentionally an admission-only proof. It must not be used for a
+/// move's recorded-root absence check: a move has a different contract and
+/// requires the old native path to remain an exact, absent witness.
+pub(crate) fn prove_existing_root_equivalence(
+    selected: &Path,
+    persisted: &Path,
+) -> DbResult<CanonicalProjectRoot> {
+    let selected = CanonicalProjectRoot::from_path(selected)?;
+    let persisted = CanonicalProjectRoot::from_path(persisted)?;
+    if selected.as_path() != persisted.as_path() {
+        return Err(DbError::ProjectRootMismatch {
+            expected: selected.display_string_lossy(),
+            found: persisted.display_string_lossy(),
+        });
+    }
+    Ok(selected)
+}
+
 /// Validate and atomically repair the root metadata and native identity.
 pub(crate) fn ensure_project_root_identity(
     connection: &Connection,
@@ -377,11 +393,11 @@ pub(crate) fn ensure_project_root_identity(
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    let expected_display = expected.display_string().ok();
-    if metadata.as_deref() == expected_display.as_deref()
-        && load_project_root_identity(connection)?.as_ref() == Some(expected)
-    {
-        return Ok(());
+    if let Some(found) = load_project_root_identity(connection)? {
+        let selected = prove_existing_root_equivalence(expected.as_path(), found.as_path())?;
+        if metadata.as_deref() == selected.display_string().ok().as_deref() {
+            return Ok(());
+        }
     }
     connection.execute_batch("BEGIN IMMEDIATE")?;
     let result = ensure_project_root_identity_in_transaction(connection, expected);
@@ -404,28 +420,16 @@ pub(crate) fn ensure_project_root_identity_in_transaction(
         )
         .optional()?;
     let found_identity = load_project_root_identity(connection)?;
-    if let Some(found) = found_identity.as_ref()
-        && found != expected
-    {
-        return Err(DbError::ProjectRootMismatch {
-            expected: expected.display_string_lossy(),
-            found: found.display_string_lossy(),
-        });
-    }
-    if found_identity.is_none() {
+    let selected = if let Some(found) = found_identity.as_ref() {
+        prove_existing_root_equivalence(expected.as_path(), found.as_path())?
+    } else {
         let Some(legacy) = found_metadata.as_deref() else {
             return Err(DbError::ProjectRootMissing);
         };
-        let legacy = CanonicalProjectRoot::from_path(Path::new(legacy))?;
-        if legacy != *expected {
-            return Err(DbError::ProjectRootMismatch {
-                expected: expected.display_string_lossy(),
-                found: legacy.display_string_lossy(),
-            });
-        }
-    }
-    set_project_root_identity(connection, expected)?;
-    set_project_root_metadata(connection, expected)?;
+        prove_existing_root_equivalence(expected.as_path(), Path::new(legacy))?
+    };
+    set_project_root_identity(connection, &selected)?;
+    set_project_root_metadata(connection, &selected)?;
     Ok(())
 }
 
@@ -1334,6 +1338,16 @@ mod tests {
         if initial_root.encode()? == renamed_root.encode()? {
             return Err("case-only root rename did not retain distinct native spelling".into());
         }
+        // A case-sensitive Windows directory intentionally cannot resolve the
+        // old spelling; the dedicated refusal test covers that namespace.
+        let Ok(recanonicalized_root) = CanonicalProjectRoot::from_path(&original_path) else {
+            return Ok(());
+        };
+        require_eq(
+            &recanonicalized_root,
+            &renamed_root,
+            "re-canonicalized case-only root",
+        )?;
 
         let reopened = AtlasStore::open_for_project(&database, &renamed_path)?;
         require_eq(
@@ -1351,6 +1365,115 @@ mod tests {
             &Some(normalize_metadata_path(&renamed_path)),
             "case-only root display metadata",
         )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_sensitive_root_namespace_rejects_distinct_binding_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir()?;
+        let case_sensitive_parent = temp.path().join("case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            // Case-sensitive directory support is filesystem/host-policy
+            // dependent; skip this negative proof when it cannot be enabled.
+            return Ok(());
+        }
+
+        let upper_path = case_sensitive_parent.join("Repo");
+        let lower_path = case_sensitive_parent.join("repo");
+        if fs::create_dir(&upper_path).is_err() || fs::create_dir(&lower_path).is_err() {
+            return Ok(());
+        }
+        let upper_identity = CanonicalProjectRoot::from_path(&upper_path)?;
+        let lower_identity = CanonicalProjectRoot::from_path(&lower_path)?;
+        if upper_identity == lower_identity {
+            return Ok(());
+        }
+
+        let database = temp.path().join("case-sensitive.db");
+        let mut store = AtlasStore::open_for_project(&database, &upper_path)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("case-sensitive root identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, project)?;
+        drop(store);
+
+        // Keep one validated read snapshot open so SQLite's WAL shared-memory
+        // sidecar already exists before the rejected admission is attempted.
+        // The refusal itself must not create or remove any sidecar.
+        let read_guard = AtlasStore::open_read_only_for_project(&database, &upper_path)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("case-sensitive.db{suffix}"))).ok()
+        });
+        let mut inventory_before = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_before.sort();
+
+        let Some(error) = AtlasStore::open_for_project(&database, &lower_path).err() else {
+            return Err(io::Error::other(
+                "case-sensitive sibling root was admitted as the persisted binding",
+            )
+            .into());
+        };
+        if !matches!(error, DbError::ProjectRootMismatch { .. }) {
+            return Err(io::Error::other(format!(
+                "case-sensitive sibling returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        let database_unchanged = fs::read(&database)? == database_before;
+        let sidecars_unchanged = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("case-sensitive.db{suffix}"))).ok()
+        }) == sidecars_before;
+        if !database_unchanged || !sidecars_unchanged {
+            return Err(io::Error::other(format!(
+                "case-sensitive sibling refusal changed database or sidecar bytes (database_unchanged={database_unchanged}, sidecars_unchanged={sidecars_unchanged})"
+            ))
+            .into());
+        }
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        if inventory_after != inventory_before {
+            return Err(io::Error::other(
+                "case-sensitive sibling refusal changed sidecar inventory",
+            )
+            .into());
+        }
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &upper_path)?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project),
+            "case-sensitive root project identity",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(upper_identity),
+            "case-sensitive root native identity",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, true)?;
+        assert_runtime_scope(&reopened, project, 1, 0, 1)?;
+        assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        require(
+            reopened.index_publication()?.is_some(),
+            "case-sensitive sibling refusal changed publication",
+        )?;
+        drop(read_guard);
         Ok(())
     }
 
