@@ -595,6 +595,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::panic_in_result_fn)]
     fn canonical_root_repairs_equivalent_alias_without_changing_project_identity()
     -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::symlink;
@@ -606,7 +607,9 @@ mod tests {
         symlink(&target, &alias)?;
         let database = temp.path().join("projectatlas.db");
         let initial = AtlasStore::open_for_project(&database, &target)?;
-        let project = initial.project_instance_id()?.expect("fresh identity");
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("fresh identity is missing"))?;
         drop(initial);
 
         let connection = Connection::open(&database)?;
@@ -648,6 +651,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::panic_in_result_fn)]
     fn canonical_root_repair_rolls_back_when_identity_write_fails() -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::symlink;
 
@@ -692,6 +696,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::panic_in_result_fn)]
     fn root_bind_accepts_equivalent_native_alias() -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::symlink;
 
@@ -1229,7 +1234,7 @@ mod tests {
         let native_identity = CanonicalProjectRoot::from_path(&root)?;
         require_eq(
             &AtlasStore::open_read_only_for_project(&database, &root)?.project_root_identity()?,
-            &Some(native_identity.clone()),
+            &Some(native_identity),
             "non-UTF-8 bound native identity",
         )?;
         let before_collision = fs::read(&database)?;
@@ -1267,7 +1272,7 @@ mod tests {
         let moved_store = AtlasStore::open_read_only_for_project(&database, &display_collision)?;
         require_eq(
             &moved_store.project_root_identity()?,
-            &Some(destination_identity.clone()),
+            &Some(destination_identity),
             "non-UTF-8 moved native identity",
         )?;
         drop(moved_store);
