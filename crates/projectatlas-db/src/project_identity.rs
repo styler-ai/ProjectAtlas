@@ -1424,6 +1424,105 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn set_project_root_preserves_non_utf8_binding_against_replacement_sibling()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(std::ffi::OsString::from_vec(vec![
+            b'r', b'e', b'p', b'o', 0x80,
+        ]));
+        let replacement_root = temp.path().join("repo-�");
+        fs::create_dir(&raw_root)?;
+        fs::create_dir(&replacement_root)?;
+        let database = temp.path().join("set-project-root-non-utf8.db");
+        let bound =
+            AtlasStore::transition_project_root(&database, &raw_root, ProjectRootTransition::Bind)?;
+        let native_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let mut store = AtlasStore::open_for_project(&database, &raw_root)?;
+        require_eq(
+            &store.project_root_identity()?,
+            &Some(native_identity.clone()),
+            "non-UTF-8 set_project_root native identity",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &None,
+            "non-UTF-8 set_project_root compatibility metadata",
+        )?;
+        seed_authored_and_graph_state(&mut store, bound.project_instance_id)?;
+        let before_database = fs::read(&database)?;
+        let same_store_error = require_error(
+            store.set_project_root(&replacement_root),
+            "set_project_root rebound a non-UTF-8 root to its replacement sibling",
+        )?;
+        require(
+            matches!(same_store_error, DbError::ProjectRootMismatch { .. }),
+            "same-store non-UTF-8 set_project_root returned the wrong error",
+        )?;
+        require_eq(
+            &store.project_root_identity()?,
+            &Some(native_identity.clone()),
+            "same-store native identity after rejected set_project_root",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &None,
+            "same-store metadata after rejected set_project_root",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &Some(bound.project_instance_id),
+            "same-store project identity after rejected set_project_root",
+        )?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        assert_database_unchanged(
+            &database,
+            &before_database,
+            "same-store rejected non-UTF-8 set_project_root",
+        )?;
+        drop(store);
+
+        let mut reopened = AtlasStore::open_for_project(&database, &raw_root)?;
+        let before_reopened_attempt = fs::read(&database)?;
+        let reopened_error = require_error(
+            reopened.set_project_root(&replacement_root),
+            "reopened store rebound a non-UTF-8 root to its replacement sibling",
+        )?;
+        require(
+            matches!(reopened_error, DbError::ProjectRootMismatch { .. }),
+            "reopened non-UTF-8 set_project_root returned the wrong error",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(native_identity.clone()),
+            "reopened native identity after rejected set_project_root",
+        )?;
+        require_eq(
+            &reopened.project_root()?,
+            &None,
+            "reopened metadata after rejected set_project_root",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(bound.project_instance_id),
+            "reopened project identity after rejected set_project_root",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, true)?;
+        assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        assert_database_unchanged(
+            &database,
+            &before_reopened_attempt,
+            "reopened rejected non-UTF-8 set_project_root",
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn stale_stores_cannot_write_after_binding_transitions() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;

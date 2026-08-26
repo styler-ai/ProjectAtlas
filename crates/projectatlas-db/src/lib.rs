@@ -2424,7 +2424,8 @@ impl AtlasStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        if found.is_none() {
+        let found_identity = project_identity::load_project_root_identity(&savepoint)?;
+        if found.is_none() && found_identity.is_none() {
             project_identity::set_project_root_identity(&savepoint, &identity)?;
             project_identity::set_project_root_metadata(&savepoint, &identity)?;
         } else {
