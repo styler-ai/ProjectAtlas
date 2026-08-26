@@ -265,11 +265,18 @@ fn is_canonical_lexical_path(path: &Path) -> bool {
     {
         use std::os::windows::ffi::OsStrExt;
         let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        let separator = u16::from(b'/');
-        let leading_unc = units.starts_with(&[separator, separator]);
+        let is_separator = |unit: &u16| *unit == u16::from(b'/') || *unit == u16::from(b'\\');
+        let leading_unc =
+            units.first().is_some_and(is_separator) && units.get(1).is_some_and(is_separator);
         let body = if leading_unc { &units[2..] } else { &units[..] };
-        (units.len() <= 3 || units.last() != Some(&separator))
-            && !body.windows(2).any(|pair| pair == [separator, separator])
+        let has_normal_component = path
+            .components()
+            .any(|component| matches!(component, std::path::Component::Normal(_)));
+        !body.first().is_some_and(is_separator)
+            && !body
+                .windows(2)
+                .any(|pair| is_separator(&pair[0]) && is_separator(&pair[1]))
+            && (!units.last().is_some_and(is_separator) || !has_normal_component)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -422,6 +429,54 @@ mod tests {
         }
         if CanonicalProjectRoot::decode(&decoded.encode()?)? != decoded {
             return Err("volume-GUID identity codec round-trip changed its native path".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_root_codec_rejects_noncanonical_volume_separators_and_accepts_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let valid_roots = [
+            (PathBuf::from("C:\\"), PathBuf::from("C:/")),
+            (
+                PathBuf::from(r"\\server\share\"),
+                PathBuf::from("//server/share/"),
+            ),
+            (
+                PathBuf::from(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\"),
+                PathBuf::from(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\"),
+            ),
+        ];
+        for (path, expected) in valid_roots {
+            let mut encoded = vec![
+                super::CANONICAL_PROJECT_ROOT_CODEC_VERSION,
+                super::platform_tag(),
+            ];
+            encoded.extend(super::native_path_bytes(path.as_os_str())?);
+            let decoded = CanonicalProjectRoot::decode(&encoded)?;
+            if !decoded.as_path().is_absolute() || decoded.as_path() != expected {
+                return Err(
+                    "Windows root identity was not retained as an absolute native path".into(),
+                );
+            }
+            if CanonicalProjectRoot::decode(&decoded.encode()?)? != decoded {
+                return Err("Windows root identity codec round-trip changed its path".into());
+            }
+        }
+
+        for path in [
+            PathBuf::from(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\\repo"),
+            PathBuf::from(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\repo\"),
+        ] {
+            let mut encoded = vec![
+                super::CANONICAL_PROJECT_ROOT_CODEC_VERSION,
+                super::platform_tag(),
+            ];
+            encoded.extend(super::native_path_bytes(path.as_os_str())?);
+            if CanonicalProjectRoot::decode(&encoded).is_ok() {
+                return Err("noncanonical volume-GUID separator form was accepted".into());
+            }
         }
         Ok(())
     }

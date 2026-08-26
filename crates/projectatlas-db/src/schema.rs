@@ -5485,6 +5485,9 @@ mod tests {
 
         fn create_predecessor(database: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
             fs::create_dir_all(root)?;
+            if let Some(parent) = database.parent() {
+                fs::create_dir_all(parent)?;
+            }
             let store = AtlasStore::open_for_project(database, root)?;
             store.connection.execute_batch(
                 "DROP TABLE project_root_identity;
@@ -5565,6 +5568,84 @@ mod tests {
                 "rejected conventional predecessor changed durable state",
             )
             .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_nineteen_rootless_open_rejects_ambiguous_root_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        fn create_predecessor(database: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
+            fs::create_dir_all(root)?;
+            let store = AtlasStore::open_for_project(database, root)?;
+            store.connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+            Ok(())
+        }
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"rootless-raw-\x80".to_vec()));
+        let raw_database = raw_root.join(".projectatlas/projectatlas.db");
+        create_predecessor(&raw_database, &raw_root)?;
+        let raw_database_parent = raw_database
+            .parent()
+            .ok_or_else(|| io::Error::other("raw predecessor has no parent"))?;
+        let raw_before = fs::read(&raw_database)?;
+        let raw_inventory = directory_entry_names(raw_database_parent)?;
+        if !matches!(
+            AtlasStore::open(&raw_database),
+            Err(DbError::ProjectRootIdentityMissing)
+        ) {
+            return Err(
+                "rootless raw predecessor was not refused before writable admission".into(),
+            );
+        }
+        require_unchanged(
+            raw_database_parent,
+            &raw_database,
+            &raw_before,
+            &raw_inventory,
+        )?;
+
+        let replacement_root = PathBuf::from(raw_root.to_string_lossy().into_owned());
+        let replacement_database = replacement_root.join(".projectatlas/projectatlas.db");
+        let replacement_database_parent = replacement_database
+            .parent()
+            .ok_or_else(|| io::Error::other("replacement predecessor has no parent"))?;
+        fs::create_dir_all(replacement_database_parent)?;
+        fs::copy(&raw_database, &replacement_database)?;
+        let replacement_before = fs::read(&replacement_database)?;
+        let replacement_inventory = directory_entry_names(replacement_database_parent)?;
+        if !matches!(
+            AtlasStore::open(&replacement_database),
+            Err(DbError::ProjectRootIdentityMissing)
+        ) {
+            return Err("rootless replacement predecessor was not refused".into());
+        }
+        require_unchanged(
+            replacement_database_parent,
+            &replacement_database,
+            &replacement_before,
+            &replacement_inventory,
+        )?;
+
+        let utf8_root = temp.path().join("rootless-utf8");
+        let utf8_database = temp.path().join("rootless-utf8.db");
+        create_predecessor(&utf8_database, &utf8_root)?;
+        let expected = CanonicalProjectRoot::from_path(&utf8_root)?;
+        let migrated = AtlasStore::open(&utf8_database)?;
+        if migrated.project_root_identity()? != Some(expected) {
+            return Err(
+                "ordinary UTF-8 rootless predecessor did not retain native identity".into(),
+            );
         }
         Ok(())
     }

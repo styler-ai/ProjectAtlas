@@ -1715,6 +1715,20 @@ impl AtlasStore {
         } else {
             schema::preflight(path, None)?
         };
+        if expected_identity.is_none()
+            && identity_requirement.is_required()
+            && preflight.state == SchemaState::UpgradeRequired
+            && preflight
+                .project_root
+                .as_deref()
+                .is_some_and(|root| root.contains('\u{fffd}'))
+        {
+            // A predecessor's replacement character may be a lossy raw path
+            // byte. Rootless migration has no native caller authority with
+            // which to disambiguate that candidate, so refuse before opening
+            // a writable connection or creating WAL state.
+            return Err(DbError::ProjectRootIdentityMissing);
+        }
         let validated_project_root = expected_identity
             .map(CanonicalProjectRoot::display_string)
             .or_else(|| expected_root.map(str::to_owned))
