@@ -161,10 +161,9 @@ impl FederatedStore {
                 "federation accepts only read-only stores with active snapshots".to_string(),
             ));
         }
-        let binding = selected_project_binding(&store)?;
         let explicit_root = CanonicalProjectRoot::from_path(&root)
             .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-        if binding.project_root_identity != explicit_root {
+        if !store.project_root_identity_matches(&explicit_root) {
             return Err(ServiceError::InvalidInput(
                 "federated store does not match its explicit root".to_string(),
             ));
@@ -1273,6 +1272,85 @@ mod tests {
         require(
             federated_root_digest(&native_root)? != federated_root_digest(&replacement_root)?,
             "federation identity collapsed non-UTF-8 and replacement roots",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn federation_recanonicalizes_case_only_root_and_rejects_case_sensitive_sibling()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original_root = temp.path().join("FederatedCaseRoot");
+        let staging_root = temp.path().join("FederatedCaseRootStaging");
+        let renamed_root = temp.path().join("federatedcaseroot");
+        let original_database = original_root.join("projectatlas.db");
+        publish_fixture(
+            &original_root,
+            &original_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        fs::rename(&original_root, &staging_root)?;
+        fs::rename(&staging_root, &renamed_root)?;
+
+        let secondary_root = temp.path().join("federated-secondary");
+        let secondary_database = secondary_root.join("projectatlas.db");
+        publish_fixture(
+            &secondary_root,
+            &secondary_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        let renamed_database = renamed_root.join("projectatlas.db");
+        let participants = open_participants(&[
+            (renamed_root, renamed_database),
+            (secondary_root, secondary_database),
+        ])?;
+        let draft = load_federated_detailed_relations(
+            participants,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        )?;
+        let (report, _) = draft.fit_output(None, |report| {
+            serde_json::to_string(report).map_err(ServiceError::from)
+        })?;
+        require(
+            report.participants.len() == 2,
+            "federated query rejected a case-only root rename",
+        )?;
+
+        let case_sensitive_parent = temp.path().join("federated-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = std::process::Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let stored_root = case_sensitive_parent.join("Repo");
+        let selected_root = case_sensitive_parent.join("repo");
+        let stored_database = stored_root.join("projectatlas.db");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        publish_fixture(&stored_root, &stored_database, IndexGeneration::new(1), 1)?;
+        let store = AtlasStore::open_read_only(&stored_database)?;
+        let result = FederatedStore::new(
+            store,
+            stored_database,
+            selected_root,
+            FederatedInputWork::default(),
+        );
+        require(
+            matches!(result, Err(ServiceError::InvalidInput(message)) if message == "federated store does not match its explicit root"),
+            "federated admission accepted a case-sensitive sibling",
         )?;
         Ok(())
     }

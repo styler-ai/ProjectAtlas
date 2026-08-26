@@ -16752,6 +16752,12 @@ mod tests {
         drop(predecessor);
         fs::copy(&raw_database, &replacement_database)?;
 
+        // A read-only WAL opener may materialize its sidecars. Warm the exact
+        // recovery path before capturing the no-mutation baseline.
+        for database in [&raw_database, &replacement_database] {
+            let _ = read_legacy_project_root_candidate_read_only(database)?;
+        }
+
         for (root, database) in [
             (&raw_root, &raw_database),
             (&replacement_root, &replacement_database),
