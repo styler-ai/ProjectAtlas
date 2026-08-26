@@ -1347,7 +1347,7 @@ fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result
             &CliError::InvalidInput(source.to_string()),
         )
     })?;
-    if indexed_root != selected_root {
+    if !store.project_root_identity_matches(&selected_root) {
         return Err(CliError::ProjectMismatch(Box::new(
             IndexProjectMismatch::from_native_roots(&selected_root, &indexed_root),
         )));
@@ -9504,6 +9504,133 @@ mod tests {
             &toon_value.pointer("/settings/root_verified"),
             &Some(&Value::Bool(false)),
             "TOON case-sensitive sibling verification",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn freshness_and_symbol_build_revalidate_case_only_root_without_sibling_mutation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original = temp.path().join("CaseOnlyRuntimeRoot");
+        let staging = temp.path().join("CaseOnlyRuntimeRootStaging");
+        let renamed = temp.path().join("caseonlyruntimeroot");
+        fs::create_dir(&original)?;
+        fs::write(original.join("lib.rs"), "pub fn runtime_root() {}\n")?;
+        let database = original.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-only runtime database has no parent"))?,
+        )?;
+        let original_plan = ScanRuntimePlan::for_path(None, &original, None)?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut original_store = open_atlas_store_for_project(&database, &original)?;
+        run_scan_pipeline(&mut original_store, &original_plan, &symbol_options)?;
+        let initial_project = original_store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("case-only runtime project identity is missing"))?;
+        drop(original_store);
+
+        fs::rename(&original, &staging)?;
+        fs::rename(&staging, &renamed)?;
+        let renamed_database = renamed.join(".projectatlas/projectatlas.db");
+        let fresh = open_fresh_atlas_store_for_project(&renamed_database, &renamed, None)?;
+        require_eq(
+            &fresh.project_instance_id()?,
+            &Some(initial_project),
+            "fresh read after case-only root rename",
+        )?;
+        drop(fresh);
+
+        let renamed_plan = ScanRuntimePlan::for_path(None, &renamed, None)?;
+        let mut renamed_store = open_atlas_store_for_project(&renamed_database, &renamed)?;
+        run_symbol_build_pipeline(&mut renamed_store, &renamed_plan, &symbol_options, None)?;
+        require_eq(
+            &renamed_store.project_instance_id()?,
+            &Some(initial_project),
+            "symbol build after case-only root rename",
+        )?;
+        drop(renamed_store);
+
+        let case_sensitive_parent = temp.path().join("runtime-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = StdCommand::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let stored_root = case_sensitive_parent.join("Repo");
+        let selected_root = case_sensitive_parent.join("repo");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        fs::write(stored_root.join("lib.rs"), "pub fn stored_root() {}\n")?;
+        let sibling_database = stored_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            sibling_database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-sensitive runtime database has no parent"))?,
+        )?;
+        let sibling_plan = ScanRuntimePlan::for_path(None, &stored_root, None)?;
+        let mut sibling_store = open_atlas_store_for_project(&sibling_database, &stored_root)?;
+        run_scan_pipeline(&mut sibling_store, &sibling_plan, &symbol_options)?;
+        drop(sibling_store);
+
+        let sidecar_bytes = |path: &Path| -> Result<Vec<Option<Vec<u8>>>, Box<dyn Error>> {
+            [
+                path.to_path_buf(),
+                db_sidecar_path(path, "wal"),
+                db_sidecar_path(path, "shm"),
+                db_sidecar_path(path, "journal"),
+            ]
+            .into_iter()
+            .map(|candidate| match fs::read(candidate) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            })
+            .collect()
+        };
+        let durable_state = |path: &Path| -> Result<
+            (
+                Option<CanonicalProjectRoot>,
+                Option<ProjectInstanceId>,
+                Option<IndexPublication>,
+            ),
+            Box<dyn Error>,
+        > {
+            let store = AtlasStore::open_read_only(path)?;
+            Ok((
+                store.project_root_identity()?,
+                store.project_instance_id()?,
+                store.index_publication()?,
+            ))
+        };
+
+        drop(AtlasStore::open_read_only(&sibling_database)?);
+        let before_sidecars = sidecar_bytes(&sibling_database)?;
+        let before_state = durable_state(&sibling_database)?;
+        let Err(CliError::ProjectMismatch(_)) =
+            open_fresh_atlas_store_for_project(&sibling_database, &selected_root, None)
+        else {
+            return Err(io::Error::other("case-sensitive sibling was admitted").into());
+        };
+        let after_sidecars = sidecar_bytes(&sibling_database)?;
+        let after_state = durable_state(&sibling_database)?;
+        require_eq(
+            &after_sidecars,
+            &before_sidecars,
+            "case-sensitive sibling sidecar state",
+        )?;
+        require_eq(
+            &after_state,
+            &before_state,
+            "case-sensitive sibling durable state",
         )?;
         Ok(())
     }
