@@ -259,14 +259,14 @@ enum CliError {
     #[error("{0}")]
     ProjectMismatch(Box<runtime::IndexProjectMismatch>),
     /// A durable root transition committed before generated configuration failed.
-    #[error(
-        "root transition {transition:?} committed for {root:?}, but generated project configuration is incomplete; rerun `projectatlas root set {root:?}` with the default bind transition to repair it without repeating the transition: {source}"
-    )]
+    #[error("{message}: {source}")]
     RootTransitionFollowup {
-        /// Canonical root already committed to the database.
-        root: String,
+        /// Lossless root display when the host can represent the committed native identity.
+        root: Option<String>,
         /// Durable transition that already completed.
         transition: RootTransition,
+        /// Recovery guidance that never substitutes a lossy root display.
+        message: String,
         /// Follow-up configuration failure.
         #[source]
         source: Box<CliError>,
@@ -3653,10 +3653,26 @@ fn bind_project_root(
         )?;
         Ok(())
     })();
-    configuration_result.map_err(|source| CliError::RootTransitionFollowup {
-        root: normalize_native_path_display(root),
-        transition,
-        source: Box::new(source),
+    configuration_result.map_err(|source| {
+        let root_display = lossless_project_root_display(&root);
+        let message = root_display.as_deref().map_or_else(
+            || {
+                format!(
+                    "root transition {transition:?} committed, but generated project configuration is incomplete: the native project root has no lossless UTF-8 representation; rerun from the actual selected directory or provide an explicit native project selection"
+                )
+            },
+            |root| {
+                format!(
+                    "root transition {transition:?} committed for {root:?}, but generated project configuration is incomplete; rerun `projectatlas root set {root:?}` with the default bind transition to repair it without repeating the transition"
+                )
+            },
+        );
+        CliError::RootTransitionFollowup {
+            root: root_display,
+            transition,
+            message,
+            source: Box::new(source),
+        }
     })?;
     build_root_report_with_transition(&db_path, Some(&config_path), Some(&transition_result))
 }
@@ -6000,6 +6016,53 @@ mod tests {
                 && control_value.get("selected_root") == Some(&Value::Null)
                 && !control_value.to_string().contains("repo-�"),
             "CLI repository-control report exposed a lossy raw-root projection",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_root_transition_config_failure_keeps_native_state_without_lossy_recovery()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let replacement_root = temp.path().join("repo-�");
+        let atlas_dir = raw_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::create_dir(&replacement_root)?;
+        // Make the second generated host config fail after the native bind commits.
+        fs::create_dir(atlas_dir.join("projectatlas.claude.mcp.json"))?;
+        let raw_db = atlas_dir.join("projectatlas.db");
+
+        let error = bind_project_root(&raw_root, RootTransition::Bind, false)
+            .expect_err("generated configuration should fail at the blocked host path");
+        let message = error.to_string();
+        require_condition(
+            !message.contains("repo-�")
+                && !message.contains("projectatlas root set")
+                && message.contains("native project root has no lossless UTF-8 representation"),
+            "raw-root transition failure exposed a fabricated recovery selector",
+        )?;
+        for format in [OutputFormat::Json, OutputFormat::Toon] {
+            let rendered = render_cli_error(format, &error)?;
+            require_condition(
+                !rendered.contains("repo-�") && !rendered.contains("projectatlas root set"),
+                "serialized raw-root transition failure exposed a fabricated recovery selector",
+            )?;
+        }
+
+        let expected_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let store = AtlasStore::open_for_project(&raw_db, &raw_root)?;
+        require_condition(
+            store.project_root_identity()?.as_ref() == Some(&expected_identity)
+                && store.project_root()?.is_none()
+                && store.project_instance_id()?.is_some(),
+            "native transition state was not retained after host-config failure",
+        )?;
+        require_condition(
+            !replacement_root.join(".projectatlas").exists()
+                && !replacement_root.join("projectatlas.toml").exists(),
+            "lossy recovery failure mutated the replacement-character sibling",
         )?;
         Ok(())
     }
