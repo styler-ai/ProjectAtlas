@@ -7325,7 +7325,7 @@ impl ProjectAtlasMcpServer {
     /// Return whether nearest routing can safely associate one DB with a live root.
     fn nearest_indexed_db_matches_root(db_path: &Path, root: &CanonicalProjectRoot) -> bool {
         match read_project_root_identity_read_only(db_path) {
-            Ok(Some(stored_root)) => stored_root == *root,
+            Ok(Some(stored_root)) => Self::nearest_existing_roots_match(&stored_root, root),
             Ok(None) => {
                 let Ok(Some(legacy_root)) = read_legacy_project_root_candidate_read_only(db_path)
                 else {
@@ -7338,10 +7338,24 @@ impl ProjectAtlasMcpServer {
                 else {
                     return false;
                 };
-                legacy_root == *root
+                Self::nearest_existing_roots_match(&legacy_root, root)
             }
             Err(_) => false,
         }
+    }
+
+    /// Re-resolve both existing roots before nearest-routing comparison.
+    fn nearest_existing_roots_match(
+        persisted_root: &CanonicalProjectRoot,
+        selected_root: &CanonicalProjectRoot,
+    ) -> bool {
+        let Ok(persisted_root) = CanonicalProjectRoot::from_path(persisted_root.as_path()) else {
+            return false;
+        };
+        let Ok(selected_root) = CanonicalProjectRoot::from_path(selected_root.as_path()) else {
+            return false;
+        };
+        persisted_root == selected_root
     }
 
     /// Return the standard `ProjectAtlas` DB path for one project root.
@@ -16583,6 +16597,99 @@ mod tests {
                 "nearest predecessor routing changed the canonical root or database path",
             )?;
         }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nearest_routing_recanonicalizes_case_only_root_rename()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let original = temp.path().join("NearestCaseRoot");
+        let staging = temp.path().join("NearestCaseRootStaging");
+        let renamed = temp.path().join("nearestcaseroot");
+        let source = original.join("src").join("lib.rs");
+        fs::create_dir_all(
+            source
+                .parent()
+                .ok_or_else(|| io::Error::other("case-only nearest source has no parent"))?,
+        )?;
+        let database = original.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-only nearest database has no parent"))?,
+        )?;
+        fs::write(&source, "pub fn nearest_case_only() {}\n")?;
+        drop(open_atlas_store_for_project(&database, &original)?);
+
+        fs::rename(&original, &staging)?;
+        fs::rename(&staging, &renamed)?;
+        let renamed_source = renamed.join("src").join("lib.rs");
+        let expected_root = canonical_project_root(&renamed)?;
+        let expected_database = ProjectAtlasMcpServer::projectatlas_db_path(&expected_root);
+        let canonical =
+            ProjectAtlasMcpServer::project_state_from_nearest_indexed_path(&renamed_source)?
+                .ok_or_else(|| {
+                    io::Error::other("canonical nearest case-only root was not found")
+                })?;
+        let lexical = ProjectAtlasMcpServer::project_state_from_nearest_lexical_indexed_path(
+            &renamed_source,
+        )?
+        .ok_or_else(|| io::Error::other("lexical nearest case-only root was not found"))?;
+        for state in [canonical, lexical] {
+            require(
+                state.root == expected_root && state.db_path == expected_database,
+                "nearest routing rejected a case-only root rename",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nearest_routing_rejects_case_sensitive_sibling() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("nearest-case-sensitive-parent");
+        fs::create_dir(&parent)?;
+        let enabled = StdCommand::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+
+        let stored_root = parent.join("Repo");
+        let selected_root = parent.join("repo");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        let stored_database = stored_root.join(".projectatlas").join("projectatlas.db");
+        let selected_database = selected_root.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            stored_database
+                .parent()
+                .ok_or_else(|| io::Error::other("stored nearest database has no parent"))?,
+        )?;
+        fs::create_dir_all(
+            selected_database
+                .parent()
+                .ok_or_else(|| io::Error::other("selected nearest database has no parent"))?,
+        )?;
+        drop(open_atlas_store_for_project(
+            &stored_database,
+            &stored_root,
+        )?);
+        fs::copy(&stored_database, &selected_database)?;
+
+        require(
+            ProjectAtlasMcpServer::indexed_root_from_candidate(&selected_root).is_none()
+                && ProjectAtlasMcpServer::indexed_root_from_lexical_candidate(&selected_root)
+                    .is_none(),
+            "nearest routing accepted a distinct case-sensitive sibling",
+        )?;
         Ok(())
     }
 
