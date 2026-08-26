@@ -6039,9 +6039,19 @@ mod tests {
         let control_value = serde_json::to_value(control_report)?;
         require_condition(
             control_value.get("control_root") == Some(&Value::Null)
-                && control_value.get("selected_root") == Some(&Value::Null)
+                && control_value.get("selected_root").is_none()
+                && control_value.pointer("/worktrees/0/root").is_none()
                 && !control_value.to_string().contains("repo-�"),
             "CLI repository-control report exposed a lossy raw-root projection",
+        )?;
+        let displayable_control =
+            serde_json::to_value(build_repository_control_report(&replacement_root)?)?;
+        let expected_display = Value::String(replacement_display);
+        require_condition(
+            displayable_control.get("control_root") == Some(&expected_display)
+                && displayable_control.get("selected_root") == Some(&expected_display)
+                && displayable_control.pointer("/worktrees/0/root") == Some(&expected_display),
+            "CLI repository-control report lost a displayable root",
         )?;
         Ok(())
     }
