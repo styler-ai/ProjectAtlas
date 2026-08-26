@@ -616,11 +616,11 @@ mod tests {
             [project.as_bytes().as_slice()],
         )?;
         let alias = WorktreeAlias::parse("seeded")?;
-        let source_root = PathBuf::from(
-            store
-                .project_root()?
-                .ok_or_else(|| io::Error::other("source root missing"))?,
-        );
+        let source_root = store
+            .project_root_identity()?
+            .ok_or_else(|| io::Error::other("source root identity missing"))?
+            .as_path()
+            .to_path_buf();
         store.register_worktree(
             &alias,
             &source_root.join(".git"),

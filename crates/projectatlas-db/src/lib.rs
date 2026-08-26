@@ -1721,15 +1721,17 @@ impl AtlasStore {
         if expected_identity.is_none()
             && identity_requirement.is_required()
             && preflight.state == SchemaState::UpgradeRequired
+            && preflight.schema_version == Some(schema::CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION)
             && preflight
                 .project_root
                 .as_deref()
-                .is_some_and(|root| root.contains('\u{fffd}'))
+                .is_none_or(|root| root.contains('\u{fffd}'))
         {
             // A predecessor's replacement character may be a lossy raw path
-            // byte. Rootless migration has no native caller authority with
-            // which to disambiguate that candidate, so refuse before opening
-            // a writable connection or creating WAL state.
+            // byte. A missing candidate is equally unauthoritative: rootless
+            // migration has no native caller authority with which to identify
+            // the binding. Refuse before opening a writable connection or
+            // creating WAL state.
             return Err(DbError::ProjectRootIdentityMissing);
         }
         let validated_project_root = expected_identity
