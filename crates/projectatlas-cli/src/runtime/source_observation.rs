@@ -15,7 +15,6 @@ use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl,
 use projectatlas_db::{AtlasStore, CapturedProjectBinding, IndexPublicationState};
 use std::collections::HashMap;
 use std::fmt;
-#[cfg(test)]
 use std::fs;
 use std::fs::File;
 use std::hash::Hash;
@@ -557,20 +556,11 @@ fn is_database_runtime_path(candidate: &Path, database: &Path) -> bool {
     if same_native_path(candidate, database) {
         return true;
     }
-    let Some(database_name) = database.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    candidate.parent().is_some_and(|parent| {
-        database
-            .parent()
-            .is_some_and(|database_parent| same_native_path(parent, database_parent))
-    }) && candidate
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name.strip_prefix(database_name)
-                .is_some_and(|suffix| matches!(suffix, "-wal" | "-shm" | "-journal"))
-        })
+    ["-wal", "-shm", "-journal"].into_iter().any(|suffix| {
+        let mut sidecar = database.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        same_native_path(candidate, Path::new(&sidecar))
+    })
 }
 
 /// Compare native paths without converting identity through display text.
@@ -579,8 +569,8 @@ fn same_native_path(left: &Path, right: &Path) -> bool {
         return true;
     }
     let canonical = |path: &Path| -> Option<PathBuf> {
-        if let Ok(identity) = CanonicalProjectRoot::from_path(path) {
-            return Some(identity.into_path());
+        if let Ok(path) = fs::canonicalize(path) {
+            return Some(path);
         }
         let parent = path.parent()?;
         let identity = CanonicalProjectRoot::from_path(parent).ok()?;
@@ -2115,6 +2105,54 @@ mod tests {
         require(
             super::same_native_path(&left, &right),
             "equivalent paths below a canonicalizable parent diverged",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn observer_filters_case_variant_database_sidecars_without_rescan() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("MiXeDAtlasRoot");
+        let metadata = root.join(".projectatlas");
+        fs::create_dir_all(&metadata)?;
+        let database = metadata.join("ProjectAtlas.db");
+        fs::write(&database, b"SQLite format 3\0")?;
+        let sidecars = ["-wal", "-shm", "-journal"].map(|suffix| {
+            let mut sidecar = database.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            PathBuf::from(sidecar)
+        });
+        for sidecar in &sidecars {
+            fs::write(sidecar, b"SQLite sidecar")?;
+        }
+        let source = root.join("source.rs");
+        fs::write(&source, "fn source() {}\n")?;
+        let binding = SourceBinding::new(&database, &root, None)?;
+        let scan_options = projectatlas_fs::ScanOptions::default();
+        let differently_cased = |path: &Path| -> Result<PathBuf, Box<dyn Error>> {
+            let path = path
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("test path was not UTF-8"))?;
+            Ok(PathBuf::from(path.to_ascii_uppercase()))
+        };
+
+        for path in std::iter::once(&database).chain(sidecars.iter()) {
+            let event =
+                Event::new(EventKind::Modify(ModifyKind::Any)).add_path(differently_cased(path)?);
+            let changes = super::observer_event_changes(&binding, &scan_options, &event);
+            require(
+                !changes.has_changes(),
+                "case-variant SQLite runtime event triggered a rescan",
+            )?;
+        }
+
+        let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source);
+        let changes = super::observer_event_changes(&binding, &scan_options, &event);
+        require(
+            changes.has_changes(),
+            "non-runtime source event was incorrectly filtered",
         )?;
         Ok(())
     }
