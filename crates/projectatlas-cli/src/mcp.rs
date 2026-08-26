@@ -87,8 +87,8 @@ use projectatlas_db::{
     ActiveWorktreeRegistrationGuard, AtlasStore, DbError, HealthQuery, HealthResolution,
     HealthScope, PreparedWorktreeHydrationCandidate, RepositoryCoverageQuery, WorktreeAlias,
     WorktreeHydrationActivation, WorktreeRegistration, WorktreeRegistrationState,
-    WorktreeUsageSnapshot, WorktreeUsageSyncState, read_project_root_identity_read_only,
-    verify_project_database,
+    WorktreeUsageSnapshot, WorktreeUsageSyncState, read_legacy_project_root_candidate_read_only,
+    read_project_root_identity_read_only, verify_project_database,
 };
 use projectatlas_fs::worktree::{
     GitRepositoryStructure, GitWorktreeEntry, GitWorktreeRole, GitWorktreeState,
@@ -7168,7 +7168,7 @@ impl ProjectAtlasMcpServer {
             return None;
         };
         let db_path = Self::projectatlas_db_path(&root);
-        if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root_identity) {
+        if !db_path.is_file() || !Self::nearest_indexed_db_matches_root(&db_path, &root_identity) {
             return None;
         }
         Some(McpIndexedRoot { root, db_path })
@@ -7192,7 +7192,7 @@ impl ProjectAtlasMcpServer {
             return None;
         }
         let db_path = Self::projectatlas_db_path(&root);
-        if !db_path.is_file() || !Self::indexed_db_matches_root(&db_path, &root_identity) {
+        if !db_path.is_file() || !Self::nearest_indexed_db_matches_root(&db_path, &root_identity) {
             return None;
         }
         Some(McpIndexedRoot { root, db_path })
@@ -7320,6 +7320,28 @@ impl ProjectAtlasMcpServer {
             return false;
         };
         stored_root == *root
+    }
+
+    /// Return whether nearest routing can safely associate one DB with a live root.
+    fn nearest_indexed_db_matches_root(db_path: &Path, root: &CanonicalProjectRoot) -> bool {
+        match read_project_root_identity_read_only(db_path) {
+            Ok(Some(stored_root)) => stored_root == *root,
+            Ok(None) => {
+                let Ok(Some(legacy_root)) = read_legacy_project_root_candidate_read_only(db_path)
+                else {
+                    return false;
+                };
+                if legacy_root.contains('\u{fffd}') {
+                    return false;
+                }
+                let Ok(legacy_root) = CanonicalProjectRoot::from_path(Path::new(&legacy_root))
+                else {
+                    return false;
+                };
+                legacy_root == *root
+            }
+            Err(_) => false,
+        }
     }
 
     /// Return the standard `ProjectAtlas` DB path for one project root.
@@ -16518,6 +16540,126 @@ mod tests {
             "indexed root changed DB path",
         )?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_root_predecessor_candidate_supports_nearest_routing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("predecessor");
+        let source = root.join("src").join("lib.rs");
+        let database = root.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            source
+                .parent()
+                .ok_or_else(|| io::Error::other("predecessor source path has no parent"))?,
+        )?;
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("predecessor database path has no parent"))?,
+        )?;
+        fs::write(&source, "pub fn predecessor() {}\n")?;
+        let store = open_atlas_store_for_project(&database, &root)?;
+        drop(store);
+        let predecessor = rusqlite::Connection::open(&database)?;
+        predecessor.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(predecessor);
+
+        let expected_root = canonical_project_root(&root)?;
+        let expected_database = ProjectAtlasMcpServer::projectatlas_db_path(&expected_root);
+        let canonical = ProjectAtlasMcpServer::project_state_from_nearest_indexed_path(&source)?
+            .ok_or_else(|| io::Error::other("canonical nearest predecessor was not found"))?;
+        let lexical =
+            ProjectAtlasMcpServer::project_state_from_nearest_lexical_indexed_path(&source)?
+                .ok_or_else(|| io::Error::other("lexical nearest predecessor was not found"))?;
+        for state in [canonical, lexical] {
+            require(
+                state.root == expected_root && state.db_path == expected_database,
+                "nearest predecessor routing changed the canonical root or database path",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nearest_root_rejects_ambiguous_predecessor_without_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn sidecar_bytes(database: &Path) -> [Option<Vec<u8>>; 3] {
+            ["wal", "shm", "journal"].map(|suffix| fs::read(db_sidecar_path(database, suffix)).ok())
+        }
+
+        fn directory_inventory(path: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            let mut names = fs::read_dir(path)?
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .collect::<Result<Vec<_>, _>>()?;
+            names.sort();
+            Ok(names)
+        }
+
+        fn snapshot(
+            database: &Path,
+        ) -> Result<(Vec<u8>, [Option<Vec<u8>>; 3], Vec<String>), Box<dyn std::error::Error>>
+        {
+            let parent = database
+                .parent()
+                .ok_or_else(|| io::Error::other("predecessor database has no parent"))?;
+            Ok((
+                fs::read(database)?,
+                sidecar_bytes(database),
+                directory_inventory(parent)?,
+            ))
+        }
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"nearest-raw-\x80".to_vec()));
+        let replacement_root = temp.path().join("nearest-raw-�");
+        let raw_database = raw_root.join(".projectatlas").join("projectatlas.db");
+        let replacement_database = replacement_root
+            .join(".projectatlas")
+            .join("projectatlas.db");
+        fs::create_dir_all(
+            raw_database
+                .parent()
+                .ok_or_else(|| io::Error::other("raw predecessor database has no parent"))?,
+        )?;
+        fs::create_dir_all(
+            replacement_database.parent().ok_or_else(|| {
+                io::Error::other("replacement predecessor database has no parent")
+            })?,
+        )?;
+        let store = open_atlas_store_for_project(&raw_database, &raw_root)?;
+        drop(store);
+        let predecessor = rusqlite::Connection::open(&raw_database)?;
+        predecessor.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(predecessor);
+        fs::copy(&raw_database, &replacement_database)?;
+
+        for (root, database) in [
+            (&raw_root, &raw_database),
+            (&replacement_root, &replacement_database),
+        ] {
+            let before = snapshot(database)?;
+            require(
+                ProjectAtlasMcpServer::indexed_root_from_candidate(root).is_none()
+                    && ProjectAtlasMcpServer::indexed_root_from_lexical_candidate(root).is_none(),
+                "ambiguous predecessor was admitted by nearest routing",
+            )?;
+            require(
+                snapshot(database)? == before,
+                "ambiguous predecessor detection changed database or sidecar state",
+            )?;
+        }
         Ok(())
     }
 }
