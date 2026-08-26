@@ -6034,14 +6034,11 @@ mod tests {
         fs::create_dir(&replacement_root)?;
         let raw_db = atlas_dir.join("projectatlas.db");
 
-        let error = match bind_project_root(&raw_root, RootTransition::Bind, false) {
-            Err(error) => error,
-            Ok(_) => {
-                return Err(io::Error::other(
-                    "generated configuration unexpectedly succeeded for a raw native root",
-                )
-                .into());
-            }
+        let Err(error) = bind_project_root(&raw_root, RootTransition::Bind, false) else {
+            return Err(io::Error::other(
+                "generated configuration unexpectedly succeeded for a raw native root",
+            )
+            .into());
         };
         let message = error.to_string();
         require_condition(
