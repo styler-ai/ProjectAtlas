@@ -5581,6 +5581,9 @@ mod tests {
 
         fn create_predecessor(database: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
             fs::create_dir_all(root)?;
+            if let Some(parent) = database.parent() {
+                fs::create_dir_all(parent)?;
+            }
             let store = AtlasStore::open_for_project(database, root)?;
             store.connection.execute_batch(
                 "DROP TABLE project_root_identity;
