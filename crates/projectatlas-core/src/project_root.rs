@@ -91,9 +91,29 @@ impl CanonicalProjectRoot {
         self.0
     }
 
-    /// Return the bounded terminal/compatibility display projection.
+    /// Return the UTF-8 terminal/compatibility display projection.
+    ///
+    /// A native root containing bytes that are not UTF-8 has no lossless text
+    /// display. Callers carrying identity or compatibility state must retain
+    /// this typed refusal instead of turning the path into replacement text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::NonUtf8Path`] when the native path has no lossless
+    /// UTF-8 display projection.
+    pub fn display_string(&self) -> CoreResult<String> {
+        let value = self.0.to_str().ok_or_else(|| CoreError::NonUtf8Path {
+            path: self.0.clone(),
+        })?;
+        Ok(crate::normalize_native_path_display_str(value))
+    }
+
+    /// Return an explicitly lossy rendering for terminal-only diagnostics.
+    ///
+    /// This method must not be used for identity comparison, persistence,
+    /// compatibility keys, or structured adapter results.
     #[must_use]
-    pub fn display_string(&self) -> String {
+    pub fn display_string_lossy(&self) -> String {
         normalize_native_path_display(&self.0)
     }
 
@@ -155,7 +175,7 @@ fn normalize_native_identity_path(path: PathBuf) -> PathBuf {
 
 impl fmt::Display for CanonicalProjectRoot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.display_string())
+        formatter.write_str(&self.display_string_lossy())
     }
 }
 
@@ -409,6 +429,41 @@ mod tests {
         let root = CanonicalProjectRoot::from_path(&path)?;
         if root != CanonicalProjectRoot::decode(&root.encode()?)? {
             return Err("non-UTF-8 root codec changed the native path".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_root_display_refuses_raw_bytes_without_colliding_with_replacement_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempdir()?;
+        let raw_name = OsString::from_vec(vec![b'r', b'o', b'o', b't', 0x80]);
+        let raw_path = directory.path().join(&raw_name);
+        let replacement_path = directory.path().join("root�");
+        fs::create_dir(&raw_path)?;
+        fs::create_dir(&replacement_path)?;
+
+        let raw = CanonicalProjectRoot::from_path(&raw_path)?;
+        let replacement = CanonicalProjectRoot::from_path(&replacement_path)?;
+        if raw == replacement || raw.encode()? == replacement.encode()? {
+            return Err("raw and replacement-character roots collided".into());
+        }
+        if !matches!(
+            raw.display_string(),
+            Err(crate::CoreError::NonUtf8Path { .. })
+        ) {
+            return Err("raw root did not return typed display unavailability".into());
+        }
+        if raw.display_string_lossy() != replacement.display_string()? {
+            return Err("test roots did not demonstrate their lossy display collision".into());
+        }
+        if CanonicalProjectRoot::decode(&raw.encode()?)? != raw
+            || CanonicalProjectRoot::decode(&replacement.encode()?)? != replacement
+        {
+            return Err("native root codec round-trip changed one root".into());
         }
         Ok(())
     }

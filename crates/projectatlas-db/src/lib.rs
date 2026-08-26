@@ -1004,8 +1004,12 @@ impl PurposeMutationTransaction<'_> {
 pub struct CapturedProjectBinding {
     /// Stable project identity captured at open or explicit root transition.
     pub project_instance_id: ProjectInstanceId,
-    /// Normalized local source root captured with the project identity.
-    pub project_root: String,
+    /// Lossless UTF-8 display of the local source root, when one exists.
+    ///
+    /// `None` is the typed unavailable state for native roots that cannot be
+    /// represented as UTF-8. Identity-critical callers must use the native
+    /// [`AtlasStore::project_root_identity`] value instead.
+    pub project_root: Option<String>,
     /// Lossless native root identity captured with the project identity.
     #[serde(skip)]
     pub project_root_identity: CanonicalProjectRoot,
@@ -1674,10 +1678,9 @@ impl AtlasStore {
     /// transactional migration, or `SQLite` setup fails.
     pub fn open_for_project(path: &Path, root: &Path) -> DbResult<Self> {
         let expected_identity = CanonicalProjectRoot::from_path(root)?;
-        let expected_root = expected_identity.display_string();
         Self::open_with_binding_requirement(
             path,
-            Some(&expected_root),
+            None,
             Some(&expected_identity),
             ProjectIdentityRequirement::Required,
         )
@@ -1730,9 +1733,14 @@ impl AtlasStore {
             return Err(DbError::ProjectRootIdentityMissing);
         }
         let validated_project_root = expected_identity
-            .map(CanonicalProjectRoot::display_string)
+            .and_then(|identity| identity.display_string().ok())
             .or_else(|| expected_root.map(str::to_owned))
-            .or(preflight.project_root.clone());
+            .or_else(|| {
+                expected_identity
+                    .is_none()
+                    .then(|| preflight.project_root.clone())
+                    .flatten()
+            });
         let connection = open_writable_connection(
             path,
             writable_open_flags(preflight.state, location.database_exists),
@@ -1774,9 +1782,10 @@ impl AtlasStore {
             }
         } else {
             if let Some(expected_identity) = expected_identity {
+                let expected_display = expected_identity.display_string().ok();
                 schema::initialize_with_project_root(
                     &connection,
-                    Some(&expected_identity.display_string()),
+                    expected_display.as_deref(),
                     Some(expected_identity),
                 )?;
             } else {
@@ -1785,16 +1794,10 @@ impl AtlasStore {
             }
             project_identity::load_project_identity(&connection)?
         };
-        let validated_project_root_identity = if validated_project_root.is_some() {
-            Some(
-                project_identity::load_project_root_identity(&connection)?
-                    .ok_or(DbError::ProjectRootIdentityMissing)?,
-            )
-        } else {
-            None
-        };
+        let validated_project_root_identity =
+            project_identity::load_project_root_identity(&connection)?;
         if identity_requirement.is_required()
-            && validated_project_root.is_some()
+            && (validated_project_root.is_some() || validated_project_root_identity.is_some())
             && validated_project_instance_id.is_none()
         {
             return Err(DbError::ProjectInstanceIdentityMissing);
@@ -1867,15 +1870,23 @@ impl AtlasStore {
             && expected != found
         {
             return Err(DbError::ProjectRootMismatch {
-                expected: expected.display_string(),
-                found: found.display_string(),
+                expected: expected.display_string_lossy(),
+                found: found.display_string_lossy(),
             });
         }
-        schema::validate_binding_completeness(
-            preflight.project_root.as_deref(),
-            validated_project_instance_id,
-            true,
-        )?;
+        if validated_project_root_identity.is_none() {
+            schema::validate_binding_completeness(
+                preflight.project_root.as_deref(),
+                validated_project_instance_id,
+                true,
+            )?;
+        } else if validated_project_instance_id.is_none() {
+            return Err(DbError::ProjectInstanceIdentityMissing);
+        }
+        let validated_project_root = match validated_project_root_identity.as_ref() {
+            Some(identity) => identity.display_string().ok(),
+            None => preflight.project_root,
+        };
         let database_location = sqlite_profile::inspect_database_location(path)?;
         Ok(Self {
             connection,
@@ -1883,10 +1894,7 @@ impl AtlasStore {
             database_path: Some(path.to_path_buf()),
             database_location: Some(database_location),
             read_only: true,
-            validated_project_root: validated_project_root_identity
-                .as_ref()
-                .map(CanonicalProjectRoot::display_string)
-                .or(preflight.project_root),
+            validated_project_root,
             validated_project_root_identity,
             validated_project_instance_id,
             library_usage_instances: RefCell::new(HashMap::new()),
@@ -2406,7 +2414,7 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn set_project_root(&mut self, root: &Path) -> DbResult<()> {
         let identity = CanonicalProjectRoot::from_path(root)?;
-        let value = identity.display_string();
+        let value = identity.display_string().ok();
         let previous_identity = self.validated_project_instance_id;
         let savepoint = self.validated_savepoint()?;
         let found = savepoint
@@ -2417,15 +2425,15 @@ impl AtlasStore {
             )
             .optional()?;
         if found.is_none() {
-            set_metadata(&savepoint, PROJECT_ROOT_KEY, &value)?;
             project_identity::set_project_root_identity(&savepoint, &identity)?;
+            project_identity::set_project_root_metadata(&savepoint, &identity)?;
         } else {
             project_identity::ensure_project_root_identity_in_transaction(&savepoint, &identity)?;
         }
         let (project_identity, _) = project_identity::ensure_project_identity(&savepoint)?;
         let identity_changed = previous_identity != Some(project_identity);
         savepoint.commit()?;
-        self.validated_project_root = Some(value);
+        self.validated_project_root = value;
         self.validated_project_root_identity = Some(identity);
         self.validated_project_instance_id = Some(project_identity);
         if identity_changed {
@@ -2463,10 +2471,7 @@ impl AtlasStore {
             project_instance_id: self
                 .validated_project_instance_id
                 .ok_or(DbError::ProjectInstanceIdentityMissing)?,
-            project_root: self
-                .validated_project_root
-                .clone()
-                .ok_or(DbError::ProjectRootMissing)?,
+            project_root: self.validated_project_root.clone(),
             project_root_identity: self
                 .validated_project_root_identity
                 .clone()

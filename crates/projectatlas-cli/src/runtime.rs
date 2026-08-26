@@ -1307,8 +1307,8 @@ fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result
         return Err(CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
             status: IndexReadStatus::ProjectMismatch,
             worktree: None,
-            selected_project_root: selected_root.display_string(),
-            indexed_project_root: indexed_root.display_string(),
+            selected_project_root: selected_root.display_string_lossy(),
+            indexed_project_root: indexed_root.display_string_lossy(),
         })));
     }
     Ok(())
