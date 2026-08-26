@@ -340,7 +340,10 @@ def preflight(root: Path, *, install: bool) -> int:
     if rustup_path and not manager_blockers:
         inventory_result = run([rustup_path, "toolchain", "list"], root)
         inventory_output = output_of(inventory_result)
-        if inventory_result is None or inventory_result.returncode != 0:
+        inventory_available = (
+            inventory_result is not None and inventory_result.returncode == 0
+        )
+        if not install and not inventory_available:
             rustup_error = "rustup did not report installed toolchains"
         elif not install and not inventory_contains(expected, inventory_output):
             rustup_error = f"expected Rust toolchain {expected!r} is not installed"
@@ -364,7 +367,12 @@ def preflight(root: Path, *, install: bool) -> int:
             else:
                 inventory_result = run([rustup_path, "toolchain", "list"], root)
                 inventory_output = output_of(inventory_result)
-                if not inventory_contains(expected, inventory_output):
+                if (
+                    inventory_result is None
+                    or inventory_result.returncode != 0
+                ):
+                    rustup_error = "rustup did not report installed toolchains"
+                elif not inventory_contains(expected, inventory_output):
                     rustup_error = (
                         "rustup install did not make the expected toolchain available"
                     )
@@ -637,6 +645,7 @@ def self_test() -> None:
             "installed": True,
             "install_returncode": 0,
             "install_timeout": False,
+            "inventory_returncodes": [],
         }
 
         def fake_which(command: str) -> str | None:
@@ -681,8 +690,13 @@ def self_test() -> None:
                     if manager_state["installed"]
                     else "stable-x86_64-pc-windows-msvc (default)\n"
                 )
+                returncode = (
+                    manager_state["inventory_returncodes"].pop(0)
+                    if manager_state["inventory_returncodes"]
+                    else 0
+                )
                 return subprocess.CompletedProcess(
-                    command, 0, stdout=inventory, stderr=""
+                    command, returncode, stdout=inventory, stderr=""
                 )
             if name == "rustup" and command[1:3] == ["toolchain", "install"]:
                 if manager_state["install_timeout"]:
@@ -839,6 +853,43 @@ def self_test() -> None:
         assert calls[1][3] == expected
         assert calls[2][1:3] == ["toolchain", "list"]
         assert calls[3][1:3] == ["show", "active-toolchain"]
+
+        manager_state["installed"] = False
+        manager_state["inventory_returncodes"] = [1, 0]
+        requested.clear()
+        calls.clear()
+        with patch.dict(
+            os.environ,
+            {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": expected},
+            clear=False,
+        ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+            f"{__name__}.run", side_effect=tracking_run
+        ):
+            assert preflight(root, install=True) == 0
+        assert [call[1:3] for call in calls[:4]] == [
+            ["toolchain", "list"],
+            ["toolchain", "install"],
+            ["toolchain", "list"],
+            ["show", "active-toolchain"],
+        ]
+
+        manager_state["installed"] = False
+        manager_state["inventory_returncodes"] = [0, 1]
+        requested.clear()
+        calls.clear()
+        with patch.dict(
+            os.environ,
+            {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": expected},
+            clear=False,
+        ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+            f"{__name__}.run", side_effect=tracking_run
+        ):
+            assert preflight(root, install=True) == 1
+        assert [call[1:3] for call in calls] == [
+            ["toolchain", "list"],
+            ["toolchain", "install"],
+            ["toolchain", "list"],
+        ]
 
         manager_state["installed"] = False
         manager_state["install_returncode"] = 1

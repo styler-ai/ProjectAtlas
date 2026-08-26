@@ -98,10 +98,10 @@
 
 ## 15. Complete bounded document-graph publication (#480)
 
-- [ ] 15.1 Inspect existing keys, constraints, indexes, `EXPLAIN QUERY PLAN`, prepared statements, savepoints, and generation ownership; design only the smallest database-owner change needed to validate whole-publication invariants and process each work unit at or below `GraphLimits::MAX_ROWS`.
-- [ ] 15.2 Publish every valid unresolved and resolved document row through bounded prepared chunks inside one transaction/generation, advertising current only after complete success and retaining the previous generation after fault or cancellation.
-- [ ] 15.3 Cover below, at, one-above, and multiple-ceiling totals; duplicates and contradictions crossing chunk boundaries; mixed resolved/unresolved rows; symlink targets; staged and immediate callers; incremental refresh; fault between chunks; rollback; cancellation; retry; query plan; CPU, memory, I/O, and write-amplification bounds.
-- [ ] 15.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 15.1 Inspect existing keys, constraints, indexes, `EXPLAIN QUERY PLAN`, prepared statements, savepoints, and generation ownership; design only the smallest database-owner change needed to validate whole-publication invariants and process each work unit at or below `GraphLimits::MAX_ROWS`.
+- [x] 15.2 Publish every valid unresolved and resolved document row through bounded prepared chunks inside one transaction/generation, advertising current only after complete success and retaining the previous generation after fault or cancellation.
+- [x] 15.3 Cover below, at, one-above, and multiple-ceiling totals; duplicates and contradictions crossing chunk boundaries; mixed resolved/unresolved rows; symlink targets; staged and immediate callers; incremental refresh; fault between chunks; rollback; cancellation; retry; query plan; CPU, memory, I/O, and write-amplification bounds.
+- [x] 15.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 16. Rust 1.98.0 deterministic upgrade (#482)
 

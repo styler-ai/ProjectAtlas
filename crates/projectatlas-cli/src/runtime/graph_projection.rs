@@ -45,18 +45,24 @@ use tempfile::{Builder as TempDirBuilder, TempDir};
 
 /// Maximum canonical keys or distinct source paths admitted by one incremental closure.
 const MAX_INCREMENTAL_RESOLUTION_ITEMS: u32 = GraphLimits::MAX_ROWS;
+/// Maximum simultaneous parser/entity/key bytes before rows spill to typed `SQLite` staging.
+const MAX_IN_MEMORY_GRAPH_WORK_BYTES: u64 = 512 * 1_024 * 1_024;
 /// Maximum aggregate normalized graph rows admitted by one incremental closure.
 const MAX_INCREMENTAL_GRAPH_ROWS: u64 = GraphLimits::MAX_ROWS as u64;
 /// Maximum conservative graph bytes admitted before requesting a complete refresh.
-const MAX_INCREMENTAL_GRAPH_BYTES: u64 = super::MAX_PUBLICATION_STAGING_BYTES;
+const MAX_INCREMENTAL_GRAPH_BYTES: u64 = MAX_IN_MEMORY_GRAPH_WORK_BYTES;
 /// Maximum persisted key bindings retained by one complete in-memory graph projection.
 const MAX_GRAPH_KEY_BINDINGS: u64 = 8_000_000;
 /// Conservative fixed bytes counted for each staged graph or binding row.
 const STAGED_GRAPH_ROW_BYTES: u64 = 128;
+/// Conservative bytes for one generated document relation and its retained indexes.
+///
+/// This covers the relation, occurrence, dependency, unresolved-reason map entry,
+/// final reason tuple, and duplicate-validation digest; candidate text is added
+/// separately from the already-counted Markdown fact bytes.
+const DOCUMENT_PROJECTION_ROW_BYTES: u64 = STAGED_GRAPH_ROW_BYTES * 8;
 /// Maximum graph-map rows processed between cooperative cancellation checks.
 const GRAPH_WORK_CHECK_INTERVAL: usize = 256;
-/// Maximum simultaneous parser/entity/key bytes before rows spill to typed `SQLite` staging.
-const MAX_IN_MEMORY_GRAPH_WORK_BYTES: u64 = 512 * 1_024 * 1_024;
 /// Borrowed entity references inserted per disposable staging call.
 const GRAPH_STAGE_ENTITY_BATCH_SIZE: usize = 1_024;
 /// Maximum normalized graph rows retained between disposable staging writes.
@@ -233,7 +239,10 @@ impl StagedRepositoryGraph {
                 Some(control),
             )?;
             if !self.document_unresolved_reasons.is_empty() {
-                publication.set_document_unresolved_reasons(&self.document_unresolved_reasons)?;
+                publication.set_document_unresolved_reasons_controlled(
+                    &self.document_unresolved_reasons,
+                    control,
+                )?;
             }
             control.check(IndexWorkStage::Publication)?;
             return Ok(());
@@ -264,7 +273,10 @@ impl StagedRepositoryGraph {
             }
         }
         if !self.document_unresolved_reasons.is_empty() {
-            publication.set_document_unresolved_reasons(&self.document_unresolved_reasons)?;
+            publication.set_document_unresolved_reasons_controlled(
+                &self.document_unresolved_reasons,
+                control,
+            )?;
         }
         control.check(IndexWorkStage::Publication)?;
         Ok(())
@@ -307,11 +319,13 @@ pub(super) fn stage_full_repository_graph(
     )?;
     let candidates = resolution_registry_from_exports(&entity_projection, control)?;
     enforce_resolution_staging_budget(&entity_projection, &candidates)?;
+    let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
     let graph_work_bytes = symbols
         .retained_bytes
         .saturating_add(entity_projection.retained_bytes)
         .saturating_add(candidates.retained_bytes)
-        .saturating_add(document_fact_map_retained_bytes(&document_facts));
+        .saturating_add(document_fact_map_retained_bytes(&document_facts))
+        .saturating_add(document_projection_bytes);
     if graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
         finish_projection_in_database_with_documents(
             root,
@@ -520,12 +534,16 @@ pub(super) fn stage_incremental_repository_graph(
         resolution_registry_from_exports(&entity_projection, control)?,
         control,
     )?;
-    enforce_resolution_staging_budget(&entity_projection, &candidates)?;
-    enforce_resolution_registry_budget(
+    let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
+    enforce_incremental_projection_budget(
+        root,
+        &affected_paths,
+        0,
         entity_projection
             .retained_bytes
             .saturating_add(candidates.retained_bytes)
-            .saturating_add(document_fact_map_retained_bytes(&document_facts)),
+            .saturating_add(document_fact_map_retained_bytes(&document_facts))
+            .saturating_add(document_projection_bytes),
     )?;
     let staged = finish_projection_with_documents(
         project,
@@ -1273,8 +1291,10 @@ fn finish_projection_in_database_with_documents(
                 &staged_rows.relation_dependencies,
             )?;
             if !staged_rows.document_unresolved_reasons.is_empty() {
-                staging
-                    .set_document_unresolved_reasons(&staged_rows.document_unresolved_reasons)?;
+                staging.set_document_unresolved_reasons_controlled(
+                    &staged_rows.document_unresolved_reasons,
+                    control,
+                )?;
             }
             staged_rows.clear();
         }
@@ -1288,8 +1308,10 @@ fn finish_projection_in_database_with_documents(
                 &staged_rows.relation_dependencies,
             )?;
             if !staged_rows.document_unresolved_reasons.is_empty() {
-                staging
-                    .set_document_unresolved_reasons(&staged_rows.document_unresolved_reasons)?;
+                staging.set_document_unresolved_reasons_controlled(
+                    &staged_rows.document_unresolved_reasons,
+                    control,
+                )?;
             }
         }
         staging.complete()?;
@@ -3566,6 +3588,37 @@ fn document_fact_map_retained_bytes(facts: &BTreeMap<String, Cow<'_, MarkdownFac
     })
 }
 
+/// Count document projection state that can survive the per-candidate filters.
+///
+/// Same-file links without a fragment are discarded before resolution and never
+/// enter the emitted relation, occurrence, dependency, or reason state. Keep
+/// those candidates out of the preflight estimate so incremental admission and
+/// the post-projection aggregate use the same ownership boundary.
+fn document_projection_retained_bytes(
+    facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
+    control: &IndexWorkControl,
+) -> Result<u64, CliError> {
+    let mut retained_bytes = 0_u64;
+    let mut candidate_index = 0_usize;
+    for (document_path, facts) in facts {
+        for candidate in &facts.link_candidates {
+            check_graph_work(control, candidate_index)?;
+            candidate_index = candidate_index.saturating_add(1);
+            if normalize_document_target(document_path, &candidate.selector).is_ok_and(|target| {
+                target.path == document_path.as_str() && target.fragment.is_none()
+            }) {
+                continue;
+            }
+            retained_bytes = retained_bytes
+                .saturating_add(DOCUMENT_PROJECTION_ROW_BYTES)
+                .saturating_add(candidate.selector.len() as u64)
+                .saturating_add(candidate.label.as_ref().map_or(0, String::len) as u64)
+                .saturating_add(candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64);
+        }
+    }
+    Ok(retained_bytes)
+}
+
 /// One normalized repository-local document target and optional heading fragment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DocumentTargetIdentity {
@@ -3997,31 +4050,34 @@ fn resolution_retained_bytes(projection: &ResolutionKeyProjection) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliError, DocumentResolutionIndex, DocumentTargetIdentity, GRAPH_STAGE_DATABASE_FILE_NAME,
-        GRAPH_STAGE_DIRECTORY_PREFIX, GraphOwners, GraphSymbolIndex, MAX_INCREMENTAL_GRAPH_BYTES,
+        CliError, DOCUMENT_PROJECTION_ROW_BYTES, DocumentResolutionIndex, DocumentTargetIdentity,
+        GRAPH_STAGE_DATABASE_FILE_NAME, GRAPH_STAGE_DIRECTORY_PREFIX, GraphOwners,
+        GraphSymbolIndex, MAX_IN_MEMORY_GRAPH_WORK_BYTES, MAX_INCREMENTAL_GRAPH_BYTES,
         MAX_INCREMENTAL_GRAPH_ROWS, PackageIndex, ProjectResolutionRegistry,
         QUALIFIED_SYMBOL_SCOPE_PREFIX, RepositoryGraphMutation, StagedRepositoryGraph,
         build_entity_projection, build_entity_projection_with_config,
         cleanup_abandoned_graph_staging, document_casefold_resolution_key, document_coverage,
-        document_fact_map_retained_bytes, enforce_incremental_projection_budget,
-        enforce_incremental_projection_limits, explicit_external_selector, finish_projection,
-        finish_projection_in_database, insert_relation, is_cargo_manifest_path,
-        normalize_document_target, project_document_rows, qualified_symbol_identity,
-        qualified_symbol_parents, registry_resolution_matches, relation_resolution,
-        remove_owned_graph_stage_payload, repository_path_belongs_to,
+        document_fact_map_retained_bytes, document_projection_retained_bytes,
+        enforce_incremental_projection_budget, enforce_incremental_projection_limits,
+        explicit_external_selector, finish_projection, finish_projection_in_database,
+        finish_projection_in_database_with_documents, finish_projection_with_documents,
+        insert_relation, is_cargo_manifest_path, normalize_document_target, project_document_rows,
+        qualified_symbol_identity, qualified_symbol_parents, registry_resolution_matches,
+        relation_resolution, remove_owned_graph_stage_payload, repository_path_belongs_to,
         resolution_registry_from_exports, rust_toolchain_identity, source_symbol_identity,
-        stage_incremental_repository_graph, try_graph_stage_lease,
+        stage_full_repository_graph, stage_incremental_repository_graph, try_graph_stage_lease,
     };
     use crate::runtime::{
         IndexRefreshReason, IndexRefreshScope, SymbolBuildReport, SymbolBuildStage,
+        SymbolParseSuccess, SymbolProjectionChange,
     };
     use projectatlas_core::graph::{
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageScope, CoverageState,
         DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector, ExtendedRelationKind,
-        GraphEntity, GraphIdentityText, GraphLimitKind, GraphRelationKind, LogicalRelation,
-        MAX_GRAPH_IDENTITY_BYTES, PackageSelector, ProjectInstanceId, RelationDependencyKey,
-        RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain,
-        ReusableTargetSelector, SymbolSelector,
+        GraphEntity, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
+        LogicalRelation, MAX_GRAPH_IDENTITY_BYTES, PackageSelector, ProjectInstanceId,
+        RelationDependencyKey, RelationResolution, RepositoryFilePath, RepositoryNodePath,
+        ResolutionKeyDomain, ReusableTargetSelector, SymbolSelector,
     };
     use projectatlas_core::relation_capabilities::{
         RELATION_FAMILY_CAPABILITIES, RelationFamilyState,
@@ -4041,8 +4097,8 @@ mod tests {
     use projectatlas_symbols::extract_symbol_graph;
     use projectatlas_symbols::{
         ConfiguredModuleResolution, EcmaScriptConfigKind, EcmaScriptModuleConfig,
-        EcmaScriptPathMapping, MAX_DOCUMENT_SELECTOR_BYTES, MAX_MARKDOWN_EVIDENCE_BYTES,
-        MAX_MARKDOWN_LABEL_BYTES, MarkdownFactLimit,
+        EcmaScriptPathMapping, MAX_DOCUMENT_LINK_CANDIDATES, MAX_DOCUMENT_SELECTOR_BYTES,
+        MAX_MARKDOWN_EVIDENCE_BYTES, MAX_MARKDOWN_LABEL_BYTES, MarkdownFactLimit,
     };
     use std::borrow::Cow;
     use std::collections::{BTreeMap, BTreeSet};
@@ -4212,6 +4268,313 @@ mod tests {
             &report.scope,
             &IndexRefreshScope::Full,
             "combined budget scope",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_projection_memory_budget_includes_reason_validation_state()
+    -> Result<(), Box<dyn Error>> {
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let facts: BTreeMap<String, Cow<'static, projectatlas_symbols::MarkdownFacts>> = (0..12)
+            .map(|document| {
+                let source = (0..1_024)
+                    .map(|link| format!("[missing]({document}-{link}.md)"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (
+                    format!("docs/source-{document}.md"),
+                    Cow::Owned(projectatlas_symbols::extract_markdown_facts(&source)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let candidate_count = facts
+            .values()
+            .map(|document| document.link_candidates.len())
+            .sum::<usize>();
+        require_eq(&candidate_count, &12_288, "document candidate fixture size")?;
+        let fact_bytes = document_fact_map_retained_bytes(&facts);
+        let projection_bytes = document_projection_retained_bytes(&facts, &control)?;
+        require(
+            projection_bytes >= u64::try_from(candidate_count)? * DOCUMENT_PROJECTION_ROW_BYTES,
+            "generated document projection state was under-accounted",
+        )?;
+        require(
+            fact_bytes.saturating_add(projection_bytes) < 512 * 1_024 * 1_024,
+            "bounded document projection fixture exceeded the in-memory envelope",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_projection_estimator_deadline_preserves_generation_and_allows_retry()
+    -> Result<(), Box<dyn Error>> {
+        const DOCUMENT_COUNT: usize = 513;
+        const CANDIDATES_PER_DOCUMENT: usize = 1_024;
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("estimator cancellation project identity is missing")?;
+        let publication_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let baseline_graph = function_graph("src/lib.rs", 1);
+        let baseline_packages = PackageIndex::from_graphs(std::slice::from_ref(&baseline_graph))?;
+        let baseline_entities = build_entity_projection(
+            project,
+            IndexGeneration::new(1),
+            &[],
+            std::slice::from_ref(&baseline_graph),
+            &baseline_packages,
+            true,
+            &publication_control,
+        )?;
+        let baseline_candidates =
+            resolution_registry_from_exports(&baseline_entities, &publication_control)?;
+        let baseline_staged = finish_projection(
+            project,
+            IndexGeneration::new(1),
+            RepositoryGraphMutation::Full,
+            std::slice::from_ref(&baseline_graph),
+            baseline_entities,
+            &baseline_candidates,
+            &publication_control,
+        )?;
+        let baseline_node = test_file_node("src/lib.rs", "rust");
+        {
+            let mut publication = store.begin_index_publication("estimator-cancellation")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(std::slice::from_ref(&baseline_node))?;
+            publication.finish_scan_replacement()?;
+            baseline_staged.apply(&mut publication, &publication_control)?;
+            publication.complete()?;
+        }
+        let publication_before = store
+            .index_publication()?
+            .ok_or("estimator cancellation baseline publication is missing")?;
+
+        let document_facts: BTreeMap<String, Cow<'_, projectatlas_symbols::MarkdownFacts>> = (0
+            ..DOCUMENT_COUNT)
+            .map(|document| {
+                let path = format!("content/source-{document:03}.md");
+                let file_name = path
+                    .rsplit_once('/')
+                    .map_or(path.as_str(), |(_parent, file_name)| file_name);
+                let source = (0..CANDIDATES_PER_DOCUMENT)
+                    .map(|index| format!("[self-{index:04}]({file_name})"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (
+                    path,
+                    Cow::Owned(projectatlas_symbols::extract_markdown_facts(&source)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let candidate_count = document_facts
+            .values()
+            .map(|facts| facts.link_candidates.len())
+            .sum::<usize>();
+        require_eq(
+            &candidate_count,
+            &(DOCUMENT_COUNT * CANDIDATES_PER_DOCUMENT),
+            "estimator cancellation candidate count",
+        )?;
+
+        let expired_control =
+            IndexWorkControl::with_deadline(IndexCancellation::new(), Instant::now());
+        let error = document_projection_retained_bytes(&document_facts, &expired_control)
+            .err()
+            .ok_or("expired estimator unexpectedly traversed all candidates")?;
+        require(
+            matches!(
+                error,
+                CliError::IndexWork(IndexWorkFailure::DeadlineExceeded {
+                    stage: IndexWorkStage::SymbolParsing,
+                })
+            ),
+            "estimator deadline did not return its typed graph-work failure",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &Some(publication_before.clone()),
+            "estimator deadline changed the current generation",
+        )?;
+
+        let retry_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let retained_bytes = document_projection_retained_bytes(&document_facts, &retry_control)?;
+        require_eq(
+            &retained_bytes,
+            &0,
+            "same-file candidates entered the retained projection estimate",
+        )?;
+        let retry_graphs = document_facts
+            .iter()
+            .map(|(path, facts)| facts.symbol_graph(path, Some("markdown")))
+            .collect::<Vec<_>>();
+        let retry_nodes = document_facts
+            .keys()
+            .map(|path| test_file_node(path, "markdown"))
+            .collect::<Vec<_>>();
+        let retry_scan_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &retry_control)?;
+        let retry_packages = PackageIndex::from_graphs(&retry_graphs)?;
+        let retry_entities = build_entity_projection(
+            project,
+            IndexGeneration::new(2),
+            &retry_nodes,
+            &retry_graphs,
+            &retry_packages,
+            false,
+            &retry_control,
+        )?;
+        let retry_candidates = resolution_registry_from_exports(&retry_entities, &retry_control)?;
+        let retried_projection = finish_projection_with_documents(
+            project,
+            IndexGeneration::new(2),
+            RepositoryGraphMutation::Full,
+            &retry_graphs,
+            &root,
+            &retry_nodes,
+            &document_facts,
+            retry_entities,
+            &retry_candidates,
+            &retry_scan_policy,
+            &retry_control,
+        )?;
+        require(
+            retried_projection.relations.is_empty()
+                && retried_projection.document_unresolved_reasons.is_empty(),
+            "same-file retry emitted document projection rows",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &Some(publication_before),
+            "estimator retry changed the current generation without publication",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_document_projection_overflow_requests_full_refresh_staging()
+    -> Result<(), Box<dyn Error>> {
+        const DOCUMENT_COUNT: usize = 513;
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("incremental document budget project identity is missing")?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let template = projectatlas_symbols::extract_markdown_facts("[missing](shared.md)");
+        let candidate = template
+            .link_candidates
+            .first()
+            .cloned()
+            .ok_or("document budget candidate fixture is missing")?;
+        let mut template = template;
+        while template.link_candidates.len() < MAX_DOCUMENT_LINK_CANDIDATES {
+            template.link_candidates.push(candidate.clone());
+        }
+
+        let mut nodes = Vec::with_capacity(DOCUMENT_COUNT);
+        let mut graphs = Vec::with_capacity(DOCUMENT_COUNT);
+        let mut changes = Vec::with_capacity(DOCUMENT_COUNT);
+        let mut paths = Vec::with_capacity(DOCUMENT_COUNT);
+        for document in 0..DOCUMENT_COUNT {
+            let path = format!("content/source-{document:03}.md");
+            let graph = template.symbol_graph(&path, Some("markdown"));
+            nodes.push(test_file_node(&path, "markdown"));
+            paths.push(path.clone());
+            graphs.push(graph.clone());
+            changes.push(SymbolProjectionChange::Parsed(SymbolParseSuccess {
+                path,
+                graph,
+                markdown_facts: Some(Box::new(template.clone())),
+                source_parser: ParserKind::Structural,
+                summary: String::new(),
+                summary_is_structural: true,
+                purpose_suggestion: None,
+            }));
+        }
+        store.replace_scan(&nodes)?;
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let entities = build_entity_projection(
+            project,
+            IndexGeneration::new(1),
+            &nodes,
+            &graphs,
+            &packages,
+            false,
+            &control,
+        )?;
+        let candidates = resolution_registry_from_exports(&entities, &control)?;
+        let projected_facts = paths
+            .iter()
+            .map(|path| (path.clone(), Cow::Borrowed(&template)))
+            .collect::<BTreeMap<_, _>>();
+        let pre_document_bytes = entities
+            .retained_bytes
+            .saturating_add(candidates.retained_bytes)
+            .saturating_add(document_fact_map_retained_bytes(&projected_facts));
+        let document_projection_bytes =
+            document_projection_retained_bytes(&projected_facts, &control)?;
+        require(
+            pre_document_bytes < MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+            "pre-document incremental state already exceeded the staging budget",
+        )?;
+        require(
+            pre_document_bytes.saturating_add(document_projection_bytes)
+                > MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+            "document projection did not cross the aggregate staging budget",
+        )?;
+
+        let mut symbols = empty_symbol_build_stage();
+        symbols.changes = changes;
+        let direct_paths = paths.clone();
+        let error = stage_incremental_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::new(0),
+            &nodes,
+            &direct_paths,
+            &scan_policy,
+            &symbols,
+            &control,
+        )
+        .err()
+        .ok_or("document projection overflow was admitted incrementally")?;
+        let CliError::RefreshRequired(report) = error else {
+            return Err(io::Error::other(format!(
+                "expected typed full-refresh guidance, found {error:?}"
+            ))
+            .into());
+        };
+        require_eq(
+            &report.reason,
+            &IndexRefreshReason::DependencyClosureLimit,
+            "document projection overflow reason",
+        )?;
+        require_eq(
+            &report.scope,
+            &IndexRefreshScope::Full,
+            "document projection overflow scope",
+        )?;
+
+        let staged = stage_full_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::new(0),
+            &nodes,
+            &scan_policy,
+            &symbols,
+            &control,
+        )?;
+        require(
+            staged.database.is_some(),
+            "full-refresh guidance did not select disposable SQLite staging",
         )?;
         Ok(())
     }
@@ -6596,6 +6959,412 @@ mod tests {
             mtime_ns: Some(1),
             content_hash: Some(format!("hash:{path}")),
         }
+    }
+
+    #[test]
+    fn large_document_projection_publishes_in_memory_staging_and_incremental()
+    -> Result<(), Box<dyn Error>> {
+        const DOCUMENT_COUNT: usize = 10;
+        const LINKS_PER_DOCUMENT: usize = 1_024;
+        const INCREMENTAL_LINKS: usize = 1_024;
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        fs::create_dir_all(root.join("content/real-target"))?;
+        fs::write(root.join("content/resolved.md"), "# Resolved\n")?;
+        let symlink_available = match create_directory_link(
+            &root.join("content/real-target"),
+            &root.join("content/alias"),
+        ) {
+            Ok(()) => true,
+            Err(source) if cfg!(windows) && source.raw_os_error() == Some(1314) => {
+                fs::create_dir(root.join("content/alias"))?;
+                false
+            }
+            Err(source) => return Err(source.into()),
+        };
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("large document fixture project identity is missing")?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let mut nodes = Vec::with_capacity(DOCUMENT_COUNT + 2);
+        let mut docs_node = test_file_node("content", "unknown");
+        docs_node.kind = NodeKind::Folder;
+        docs_node.language = None;
+        docs_node.extension = None;
+        nodes.push(docs_node);
+        let mut graphs = Vec::with_capacity(DOCUMENT_COUNT + 1);
+        let mut document_facts: BTreeMap<
+            String,
+            Cow<'static, projectatlas_symbols::MarkdownFacts>,
+        > = BTreeMap::new();
+        for document in 0..DOCUMENT_COUNT {
+            let path = format!("content/source-{document:02}.md");
+            let mut links = Vec::with_capacity(LINKS_PER_DOCUMENT);
+            if document == 0 {
+                links.push("[resolved](resolved.md)".to_string());
+                links.push("[symlink](alias)".to_string());
+            }
+            while links.len() < LINKS_PER_DOCUMENT {
+                let link = links.len();
+                links.push(format!(
+                    "[missing-{document:02}-{link:04}](missing-{document:02}-{link:04}.md)"
+                ));
+            }
+            let facts = projectatlas_symbols::extract_markdown_facts(&links.join("\n"));
+            require_eq(
+                &facts.link_candidates.len(),
+                &LINKS_PER_DOCUMENT,
+                "large document candidate count",
+            )?;
+            graphs.push(facts.symbol_graph(&path, Some("markdown")));
+            document_facts.insert(path.clone(), Cow::Owned(facts));
+            nodes.push(test_file_node(&path, "markdown"));
+        }
+        let resolved_facts = projectatlas_symbols::extract_markdown_facts("# Resolved\n");
+        graphs.push(resolved_facts.symbol_graph("content/resolved.md", Some("markdown")));
+        nodes.push(test_file_node("content/resolved.md", "markdown"));
+        let candidate_count = document_facts
+            .values()
+            .map(|facts| facts.link_candidates.len())
+            .sum::<usize>();
+        require_eq(
+            &candidate_count,
+            &(DOCUMENT_COUNT * LINKS_PER_DOCUMENT),
+            "large document projection candidate total",
+        )?;
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let packages = PackageIndex::from_graphs(&graphs)?;
+
+        let generation = IndexGeneration::new(1);
+        let entities = build_entity_projection(
+            project, generation, &nodes, &graphs, &packages, true, &control,
+        )?;
+        let candidates = resolution_registry_from_exports(&entities, &control)?;
+        let in_memory = finish_projection_with_documents(
+            project,
+            generation,
+            RepositoryGraphMutation::Full,
+            &graphs,
+            &root,
+            &nodes,
+            &document_facts,
+            entities,
+            &candidates,
+            &scan_policy,
+            &control,
+        )?;
+        require(
+            in_memory.database.is_none(),
+            "normal projection unexpectedly selected disposable staging",
+        )?;
+        require(
+            in_memory.document_unresolved_reasons.len() > GraphLimits::MAX_ROWS as usize,
+            "normal projection did not retain a multi-ceiling reason vector",
+        )?;
+        require_eq(
+            &in_memory.relations.len(),
+            &candidate_count,
+            "normal projection relation count",
+        )?;
+        require(
+            in_memory.relations.iter().any(|relation| {
+                matches!(relation.resolution(), RelationResolution::Resolved { .. })
+            }),
+            "normal projection lost the resolved document result",
+        )?;
+        let symlink_relation = in_memory
+            .relations
+            .iter()
+            .find(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Unresolved { reference }
+                        if reference.as_str() == "alias"
+                )
+            })
+            .ok_or("normal projection lost the symlink document result")?;
+        let symlink_reason = in_memory
+            .document_unresolved_reasons
+            .iter()
+            .find(|(key, _reason)| key == symlink_relation.key())
+            .map(|(_key, reason)| *reason);
+        require_eq(
+            &symlink_reason,
+            &Some(DocumentTargetUnresolvedReason::Unsupported),
+            "symlink document result did not retain its closed reason",
+        )?;
+        require(
+            !symlink_available || root.join("content/alias").exists(),
+            "symlink document fixture disappeared before publication",
+        )?;
+        {
+            let mut publication = store.begin_index_publication("large-document-projection")?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            in_memory.apply(&mut publication, &control)?;
+            publication.complete()?;
+        }
+        let published_page = store.repository_graph_relation_rows(
+            RepositoryGraphRelationQuery::Family {
+                relation: GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+            },
+            GraphLimits::MAX_ROWS,
+            None,
+        )?;
+        require(
+            published_page.truncated && published_page.rows.len() == GraphLimits::MAX_ROWS as usize,
+            "normal projection publication did not expose a bounded multi-page result",
+        )?;
+
+        let incremental_path = "content/source-00.md".to_string();
+        let incremental_source = (0..INCREMENTAL_LINKS)
+            .map(|link| format!("[incremental-{link:04}](incremental-{link:04}.md)"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let incremental_facts = projectatlas_symbols::extract_markdown_facts(&incremental_source);
+        let incremental_graph = incremental_facts.symbol_graph(&incremental_path, Some("markdown"));
+        let incremental_nodes = vec![test_file_node(&incremental_path, "markdown")];
+        let incremental_packages =
+            PackageIndex::from_graphs(std::slice::from_ref(&incremental_graph))?;
+        let incremental_entities = build_entity_projection(
+            project,
+            IndexGeneration::new(2),
+            &incremental_nodes,
+            std::slice::from_ref(&incremental_graph),
+            &incremental_packages,
+            false,
+            &control,
+        )?;
+        let incremental_candidates =
+            resolution_registry_from_exports(&incremental_entities, &control)?;
+        let incremental_staged = finish_projection_with_documents(
+            project,
+            IndexGeneration::new(2),
+            RepositoryGraphMutation::AffectedPaths(vec![incremental_path.clone()]),
+            std::slice::from_ref(&incremental_graph),
+            &root,
+            &nodes,
+            &BTreeMap::from([(incremental_path.clone(), Cow::Owned(incremental_facts))]),
+            incremental_entities,
+            &incremental_candidates,
+            &scan_policy,
+            &control,
+        )?;
+        require(
+            incremental_staged.document_unresolved_reasons.len() <= GraphLimits::MAX_ROWS as usize,
+            "incremental projection exceeded its aggregate row budget",
+        )?;
+        enforce_incremental_projection_limits(
+            &root,
+            &BTreeSet::from([incremental_path]),
+            RepositoryAffectedSourceFootprint {
+                rows: 0,
+                retained_bytes: 0,
+                truncated: false,
+            },
+            &incremental_staged,
+        )?;
+        {
+            let mut publication =
+                store.begin_index_projection_refresh("large-document-projection")?;
+            incremental_staged.apply(&mut publication, &control)?;
+            publication.complete()?;
+        }
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(IndexGeneration::new(2)),
+            "incremental publication generation",
+        )?;
+
+        let staging_generation = IndexGeneration::new(3);
+        let staging_entities = build_entity_projection(
+            project,
+            staging_generation,
+            &nodes,
+            &graphs,
+            &packages,
+            true,
+            &control,
+        )?;
+        let staging_candidates = resolution_registry_from_exports(&staging_entities, &control)?;
+        let staged = finish_projection_in_database_with_documents(
+            &root,
+            &nodes,
+            project,
+            staging_generation,
+            &graphs,
+            &document_facts,
+            staging_entities,
+            &staging_candidates,
+            &scan_policy,
+            &control,
+        )?;
+        let database_stage = staged
+            .database
+            .as_ref()
+            .ok_or("large projection did not select disposable staging")?;
+        let staged_database_bytes = fs::metadata(
+            database_stage
+                .directory()?
+                .path()
+                .join(GRAPH_STAGE_DATABASE_FILE_NAME),
+        )?
+        .len();
+        require(
+            staged_database_bytes > 0,
+            "disposable staging database retained no durable bytes",
+        )?;
+        {
+            let mut publication =
+                store.begin_index_projection_refresh("large-document-projection")?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            staged.apply(&mut publication, &control)?;
+            publication.complete()?;
+        }
+        let staged_page = store.repository_graph_relation_rows(
+            RepositoryGraphRelationQuery::Family {
+                relation: GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+            },
+            GraphLimits::MAX_ROWS,
+            None,
+        )?;
+        require(
+            staged_page.truncated && staged_page.rows.len() == GraphLimits::MAX_ROWS as usize,
+            "disposable staging publication did not expose a bounded multi-page result",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_document_admission_uses_emitted_rows() -> Result<(), Box<dyn Error>> {
+        const DISCARDED_DOCUMENT_COUNT: usize = 513;
+        const EMITTED_DOCUMENT_COUNT: usize = 10;
+        const CANDIDATES_PER_DOCUMENT: usize = 1_024;
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        fs::create_dir_all(root.join("content"))?;
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let paths = (0..DISCARDED_DOCUMENT_COUNT)
+            .map(|index| format!("content/links-{index:03}.md"))
+            .collect::<Vec<_>>();
+        let mut nodes = paths
+            .iter()
+            .map(|path| test_file_node(path, "markdown"))
+            .collect::<Vec<_>>();
+        store.replace_scan(&nodes)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let symbols = empty_symbol_build_stage();
+
+        for path in &paths {
+            let file_name = path
+                .rsplit_once('/')
+                .map(|(_parent, file_name)| file_name)
+                .ok_or("same-file document fixture path has no parent")?;
+            let self_source = (0..CANDIDATES_PER_DOCUMENT)
+                .map(|index| format!("[self-{index:05}]({file_name})"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(root.join(path), &self_source)?;
+            let self_facts = projectatlas_symbols::extract_markdown_facts(&self_source);
+            require_eq(
+                &self_facts.link_candidates.len(),
+                &CANDIDATES_PER_DOCUMENT,
+                "same-file raw candidates per document",
+            )?;
+            store.replace_symbol_graph(&self_facts.symbol_graph(path, Some("markdown")))?;
+        }
+        for (node, path) in nodes.iter_mut().zip(&paths) {
+            let bytes = fs::read(root.join(path))?;
+            node.content_hash = Some(blake3::hash(&bytes).to_hex().to_string());
+        }
+        store.replace_scan(&nodes)?;
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let incremental = stage_incremental_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::new(0),
+            &nodes,
+            &paths,
+            &scan_policy,
+            &symbols,
+            &control,
+        )?;
+        require(
+            matches!(
+                &incremental.mutation,
+                RepositoryGraphMutation::AffectedPaths(affected) if affected == &paths
+            ),
+            "same-file candidates were not retained as an incremental projection",
+        )?;
+        require(
+            incremental.relations.is_empty() && incremental.document_unresolved_reasons.is_empty(),
+            "same-file candidates emitted document rows despite the no-fragment filter",
+        )?;
+        require(
+            store.repository_graph_generation()?.is_none(),
+            "incremental admission test unexpectedly published a generation",
+        )?;
+
+        let emitted_paths = paths
+            .iter()
+            .take(EMITTED_DOCUMENT_COUNT)
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in &emitted_paths {
+            let unsupported_source = (0..CANDIDATES_PER_DOCUMENT)
+                .map(|index| format!("[external-{index:05}](target-{index:05}.md#invalid?)"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(root.join(path), &unsupported_source)?;
+            let unsupported_facts =
+                projectatlas_symbols::extract_markdown_facts(&unsupported_source);
+            require_eq(
+                &unsupported_facts.link_candidates.len(),
+                &CANDIDATES_PER_DOCUMENT,
+                "unsupported raw candidates per document",
+            )?;
+            store.replace_symbol_graph(&unsupported_facts.symbol_graph(path, Some("markdown")))?;
+        }
+        for (node, path) in nodes.iter_mut().zip(&paths) {
+            let bytes = fs::read(root.join(path))?;
+            node.content_hash = Some(blake3::hash(&bytes).to_hex().to_string());
+        }
+        store.replace_scan(&nodes)?;
+        let error = stage_incremental_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::new(0),
+            &nodes,
+            &emitted_paths,
+            &scan_policy,
+            &symbols,
+            &control,
+        )
+        .err()
+        .ok_or("emitted document rows over the ceiling were admitted incrementally")?;
+        let CliError::RefreshRequired(report) = error else {
+            return Err(io::Error::other(format!(
+                "expected typed full-refresh guidance, found {error:?}"
+            ))
+            .into());
+        };
+        require_eq(
+            &report.reason,
+            &IndexRefreshReason::DependencyClosureLimit,
+            "emitted-row overflow reason",
+        )?;
+        require_eq(
+            &report.scope,
+            &IndexRefreshScope::Full,
+            "emitted-row overflow scope",
+        )?;
+        require(
+            store.repository_graph_generation()?.is_none(),
+            "emitted-row overflow changed the current generation",
+        )?;
+        Ok(())
     }
 
     #[test]
