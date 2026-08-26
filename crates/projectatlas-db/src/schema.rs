@@ -5720,6 +5720,7 @@ mod tests {
                FROM nodes WHERE path = 'src/lib.rs'",
             [],
         )?;
+        recreate_disposable_graph_projection(&store.connection, true)?;
         store.connection.execute(
             "UPDATE project_identity SET active_generation = 11 WHERE singleton = 1",
             [],
@@ -5735,7 +5736,22 @@ mod tests {
             "DROP TABLE project_root_identity;
              UPDATE metadata SET value = '18' WHERE key = 'schema_version';",
         )?;
+        if read_schema_contract(&store.connection)?
+            != *worktree_control_predecessor_schema_contract()?
+        {
+            return Err(io::Error::other("schema-18 rootless fixture shape drifted").into());
+        }
         drop(store);
+
+        let (preflight_state, _) = preflight(&raw_database, None)?;
+        if preflight_state.state != SchemaState::UpgradeRequired
+            || preflight_state.schema_version != Some(WORKTREE_CONTROL_SCHEMA_VERSION)
+        {
+            return Err(io::Error::other(
+                "schema-18 rootless fixture was not a read-only upgrade candidate",
+            )
+            .into());
+        }
 
         let snapshot = read_snapshot(&raw_database)?;
         let database_before = fs::read(&raw_database)?;
