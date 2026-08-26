@@ -26,9 +26,9 @@ use crate::parser_linux_authority::{
 use projectatlas_core::IndexCancellation;
 use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_LINUX_MEMORY_PROBE_BYTES, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES,
-    OPTIONAL_PARSER_PACK_WINDOWS_MINIMUM_MEMORY_PROBE_BYTES, OptionalParserPackArtifactManifest,
-    OptionalParserPackManifest, OptionalParserPackManifestError, PackPlatform,
-    ParserPackMemoryProbe, ParserPackPayloadRole,
+    OPTIONAL_PARSER_PACK_WINDOWS_MINIMUM_MEMORY_PROBE_BYTES, OptionalParserCapability,
+    OptionalParserPackArtifactManifest, OptionalParserPackManifest,
+    OptionalParserPackManifestError, PackPlatform, ParserPackMemoryProbe, ParserPackPayloadRole,
 };
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
@@ -1951,11 +1951,7 @@ fn read_verified_linux_payload(
 
 /// Return the accepted target for the current host or refuse before reading source.
 fn host_pack_platform() -> Option<PackPlatform> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some(PackPlatform::LinuxX86_64),
-        ("windows", "x86_64") => Some(PackPlatform::WindowsX86_64),
-        _ => None,
-    }
+    OptionalParserCapability::current().pack_platform()
 }
 
 /// Canonicalize one required artifact directory.

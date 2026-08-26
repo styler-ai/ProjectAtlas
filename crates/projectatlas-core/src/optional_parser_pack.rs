@@ -455,6 +455,56 @@ pub enum PackPlatform {
     WindowsX86_64,
 }
 
+/// Closed runtime capability for the optional parser-pack boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum OptionalParserCapability {
+    /// The current tuple has an accepted pack and containment adapter.
+    Pack {
+        /// Accepted native target for the optional parser pack.
+        platform: PackPlatform,
+    },
+    /// The tuple has no optional pack, while built-in parsing remains available.
+    BuiltInOnly,
+}
+
+impl OptionalParserCapability {
+    /// Resolve one host tuple through the closed optional-parser authority.
+    #[must_use]
+    pub fn for_target(os: &str, architecture: &str) -> Self {
+        match (os, architecture) {
+            ("linux", "x86_64") => Self::Pack {
+                platform: PackPlatform::LinuxX86_64,
+            },
+            ("windows", "x86_64") => Self::Pack {
+                platform: PackPlatform::WindowsX86_64,
+            },
+            _ => Self::BuiltInOnly,
+        }
+    }
+
+    /// Resolve the capability for the process host tuple.
+    #[must_use]
+    pub fn current() -> Self {
+        Self::for_target(std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    /// Return the accepted pack target, or `None` for built-in-only hosts.
+    #[must_use]
+    pub const fn pack_platform(self) -> Option<PackPlatform> {
+        match self {
+            Self::Pack { platform } => Some(platform),
+            Self::BuiltInOnly => None,
+        }
+    }
+
+    /// Return whether built-in parser coverage remains available.
+    #[must_use]
+    pub const fn built_in_parsing_available(self) -> bool {
+        true
+    }
+}
+
 impl PackPlatform {
     /// Complete optional-pack artifact target set in canonical order.
     pub const ALL: &'static [Self] = &[Self::LinuxX86_64, Self::WindowsX86_64];
@@ -2793,6 +2843,28 @@ mod tests {
         } else {
             Err(io::Error::other(message).into())
         }
+    }
+
+    #[test]
+    fn capability_authority_keeps_macos_arm64_builtin_only() -> Result<(), Box<dyn Error>> {
+        let macos_arm64 = OptionalParserCapability::for_target("macos", "aarch64");
+        require(
+            macos_arm64 == OptionalParserCapability::BuiltInOnly
+                && macos_arm64.pack_platform().is_none()
+                && macos_arm64.built_in_parsing_available(),
+            "macOS arm64 optional-parser capability drifted from built-in-only",
+        )?;
+        require(
+            OptionalParserCapability::for_target("linux", "x86_64")
+                == OptionalParserCapability::Pack {
+                    platform: PackPlatform::LinuxX86_64,
+                }
+                && OptionalParserCapability::for_target("windows", "x86_64")
+                    == OptionalParserCapability::Pack {
+                        platform: PackPlatform::WindowsX86_64,
+                    },
+            "supported optional-parser platform capability drifted",
+        )
     }
 
     fn test_manifest() -> Result<OptionalParserPackManifest, Box<dyn Error>> {
