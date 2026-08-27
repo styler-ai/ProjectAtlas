@@ -3412,7 +3412,9 @@ fn assert_settings_reports_supported_predecessor_without_migration(
     label: &str,
     schema: &str,
 ) -> Result<(), Box<dyn Error>> {
+    #[cfg(not(unix))]
     let supported_schema = projectatlas_db::CURRENT_SCHEMA_VERSION;
+    #[cfg(not(unix))]
     let migration_steps = u64::try_from(supported_schema - 8)?;
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -3457,14 +3459,16 @@ fn assert_settings_reports_supported_predecessor_without_migration(
         return Ok(());
     }
 
-    let token = Command::cargo_bin("projectatlas")?
-        .current_dir(&repo)
-        .args(["--format", "json", "--db"])
-        .arg(&db_path)
-        .arg("token")
-        .output()?;
-    let token_error = String::from_utf8_lossy(&token.stderr);
-    let token_error_json: Value = serde_json::from_slice(&token.stderr).map_err(|source| {
+    #[cfg(not(unix))]
+    {
+        let token = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["--format", "json", "--db"])
+            .arg(&db_path)
+            .arg("token")
+            .output()?;
+        let token_error = String::from_utf8_lossy(&token.stderr);
+        let token_error_json: Value = serde_json::from_slice(&token.stderr).map_err(|source| {
         io::Error::other(format!(
             "token predecessor response was not JSON: status={:?} stdout={} stderr={} error={source}",
             token.status.code(),
@@ -3472,123 +3476,126 @@ fn assert_settings_reports_supported_predecessor_without_migration(
             token_error,
         ))
     })?;
-    if token.status.success()
-        || token_error_json
-            .pointer("/error/kind")
-            .and_then(Value::as_str)
-            != Some("schema_migration_required")
-        || token_error_json
-            .pointer("/error/schema_migration_required/found_schema_version")
-            .and_then(Value::as_i64)
-            != Some(8)
-        || token_error_json
-            .pointer("/error/schema_migration_required/supported_schema_version")
-            .and_then(Value::as_i64)
-            != Some(supported_schema)
-        || token_error_json
-            .pointer("/error/schema_migration_required/migration_steps_remaining")
-            .and_then(Value::as_u64)
-            != Some(migration_steps)
-        || !token_error.contains("projectatlas init")
-        || !token_error.contains("atlas_init")
-        || !token_error.contains("same global `--db`/`--config` selection")
-        || !token_error.contains("same MCP server/database binding")
-        || token_error.contains("schema_version_mismatch")
-        || token_error.contains("unsupported schema version")
-    {
-        return Err(io::Error::other(format!(
-            "token misclassified the supported predecessor {label}: {token_error}"
-        ))
-        .into());
-    }
-
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
-    let mut mcp = McpContractSession::spawn(&executable, &repo, &db_path)?;
-    let mcp_result = (|| -> Result<(), Box<dyn Error>> {
-        let token_report = mcp.call_tool("atlas_token_report", &json!({}))?;
-        if !token_report.contains("kind: schema_migration_required")
-            || !token_report.contains("found_schema_version: 8")
-            || !token_report.contains(&format!("supported_schema_version: {supported_schema}"))
-            || !token_report.contains(&format!("migration_steps_remaining: {migration_steps}"))
-            || !token_report.contains("projectatlas init")
-            || !token_report.contains("atlas_init")
-            || !token_report.contains("same global `--db`/`--config` selection")
-            || !token_report.contains("same MCP server/database binding")
-            || token_report.contains("schema_version_mismatch")
-            || token_report.contains("unsupported schema version")
+        if token.status.success()
+            || token_error_json
+                .pointer("/error/kind")
+                .and_then(Value::as_str)
+                != Some("schema_migration_required")
+            || token_error_json
+                .pointer("/error/schema_migration_required/found_schema_version")
+                .and_then(Value::as_i64)
+                != Some(8)
+            || token_error_json
+                .pointer("/error/schema_migration_required/supported_schema_version")
+                .and_then(Value::as_i64)
+                != Some(supported_schema)
+            || token_error_json
+                .pointer("/error/schema_migration_required/migration_steps_remaining")
+                .and_then(Value::as_u64)
+                != Some(migration_steps)
+            || !token_error.contains("projectatlas init")
+            || !token_error.contains("atlas_init")
+            || !token_error.contains("same global `--db`/`--config` selection")
+            || !token_error.contains("same MCP server/database binding")
+            || token_error.contains("schema_version_mismatch")
+            || token_error.contains("unsupported schema version")
         {
             return Err(io::Error::other(format!(
-                "MCP token report misclassified the supported predecessor {label}: {token_report}"
+                "token misclassified the supported predecessor {label}: {token_error}"
             ))
             .into());
         }
-        let mcp_settings = mcp.call_tool("atlas_settings", &json!({}))?;
-        for required in [
-            "compatibility: supported_predecessor".to_string(),
-            "migration_required: true".to_string(),
-            "migration_supported: true".to_string(),
-            format!("migration_steps_remaining: {migration_steps}"),
-        ] {
-            if !mcp_settings.contains(&required) {
+
+        let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+        let mut mcp = McpContractSession::spawn(&executable, &repo, &db_path)?;
+        let mcp_result = (|| -> Result<(), Box<dyn Error>> {
+            let token_report = mcp.call_tool("atlas_token_report", &json!({}))?;
+            if !token_report.contains("kind: schema_migration_required")
+                || !token_report.contains("found_schema_version: 8")
+                || !token_report.contains(&format!("supported_schema_version: {supported_schema}"))
+                || !token_report.contains(&format!("migration_steps_remaining: {migration_steps}"))
+                || !token_report.contains("projectatlas init")
+                || !token_report.contains("atlas_init")
+                || !token_report.contains("same global `--db`/`--config` selection")
+                || !token_report.contains("same MCP server/database binding")
+                || token_report.contains("schema_version_mismatch")
+                || token_report.contains("unsupported schema version")
+            {
                 return Err(io::Error::other(format!(
+                "MCP token report misclassified the supported predecessor {label}: {token_report}"
+            ))
+            .into());
+            }
+            let mcp_settings = mcp.call_tool("atlas_settings", &json!({}))?;
+            for required in [
+                "compatibility: supported_predecessor".to_string(),
+                "migration_required: true".to_string(),
+                "migration_supported: true".to_string(),
+                format!("migration_steps_remaining: {migration_steps}"),
+            ] {
+                if !mcp_settings.contains(&required) {
+                    return Err(io::Error::other(format!(
                     "MCP settings omitted predecessor field {required:?} for {label}: {mcp_settings}"
                 ))
                 .into());
+                }
             }
+            Ok(())
+        })();
+        complete_mcp_test_after_shutdown(mcp_result, || mcp.shutdown())?;
+
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["--format", "json", "settings"])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "settings failed for {label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let settings: Value = serde_json::from_slice(&output.stdout)?;
+        let schema = settings
+            .get("database")
+            .and_then(|value| value.get("schema"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| io::Error::other("predecessor settings omitted schema state"))?;
+        if schema.get("stored_version").and_then(Value::as_i64) != Some(8)
+            || schema.get("compatibility").and_then(Value::as_str) != Some("supported_predecessor")
+            || schema.get("migration_required").and_then(Value::as_bool) != Some(true)
+            || schema.get("migration_supported").and_then(Value::as_bool) != Some(true)
+            || schema
+                .get("migration_steps_remaining")
+                .and_then(Value::as_u64)
+                != Some(migration_steps)
+            || !settings.get("index").is_some_and(Value::is_null)
+            || !settings.get("telemetry").is_some_and(Value::is_null)
+        {
+            return Err(io::Error::other(format!(
+                "settings misstated the supported predecessor {label}"
+            ))
+            .into());
+        }
+        if settings
+            .get("search")
+            .and_then(|value| value.get("lexical"))
+            .and_then(|value| value.get("state"))
+            .and_then(Value::as_str)
+            != Some("unavailable")
+        {
+            return Err(
+                io::Error::other("predecessor settings overstated lexical readiness").into(),
+            );
+        }
+        if fs::read(&db_path)? != bytes_before {
+            return Err(io::Error::other(format!(
+                "settings migrated or mutated the predecessor database {label}"
+            ))
+            .into());
         }
         Ok(())
-    })();
-    complete_mcp_test_after_shutdown(mcp_result, || mcp.shutdown())?;
-
-    let output = Command::cargo_bin("projectatlas")?
-        .current_dir(&repo)
-        .args(["--format", "json", "settings"])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "settings failed for {label}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-        .into());
     }
-    let settings: Value = serde_json::from_slice(&output.stdout)?;
-    let schema = settings
-        .get("database")
-        .and_then(|value| value.get("schema"))
-        .and_then(Value::as_object)
-        .ok_or_else(|| io::Error::other("predecessor settings omitted schema state"))?;
-    if schema.get("stored_version").and_then(Value::as_i64) != Some(8)
-        || schema.get("compatibility").and_then(Value::as_str) != Some("supported_predecessor")
-        || schema.get("migration_required").and_then(Value::as_bool) != Some(true)
-        || schema.get("migration_supported").and_then(Value::as_bool) != Some(true)
-        || schema
-            .get("migration_steps_remaining")
-            .and_then(Value::as_u64)
-            != Some(migration_steps)
-        || !settings.get("index").is_some_and(Value::is_null)
-        || !settings.get("telemetry").is_some_and(Value::is_null)
-    {
-        return Err(io::Error::other(format!(
-            "settings misstated the supported predecessor {label}"
-        ))
-        .into());
-    }
-    if settings
-        .get("search")
-        .and_then(|value| value.get("lexical"))
-        .and_then(|value| value.get("state"))
-        .and_then(Value::as_str)
-        != Some("unavailable")
-    {
-        return Err(io::Error::other("predecessor settings overstated lexical readiness").into());
-    }
-    if fs::read(&db_path)? != bytes_before {
-        return Err(io::Error::other(format!(
-            "settings migrated or mutated the predecessor database {label}"
-        ))
-        .into());
-    }
-    Ok(())
 }
 
 #[test]
@@ -3664,86 +3671,89 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
         return Ok(());
     }
 
-    let cli_error = Command::new(&executable)
-        .current_dir(&repo)
-        .args(["--format", "json", "--db"])
-        .arg(&cli_db)
-        .arg("--config")
-        .arg(&config)
-        .arg("token")
-        .output()?;
-    let cli_error_text = String::from_utf8_lossy(&cli_error.stderr);
-    if cli_error.status.success()
-        || !cli_error_text.contains("schema_migration_required")
-        || !cli_error_text.contains("same global `--db`/`--config` selection")
+    #[cfg(not(unix))]
     {
-        return Err(io::Error::other(format!(
+        let cli_error = Command::new(&executable)
+            .current_dir(&repo)
+            .args(["--format", "json", "--db"])
+            .arg(&cli_db)
+            .arg("--config")
+            .arg(&config)
+            .arg("token")
+            .output()?;
+        let cli_error_text = String::from_utf8_lossy(&cli_error.stderr);
+        if cli_error.status.success()
+            || !cli_error_text.contains("schema_migration_required")
+            || !cli_error_text.contains("same global `--db`/`--config` selection")
+        {
+            return Err(io::Error::other(format!(
             "CLI recovery did not preserve the explicit database selection: status={:?} stdout={} stderr={cli_error_text}",
             cli_error.status.code(),
             String::from_utf8_lossy(&cli_error.stdout),
         ))
         .into());
-    }
-    let cli_init = Command::new(&executable)
-        .current_dir(&repo)
-        .args(["--format", "json", "--db"])
-        .arg(&cli_db)
-        .arg("--config")
-        .arg(&config)
-        .args(["init", "--no-scan"])
-        .output()?;
-    if !cli_init.status.success() {
-        return Err(io::Error::other(format!(
-            "CLI recovery failed for the selected database: {}",
-            String::from_utf8_lossy(&cli_init.stderr)
-        ))
-        .into());
-    }
-    if default_db.exists() {
-        return Err(io::Error::other("CLI recovery created the default database").into());
-    }
-
-    let mut mcp = McpContractSession::spawn(&executable, &repo, &mcp_db)?;
-    let mcp_result = (|| -> Result<(), Box<dyn Error>> {
-        let migration = mcp.call_tool("atlas_token_report", &json!({}))?;
-        if !migration.contains("schema_migration_required")
-            || !migration.contains("same MCP server/database binding")
-        {
+        }
+        let cli_init = Command::new(&executable)
+            .current_dir(&repo)
+            .args(["--format", "json", "--db"])
+            .arg(&cli_db)
+            .arg("--config")
+            .arg(&config)
+            .args(["init", "--no-scan"])
+            .output()?;
+        if !cli_init.status.success() {
             return Err(io::Error::other(format!(
-                "MCP recovery did not preserve the configured database binding: {migration}"
+                "CLI recovery failed for the selected database: {}",
+                String::from_utf8_lossy(&cli_init.stderr)
             ))
             .into());
         }
-        mcp.call_tool("atlas_init", &json!({"no_scan": true}))?;
-        let settings = mcp.call_tool("atlas_settings", &json!({}))?;
-        if !settings.contains("compatibility: current") {
-            return Err(io::Error::other(format!(
-                "MCP recovery did not migrate the configured database: {settings}"
-            ))
-            .into());
+        if default_db.exists() {
+            return Err(io::Error::other("CLI recovery created the default database").into());
+        }
+
+        let mut mcp = McpContractSession::spawn(&executable, &repo, &mcp_db)?;
+        let mcp_result = (|| -> Result<(), Box<dyn Error>> {
+            let migration = mcp.call_tool("atlas_token_report", &json!({}))?;
+            if !migration.contains("schema_migration_required")
+                || !migration.contains("same MCP server/database binding")
+            {
+                return Err(io::Error::other(format!(
+                    "MCP recovery did not preserve the configured database binding: {migration}"
+                ))
+                .into());
+            }
+            mcp.call_tool("atlas_init", &json!({"no_scan": true}))?;
+            let settings = mcp.call_tool("atlas_settings", &json!({}))?;
+            if !settings.contains("compatibility: current") {
+                return Err(io::Error::other(format!(
+                    "MCP recovery did not migrate the configured database: {settings}"
+                ))
+                .into());
+            }
+            Ok(())
+        })();
+        complete_mcp_test_after_shutdown(mcp_result, || mcp.shutdown())?;
+
+        for (adapter, database) in [("CLI", &cli_db), ("MCP", &mcp_db)] {
+            let connection = Connection::open(database)?;
+            let stored_version: String = connection.query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )?;
+            if stored_version != projectatlas_db::CURRENT_SCHEMA_VERSION.to_string() {
+                return Err(io::Error::other(format!(
+                    "{adapter} recovery did not migrate the explicitly selected database"
+                ))
+                .into());
+            }
+        }
+        if default_db.exists() {
+            return Err(io::Error::other("MCP recovery created the default database").into());
         }
         Ok(())
-    })();
-    complete_mcp_test_after_shutdown(mcp_result, || mcp.shutdown())?;
-
-    for (adapter, database) in [("CLI", &cli_db), ("MCP", &mcp_db)] {
-        let connection = Connection::open(database)?;
-        let stored_version: String = connection.query_row(
-            "SELECT value FROM metadata WHERE key = 'schema_version'",
-            [],
-            |row| row.get(0),
-        )?;
-        if stored_version != projectatlas_db::CURRENT_SCHEMA_VERSION.to_string() {
-            return Err(io::Error::other(format!(
-                "{adapter} recovery did not migrate the explicitly selected database"
-            ))
-            .into());
-        }
     }
-    if default_db.exists() {
-        return Err(io::Error::other("MCP recovery created the default database").into());
-    }
-    Ok(())
 }
 
 #[test]
@@ -3821,49 +3831,52 @@ fn assert_cli_migrates_released_schema_layout(
         return Ok(());
     }
 
-    let output = Command::cargo_bin("projectatlas")?
-        .current_dir(&repo)
-        .args(["--format", "json", command])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "{command} failed to migrate {label}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-        .into());
-    }
-    let connection = Connection::open(&db_path)?;
-    let (stored_version, stored_root): (String, String) = connection.query_row(
-        "SELECT
+    #[cfg(not(unix))]
+    {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["--format", "json", command])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "{command} failed to migrate {label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let connection = Connection::open(&db_path)?;
+        let (stored_version, stored_root): (String, String) = connection.query_row(
+            "SELECT
              (SELECT value FROM metadata WHERE key = 'schema_version'),
              (SELECT value FROM metadata WHERE key = 'project_root')",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if stored_version != projectatlas_db::CURRENT_SCHEMA_VERSION.to_string()
-        || stored_root != project_root
-    {
-        return Err(io::Error::other(format!(
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if stored_version != projectatlas_db::CURRENT_SCHEMA_VERSION.to_string()
+            || stored_root != project_root
+        {
+            return Err(io::Error::other(format!(
             "{command} did not preserve and migrate {label}: version={stored_version}, root={stored_root}"
         ))
         .into());
-    }
-    drop(connection);
+        }
+        drop(connection);
 
-    let verify = Command::cargo_bin("projectatlas")?
-        .current_dir(&repo)
-        .args(["--format", "json", "root", "verify"])
-        .output()?;
-    if !verify.status.success() {
-        return Err(io::Error::other(format!(
-            "root verify failed after {command} migrated {label}: {}",
-            String::from_utf8_lossy(&verify.stderr)
-        ))
-        .into());
+        let verify = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["--format", "json", "root", "verify"])
+            .output()?;
+        if !verify.status.success() {
+            return Err(io::Error::other(format!(
+                "root verify failed after {command} migrated {label}: {}",
+                String::from_utf8_lossy(&verify.stderr)
+            ))
+            .into());
+        }
+        let report: Value = serde_json::from_slice(&verify.stdout)?;
+        require_json_bool(&report, &["verified"], true)?;
+        Ok(())
     }
-    let report: Value = serde_json::from_slice(&verify.stdout)?;
-    require_json_bool(&report, &["verified"], true)?;
-    Ok(())
 }
 
 #[test]
