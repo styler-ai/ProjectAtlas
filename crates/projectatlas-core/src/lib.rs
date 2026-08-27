@@ -672,8 +672,6 @@ pub fn lossless_native_path_display(path: &Path) -> CoreResult<String> {
 #[cfg(windows)]
 /// Preserve the extended prefix when a component relies on Win32 verbatim semantics.
 fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
-    use std::path::Component;
-
     let Some(value) = path.to_str() else {
         return true;
     };
@@ -695,31 +693,51 @@ fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
         return true;
     }
 
-    path.components().any(|component| {
-        let Component::Normal(component) = component else {
-            return false;
-        };
-        let Some(component) = component.to_str() else {
-            return true;
-        };
-        if component.ends_with(['.', ' ']) {
-            return true;
-        }
-        let name = component
-            .split_once('.')
-            .map_or(component, |(stem, _)| stem);
-        let upper = name.to_ascii_uppercase();
-        matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || matches!(upper.as_str(), "CONIN$" | "CONOUT$")
-            || matches!(
-                upper.as_str(),
-                "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³"
-            )
-            || (upper.len() == 4
-                && (upper.starts_with("COM") || upper.starts_with("LPT"))
-                && upper.as_bytes()[3].is_ascii_digit()
-                && upper.as_bytes()[3] != b'0')
-    })
+    windows_path_requires_verbatim_semantics(path)
+}
+
+/// Return whether a Windows path contains a component that requires verbatim semantics.
+///
+/// This predicate deliberately operates on native path components rather than display text
+/// normalization. The database crate also uses it to reject historical display projections that
+/// cannot establish native authority after verbatim semantics were stripped.
+#[must_use]
+pub fn windows_path_requires_verbatim_semantics(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+
+        path.components().any(|component| {
+            let Component::Normal(component) = component else {
+                return false;
+            };
+            let Some(component) = component.to_str() else {
+                return true;
+            };
+            if component.ends_with(['.', ' ']) {
+                return true;
+            }
+            let name = component
+                .split_once('.')
+                .map_or(component, |(stem, _)| stem);
+            let upper = name.to_ascii_uppercase();
+            matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || matches!(upper.as_str(), "CONIN$" | "CONOUT$")
+                || matches!(
+                    upper.as_str(),
+                    "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³"
+                )
+                || (upper.len() == 4
+                    && (upper.starts_with("COM") || upper.starts_with("LPT"))
+                    && upper.as_bytes()[3].is_ascii_digit()
+                    && upper.as_bytes()[3] != b'0')
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 #[cfg(not(windows))]
@@ -992,6 +1010,35 @@ mod tests {
         ] {
             let display = super::lossless_native_path_display(Path::new(path))?;
             require_eq(&display, path)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_component_classifier_covers_legacy_spellings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for path in [
+            r"C:\repo.",
+            r"C:\repo ",
+            r"C:\repo\CON",
+            r"C:\repo\CONIN$",
+            r"C:\repo\conout$.log",
+            r"C:\repo\COM1.txt",
+            r"C:\repo\LPT3.cfg",
+            r"C:\repo\COM¹",
+            r"C:\repo\LPT³.log",
+        ] {
+            if !super::windows_path_requires_verbatim_semantics(Path::new(path)) {
+                return Err(format!("verbatim component was not classified: {path}").into());
+            }
+        }
+        for path in [r"C:\repo", r"C:\repo\ordinary.txt", r"\\server\share\repo"] {
+            if super::windows_path_requires_verbatim_semantics(Path::new(path)) {
+                return Err(
+                    format!("ordinary component was classified as verbatim: {path}").into(),
+                );
+            }
         }
         Ok(())
     }

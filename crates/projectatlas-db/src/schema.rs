@@ -1485,7 +1485,10 @@ pub(crate) fn legacy_root_requires_native_authority(legacy: Option<&str>) -> boo
     }
     #[cfg(not(unix))]
     {
-        legacy.is_none_or(|root| root.contains('\u{fffd}'))
+        legacy.is_none_or(|root| {
+            root.contains('\u{fffd}')
+                || projectatlas_core::windows_path_requires_verbatim_semantics(Path::new(root))
+        })
     }
 }
 
@@ -5715,6 +5718,113 @@ mod tests {
                 "copied conventional predecessor changed durable state while refusing",
             )
             .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn schema_nineteen_verbatim_predecessor_refuses_without_native_authority()
+    -> Result<(), Box<dyn Error>> {
+        fn sidecars(database: &Path) -> [Option<Vec<u8>>; 3] {
+            ["-wal", "-shm", "-journal"]
+                .map(|suffix| fs::read(sqlite_sidecar_path(database, suffix)).ok())
+        }
+
+        fn snapshot(
+            database: &Path,
+        ) -> Result<
+            (
+                Vec<u8>,
+                [Option<Vec<u8>>; 3],
+                Vec<String>,
+                CurrentSchemaSnapshot,
+            ),
+            Box<dyn Error>,
+        > {
+            let parent = database
+                .parent()
+                .ok_or_else(|| io::Error::other("verbatim predecessor has no parent"))?;
+            let connection =
+                Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let durable = current_schema_snapshot(&connection)?;
+            drop(connection);
+            Ok((
+                fs::read(database)?,
+                sidecars(database),
+                directory_entry_names(parent)?,
+                durable,
+            ))
+        }
+
+        let temp = tempfile::tempdir()?;
+        let extended_base = PathBuf::from(format!(r"\\?\{}", temp.path().display()));
+        let verbatim_root = extended_base.join("repo.");
+        let ordinary_root = temp.path().join("repo");
+        fs::create_dir_all(&verbatim_root)?;
+        fs::create_dir_all(&ordinary_root)?;
+
+        let database = temp.path().join("verbatim-predecessor.db");
+        let store = AtlasStore::open_for_project(&database, &verbatim_root)?;
+        store.connection.execute_batch(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
+             INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'verbatim predecessor purpose', 'agent', 'approved', 'schema-test'
+               FROM nodes WHERE path = 'src/lib.rs';
+             UPDATE project_identity SET active_generation = 7 WHERE singleton = 1;
+             UPDATE metadata SET value = 'complete' WHERE key = 'index_publication_state';
+             UPDATE metadata SET value = 'verbatim-predecessor' WHERE key = 'index_publication_fingerprint';
+             UPDATE metadata SET value = '7' WHERE key = 'index_publication_generation';",
+        )?;
+        set_metadata(
+            &store.connection,
+            PROJECT_ROOT_KEY,
+            &crate::normalize_metadata_path(&verbatim_root),
+        )?;
+        let stored_root = read_metadata(&store.connection, PROJECT_ROOT_KEY)?
+            .ok_or_else(|| io::Error::other("verbatim predecessor root metadata is missing"))?;
+        if stored_root != crate::normalize_metadata_path(&verbatim_root) {
+            return Err(
+                io::Error::other("verbatim predecessor lost its historical display").into(),
+            );
+        }
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(store);
+
+        let before = snapshot(&database)?;
+        let candidate = crate::read_legacy_project_root_candidate_read_only(&database);
+        if !matches!(candidate, Err(DbError::ProjectRootIdentityMissing)) {
+            return Err(io::Error::other(
+                "verbatim predecessor candidate was exposed without native authority",
+            )
+            .into());
+        }
+        if snapshot(&database)? != before {
+            return Err(
+                io::Error::other("candidate discovery changed the verbatim predecessor").into(),
+            );
+        }
+
+        for (label, root) in [
+            ("verbatim root", &verbatim_root),
+            ("ordinary sibling", &ordinary_root),
+        ] {
+            let result = AtlasStore::open_for_project(&database, root);
+            if !matches!(result, Err(DbError::ProjectRootIdentityMissing)) {
+                return Err(io::Error::other(format!(
+                    "{label} admitted a verbatim-sensitive predecessor"
+                ))
+                .into());
+            }
+            if snapshot(&database)? != before {
+                return Err(io::Error::other(format!(
+                    "{label} refusal changed predecessor bytes, sidecars, inventory, or durable state"
+                ))
+                .into());
+            }
         }
         Ok(())
     }
