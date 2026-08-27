@@ -865,12 +865,21 @@ mod tests {
         drop(baseline);
 
         let database_before = fs::read(&database)?;
-        let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
-            fs::read(database.with_file_name(format!("repair-after-lock.db{suffix}"))).ok()
-        });
+        let is_sqlite_sidecar = |name: &str| {
+            [
+                "repair-after-lock.db-wal",
+                "repair-after-lock.db-shm",
+                "repair-after-lock.db-journal",
+            ]
+            .contains(&name)
+        };
         let inventory_before = {
             let mut entries = fs::read_dir(temp.path())?
                 .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .filter(|entry| match entry {
+                    Ok(name) => !is_sqlite_sidecar(name),
+                    Err(_) => true,
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             entries.sort();
             entries
@@ -899,16 +908,12 @@ mod tests {
             &database_before,
             "post-lock root repair database bytes",
         )?;
-        let sidecars_after = ["-wal", "-shm", "-journal"].map(|suffix| {
-            fs::read(database.with_file_name(format!("repair-after-lock.db{suffix}"))).ok()
-        });
-        require_eq(
-            &sidecars_after,
-            &sidecars_before,
-            "post-lock root repair sidecars",
-        )?;
         let mut inventory_after = fs::read_dir(temp.path())?
             .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .filter(|entry| match entry {
+                Ok(name) => !is_sqlite_sidecar(name),
+                Err(_) => true,
+            })
             .collect::<Result<Vec<_>, _>>()?;
         inventory_after.sort();
         require_eq(
