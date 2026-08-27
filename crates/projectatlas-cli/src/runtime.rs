@@ -12776,6 +12776,16 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         Ok(())
     }
 
+    /// Require a test condition without relying on a crate-level test helper.
+    #[cfg(unix)]
+    fn require_condition(condition: bool, label: &str) -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(label).into())
+        }
+    }
+
     /// Require equal test values without panicking from a fallible test.
     fn require_eq<T>(actual: &T, expected: &T, label: &str) -> Result<(), Box<dyn Error>>
     where
