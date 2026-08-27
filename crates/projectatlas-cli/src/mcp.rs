@@ -16803,8 +16803,15 @@ mod tests {
             .path()
             .join(OsString::from_vec(b"mcp-raw-root-\x80".to_vec()));
         let replacement_root = PathBuf::from(raw_root.to_string_lossy().into_owned());
-        let database = temp.path().join("mcp-custom-predecessor.db");
+        let database = raw_root
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_DB_FILE_NAME);
         fs::create_dir_all(&raw_root)?;
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("predecessor database has no parent"))?,
+        )?;
         let store = AtlasStore::open_for_project(&database, &raw_root)?;
         drop(store);
         let predecessor = rusqlite::Connection::open(&database)?;
@@ -16846,7 +16853,7 @@ mod tests {
             "MCP startup selected the replacement-character candidate",
         )?;
         let result = server.atlas_init(Parameters(AtlasInitParams {
-            project_path: Some(replacement_root.to_string_lossy().into_owned()),
+            project_path: None,
             worktree: None,
             no_scan: Some(true),
             force_rescan: Some(false),
