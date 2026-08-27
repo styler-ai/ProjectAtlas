@@ -645,6 +645,88 @@ pub fn normalize_native_path_display_str(path: &str) -> String {
     }
 }
 
+/// Return a lossless UTF-8 display projection for a native path.
+///
+/// Windows extended prefixes are normalized only when the conversion keeps
+/// the path absolute and does not discard Win32 verbatim semantics. A native
+/// path that cannot be represented as UTF-8 returns [`CoreError::NonUtf8Path`]
+/// instead of a replacement-character path that could select a different
+/// filesystem object.
+///
+/// # Errors
+///
+/// Returns [`CoreError::NonUtf8Path`] when `path` contains native data that is
+/// not losslessly representable as UTF-8.
+pub fn lossless_native_path_display(path: &Path) -> CoreResult<String> {
+    let original = path.to_str().ok_or_else(|| CoreError::NonUtf8Path {
+        path: path.to_path_buf(),
+    })?;
+    let normalized = normalize_native_path_display_str(original);
+    if Path::new(&normalized).is_absolute() && !windows_verbatim_semantics_require_prefix(path) {
+        Ok(normalized)
+    } else {
+        Ok(original.to_owned())
+    }
+}
+
+#[cfg(windows)]
+/// Preserve the extended prefix when a component relies on Win32 verbatim semantics.
+fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
+    use std::path::Component;
+
+    let Some(value) = path.to_str() else {
+        return true;
+    };
+    if !value.starts_with("\\\\?\\") {
+        return false;
+    }
+
+    // A project root is immediately extended with ProjectAtlas children.
+    // Preserve the namespace before the ordinary Win32 limit is reached so
+    // that the child path remains usable without changing its semantics.
+    let normalized = normalize_native_path_display_str(value);
+    let project_atlas_suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
+    if normalized
+        .encode_utf16()
+        .count()
+        .saturating_add(project_atlas_suffix_units)
+        >= 260
+    {
+        return true;
+    }
+
+    path.components().any(|component| {
+        let Component::Normal(component) = component else {
+            return false;
+        };
+        let Some(component) = component.to_str() else {
+            return true;
+        };
+        if component.ends_with(['.', ' ']) {
+            return true;
+        }
+        let name = component
+            .split_once('.')
+            .map_or(component, |(stem, _)| stem);
+        let upper = name.to_ascii_uppercase();
+        matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || matches!(
+                upper.as_str(),
+                "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³"
+            )
+            || (upper.len() == 4
+                && (upper.starts_with("COM") || upper.starts_with("LPT"))
+                && upper.as_bytes()[3].is_ascii_digit()
+                && upper.as_bytes()[3] != b'0')
+    })
+}
+
+#[cfg(not(windows))]
+/// Unix and fallback hosts do not assign Win32 verbatim semantics to paths.
+fn windows_verbatim_semantics_require_prefix(_path: &Path) -> bool {
+    false
+}
+
 /// Normalize and validate a user-supplied path as a repository-relative file key.
 ///
 /// # Errors

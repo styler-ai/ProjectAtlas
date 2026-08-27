@@ -1370,6 +1370,52 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn verbatim_root_reopens_file_backed_store_without_identity_drift() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp
+            .path()
+            .to_str()
+            .ok_or("temporary directory was not UTF-8")?;
+        let long_component = "a".repeat(220);
+        let root = std::path::PathBuf::from(format!(r"\\?\{base}\{long_component}"));
+        fs::create_dir(&root)?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or("verbatim root database has no parent")?,
+        )?;
+
+        let initial = AtlasStore::open_for_project(&database, &root)?;
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("verbatim root project identity is missing"))?;
+        let native_root = initial
+            .project_root_identity()?
+            .ok_or_else(|| io::Error::other("verbatim root native identity is missing"))?;
+        let display = native_root.display_string()?;
+        if !display.starts_with(r"\\?\") {
+            return Err("verbatim root display lost its extended prefix".into());
+        }
+        drop(initial);
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project),
+            "verbatim root project identity",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(native_root),
+            "verbatim root native identity",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn case_sensitive_root_namespace_rejects_distinct_binding_without_mutation()
     -> Result<(), Box<dyn Error>> {
         use std::process::Command;

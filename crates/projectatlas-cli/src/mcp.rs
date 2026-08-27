@@ -15820,6 +15820,56 @@ mod tests {
     #[test]
     fn mcp_settings_reports_native_root_equivalence() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
+        let base = temp
+            .path()
+            .to_str()
+            .ok_or("temporary directory was not UTF-8")?;
+        let long_component = "a".repeat(220);
+        let verbatim_root = PathBuf::from(format!(r"\\?\{base}\{long_component}"));
+        fs::create_dir(&verbatim_root)?;
+        let verbatim_database = verbatim_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            verbatim_database
+                .parent()
+                .ok_or("verbatim MCP database has no parent")?,
+        )?;
+        drop(AtlasStore::open_for_project(
+            &verbatim_database,
+            &verbatim_root,
+        )?);
+        let verbatim_config = temp.path().join("mcp-verbatim-config.toml");
+        let verbatim_text = verbatim_root
+            .to_str()
+            .ok_or("verbatim MCP root was not UTF-8")?;
+        fs::write(
+            &verbatim_config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(verbatim_text)?
+            ),
+        )?;
+        let verbatim_expected =
+            CanonicalProjectRoot::from_path(&verbatim_root)?.display_string()?;
+        let verbatim_server = ProjectAtlasMcpServer::new(
+            verbatim_database.clone(),
+            None,
+            "mcp-verbatim-settings-test".to_string(),
+            false,
+        );
+        let verbatim_state = McpProjectState {
+            root: verbatim_root,
+            db_path: verbatim_database,
+            config_path: Some(verbatim_config),
+            worktree: None,
+        };
+        let verbatim: serde_json::Value = toon_format::decode_default(
+            &verbatim_server.render_settings_with_capabilities(&verbatim_state)?,
+        )?;
+        require(
+            verbatim.pointer("/settings/repo_root") == Some(&serde_json::json!(verbatim_expected)),
+            "MCP settings lost the verbatim native root projection",
+        )?;
+
         let original = temp.path().join("McpCaseRoot");
         let staging = temp.path().join("McpCaseRootStaging");
         let renamed = temp.path().join("mcpcaseroot");

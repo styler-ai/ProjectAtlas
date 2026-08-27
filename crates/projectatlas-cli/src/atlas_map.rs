@@ -2867,18 +2867,12 @@ fn default_config_root_value(root: &Path, config_path: &Path) -> AtlasMapResult<
                 .join("/"))
         }
     } else {
-        let value = root
-            .to_str()
-            .ok_or_else(|| AtlasMapError::InvalidRepositoryPath {
+        projectatlas_core::lossless_native_path_display(&root).map_err(|_error| {
+            AtlasMapError::InvalidRepositoryPath {
                 path: "<native project root>".to_string(),
                 message: "cannot serialize a non-UTF-8 root into an external TOML config"
                     .to_string(),
-            })?;
-        let normalized = projectatlas_core::normalize_native_path_display_str(value);
-        Ok(if Path::new(&normalized).is_absolute() {
-            normalized
-        } else {
-            value.to_owned()
+            }
         })
     }
 }
@@ -3442,6 +3436,36 @@ root = "."
         let escaped = expected.replace('\\', "\\\\");
         if !text.contains(&format!("root = \"{escaped}\"")) {
             return Err(io::Error::other("generated volume-GUID root was not TOML-escaped").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_config_preserves_verbatim_drive_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = Path::new(r"\\?\C:\repo\folder.");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
+        let text = super::default_config_text_for(root, &config_path)?;
+        let expected = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("synthetic verbatim root was not UTF-8"))?;
+        let parsed = toml::from_str::<toml::Value>(&text)?;
+        let decoded = parsed
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|project| project.get("root"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| io::Error::other("generated verbatim root was not a TOML string"))?;
+        if !Path::new(decoded).is_absolute() || decoded != expected {
+            return Err(io::Error::other(format!(
+                "generated verbatim root changed its absolute spelling: {decoded:?}"
+            ))
+            .into());
+        }
+        let escaped = expected.replace('\\', "\\\\");
+        if !text.contains(&format!("root = \"{escaped}\"")) {
+            return Err(io::Error::other("generated verbatim root was not TOML-escaped").into());
         }
         Ok(())
     }

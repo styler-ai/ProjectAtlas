@@ -2397,14 +2397,7 @@ pub(crate) fn lossless_project_root_display(root: &Path) -> Option<String> {
 
 /// Return a lossless UTF-8 display for one native path.
 pub(crate) fn lossless_native_path_display(path: &Path) -> Option<String> {
-    path.to_str().map(|original| {
-        let normalized = normalize_native_path_display_str(original);
-        if Path::new(&normalized).is_absolute() {
-            normalized
-        } else {
-            original.to_owned()
-        }
-    })
+    projectatlas_core::lossless_native_path_display(path).ok()
 }
 
 /// Return one exact source root from structural Git or non-Git evidence.
@@ -9557,6 +9550,65 @@ mod tests {
             &Path::new(&unc).is_absolute(),
             &true,
             "extended UNC display remained absolute",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_report_preserves_verbatim_native_root_projection() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp
+            .path()
+            .to_str()
+            .ok_or("temporary directory was not UTF-8")?;
+        let long_component = "a".repeat(220);
+        let root = PathBuf::from(format!(r"\\?\{base}\{long_component}"));
+        fs::create_dir(&root)?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or("verbatim settings database has no parent")?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+
+        let config = temp.path().join("verbatim-settings-config.toml");
+        fs::write(
+            &config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(
+                    &root
+                        .to_str()
+                        .ok_or("verbatim root was not UTF-8")?
+                        .to_owned()
+                )?
+            ),
+        )?;
+        let expected = CanonicalProjectRoot::from_path(&root)?.display_string()?;
+        if !expected.starts_with(r"\\?\") {
+            return Err("verbatim root lost its extended prefix".into());
+        }
+
+        let report = build_settings_report(&database, Some(&config), OutputFormat::Json)?;
+        require_eq(
+            &report.repo_root,
+            &Some(expected.clone()),
+            "JSON settings verbatim root",
+        )?;
+        let json = serde_json::to_value(&report)?;
+        require_eq(
+            &json.get("repo_root"),
+            &Some(&Value::String(expected.clone())),
+            "JSON settings verbatim root field",
+        )?;
+        let toon = crate::render_settings_report(&report);
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_eq(
+            &toon_value.pointer("/settings/repo_root"),
+            &Some(&Value::String(expected)),
+            "TOON settings verbatim root field",
         )?;
         Ok(())
     }

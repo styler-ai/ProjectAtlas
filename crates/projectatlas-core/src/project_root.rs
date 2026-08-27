@@ -102,17 +102,7 @@ impl CanonicalProjectRoot {
     /// Returns [`CoreError::NonUtf8Path`] when the native path has no lossless
     /// UTF-8 display projection.
     pub fn display_string(&self) -> CoreResult<String> {
-        let value = self.0.to_str().ok_or_else(|| CoreError::NonUtf8Path {
-            path: self.0.clone(),
-        })?;
-        let normalized = crate::normalize_native_path_display_str(value);
-        if Path::new(&normalized).is_absolute()
-            && !windows_verbatim_semantics_require_prefix(&self.0)
-        {
-            Ok(normalized)
-        } else {
-            Ok(value.to_owned())
-        }
+        crate::lossless_native_path_display(&self.0)
     }
 
     /// Return an explicitly lossy rendering for terminal-only diagnostics.
@@ -167,51 +157,11 @@ impl CanonicalProjectRoot {
 fn normalize_native_identity_path(path: PathBuf) -> PathBuf {
     if let Some(value) = path.to_str() {
         let normalized = PathBuf::from(crate::normalize_native_path_display_str(value));
-        if normalized.is_absolute() && !windows_verbatim_semantics_require_prefix(&path) {
+        if normalized.is_absolute() && !crate::windows_verbatim_semantics_require_prefix(&path) {
             return normalized;
         }
     }
     path
-}
-
-#[cfg(windows)]
-/// Preserve the extended prefix when a component relies on Win32 verbatim semantics.
-fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
-    use std::path::Component;
-
-    let Some(value) = path.to_str() else {
-        return true;
-    };
-    if !value.starts_with("\\\\?\\") {
-        return false;
-    }
-
-    path.components().any(|component| {
-        let Component::Normal(component) = component else {
-            return false;
-        };
-        let Some(component) = component.to_str() else {
-            return true;
-        };
-        if component.ends_with(['.', ' ']) {
-            return true;
-        }
-        let name = component
-            .split_once('.')
-            .map_or(component, |(stem, _)| stem);
-        let upper = name.to_ascii_uppercase();
-        matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || (upper.len() == 4
-                && (upper.starts_with("COM") || upper.starts_with("LPT"))
-                && upper.as_bytes()[3].is_ascii_digit()
-                && upper.as_bytes()[3] != b'0')
-    })
-}
-
-#[cfg(not(windows))]
-/// Unix and fallback hosts do not assign Win32 verbatim semantics to paths.
-fn windows_verbatim_semantics_require_prefix(_path: &Path) -> bool {
-    false
 }
 
 #[cfg(not(windows))]
@@ -377,7 +327,7 @@ mod tests {
     use super::CanonicalProjectRoot;
     #[cfg(unix)]
     use std::ffi::OsString;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -545,10 +495,20 @@ mod tests {
     #[test]
     fn canonical_root_codec_preserves_verbatim_components() -> Result<(), Box<dyn std::error::Error>>
     {
+        let long_component = "a".repeat(240);
         for path in [
             PathBuf::from(r"\\?\C:\repo\folder."),
             PathBuf::from(r"\\?\C:\repo\CON.txt"),
+            PathBuf::from(r"\\?\C:\repo\COM¹.txt"),
+            PathBuf::from(r"\\?\C:\repo\COM².dat"),
+            PathBuf::from(r"\\?\C:\repo\COM³.bin"),
+            PathBuf::from(r"\\?\C:\repo\LPT¹.tmp"),
+            PathBuf::from(r"\\?\C:\repo\LPT².cfg"),
+            PathBuf::from(r"\\?\C:\repo\LPT³.log"),
             PathBuf::from(r"\\?\UNC\server\share\LPT1"),
+            PathBuf::from(format!(r"\\?\C:\{long_component}")),
+            PathBuf::from(format!(r"\\?\UNC\server\share\{long_component}")),
+            PathBuf::from(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1"),
         ] {
             let mut encoded = vec![
                 super::CANONICAL_PROJECT_ROOT_CODEC_VERSION,
@@ -565,6 +525,32 @@ mod tests {
             if CanonicalProjectRoot::decode(&decoded.encode()?)? != decoded {
                 return Err("verbatim-sensitive root codec round-trip changed its path".into());
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_root_round_trips_real_verbatim_only_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let base = directory
+            .path()
+            .to_str()
+            .ok_or("temporary directory was not UTF-8")?;
+        let verbatim_path = PathBuf::from(format!(r"\\?\{base}\verbatim-only."));
+        fs::create_dir(&verbatim_path)?;
+
+        let root = CanonicalProjectRoot::from_path(&verbatim_path)?;
+        if root.as_path() != verbatim_path {
+            return Err("verbatim-only directory changed native identity".into());
+        }
+        if root.display_string()? != verbatim_path.to_str().ok_or("non-UTF-8 test path")? {
+            return Err("verbatim-only directory changed its display spelling".into());
+        }
+        let decoded = CanonicalProjectRoot::decode(&root.encode()?)?;
+        if decoded.as_path() != root.as_path() {
+            return Err("verbatim-only directory codec changed its native path".into());
         }
         Ok(())
     }
