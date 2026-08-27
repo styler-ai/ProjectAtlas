@@ -2868,7 +2868,7 @@ fn default_config_root_value(root: &Path, config_path: &Path) -> AtlasMapResult<
         }
     } else {
         root.to_str()
-            .map(|value| value.replace('\\', "/"))
+            .map(projectatlas_core::normalize_native_path_display_str)
             .ok_or_else(|| AtlasMapError::InvalidRepositoryPath {
                 path: "<native project root>".to_string(),
                 message: "cannot serialize a non-UTF-8 root into an external TOML config"
@@ -2909,7 +2909,10 @@ fn default_config_text_with_root(root_value: &str) -> String {
     let source_extensions = toml_array(DEFAULT_SOURCE_EXTENSIONS);
     [
         "[project]",
-        &format!("root = \"{}\"", root_value.replace('"', "\\\"")),
+        &format!(
+            "root = \"{}\"",
+            root_value.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
         "map_path = \".projectatlas/projectatlas.toon\"",
         "nonsource_files_path = \".projectatlas/projectatlas-nonsource-files.toon\"",
         "",
@@ -3427,6 +3430,35 @@ root = "."
         if config.root != expected_root {
             return Err(io::Error::other(format!(
                 "symlinked external config selected {:?}, expected {expected_root:?}",
+                config.root
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_preserves_unix_backslash_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo\\name");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
+        fs::create_dir(&root)?;
+
+        super::init_project_with_config(&root, Some(&config_path))?;
+
+        let config_text = fs::read_to_string(&config_path)?;
+        if !config_text.contains("repo\\\\name") {
+            return Err(io::Error::other(
+                "external config did not TOML-escape its literal Unix backslash",
+            )
+            .into());
+        }
+        let config = super::load_atlas_config(Some(&config_path))?;
+        let expected_root = root.canonicalize()?;
+        if config.root != expected_root {
+            return Err(io::Error::other(format!(
+                "external config selected {:?}, expected {expected_root:?}",
                 config.root
             ))
             .into());
