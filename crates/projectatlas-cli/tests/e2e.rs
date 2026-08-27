@@ -23837,8 +23837,9 @@ fn structural_summaries_cover_declarative_files_and_projectatlas_inputs()
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
-        .arg("config")
-        .arg("--print")
+        .arg("--db")
+        .arg(&db)
+        .args(["config", "--print"])
         .assert()
         .success()
         .stdout(predicate::str::contains("exclude_path_prefixes"))
