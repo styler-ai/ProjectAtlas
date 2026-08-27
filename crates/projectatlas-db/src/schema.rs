@@ -3229,11 +3229,15 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    use std::sync::Arc;
+    #[cfg(windows)]
+    use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
+    #[cfg(windows)]
     use std::thread;
 
     /// Complete logical snapshot of the durable schema-8 state used by rollback tests.
+    #[cfg(windows)]
     #[derive(Debug, PartialEq)]
     struct ReleasedSchemaDurableState {
         metadata: Vec<Vec<Value>>,
@@ -3246,6 +3250,7 @@ mod tests {
     }
 
     /// Read every column from the durable tables in deterministic key order.
+    #[cfg(windows)]
     fn released_schema_durable_state(
         connection: &Connection,
     ) -> DbResult<ReleasedSchemaDurableState> {
@@ -5935,17 +5940,19 @@ mod tests {
         let database = temp.path().join("schema-19-collision.db");
 
         let store = AtlasStore::open_for_project(&database, &raw_root)?;
+        store.record_usage(&usage_from_estimates(
+            "collision",
+            "schema",
+            Some("src/lib.rs".to_string()),
+            None,
+            30,
+            10,
+        ))?;
         store.connection.execute_batch(
             "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
              INSERT INTO purposes(node_id, purpose, source, status, updated_by)
              SELECT id, 'collision authored purpose', 'agent', 'approved', 'collision-test'
                FROM nodes WHERE path = 'src/lib.rs';
-             INSERT INTO usage_events(
-                 session_id, command,
-                 estimated_tokens_without_projectatlas,
-                 estimated_tokens_with_projectatlas,
-                 estimated_tokens_saved
-             ) VALUES('collision', 'schema', 30, 10, 20);
              UPDATE project_identity SET active_generation = 13 WHERE singleton = 1;
              DROP TABLE project_root_identity;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';
@@ -6328,6 +6335,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn resolution_schema_migrates_parser_provenance_without_weakening_existing_facts()
     -> Result<(), Box<dyn Error>> {
@@ -6439,6 +6447,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn telemetry_schema_migrates_resolution_keys_and_legacy_purpose_state_atomically()
     -> Result<(), Box<dyn Error>> {
@@ -6833,6 +6842,14 @@ mod tests {
                 ))
                 .into());
             };
+            #[cfg(unix)]
+            if !matches!(error, DbError::ProjectRootIdentityMissing) {
+                return Err(io::Error::other(format!(
+                    "{label} wrong root returned the wrong Unix error: {error}"
+                ))
+                .into());
+            }
+            #[cfg(windows)]
             match error {
                 DbError::ProjectRootMismatch {
                     expected, found, ..
@@ -7058,6 +7075,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn released_schema_malformed_telemetry_rolls_back_unchanged_and_retries()
     -> Result<(), Box<dyn Error>> {
@@ -7908,6 +7926,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn concurrent_migrators_converge_without_global_coordination() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -7977,6 +7996,7 @@ mod tests {
     }
 
     /// Seed representative durable rows for released-schema rollback coverage.
+    #[cfg(windows)]
     fn seed_released_schema_durable_state(connection: &Connection) -> DbResult<()> {
         set_metadata(connection, "custom_setting", "preserved")?;
         connection.execute_batch(
