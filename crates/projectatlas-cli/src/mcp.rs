@@ -13419,42 +13419,13 @@ mod tests {
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("migratable target identity is missing"))?;
         drop(migratable_store);
-        let predecessor = rusqlite::Connection::open(&target_b_db)?;
-        let current_limits = GraphLimitKind::ALL
-            .iter()
-            .map(|limit| format!("'{}'", limit.as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let current_coverage_schema: String = predecessor.query_row(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'graph_coverage'",
-            [],
-            |row| row.get(0),
+        let incomplete_current = rusqlite::Connection::open(&target_b_db)?;
+        incomplete_current.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
+            [worktree_b.join(".").to_string_lossy().into_owned()],
         )?;
-        let predecessor_coverage_schema = current_coverage_schema.replace(
-            &current_limits,
-            "'rows', 'occurrences', 'depth', 'output_bytes'",
-        );
-        require(
-            predecessor_coverage_schema != current_coverage_schema,
-            "predecessor fixture did not replace the current graph limit domain",
-        )?;
-        // This isolated fixture needs the exact released schema-17 declaration; rebuilding the
-        // table here would duplicate the complete production graph DDL in the CLI crate.
-        predecessor.execute_batch("PRAGMA writable_schema = ON;")?;
-        predecessor.execute(
-            "UPDATE sqlite_schema SET sql = ?1 WHERE type = 'table' AND name = 'graph_coverage'",
-            [predecessor_coverage_schema],
-        )?;
-        predecessor.execute_batch("PRAGMA writable_schema = OFF;")?;
-        predecessor.execute_batch(
-            "DROP TABLE usage_instance_worktree_origins;
-             DROP TABLE worktree_usage_aggregates;
-            DROP TABLE worktree_registrations;
-            DROP TABLE usage_aggregate_revisions;
-            DROP TABLE project_root_identity;
-            UPDATE metadata SET value = '17' WHERE key = 'schema_version';",
-        )?;
-        drop(predecessor);
+        incomplete_current.execute_batch("DELETE FROM project_root_identity;")?;
+        drop(incomplete_current);
         let migratable_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_b,
             alias: Some("migratable-atlas".to_string()),
@@ -13464,7 +13435,7 @@ mod tests {
                 && migratable_added
                     .contains("registration committed without local telemetry import"),
             &format!(
-                "supported predecessor atlas did not retain its explicit unbound registration: {migratable_added}"
+                "current repair atlas did not retain its explicit unbound registration: {migratable_added}"
             ),
         )?;
         let control_before_migration =
@@ -13474,7 +13445,7 @@ mod tests {
                 .worktree_registration(&WorktreeAlias::parse("migratable-atlas")?)?
                 .project_instance_id
                 .is_none(),
-            "supported predecessor fixture unexpectedly bound before migration",
+            "current repair fixture unexpectedly bound before scan",
         )?;
         drop(control_before_migration);
         let migrated = server.atlas_scan(Parameters(AtlasScanParams {
@@ -13490,12 +13461,12 @@ mod tests {
         }));
         require(
             migrated.contains("scan:"),
-            &format!("alias-routed predecessor migration did not complete its scan: {migrated}"),
+            &format!("alias-routed current repair did not complete its scan: {migrated}"),
         )?;
         let migrated_target = open_atlas_store_read_only_for_project(&target_b_db, &worktree_b)?;
         require(
             migrated_target.project_instance_id()? == Some(migratable_project),
-            "supported predecessor migration changed the worktree project identity",
+            "current repair changed the worktree project identity",
         )?;
         drop(migrated_target);
         let control_after_migration =
@@ -13505,7 +13476,7 @@ mod tests {
                 .worktree_registration(&WorktreeAlias::parse("migratable-atlas")?)?
                 .project_instance_id
                 == Some(migratable_project),
-            "alias-routed predecessor migration left its registration unbound",
+            "alias-routed current repair left its registration unbound",
         )?;
         drop(control_after_migration);
         let retired_migratable =
@@ -13514,7 +13485,7 @@ mod tests {
             }));
         require(
             retired_migratable.contains("status: retired"),
-            &format!("migrated registration could not be retired: {retired_migratable}"),
+            &format!("current-repair registration could not be retired: {retired_migratable}"),
         )?;
 
         let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
