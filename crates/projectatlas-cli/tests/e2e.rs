@@ -3456,7 +3456,7 @@ fn assert_settings_reports_supported_predecessor_without_migration(
             ))
             .into());
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -3668,7 +3668,7 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
                 io::Error::other("Unix predecessor refusal created the default database").into(),
             );
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -3828,7 +3828,7 @@ fn assert_cli_migrates_released_schema_layout(
             ))
             .into());
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
