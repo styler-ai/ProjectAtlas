@@ -1291,8 +1291,53 @@ mod tests {
             IndexGeneration::new(1),
             1,
         )?;
+        let captured_root = CanonicalProjectRoot::from_path(&original_root)?;
         fs::rename(&original_root, &staging_root)?;
         fs::rename(&staging_root, &renamed_root)?;
+
+        let renamed_identity = CanonicalProjectRoot::from_path(&renamed_root)?;
+        let renamed_database = renamed_root.join("projectatlas.db");
+        let before_repair_store =
+            AtlasStore::open_read_only_for_project(&renamed_database, &renamed_root)?;
+        let before_repair = crate::relations::load_detailed_relations(
+            &before_repair_store,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        )?;
+        before_repair_store.finish_index_read_snapshot()?;
+        drop(before_repair_store);
+        let captured_digest = federated_root_digest(&captured_root)?;
+        require(
+            captured_digest == federated_root_digest(&renamed_identity)?,
+            "case-only root rename changed the service root digest",
+        )?;
+        let repair_store = AtlasStore::open_for_project(&renamed_database, &renamed_root)?;
+        drop(repair_store);
+        let after_repair_store =
+            AtlasStore::open_read_only_for_project(&renamed_database, &renamed_root)?;
+        let resumed = crate::relations::load_detailed_relations(
+            &after_repair_store,
+            &relation_query(
+                Some(
+                    before_repair
+                        .continuation
+                        .ok_or("case-only rename fixture omitted a relation continuation")?,
+                ),
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        );
+        after_repair_store.finish_index_read_snapshot()?;
+        drop(after_repair_store);
+        require(
+            resumed.is_ok(),
+            "case-only root rename invalidated a relation continuation",
+        )?;
 
         let secondary_root = temp.path().join("federated-secondary");
         let secondary_database = secondary_root.join("projectatlas.db");
@@ -1302,9 +1347,8 @@ mod tests {
             IndexGeneration::new(1),
             1,
         )?;
-        let renamed_database = renamed_root.join("projectatlas.db");
         let participants = open_participants(&[
-            (renamed_root, renamed_database),
+            (renamed_root.clone(), renamed_database.clone()),
             (secondary_root, secondary_database),
         ])?;
         let draft = load_federated_detailed_relations(
@@ -1322,6 +1366,34 @@ mod tests {
         require(
             report.participants.len() == 2,
             "federated query rejected a case-only root rename",
+        )?;
+
+        let duplicate_database = temp.path().join("federated-duplicate.db");
+        publish_fixture(
+            &renamed_root,
+            &duplicate_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        let duplicate = load_federated_detailed_relations(
+            open_participants(&[
+                (renamed_root.clone(), renamed_database),
+                (renamed_root, duplicate_database),
+            ])?,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        );
+        require(
+            matches!(
+                duplicate,
+                Err(ServiceError::InvalidInput(message))
+                    if message == "federated roots or project identities must be unique"
+            ),
+            "federation admitted two databases for one case-renamed root",
         )?;
 
         let case_sensitive_parent = temp.path().join("federated-case-sensitive-parent");

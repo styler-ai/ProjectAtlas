@@ -198,7 +198,9 @@ pub(crate) fn canonical_root_digest(
     domain: &str,
     root: &CanonicalProjectRoot,
 ) -> ServiceResult<[u8; 32]> {
-    let encoded = root
+    let canonical_root = CanonicalProjectRoot::from_path(root.as_path())
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let encoded = canonical_root
         .encode()
         .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
     let mut hasher = blake3::Hasher::new();
