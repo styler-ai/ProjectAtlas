@@ -1291,6 +1291,13 @@ mod tests {
             IndexGeneration::new(1),
             1,
         )?;
+        let duplicate_database = temp.path().join("federated-duplicate.db");
+        publish_fixture(
+            &original_root,
+            &duplicate_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
         let captured_root = CanonicalProjectRoot::from_path(&original_root)?;
         fs::rename(&original_root, &staging_root)?;
         fs::rename(&staging_root, &renamed_root)?;
@@ -1339,6 +1346,20 @@ mod tests {
             "case-only root rename invalidated a relation continuation",
         )?;
 
+        let repaired_binding =
+            AtlasStore::open_read_only(&renamed_database)?.captured_project_binding()?;
+        let duplicate_binding =
+            AtlasStore::open_read_only(&duplicate_database)?.captured_project_binding()?;
+        require(
+            repaired_binding.project_instance_id != duplicate_binding.project_instance_id,
+            "duplicate federation fixture reused the repaired project identity",
+        )?;
+        require(
+            repaired_binding.project_root_identity.encode()?
+                != duplicate_binding.project_root_identity.encode()?,
+            "duplicate federation fixture did not retain old and fresh root spellings",
+        )?;
+
         let secondary_root = temp.path().join("federated-secondary");
         let secondary_database = secondary_root.join("projectatlas.db");
         publish_fixture(
@@ -1368,13 +1389,6 @@ mod tests {
             "federated query rejected a case-only root rename",
         )?;
 
-        let duplicate_database = temp.path().join("federated-duplicate.db");
-        publish_fixture(
-            &renamed_root,
-            &duplicate_database,
-            IndexGeneration::new(1),
-            1,
-        )?;
         let duplicate = load_federated_detailed_relations(
             open_participants(&[
                 (renamed_root.clone(), renamed_database),
