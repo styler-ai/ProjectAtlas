@@ -2397,7 +2397,14 @@ pub(crate) fn lossless_project_root_display(root: &Path) -> Option<String> {
 
 /// Return a lossless UTF-8 display for one native path.
 pub(crate) fn lossless_native_path_display(path: &Path) -> Option<String> {
-    path.to_str().map(normalize_native_path_display_str)
+    path.to_str().map(|original| {
+        let normalized = normalize_native_path_display_str(original);
+        if Path::new(&normalized).is_absolute() {
+            normalized
+        } else {
+            original.to_owned()
+        }
+    })
 }
 
 /// Return one exact source root from structural Git or non-Git evidence.
@@ -9504,6 +9511,52 @@ mod tests {
             &serialized.contains('\u{fffd}'),
             &false,
             "serialized settings fabricated a replacement root",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lossless_native_path_display_preserves_absolute_volume_guid_paths()
+    -> Result<(), Box<dyn Error>> {
+        let volume = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\repo\file";
+        let volume_display = lossless_native_path_display(Path::new(volume))
+            .ok_or_else(|| io::Error::other("volume-GUID path was not UTF-8"))?;
+        require_eq(
+            &volume_display,
+            &volume.to_string(),
+            "lossless volume-GUID display",
+        )?;
+        require_eq(
+            &Path::new(&volume_display).is_absolute(),
+            &true,
+            "volume-GUID display remained absolute",
+        )?;
+
+        let drive = lossless_native_path_display(Path::new(r"\\?\C:\repo\file"))
+            .ok_or_else(|| io::Error::other("extended drive path was not UTF-8"))?;
+        require_eq(
+            &drive,
+            &"C:/repo/file".to_string(),
+            "normalized extended drive display",
+        )?;
+        require_eq(
+            &Path::new(&drive).is_absolute(),
+            &true,
+            "extended drive display remained absolute",
+        )?;
+
+        let unc = lossless_native_path_display(Path::new(r"\\?\UNC\server\share\repo\file"))
+            .ok_or_else(|| io::Error::other("extended UNC path was not UTF-8"))?;
+        require_eq(
+            &unc,
+            &"//server/share/repo/file".to_string(),
+            "normalized extended UNC display",
+        )?;
+        require_eq(
+            &Path::new(&unc).is_absolute(),
+            &true,
+            "extended UNC display remained absolute",
         )?;
         Ok(())
     }

@@ -16838,6 +16838,9 @@ mod tests {
         let database_before = fs::read(&database)?;
         let sidecars_before = ["wal", "shm", "journal"]
             .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let raw_project_dir = raw_root.join(PROJECTATLAS_DIR_NAME);
+        let raw_config = raw_project_dir.join(PROJECTATLAS_CONFIG_FILE_NAME);
+        let raw_nonsource = raw_project_dir.join(MCP_NONSOURCE_FILE_NAME);
         let replacement_project_dir = replacement_root.join(PROJECTATLAS_DIR_NAME);
         let replacement_config = replacement_project_dir.join(PROJECTATLAS_CONFIG_FILE_NAME);
         let replacement_nonsource = replacement_project_dir.join(MCP_NONSOURCE_FILE_NAME);
@@ -16847,9 +16850,13 @@ mod tests {
             "ambiguous-predecessor".to_string(),
             false,
         );
+        let startup = ProjectAtlasMcpServer::startup_project_state(database.clone(), None);
         require(
-            ProjectAtlasMcpServer::startup_project_state(database.clone(), None).root
-                != canonical_project_root(&replacement_root)?,
+            startup.root == canonical_project_root(&raw_root)?,
+            "MCP startup did not select the raw native predecessor root",
+        )?;
+        require(
+            startup.root != canonical_project_root(&replacement_root)?,
             "MCP startup selected the replacement-character candidate",
         )?;
         let result = server.atlas_init(Parameters(AtlasInitParams {
@@ -16875,6 +16882,10 @@ mod tests {
                 && !replacement_config.exists()
                 && !replacement_nonsource.exists(),
             "ambiguous predecessor init wrote replacement-root project state",
+        )?;
+        require(
+            !raw_config.exists() && !raw_nonsource.exists(),
+            "ambiguous predecessor init wrote raw-root project state",
         )?;
         Ok(())
     }
