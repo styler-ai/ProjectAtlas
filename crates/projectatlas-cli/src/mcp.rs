@@ -16841,11 +16841,12 @@ mod tests {
             false,
         );
         require(
-            server.active_project_state()?.root != canonical_project_root(&replacement_root)?,
+            ProjectAtlasMcpServer::startup_project_state(database.clone(), None).root
+                != canonical_project_root(&replacement_root)?,
             "MCP startup selected the replacement-character candidate",
         )?;
         let result = server.atlas_init(Parameters(AtlasInitParams {
-            project_path: None,
+            project_path: Some(replacement_root.to_string_lossy().into_owned()),
             worktree: None,
             no_scan: Some(true),
             force_rescan: Some(false),

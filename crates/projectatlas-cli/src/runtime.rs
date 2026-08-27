@@ -8894,9 +8894,8 @@ mod tests {
             .path()
             .join(OsString::from_vec(b"runtime-raw-root-\x80".to_vec()));
         let replacement_root = temp.path().join("runtime-raw-root-�");
-        let database = raw_root.join(".projectatlas/projectatlas.db");
+        let database = temp.path().join("runtime-custom-predecessor.db");
         fs::create_dir(&raw_root)?;
-        fs::create_dir(raw_root.join(".projectatlas"))?;
         drop(AtlasStore::open_for_project(&database, &raw_root)?);
         {
             let connection = rusqlite::Connection::open(&database)?;
