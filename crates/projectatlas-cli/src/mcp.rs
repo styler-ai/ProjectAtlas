@@ -16806,16 +16806,18 @@ mod tests {
         let database = temp.path().join("mcp-custom-predecessor.db");
         fs::create_dir_all(&raw_root)?;
         let store = AtlasStore::open_for_project(&database, &raw_root)?;
-        store.connection.execute_batch(
+        drop(store);
+        let predecessor = rusqlite::Connection::open(&database)?;
+        predecessor.execute_batch(
             "DROP TABLE project_root_identity;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
-        store.connection.execute(
+        predecessor.execute(
             "INSERT INTO metadata(key, value) VALUES('project_root', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [&replacement_root.to_string_lossy().into_owned()],
         )?;
-        drop(store);
+        drop(predecessor);
         fs::create_dir_all(&replacement_root)?;
 
         let database_before = fs::read(&database)?;
