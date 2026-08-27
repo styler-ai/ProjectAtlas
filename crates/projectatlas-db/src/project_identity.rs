@@ -833,7 +833,7 @@ mod tests {
         };
 
         let connection = Connection::open(&database)?;
-        connection.execute_batch("BEGIN IMMEDIATE")?;
+        connection.execute_batch("BEGIN IMMEDIATE; PRAGMA defer_foreign_keys = ON;")?;
         connection.execute("DELETE FROM project_identity", [])?;
         let expected = CanonicalProjectRoot::from_path(&alias)?;
         let error = ensure_project_root_identity_after_lock(&connection, &expected)
