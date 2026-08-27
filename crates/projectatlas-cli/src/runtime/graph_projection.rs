@@ -4848,6 +4848,44 @@ mod tests {
             "schema-19 unrelated-root staging database was admitted",
         )?;
 
+        let schema_eighteen = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}schema18"));
+        prepare_schema_nineteen(&schema_eighteen, &root)?;
+        let schema_eighteen_database = schema_eighteen.join(GRAPH_STAGE_DATABASE_FILE_NAME);
+        let connection = Connection::open(&schema_eighteen_database)?;
+        connection.execute(
+            "UPDATE metadata SET value = '18' WHERE key = 'schema_version'",
+            [],
+        )?;
+        require(
+            !AtlasStore::repository_graph_staging_belongs_to(
+                &schema_eighteen_database,
+                &root,
+                project,
+            )?,
+            "schema-18 staging database was admitted as a schema-19 predecessor",
+        )?;
+
+        let incomplete_current =
+            atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}current-incomplete"));
+        fs::create_dir(&incomplete_current)?;
+        let incomplete_current_database = incomplete_current.join(GRAPH_STAGE_DATABASE_FILE_NAME);
+        drop(AtlasStore::create_repository_graph_staging(
+            &incomplete_current_database,
+            &root,
+            project,
+        )?);
+        let connection = Connection::open(&incomplete_current_database)?;
+        connection.execute_batch("DROP TABLE project_root_identity")?;
+        require(
+            !AtlasStore::repository_graph_staging_belongs_to(
+                &incomplete_current_database,
+                &root,
+                project,
+            )
+            .unwrap_or(false),
+            "current staging database without native identity was admitted",
+        )?;
+
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
         cleanup_abandoned_graph_staging(&root, project, &control)?;
         require(
@@ -4857,6 +4895,14 @@ mod tests {
         require(
             foreign.exists(),
             "restart cleanup removed an unrelated schema-19 staging database",
+        )?;
+        require(
+            schema_eighteen.exists(),
+            "restart cleanup removed a non-predecessor schema-18 staging database",
+        )?;
+        require(
+            incomplete_current.exists(),
+            "restart cleanup removed a current staging database without native identity",
         )?;
         Ok(())
     }

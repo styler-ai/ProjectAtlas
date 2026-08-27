@@ -3331,7 +3331,7 @@ impl AtlasStore {
                         .is_ok()
                 })
             }
-            version if version == schema::SCHEMA_VERSION - 1 => {
+            schema::CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION => {
                 schema::validate_legacy_project_root_binding(&connection, &expected_root).is_ok()
             }
             _ => false,

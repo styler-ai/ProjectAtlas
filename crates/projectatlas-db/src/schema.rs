@@ -40,7 +40,7 @@ const CLASSIFIED_GRAPH_SCHEMA_VERSION: i64 = 17;
 /// First schema with local worktree registration and aggregate telemetry control state.
 const WORKTREE_CONTROL_SCHEMA_VERSION: i64 = 18;
 /// Schema immediately before the canonical native-root identity migration.
-const CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION: i64 = 19;
+pub(crate) const CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION: i64 = 19;
 /// First schema with a lossless native project-root identity.
 const CANONICAL_ROOT_SCHEMA_VERSION: i64 = 20;
 /// Metadata key for the durable schema version.
