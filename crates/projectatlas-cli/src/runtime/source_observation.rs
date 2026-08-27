@@ -2252,14 +2252,7 @@ mod tests {
         let database = metadata.join("ProjectAtlas.db");
         fs::write(&database, b"SQLite format 3\0")?;
         let binding = SourceBinding::new(&database, &root, None)?;
-        let mut sidecar = database.as_os_str().to_os_string();
-        sidecar.push("-WAL");
-        let event_path = PathBuf::from(
-            sidecar
-                .to_str()
-                .ok_or_else(|| std::io::Error::other("fixture path was not UTF-8"))?
-                .to_ascii_uppercase(),
-        );
+        let event_path = metadata.join("PROJECTATLAS.DB-WAL");
         let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(event_path);
         let changes = super::observer_event_changes(
             &binding,
