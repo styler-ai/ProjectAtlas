@@ -4832,9 +4832,17 @@ mod tests {
         let owned = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}schema19-owned"));
         prepare_schema_nineteen(&owned, &root)?;
         let owned_database = owned.join(GRAPH_STAGE_DATABASE_FILE_NAME);
+        let owned_matches =
+            AtlasStore::repository_graph_staging_belongs_to(&owned_database, &root, project)?;
+        #[cfg(windows)]
         require(
-            AtlasStore::repository_graph_staging_belongs_to(&owned_database, &root, project)?,
+            owned_matches,
             "schema-19 owned staging database was not admitted",
+        )?;
+        #[cfg(unix)]
+        require(
+            !owned_matches,
+            "schema-19 legacy staging database was admitted without native authority",
         )?;
         fs::write(owned.join("large-graph-payload"), b"stale graph payload")?;
 
@@ -4888,9 +4896,15 @@ mod tests {
 
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
         cleanup_abandoned_graph_staging(&root, project, &control)?;
+        #[cfg(windows)]
         require(
             !owned.exists(),
             "restart cleanup retained an owned schema-19 staging database",
+        )?;
+        #[cfg(unix)]
+        require(
+            owned.exists(),
+            "restart cleanup removed an unproven schema-19 staging database",
         )?;
         require(
             foreign.exists(),

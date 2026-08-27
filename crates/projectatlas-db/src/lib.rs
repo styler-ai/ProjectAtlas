@@ -1721,16 +1721,11 @@ impl AtlasStore {
         if expected_identity.is_none()
             && identity_requirement.is_required()
             && preflight.state == SchemaState::UpgradeRequired
-            && preflight
-                .project_root
-                .as_deref()
-                .is_none_or(|root| root.contains('\u{fffd}'))
+            && schema::legacy_root_requires_native_authority(preflight.project_root.as_deref())
         {
-            // A predecessor's replacement character may be a lossy raw path
-            // byte. A missing candidate is equally unauthoritative: rootless
-            // migration has no native caller authority with which to identify
-            // the binding. Refuse before opening a writable connection or
-            // creating WAL state.
+            // Rootless predecessor migration has no native caller authority
+            // with which to identify a lossy legacy display. Refuse before
+            // opening a writable connection or creating WAL state.
             return Err(DbError::ProjectRootIdentityMissing);
         }
         let validated_project_root = expected_identity
@@ -8758,6 +8753,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn released_schema_layouts_upgrade_without_losing_local_state() -> Result<(), Box<dyn Error>> {
         let layouts: [(&str, fn(&Path, &Path) -> Result<(), Box<dyn Error>>); 2] = [
@@ -12325,6 +12321,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn file_text_fts_migration_backfills_existing_text_and_survives_reopen()
     -> Result<(), Box<dyn Error>> {

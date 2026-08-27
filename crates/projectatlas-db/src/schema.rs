@@ -1435,8 +1435,8 @@ pub(crate) fn preflight(
 ///
 /// Current databases use the typed root identity. A missing typed identity is
 /// admitted only for the narrow recovery path that proves unambiguous legacy
-/// metadata names the same existing native root; no binding is created by this
-/// helper.
+/// metadata names the same existing native root on platforms where that
+/// historical projection is injective; no binding is created by this helper.
 pub(crate) fn preflight_for_project(
     path: &Path,
     expected_root: &CanonicalProjectRoot,
@@ -1462,6 +1462,26 @@ pub(crate) fn preflight_for_project(
     Ok((preflight, location))
 }
 
+/// Return whether legacy root metadata is insufficient as native authority.
+///
+/// Unix predecessor schemas stored a display projection that changed literal
+/// backslashes into separators. That projection is non-injective, so no
+/// legacy text can prove which native path originally owned the database.
+/// Windows retains the historical text recovery only when it is not already
+/// visibly ambiguous; current native identity rows remain authoritative on
+/// every platform.
+pub(crate) fn legacy_root_requires_native_authority(legacy: Option<&str>) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = legacy;
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        legacy.is_none_or(|root| root.contains('\u{fffd}'))
+    }
+}
+
 /// Revalidate a predecessor's legacy root against the caller's native root.
 ///
 /// This check is intentionally repeated from the writer connection after its
@@ -1473,10 +1493,9 @@ pub(crate) fn validate_legacy_project_root_binding(
     expected_root: &CanonicalProjectRoot,
 ) -> DbResult<CanonicalProjectRoot> {
     let legacy = read_metadata(connection, PROJECT_ROOT_KEY)?.ok_or(DbError::ProjectRootMissing)?;
-    if legacy.contains('\u{fffd}') {
-        // A replacement character may represent either a real character or a
-        // lossy raw path byte. Without a native predecessor authority, the
-        // spelling is ambiguous and must be rejected to prevent a collision.
+    if legacy_root_requires_native_authority(Some(&legacy)) {
+        // Without a durable native predecessor authority, the legacy display
+        // projection cannot distinguish native names that normalized alike.
         return Err(DbError::ProjectRootIdentityMissing);
     }
     crate::project_identity::prove_existing_root_equivalence(
@@ -4097,6 +4116,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn supported_schema_upgrades_preserve_authored_state_and_invalidate_publication()
     -> Result<(), Box<dyn Error>> {
@@ -4292,6 +4312,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn released_schema_eight_upgrade_preserves_token_impact_across_reopen()
     -> Result<(), Box<dyn Error>> {
@@ -4498,6 +4519,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn lexical_schema_upgrade_preserves_identity_and_authored_purpose_only()
     -> Result<(), Box<dyn Error>> {
@@ -4633,6 +4655,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_sixteen_upgrade_rolls_back_then_preserves_authored_state_and_reopens()
     -> Result<(), Box<dyn Error>> {
@@ -4921,6 +4944,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_seventeen_upgrade_preserves_main_telemetry_and_matches_fresh_schema()
     -> Result<(), Box<dyn Error>> {
@@ -5015,6 +5039,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_eighteen_upgrade_is_atomic_and_preserves_only_authored_graph_state()
     -> Result<(), Box<dyn Error>> {
@@ -5275,6 +5300,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_nineteen_upgrade_repairs_native_root_atomically_and_retries()
     -> Result<(), Box<dyn Error>> {
@@ -5548,7 +5574,10 @@ mod tests {
         let destination_before = fs::read(&database_b)?;
         let destination_inventory = directory_entry_names(&root_b)?;
         let result = AtlasStore::open_for_project(&database_b, &root_b);
-        if !matches!(result, Err(DbError::ProjectRootMismatch { .. })) {
+        if !matches!(
+            result,
+            Err(DbError::ProjectRootMismatch { .. } | DbError::ProjectRootIdentityMissing)
+        ) {
             return Err(io::Error::other(
                 "copied conventional schema-19 database was admitted under a new root",
             )
@@ -5613,6 +5642,153 @@ mod tests {
             .into());
         }
         require_unchanged(temp.path(), &database, &before, &inventory)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_nineteen_backslash_collision_refuses_legacy_authority_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        fn sidecars(database: &Path) -> [Option<Vec<u8>>; 3] {
+            ["-wal", "-shm", "-journal"]
+                .map(|suffix| fs::read(sqlite_sidecar_path(database, suffix)).ok())
+        }
+
+        fn logical_state(
+            database: &Path,
+        ) -> Result<(String, String, i64, Vec<u8>, i64, i64, i64, i64, String), Box<dyn Error>>
+        {
+            let connection =
+                Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            Ok(connection.query_row(
+                "SELECT
+                    (SELECT value FROM metadata WHERE key = 'schema_version'),
+                    (SELECT value FROM metadata WHERE key = 'project_root'),
+                    (SELECT COUNT(*) FROM sqlite_master
+                       WHERE type = 'table' AND name = 'project_root_identity'),
+                    (SELECT project_instance_id FROM project_identity WHERE singleton = 1),
+                    (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                    (SELECT COUNT(*) FROM nodes),
+                    (SELECT COUNT(*) FROM purposes),
+                    (SELECT COUNT(*) FROM usage_events),
+                    COALESCE((SELECT value FROM metadata
+                               WHERE key = 'index_publication_state'), '')",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )?)
+        }
+
+        fn snapshot(
+            database: &Path,
+        ) -> Result<
+            (
+                Vec<u8>,
+                [Option<Vec<u8>>; 3],
+                Vec<String>,
+                (String, String, i64, Vec<u8>, i64, i64, i64, i64, String),
+            ),
+            Box<dyn Error>,
+        > {
+            let parent = database
+                .parent()
+                .ok_or_else(|| io::Error::other("collision database has no parent"))?;
+            Ok((
+                fs::read(database)?,
+                sidecars(database),
+                directory_entry_names(parent)?,
+                logical_state(database)?,
+            ))
+        }
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo\\name".to_vec()));
+        let slash_root = temp.path().join("repo").join("name");
+        fs::create_dir_all(&raw_root)?;
+        fs::create_dir_all(&slash_root)?;
+        let database = temp.path().join("schema-19-collision.db");
+
+        let store = AtlasStore::open_for_project(&database, &raw_root)?;
+        store.connection.execute_batch(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
+             INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'collision authored purpose', 'agent', 'approved', 'collision-test'
+               FROM nodes WHERE path = 'src/lib.rs';
+             INSERT INTO usage_events(
+                 session_id, command,
+                 estimated_tokens_without_projectatlas,
+                 estimated_tokens_with_projectatlas,
+                 estimated_tokens_saved
+             ) VALUES('collision', 'schema', 30, 10, 20);
+             UPDATE project_identity SET active_generation = 13 WHERE singleton = 1;
+             DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';
+             UPDATE metadata SET value = REPLACE(value, char(92), '/')
+               WHERE key = 'project_root';",
+        )?;
+        drop(store);
+        let before = snapshot(&database)?;
+
+        for (label, result) in [
+            (
+                "explicit raw root",
+                AtlasStore::open_for_project(&database, &raw_root).map(|_| ()),
+            ),
+            (
+                "explicit slash sibling",
+                AtlasStore::open_for_project(&database, &slash_root).map(|_| ()),
+            ),
+            (
+                "rootless required open",
+                AtlasStore::open(&database).map(|_| ()),
+            ),
+            (
+                "legacy bind",
+                AtlasStore::transition_project_root(
+                    &database,
+                    &slash_root,
+                    crate::project_identity::ProjectRootTransition::Bind,
+                )
+                .map(|_| ()),
+            ),
+            (
+                "legacy detach",
+                AtlasStore::transition_project_root(
+                    &database,
+                    &slash_root,
+                    crate::project_identity::ProjectRootTransition::Detach,
+                )
+                .map(|_| ()),
+            ),
+        ] {
+            if !matches!(result, Err(DbError::ProjectRootIdentityMissing)) {
+                return Err(io::Error::other(format!(
+                    "{label} admitted or returned the wrong error"
+                ))
+                .into());
+            }
+            let after = snapshot(&database)?;
+            if after != before {
+                return Err(io::Error::other(format!(
+                    "{label} changed predecessor bytes, sidecars, inventory, or logical state"
+                ))
+                .into());
+            }
+        }
         Ok(())
     }
 
@@ -5783,12 +5959,11 @@ mod tests {
         let utf8_root = temp.path().join("rootless-utf8");
         let utf8_database = temp.path().join("rootless-utf8.db");
         create_predecessor(&utf8_database, &utf8_root)?;
-        let expected = CanonicalProjectRoot::from_path(&utf8_root)?;
-        let migrated = AtlasStore::open(&utf8_database)?;
-        if migrated.project_root_identity()? != Some(expected) {
-            return Err(
-                "ordinary UTF-8 rootless predecessor did not retain native identity".into(),
-            );
+        if !matches!(
+            AtlasStore::open(&utf8_database),
+            Err(DbError::ProjectRootIdentityMissing)
+        ) {
+            return Err("rootless UTF-8 predecessor was admitted without native authority".into());
         }
         Ok(())
     }
@@ -6540,6 +6715,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn predecessor_writer_revalidates_legacy_binding_inside_transaction()
     -> Result<(), Box<dyn Error>> {

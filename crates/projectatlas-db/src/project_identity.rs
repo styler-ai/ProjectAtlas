@@ -66,6 +66,11 @@ impl AtlasStore {
         let (preflight, _) = schema::preflight(database_path, None)?;
         let previous_root = preflight.project_root.clone();
         let previous_identity = preflight.project_instance_id;
+        if preflight.state == SchemaState::UpgradeRequired
+            && schema::legacy_root_requires_native_authority(previous_root.as_deref())
+        {
+            return Err(DbError::ProjectRootIdentityMissing);
+        }
         let previous_root_identity = if preflight.state == SchemaState::Current {
             read_current_project_root_identity(database_path)?
         } else if (transition == ProjectRootTransition::Bind
@@ -1389,6 +1394,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_nineteen_detach_migrates_legacy_identity_before_transition()
     -> Result<(), Box<dyn Error>> {
@@ -1484,6 +1490,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_nineteen_detach_rolls_back_migration_when_transition_fails()
     -> Result<(), Box<dyn Error>> {
@@ -1649,6 +1656,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_nineteen_same_root_bind_reports_preserved_identity_and_state()
     -> Result<(), Box<dyn Error>> {
