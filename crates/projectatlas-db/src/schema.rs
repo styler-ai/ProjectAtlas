@@ -1456,6 +1456,13 @@ pub(crate) fn preflight_for_project(
             expected_root.as_path(),
             found.as_path(),
         )?;
+    } else if preflight.state == SchemaState::Current {
+        let legacy =
+            read_metadata(&connection, PROJECT_ROOT_KEY)?.ok_or(DbError::ProjectRootMissing)?;
+        crate::project_identity::prove_existing_root_equivalence(
+            expected_root.as_path(),
+            Path::new(&legacy),
+        )?;
     } else {
         validate_legacy_project_root_binding(&connection, expected_root)?;
     }
@@ -4115,6 +4122,96 @@ mod tests {
                 ))
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn current_root_repair_refuses_distinct_root_without_mutation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        let other = temp.path().join("other-repository");
+        fs::create_dir_all(&root)?;
+        fs::create_dir_all(&other)?;
+        let database = temp.path().join("incomplete-root-identity.db");
+        {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.connection.execute(
+                "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+                [],
+            )?;
+            store.record_usage(&usage_from_estimates(
+                "current-root-repair-session",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                12,
+                5,
+            ))?;
+            store.connection.execute(
+                "UPDATE project_identity SET active_generation = 7 WHERE singleton = 1",
+                [],
+            )?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+        {
+            let connection = Connection::open(&database)?;
+            connection.execute_batch(
+                "DELETE FROM project_root_identity;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )?;
+        }
+
+        // Warm the read-only path before capturing the refusal baseline so
+        // any SQLite sidecar lifecycle is outside the mutation assertion.
+        {
+            let connection =
+                Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            drop(connection);
+        }
+        let snapshot_before = {
+            let connection =
+                Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let snapshot = current_schema_snapshot(&connection)?;
+            drop(connection);
+            snapshot
+        };
+        let sidecars_before = ["-wal", "-shm", "-journal"]
+            .map(|suffix| fs::read(sqlite_sidecar_path(&database, suffix)).ok());
+        let database_before = fs::read(&database)?;
+        let inventory_before = directory_entry_names(temp.path())?;
+
+        let Err(error) = AtlasStore::open_for_project(&database, &other) else {
+            return Err(io::Error::other(
+                "distinct root unexpectedly repaired the incomplete current binding",
+            )
+            .into());
+        };
+        if !matches!(error, DbError::ProjectRootMismatch { .. }) {
+            return Err(io::Error::other(format!(
+                "distinct root returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        if fs::read(&database)? != database_before {
+            return Err(io::Error::other("distinct root refusal changed database bytes").into());
+        }
+        let sidecars_after = ["-wal", "-shm", "-journal"]
+            .map(|suffix| fs::read(sqlite_sidecar_path(&database, suffix)).ok());
+        if sidecars_after != sidecars_before {
+            return Err(io::Error::other("distinct root refusal changed SQLite sidecars").into());
+        }
+        if directory_entry_names(temp.path())? != inventory_before {
+            return Err(
+                io::Error::other("distinct root refusal changed directory inventory").into(),
+            );
+        }
+        let connection =
+            Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        if current_schema_snapshot(&connection)? != snapshot_before {
+            return Err(io::Error::other("distinct root refusal changed durable rows").into());
         }
         Ok(())
     }
