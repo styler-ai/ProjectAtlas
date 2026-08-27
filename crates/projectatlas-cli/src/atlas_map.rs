@@ -11,6 +11,7 @@ use projectatlas_fs::{ScanOptions, scan_repo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -2849,9 +2850,7 @@ fn default_config_root_value(root: &Path, config_path: &Path) -> AtlasMapResult<
         return Ok(".".to_string());
     };
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let parent = parent
-        .canonicalize()
-        .unwrap_or_else(|_| parent.to_path_buf());
+    let parent = resolve_config_parent(parent);
     if parent == root {
         return Ok(".".to_string());
     }
@@ -2875,6 +2874,33 @@ fn default_config_root_value(root: &Path, config_path: &Path) -> AtlasMapResult<
                 message: "cannot serialize a non-UTF-8 root into an external TOML config"
                     .to_string(),
             })
+    }
+}
+
+/// Resolve a config parent through existing symlinks while preserving missing native components.
+fn resolve_config_parent(parent: &Path) -> PathBuf {
+    let mut missing_components = Vec::new();
+    let mut candidate = parent;
+    loop {
+        match candidate.canonicalize() {
+            Ok(mut resolved) => {
+                for component in missing_components.iter().rev() {
+                    resolved.push(component);
+                }
+                return resolved;
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                let Some(component) = candidate.file_name() else {
+                    return parent.to_path_buf();
+                };
+                missing_components.push(component.to_os_string());
+                let Some(next) = candidate.parent() else {
+                    return parent.to_path_buf();
+                };
+                candidate = next;
+            }
+            Err(_) => return parent.to_path_buf(),
+        }
     }
 }
 
@@ -3376,6 +3402,34 @@ root = "."
                 ))
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_through_symlink_preserves_canonical_project_root()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root)?;
+        fs::create_dir(&outside)?;
+        symlink(&outside, root.join("link"))?;
+
+        let config_path = root.join("link").join("nested").join("projectatlas.toml");
+        super::init_project_with_config(&root, Some(&config_path))?;
+
+        let config = super::load_atlas_config(Some(&config_path))?;
+        let expected_root = root.canonicalize()?;
+        if config.root != expected_root {
+            return Err(io::Error::other(format!(
+                "symlinked external config selected {:?}, expected {expected_root:?}",
+                config.root
+            ))
+            .into());
         }
         Ok(())
     }
