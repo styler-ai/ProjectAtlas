@@ -6089,6 +6089,9 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn record_usage(&self, event: &UsageEvent) -> DbResult<()> {
         telemetry::validate_event(event, TelemetryRetentionPolicy::default())?;
+        self.validated_project_root_identity
+            .as_ref()
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         let instance_id = self.library_usage_instance(&event.session_id, false)?;
         match self.record_usage_for_instance(
             instance_id,
@@ -6199,10 +6202,14 @@ impl AtlasStore {
         let project_instance_id = self
             .validated_project_instance_id
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let project_root_identity = self
+            .validated_project_root_identity
+            .as_ref()
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         self.with_telemetry_connection(|connection| {
             with_validated_native_write_transaction(
                 connection,
-                self.validated_project_root_identity.as_ref(),
+                Some(project_root_identity),
                 Some(project_instance_id),
                 |transaction| {
                     telemetry::record_usage_for_project(
@@ -6222,7 +6229,7 @@ impl AtlasStore {
             // retry a successfully persisted event.
             drop(telemetry::maintain_after_commit_for_native_project(
                 connection,
-                self.validated_project_root_identity.as_ref(),
+                Some(project_root_identity),
                 project_instance_id,
                 policy,
             ));
@@ -6237,10 +6244,14 @@ impl AtlasStore {
     /// Returns an error when the selected binding changed, the instance is
     /// already inactive, or `SQLite` cannot commit the state transition.
     pub fn seal_usage_instance(&self, instance_id: UsageInstanceId) -> DbResult<()> {
+        let project_root_identity = self
+            .validated_project_root_identity
+            .as_ref()
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         self.with_telemetry_connection(|connection| {
             with_validated_native_write_transaction(
                 connection,
-                self.validated_project_root_identity.as_ref(),
+                Some(project_root_identity),
                 self.validated_project_instance_id,
                 |transaction| telemetry::seal_usage_instance(transaction, instance_id),
             )
@@ -10249,6 +10260,158 @@ mod tests {
             &current.token_overview(Some("identity-race"))?.calls,
             &0,
             "telemetry refused after identity replacement",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_recovery_requires_native_identity_before_telemetry_write()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let event = usage_from_estimates(
+            "rooted-telemetry",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        );
+        let rooted_instance = UsageInstanceId::from_bytes([7; 16])?;
+        {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.record_usage(&event)?;
+            store.record_usage_for_instance(
+                rooted_instance,
+                UsageInstanceOwner::LibraryHandle,
+                &event,
+                false,
+            )?;
+            store.seal_usage_instance(rooted_instance)?;
+            require_eq(
+                &store.token_overview(Some("rooted-telemetry"))?.calls,
+                &2,
+                "rooted telemetry positive write",
+            )?;
+            store
+                .connection
+                .execute("DELETE FROM project_root_identity", [])?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+
+        let file_snapshot = || -> Result<BTreeMap<std::ffi::OsString, Vec<u8>>, io::Error> {
+            let mut files = BTreeMap::new();
+            for entry in fs::read_dir(temp.path())? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    files.insert(entry.file_name(), fs::read(entry.path())?);
+                }
+            }
+            Ok(files)
+        };
+        let reader = AtlasStore::open_read_only(&database)?;
+        require_eq(
+            &reader.project_root_identity()?,
+            &None,
+            "rootless recovery has no native identity",
+        )?;
+        require_eq(
+            &reader.validated_project_instance_id.is_some(),
+            &true,
+            "rootless recovery retains project identity",
+        )?;
+        require_eq(
+            &reader.project_root()?,
+            &Some(normalize_native_path_display(&root)),
+            "rootless recovery retains legacy display root",
+        )?;
+        let overview_before = reader.token_overview(Some("rooted-telemetry"))?;
+        let files_before = file_snapshot()?;
+
+        let missing_root_event = usage_from_estimates(
+            "rootless-telemetry",
+            "summary",
+            Some("src/main.rs".to_string()),
+            None,
+            80,
+            20,
+        );
+        let Err(error) = reader.record_usage(&missing_root_event) else {
+            return Err(io::Error::other("rootless recovery recorded direct telemetry").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "rootless direct telemetry refusal",
+        )?;
+
+        let Err(error) = reader.record_usage_for_instance(
+            UsageInstanceId::from_bytes([8; 16])?,
+            UsageInstanceOwner::LibraryHandle,
+            &missing_root_event,
+            false,
+        ) else {
+            return Err(io::Error::other("rootless recovery recorded instance telemetry").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "rootless instance telemetry refusal",
+        )?;
+
+        let Err(error) = reader.record_usage_for_worktree_instance(
+            UsageInstanceId::from_bytes([9; 16])?,
+            UsageInstanceOwner::McpProcess,
+            1,
+            &missing_root_event,
+            false,
+        ) else {
+            return Err(io::Error::other("rootless recovery recorded worktree telemetry").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "rootless worktree telemetry refusal",
+        )?;
+
+        let Err(error) = reader.seal_usage_instance(UsageInstanceId::from_bytes([10; 16])?) else {
+            return Err(io::Error::other("rootless recovery sealed telemetry").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "rootless seal telemetry refusal",
+        )?;
+
+        require_eq(
+            &reader.token_overview(Some("rooted-telemetry"))?,
+            &overview_before,
+            "rootless telemetry rows remain unchanged",
+        )?;
+        require_eq(
+            &file_snapshot()?,
+            &files_before,
+            "rootless telemetry files remain unchanged",
+        )?;
+        drop(reader);
+
+        let repaired = AtlasStore::open_for_project(&database, &root)?;
+        repaired.record_usage(&usage_from_estimates(
+            "repaired-telemetry",
+            "summary",
+            None,
+            None,
+            60,
+            20,
+        ))?;
+        require_eq(
+            &repaired.token_overview(Some("repaired-telemetry"))?.calls,
+            &1,
+            "repaired telemetry retry",
         )?;
         Ok(())
     }
