@@ -16793,6 +16793,76 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn mcp_init_rejects_ambiguous_predecessor_before_project_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"mcp-raw-root-\x80".to_vec()));
+        let replacement_root = PathBuf::from(raw_root.to_string_lossy().into_owned());
+        let database = temp.path().join("mcp-custom-predecessor.db");
+        fs::create_dir_all(&raw_root)?;
+        let store = AtlasStore::open_for_project(&database, &raw_root)?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        store.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('project_root', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&replacement_root.to_string_lossy().into_owned()],
+        )?;
+        drop(store);
+        fs::create_dir_all(&replacement_root)?;
+
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let replacement_project_dir = replacement_root.join(PROJECTATLAS_DIR_NAME);
+        let replacement_config = replacement_project_dir.join(PROJECTATLAS_CONFIG_FILE_NAME);
+        let replacement_nonsource = replacement_project_dir.join(MCP_NONSOURCE_FILE_NAME);
+        let server = ProjectAtlasMcpServer::new(
+            database.clone(),
+            None,
+            "ambiguous-predecessor".to_string(),
+            false,
+        );
+        require(
+            server.active_project_state()?.root == canonical_project_root(&replacement_root)?,
+            "MCP startup did not select the replacement-character candidate",
+        )?;
+        let result = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: None,
+            worktree: None,
+            no_scan: Some(true),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            result.contains("project-root identity"),
+            &format!("ambiguous predecessor init returned an unexpected result: {result}"),
+        )?;
+        require(
+            fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"]
+                    .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok())
+                    == sidecars_before,
+            "ambiguous predecessor init changed database or sidecar state",
+        )?;
+        require(
+            !replacement_project_dir.exists()
+                && !replacement_config.exists()
+                && !replacement_nonsource.exists(),
+            "ambiguous predecessor init wrote replacement-root project state",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn nearest_root_rejects_ambiguous_predecessor_without_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
         fn sidecar_bytes(database: &Path) -> [Option<Vec<u8>>; 3] {

@@ -2533,6 +2533,14 @@ pub(crate) fn run_init_bootstrap(
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
     let root = canonical_source_project_root(root)?;
+    if db_path.is_file()
+        && read_legacy_project_root_candidate_read_only(db_path)?
+            .is_some_and(|legacy_root| legacy_root.contains('\u{fffd}'))
+    {
+        return Err(project_store_error(
+            projectatlas_db::DbError::ProjectRootIdentityMissing,
+        ));
+    }
     let project_dir = root.join(".projectatlas");
     let config_file = init_config_path(&root, config_path);
     let nonsource_file = project_dir.join("projectatlas-nonsource-files.toon");
