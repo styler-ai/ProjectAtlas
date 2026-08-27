@@ -386,6 +386,9 @@ pub(crate) fn ensure_project_root_identity(
     connection: &Connection,
     expected: &CanonicalProjectRoot,
 ) -> DbResult<()> {
+    if load_project_identity(connection)?.is_none() {
+        return Err(DbError::ProjectInstanceIdentityMissing);
+    }
     let metadata = connection
         .query_row(
             "SELECT value FROM metadata WHERE key = ?1",

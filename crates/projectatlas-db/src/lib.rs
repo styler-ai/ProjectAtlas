@@ -1742,6 +1742,13 @@ impl AtlasStore {
                     .then(|| preflight.project_root.clone())
                     .flatten()
             });
+        if preflight.state == SchemaState::Current
+            && expected_identity.is_some()
+            && identity_requirement.is_required()
+            && preflight.project_instance_id.is_none()
+        {
+            return Err(DbError::ProjectInstanceIdentityMissing);
+        }
         let connection = open_writable_connection(
             path,
             writable_open_flags(preflight.state, location.database_exists),

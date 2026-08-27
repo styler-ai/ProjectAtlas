@@ -3985,6 +3985,119 @@ mod tests {
     }
 
     #[test]
+    fn current_root_repair_refuses_incomplete_binding_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("incomplete-binding.db");
+        {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.connection.execute(
+                "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+                [],
+            )?;
+            store.connection.execute(
+                "INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+                 SELECT id, 'authored incomplete-binding purpose', 'agent', 'approved',
+                        'schema-test'
+                   FROM nodes WHERE path = 'src/lib.rs'",
+                [],
+            )?;
+            store.record_usage(&usage_from_estimates(
+                "incomplete-binding-session",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                12,
+                5,
+            ))?;
+            store.connection.execute(
+                "UPDATE project_identity SET active_generation = 7 WHERE singleton = 1",
+                [],
+            )?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+
+        // Model an incomplete current binding: the legacy display remains
+        // present, but neither identity singleton exists. This is the exact
+        // state in which repair must be refused before writable admission.
+        {
+            let connection = Connection::open(&database)?;
+            connection.execute_batch(
+                "DELETE FROM project_root_identity;
+                 DELETE FROM project_identity;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )?;
+        }
+
+        // Warm the read-only SQLite path before capturing the no-mutation
+        // baseline; a WAL reader may materialize its shared-memory sidecar.
+        {
+            let connection =
+                Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            drop(connection);
+        }
+        let snapshot_before = {
+            let connection =
+                Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let snapshot = current_schema_snapshot(&connection)?;
+            drop(connection);
+            snapshot
+        };
+        let sidecars_before = ["-wal", "-shm", "-journal"]
+            .map(|suffix| fs::read(sqlite_sidecar_path(&database, suffix)).ok());
+        let database_before = fs::read(&database)?;
+        let inventory_before = directory_entry_names(temp.path())?;
+
+        for attempt in 0..2 {
+            let Err(error) = AtlasStore::open_for_project(&database, &root) else {
+                return Err(io::Error::other(format!(
+                    "incomplete current binding opened on attempt {attempt}"
+                ))
+                .into());
+            };
+            if !matches!(error, DbError::ProjectInstanceIdentityMissing) {
+                return Err(io::Error::other(format!(
+                    "incomplete current binding returned the wrong error on attempt {attempt}: {error}"
+                ))
+                .into());
+            }
+            if fs::read(&database)? != database_before {
+                return Err(io::Error::other(format!(
+                    "incomplete current binding changed database bytes on attempt {attempt}"
+                ))
+                .into());
+            }
+            let sidecars_after = ["-wal", "-shm", "-journal"]
+                .map(|suffix| fs::read(sqlite_sidecar_path(&database, suffix)).ok());
+            if sidecars_after != sidecars_before {
+                return Err(io::Error::other(format!(
+                    "incomplete current binding changed SQLite sidecars on attempt {attempt}"
+                ))
+                .into());
+            }
+            if directory_entry_names(temp.path())? != inventory_before {
+                return Err(io::Error::other(format!(
+                    "incomplete current binding changed directory inventory on attempt {attempt}"
+                ))
+                .into());
+            }
+            let connection =
+                Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            if current_schema_snapshot(&connection)? != snapshot_before {
+                return Err(io::Error::other(format!(
+                    "incomplete current binding changed durable rows on attempt {attempt}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn supported_schema_upgrades_preserve_authored_state_and_invalidate_publication()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
