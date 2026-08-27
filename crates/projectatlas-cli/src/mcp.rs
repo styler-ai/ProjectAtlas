@@ -16820,6 +16820,10 @@ mod tests {
         drop(predecessor);
         fs::create_dir_all(&replacement_root)?;
 
+        // The startup root resolver opens the predecessor read-only. SQLite
+        // may materialize WAL sidecars for that read path, so warm the exact
+        // recovery route before capturing the no-mutation baseline.
+        let _ = default_mcp_project_root(&database, None)?;
         let database_before = fs::read(&database)?;
         let sidecars_before = ["wal", "shm", "journal"]
             .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
