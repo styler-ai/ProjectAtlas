@@ -1,6 +1,9 @@
 //! Durable project identity and explicit root-binding transitions.
 
-use super::{AtlasStore, DbError, DbResult, normalize_metadata_path, set_metadata};
+use super::{
+    AtlasStore, DbError, DbResult, ProjectRootMismatchIdentities, normalize_metadata_path,
+    set_metadata,
+};
 use crate::schema::{self, PROJECT_ROOT_KEY, SchemaState};
 use projectatlas_core::graph::ProjectInstanceId;
 use projectatlas_core::{CanonicalProjectRoot, IndexGeneration};
@@ -425,6 +428,10 @@ pub(crate) fn prove_existing_root_equivalence(
         return Err(DbError::ProjectRootMismatch {
             expected: selected.display_string_lossy(),
             found: persisted.display_string_lossy(),
+            identities: Some(Box::new(ProjectRootMismatchIdentities {
+                expected: selected,
+                found: persisted,
+            })),
         });
     }
     Ok(selected)

@@ -1871,6 +1871,7 @@ fn current_binding(
             (Some(expected), Some(found)) => Err(DbError::ProjectRootMismatch {
                 expected: expected.to_string(),
                 found,
+                identities: None,
             }),
             (Some(_), None) => Err(DbError::ProjectRootMissing),
             (None, found_root) => Err(DbError::ProjectRootTransitionChanged {
@@ -1967,6 +1968,7 @@ fn inspect_connection(
                 return Err(DbError::ProjectRootMismatch {
                     expected: expected.to_string(),
                     found: found.to_string(),
+                    identities: None,
                 });
             }
             None if state == SchemaState::Fresh => {}
@@ -6832,9 +6834,10 @@ mod tests {
                 .into());
             };
             match error {
-                DbError::ProjectRootMismatch { expected, found }
-                    if expected == normalize_native_path_display(&other)
-                        && found == normalize_native_path_display(&root) => {}
+                DbError::ProjectRootMismatch {
+                    expected, found, ..
+                } if expected == normalize_native_path_display(&other)
+                    && found == normalize_native_path_display(&root) => {}
                 other => {
                     return Err(io::Error::other(format!(
                         "{label} wrong root returned the wrong error: {other}"

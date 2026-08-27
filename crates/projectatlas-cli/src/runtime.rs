@@ -2490,17 +2490,23 @@ pub(crate) fn open_atlas_store_read_only_for_project(
 /// Preserve typed selected-root mismatch diagnostics across store adapters.
 pub(crate) fn project_store_error(source: projectatlas_db::DbError) -> CliError {
     match source {
-        projectatlas_db::DbError::ProjectRootMismatch { expected, found } => {
-            CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
-                status: IndexReadStatus::ProjectMismatch,
-                worktree: None,
-                selected_project_root: None,
-                indexed_project_root: None,
-                diagnostic: Some(format!(
-                    "database project root {found:?} does not match selected root {expected:?}"
-                )),
-            }))
-        }
+        projectatlas_db::DbError::ProjectRootMismatch {
+            expected,
+            found,
+            identities,
+        } => CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
+            status: IndexReadStatus::ProjectMismatch,
+            worktree: None,
+            selected_project_root: identities
+                .as_ref()
+                .and_then(|identities| identities.expected.display_string().ok()),
+            indexed_project_root: identities
+                .as_ref()
+                .and_then(|identities| identities.found.display_string().ok()),
+            diagnostic: Some(format!(
+                "database project root {found:?} does not match selected root {expected:?}"
+            )),
+        })),
         other => CliError::Db(other),
     }
 }

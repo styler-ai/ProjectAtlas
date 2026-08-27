@@ -5877,6 +5877,50 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn cli_project_mismatch_preserves_lossless_store_roots() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-root");
+        let indexed_root = temp.path().join("indexed-root");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&indexed_root)?;
+        let database = indexed_root.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("indexed database path has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &indexed_root)?);
+
+        let Err(error) = super::runtime::open_atlas_store_for_project(&database, &selected_root)
+        else {
+            return Err(io::Error::other("wrong-root store open unexpectedly succeeded").into());
+        };
+        let selected_display =
+            projectatlas_core::CanonicalProjectRoot::from_path(&selected_root)?.display_string()?;
+        let indexed_display =
+            projectatlas_core::CanonicalProjectRoot::from_path(&indexed_root)?.display_string()?;
+
+        let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+        require_condition(
+            json.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::String(selected_display.clone()))
+                && json.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::String(indexed_display.clone())),
+            "CLI JSON omitted lossless roots from a store mismatch",
+        )?;
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_condition(
+            toon_value.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::String(selected_display))
+                && toon_value.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::String(indexed_display)),
+            "CLI TOON omitted lossless roots from a store mismatch",
+        )?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn cli_project_mismatch_keeps_native_display_unavailable_typed() -> Result<(), Box<dyn Error>> {
@@ -5917,6 +5961,7 @@ mod tests {
         let mapped = super::runtime::project_store_error(DbError::ProjectRootMismatch {
             expected: raw_root.to_string_lossy().into_owned(),
             found: replacement_root.to_string_lossy().into_owned(),
+            identities: None,
         });
         let mapped_json: Value =
             serde_json::from_str(&render_cli_error(OutputFormat::Json, &mapped)?)?;

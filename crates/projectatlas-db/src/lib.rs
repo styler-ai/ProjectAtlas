@@ -444,6 +444,8 @@ pub enum DbError {
         expected: String,
         /// Durable root recorded in `SQLite`.
         found: String,
+        /// Lossless native identities when the admission proof had both roots.
+        identities: Option<Box<ProjectRootMismatchIdentities>>,
     },
     /// A native project-root identity or its lossless codec is invalid.
     #[error("project-root identity error: {0}")]
@@ -771,6 +773,15 @@ impl DbError {
             _ => false,
         }
     }
+}
+
+/// Lossless native identities involved in a project-root mismatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectRootMismatchIdentities {
+    /// Canonical root selected by the caller.
+    pub expected: CanonicalProjectRoot,
+    /// Canonical root recorded by the opened index.
+    pub found: CanonicalProjectRoot,
 }
 
 /// Convenient result alias for database operations.

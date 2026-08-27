@@ -3433,6 +3433,30 @@ fn assert_settings_reports_supported_predecessor_without_migration(
     drop(connection);
     let bytes_before = fs::read(&db_path)?;
 
+    #[cfg(unix)]
+    {
+        let token = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["--format", "json", "--db"])
+            .arg(&db_path)
+            .arg("token")
+            .output()?;
+        let token_error = String::from_utf8_lossy(&token.stderr);
+        if token.status.success() || !token_error.contains("canonical project-root identity") {
+            return Err(io::Error::other(format!(
+                "Unix predecessor {label} was not refused before root selection: {token_error}"
+            ))
+            .into());
+        }
+        if fs::read(&db_path)? != bytes_before {
+            return Err(io::Error::other(format!(
+                "Unix predecessor {label} refusal changed the database"
+            ))
+            .into());
+        }
+        return Ok(());
+    }
+
     let token = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .args(["--format", "json", "--db"])
@@ -3604,8 +3628,42 @@ fn supported_predecessor_recovery_preserves_explicit_database_selection()
         )?;
     }
     let default_db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
-
     let executable = mcp_contract_executable();
+
+    #[cfg(unix)]
+    {
+        for database in [&cli_db, &mcp_db] {
+            let before = fs::read(database)?;
+            let output = Command::new(&executable)
+                .current_dir(&repo)
+                .args(["--format", "json", "--db"])
+                .arg(database)
+                .arg("--config")
+                .arg(&config)
+                .arg("token")
+                .output()?;
+            let error = String::from_utf8_lossy(&output.stderr);
+            if output.status.success() || !error.contains("canonical project-root identity") {
+                return Err(io::Error::other(format!(
+                    "Unix explicit predecessor was not refused before selection: {error}"
+                ))
+                .into());
+            }
+            if fs::read(database)? != before {
+                return Err(io::Error::other(
+                    "Unix explicit predecessor refusal changed the selected database",
+                )
+                .into());
+            }
+        }
+        if default_db.exists() {
+            return Err(
+                io::Error::other("Unix predecessor refusal created the default database").into(),
+            );
+        }
+        return Ok(());
+    }
+
     let cli_error = Command::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "--db"])
@@ -3735,6 +3793,33 @@ fn assert_cli_migrates_released_schema_layout(
         [&project_root],
     )?;
     drop(connection);
+
+    #[cfg(unix)]
+    {
+        let bytes_before = fs::read(&db_path)?;
+        let sidecars_before = ["-wal", "-shm", "-journal"]
+            .map(|suffix| fs::read(sqlite_sidecar_path(&db_path, suffix)).ok());
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["--format", "json", command])
+            .output()?;
+        let error = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() || !error.contains("canonical project-root identity") {
+            return Err(io::Error::other(format!(
+                "Unix predecessor {label} {command} was not refused before migration: {error}"
+            ))
+            .into());
+        }
+        let sidecars_after = ["-wal", "-shm", "-journal"]
+            .map(|suffix| fs::read(sqlite_sidecar_path(&db_path, suffix)).ok());
+        if fs::read(&db_path)? != bytes_before || sidecars_after != sidecars_before {
+            return Err(io::Error::other(format!(
+                "Unix predecessor {label} {command} refusal changed database state"
+            ))
+            .into());
+        }
+        return Ok(());
+    }
 
     let output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)

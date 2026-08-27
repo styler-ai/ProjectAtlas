@@ -11137,6 +11137,42 @@ mod tests {
         )
     }
 
+    #[test]
+    fn mcp_project_mismatch_preserves_lossless_store_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-root");
+        let indexed_root = temp.path().join("indexed-root");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&indexed_root)?;
+        let database = indexed_root.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("indexed database path has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &indexed_root)?);
+
+        let Err(error) = open_atlas_store_for_project(&database, &selected_root) else {
+            return Err(io::Error::other("wrong-root store open unexpectedly succeeded").into());
+        };
+        let selected_display = CanonicalProjectRoot::from_path(&selected_root)?.display_string()?;
+        let indexed_display = CanonicalProjectRoot::from_path(&indexed_root)?.display_string()?;
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        let value: serde_json::Value = toon_format::decode_default(&payload)?;
+        require(
+            value.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&serde_json::Value::String(selected_display.clone()))
+                && value.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&serde_json::Value::String(indexed_display.clone())),
+            "MCP omitted lossless roots from a store mismatch",
+        )?;
+        require(
+            payload.contains(&selected_display) && payload.contains(&indexed_display),
+            "MCP TOON did not retain lossless store roots",
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn mcp_project_mismatch_keeps_native_display_unavailable_typed()
@@ -11165,6 +11201,7 @@ mod tests {
         let mapped = crate::runtime::project_store_error(DbError::ProjectRootMismatch {
             expected: raw_root.to_string_lossy().into_owned(),
             found: replacement_root.to_string_lossy().into_owned(),
+            identities: None,
         });
         let mapped_payload = ProjectAtlasMcpServer::encode_error_payload(&mapped);
         require(
