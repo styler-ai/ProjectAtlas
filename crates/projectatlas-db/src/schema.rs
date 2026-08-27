@@ -7093,6 +7093,7 @@ mod tests {
     }
 
     /// Verify one released layout rolls back a late migration failure and retries.
+    #[cfg(windows)]
     fn assert_released_schema_malformed_telemetry_rolls_back(
         label: &str,
         write_fixture: fn(&Path, &Path) -> Result<(), Box<dyn Error>>,
