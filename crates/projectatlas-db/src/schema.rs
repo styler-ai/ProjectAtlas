@@ -1477,10 +1477,7 @@ fn validate_legacy_project_root_binding(
         // A replacement character may represent either a real character or a
         // lossy raw path byte. Without a native predecessor authority, the
         // spelling is ambiguous and must be rejected to prevent a collision.
-        return Err(DbError::ProjectRootMismatch {
-            expected: expected_root.display_string_lossy(),
-            found: legacy,
-        });
+        return Err(DbError::ProjectRootIdentityMissing);
     }
     crate::project_identity::prove_existing_root_equivalence(
         expected_root.as_path(),

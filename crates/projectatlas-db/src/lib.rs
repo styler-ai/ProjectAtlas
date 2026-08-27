@@ -6485,6 +6485,22 @@ pub fn read_legacy_project_root_candidate_read_only(path: &Path) -> DbResult<Opt
         .flatten())
 }
 
+/// Validate one existing project binding without creating, migrating, or repairing it.
+///
+/// A fresh or absent database is admitted for a later initializer. Existing current
+/// databases use their native identity, while supported predecessors use the same
+/// read-only native-equivalence proof as the storage writer. No SQLite write
+/// connection or WAL state is opened by this check.
+///
+/// # Errors
+///
+/// Returns an error when the database is malformed, incompatible, missing an
+/// unambiguous predecessor binding, or belongs to another project root.
+pub fn preflight_project_binding_read_only(path: &Path, root: &Path) -> DbResult<()> {
+    let expected_identity = CanonicalProjectRoot::from_path(root)?;
+    schema::preflight_for_project(path, &expected_identity).map(|_| ())
+}
+
 /// Read the authoritative native project-root identity without mutation.
 ///
 /// # Errors

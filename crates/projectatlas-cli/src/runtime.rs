@@ -69,8 +69,8 @@ use projectatlas_db::{
     IndexPublicationState, IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
     MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
     TelemetryRetentionState, WorktreeRegistration, WorktreeUsageSnapshot, database_settings_report,
-    read_legacy_project_root_candidate_read_only, read_project_root_identity_read_only,
-    validate_database_location,
+    preflight_project_binding_read_only, read_legacy_project_root_candidate_read_only,
+    read_project_root_identity_read_only, validate_database_location,
 };
 use projectatlas_fs::worktree::{
     GitManagerSourceSelection, GitRepositorySelection, GitWorktreeState, RepositoryStructure,
@@ -2533,15 +2533,7 @@ pub(crate) fn run_init_bootstrap(
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
     let root = canonical_source_project_root(root)?;
-    preflight_existing_current_project_binding(db_path, &root)?;
-    if db_path.is_file()
-        && read_legacy_project_root_candidate_read_only(db_path)?
-            .is_some_and(|legacy_root| legacy_root.contains('\u{fffd}'))
-    {
-        return Err(project_store_error(
-            projectatlas_db::DbError::ProjectRootIdentityMissing,
-        ));
-    }
+    preflight_existing_project_binding(db_path, &root)?;
     let project_dir = root.join(".projectatlas");
     let config_file = init_config_path(&root, config_path);
     let nonsource_file = project_dir.join("projectatlas-nonsource-files.toon");
@@ -2620,22 +2612,17 @@ pub(crate) fn run_init_bootstrap(
     })
 }
 
-/// Refuse an existing current database bound to another root before init writes.
+/// Refuse an existing database binding before init writes.
 ///
-/// Predecessors intentionally remain on the legacy recovery path below; a
-/// current native identity is authoritative and is admitted through the DB's
-/// read-only equivalence proof before any config or project directory write.
-fn preflight_existing_current_project_binding(db_path: &Path, root: &Path) -> Result<(), CliError> {
-    if !db_path.is_file() {
-        return Ok(());
-    }
-    if read_project_root_identity_read_only(db_path)
-        .map_err(project_store_error)?
-        .is_some()
-    {
-        drop(open_atlas_store_read_only_for_project(db_path, root)?);
-    }
-    Ok(())
+/// The storage owner performs one read-only admission for both current native
+/// identities and supported predecessor metadata. Fresh databases remain
+/// available to the initializer, while the later writer still revalidates under
+/// its transaction for races.
+pub(crate) fn preflight_existing_project_binding(
+    db_path: &Path,
+    root: &Path,
+) -> Result<(), CliError> {
+    preflight_project_binding_read_only(db_path, root).map_err(project_store_error)
 }
 
 /// Return created/existing status for a path.
@@ -8956,6 +8943,63 @@ mod tests {
             &reopened.project_root_identity()?,
             &persisted_identity,
             "current binding after wrong-root init",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_predecessor_wrong_root_before_project_writes() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-predecessor-root");
+        let bound_root = temp.path().join("bound-predecessor-root");
+        let database = temp.path().join("external-predecessor.db");
+        let config_path = selected_root.join("external-config/config.toml");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&bound_root)?;
+        drop(AtlasStore::open_for_project(&database, &bound_root)?);
+        {
+            let connection = rusqlite::Connection::open(&database)?;
+            connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+        }
+        read_legacy_project_root_candidate_read_only(&database)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let selected_project_dir = selected_root.join(".projectatlas");
+        let config_parent = config_path
+            .parent()
+            .ok_or_else(|| io::Error::other("selected predecessor config has no parent"))?;
+
+        let result = run_init_bootstrap(
+            &selected_root,
+            &database,
+            Some(&config_path),
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        );
+        require_eq(
+            &matches!(result, Err(CliError::ProjectMismatch(_))),
+            &true,
+            "predecessor wrong-root init did not return a typed project mismatch",
+        )?;
+        require_eq(
+            &(!selected_project_dir.exists() && !config_parent.exists() && !config_path.exists()),
+            &true,
+            "predecessor wrong-root init created selected project or config state",
+        )?;
+        require_eq(
+            &(fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"]
+                    .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok())
+                    == sidecars_before),
+            &true,
+            "predecessor wrong-root init changed database or sidecar state",
         )?;
         Ok(())
     }

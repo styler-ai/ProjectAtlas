@@ -23,8 +23,8 @@ use crate::runtime::{
     lossless_native_path_display, lossless_project_root_display, next_step_report_payload,
     next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
     open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
-    purpose_curation_page, purpose_curator_handoff, ranked_file_nodes_with_reasons,
-    ranked_folder_nodes_with_reasons, read_indexed_file_content,
+    preflight_existing_project_binding, purpose_curation_page, purpose_curator_handoff,
+    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
     reconcile_hydrated_index_controlled, record_directory_walk_usage_estimate,
     record_usage_estimate, record_usage_text, render_classified_ranked_file_rows,
     render_classified_symbol_rows, render_health_page, render_purpose_curation_page,
@@ -4483,6 +4483,7 @@ impl ProjectAtlasMcpServer {
             return Ok(report);
         }
 
+        preflight_existing_project_binding(&state.db_path, &state.root)?;
         let project_dir = state.root.join(PROJECTATLAS_DIR_NAME);
         let nonsource_file = project_dir.join(MCP_NONSOURCE_FILE_NAME);
         let project_dir_existed = project_dir.exists();
@@ -17008,6 +17009,74 @@ mod tests {
         require(
             reopened.project_root_identity()? == persisted_identity,
             "current binding changed after wrong-root MCP init",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_init_rejects_predecessor_wrong_root_before_project_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-predecessor-root");
+        let bound_root = temp.path().join("bound-predecessor-root");
+        let database = temp.path().join("external-predecessor.db");
+        let config_path = selected_root.join("external-config/config.toml");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&bound_root)?;
+        drop(AtlasStore::open_for_project(&database, &bound_root)?);
+        {
+            let connection = rusqlite::Connection::open(&database)?;
+            connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+        }
+        read_legacy_project_root_candidate_read_only(&database)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(crate::runtime::db_sidecar_path(&database, suffix)).ok());
+        let selected_project_dir = selected_root.join(PROJECTATLAS_DIR_NAME);
+        let config_parent = config_path
+            .parent()
+            .ok_or_else(|| io::Error::other("selected predecessor config has no parent"))?;
+        let server = ProjectAtlasMcpServer::new(
+            database.clone(),
+            Some(config_path.clone()),
+            "predecessor-wrong-root".to_string(),
+            false,
+        );
+        *server
+            .project_state
+            .write()
+            .map_err(|_poisoned| io::Error::other("MCP project state lock poisoned"))? =
+            McpProjectState {
+                root: selected_root,
+                db_path: database.clone(),
+                config_path: Some(config_path.clone()),
+                worktree: None,
+            };
+
+        let result = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: None,
+            worktree: None,
+            no_scan: Some(true),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            result.contains("does not match selected root"),
+            &format!("predecessor wrong-root MCP init returned an unexpected result: {result}"),
+        )?;
+        require(
+            !selected_project_dir.exists() && !config_parent.exists() && !config_path.exists(),
+            "predecessor wrong-root MCP init created selected project or config state",
+        )?;
+        require(
+            fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"].map(|suffix| {
+                    fs::read(crate::runtime::db_sidecar_path(&database, suffix)).ok()
+                }) == sidecars_before,
+            "predecessor wrong-root MCP init changed database or sidecar state",
         )?;
         Ok(())
     }
