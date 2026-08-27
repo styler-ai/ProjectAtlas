@@ -2867,13 +2867,19 @@ fn default_config_root_value(root: &Path, config_path: &Path) -> AtlasMapResult<
                 .join("/"))
         }
     } else {
-        root.to_str()
-            .map(projectatlas_core::normalize_native_path_display_str)
+        let value = root
+            .to_str()
             .ok_or_else(|| AtlasMapError::InvalidRepositoryPath {
                 path: "<native project root>".to_string(),
                 message: "cannot serialize a non-UTF-8 root into an external TOML config"
                     .to_string(),
-            })
+            })?;
+        let normalized = projectatlas_core::normalize_native_path_display_str(value);
+        Ok(if Path::new(&normalized).is_absolute() {
+            normalized
+        } else {
+            value.to_owned()
+        })
     }
 }
 
@@ -3405,6 +3411,37 @@ root = "."
                 ))
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_config_preserves_absolute_volume_guid_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = Path::new(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\repo");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
+
+        let text = super::default_config_text_for(root, &config_path)?;
+        let expected = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("synthetic volume-GUID root was not UTF-8"))?;
+        let parsed = toml::from_str::<toml::Value>(&text)?;
+        let decoded = parsed
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|project| project.get("root"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| io::Error::other("generated volume-GUID root was not a TOML string"))?;
+        if !Path::new(decoded).is_absolute() || decoded != expected {
+            return Err(io::Error::other(format!(
+                "generated volume-GUID root lost its absolute native spelling: {decoded:?}"
+            ))
+            .into());
+        }
+        let escaped = expected.replace('\\', "\\\\");
+        if !text.contains(&format!("root = \"{escaped}\"")) {
+            return Err(io::Error::other("generated volume-GUID root was not TOML-escaped").into());
         }
         Ok(())
     }
