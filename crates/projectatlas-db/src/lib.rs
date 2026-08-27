@@ -6467,7 +6467,9 @@ pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
 /// never an authoritative project identity and callers must canonicalize the
 /// candidate through the live filesystem before opening a project database.
 /// Current databases intentionally return no candidate because their typed
-/// native identity is the only authority.
+/// native identity is the only authority. A predecessor candidate is returned
+/// only when the schema-owned policy can establish that its legacy projection
+/// is usable; otherwise the typed native-identity error is returned.
 ///
 /// # Errors
 ///
@@ -6475,9 +6477,13 @@ pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
 /// predecessor schema is incompatible or malformed.
 pub fn read_legacy_project_root_candidate_read_only(path: &Path) -> DbResult<Option<String>> {
     let (preflight, _) = schema::inspect_compatibility(path, None)?;
-    Ok((preflight.state == SchemaState::UpgradeRequired)
-        .then_some(preflight.project_root)
-        .flatten())
+    if preflight.state != SchemaState::UpgradeRequired {
+        return Ok(None);
+    }
+    if schema::legacy_root_requires_native_authority(preflight.project_root.as_deref()) {
+        return Err(DbError::ProjectRootIdentityMissing);
+    }
+    Ok(preflight.project_root)
 }
 
 /// Validate one existing project binding without creating, migrating, or repairing it.

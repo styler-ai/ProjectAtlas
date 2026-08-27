@@ -2715,9 +2715,9 @@ pub(crate) fn config_root_mismatch_error(
 
 /// Resolve a predecessor root only as a read-only discovery candidate.
 ///
-/// Legacy metadata is a display-only recovery hint. Replacement characters
-/// make its native spelling ambiguous, so reject it before constructing a
-/// path or probing any candidate configuration location.
+/// Legacy metadata is a display-only recovery hint. The database-owned
+/// candidate reader rejects projections without native authority before this
+/// function constructs a path or probes any candidate configuration location.
 fn legacy_project_root_candidate(db: &Path) -> Result<Option<PathBuf>, CliError> {
     if !db.exists() {
         return Ok(None);
@@ -2725,11 +2725,6 @@ fn legacy_project_root_candidate(db: &Path) -> Result<Option<PathBuf>, CliError>
     let Some(project_root) = read_legacy_project_root_candidate_read_only(db)? else {
         return Ok(None);
     };
-    if project_root.contains('\u{fffd}') {
-        return Err(project_store_error(
-            projectatlas_db::DbError::ProjectRootIdentityMissing,
-        ));
-    }
     Ok(Some(canonical_source_project_root(Path::new(
         &project_root,
     ))?))
@@ -8858,6 +8853,7 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
     #[test]
     fn default_mcp_project_root_recovers_custom_predecessor_candidate() -> Result<(), Box<dyn Error>>
     {
@@ -8947,6 +8943,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn init_rejects_predecessor_wrong_root_before_project_writes() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -9006,8 +9003,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn runtime_rejects_ambiguous_predecessor_before_config_discovery() -> Result<(), Box<dyn Error>>
-    {
+    fn runtime_rejects_non_authoritative_predecessor_before_config_discovery()
+    -> Result<(), Box<dyn Error>> {
         fn is_ambiguous_predecessor(error: &CliError) -> bool {
             matches!(error, CliError::Db(DbError::ProjectRootIdentityMissing))
         }
@@ -9018,10 +9015,10 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let raw_root = temp
             .path()
-            .join(OsString::from_vec(b"runtime-raw-root-\x80".to_vec()));
-        let replacement_root = temp.path().join("runtime-raw-root-�");
+            .join(OsString::from_vec(b"runtime-repo\\name".to_vec()));
+        let replacement_root = temp.path().join("runtime-repo/name");
         let database = temp.path().join("runtime-custom-predecessor.db");
-        fs::create_dir(&raw_root)?;
+        fs::create_dir_all(&raw_root)?;
         drop(AtlasStore::open_for_project(&database, &raw_root)?);
         {
             let connection = rusqlite::Connection::open(&database)?;
@@ -9049,6 +9046,16 @@ mod tests {
             ),
         )?;
         let replacement_config_before = fs::read(&replacement_config)?;
+        require_condition(
+            matches!(
+                read_legacy_project_root_candidate_read_only(&database),
+                Err(DbError::ProjectRootIdentityMissing)
+            ),
+            "non-authoritative predecessor candidate was exposed",
+        )?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
 
         require_condition(
             default_mcp_project_root(&database, None)
@@ -9089,6 +9096,13 @@ mod tests {
         require_condition(
             fs::read(&replacement_config)? == replacement_config_before,
             "ambiguous predecessor discovery changed the replacement config",
+        )?;
+        require_condition(
+            fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"]
+                    .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok())
+                    == sidecars_before,
+            "ambiguous predecessor discovery changed database or sidecars",
         )?;
         Ok(())
     }

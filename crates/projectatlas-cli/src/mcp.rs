@@ -7324,9 +7324,6 @@ impl ProjectAtlasMcpServer {
                 else {
                     return false;
                 };
-                if legacy_root.contains('\u{fffd}') {
-                    return false;
-                }
                 let Ok(legacy_root) = CanonicalProjectRoot::from_path(Path::new(&legacy_root))
                 else {
                     return false;
@@ -16706,6 +16703,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn indexed_root_predecessor_candidate_supports_nearest_routing()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -17013,6 +17011,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn mcp_init_rejects_predecessor_wrong_root_before_project_writes()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -17143,7 +17142,13 @@ mod tests {
         // A read-only WAL opener may materialize its sidecars. Warm the exact
         // recovery path before capturing the no-mutation baseline.
         for database in [&raw_database, &replacement_database] {
-            let _ = read_legacy_project_root_candidate_read_only(database)?;
+            require(
+                matches!(
+                    read_legacy_project_root_candidate_read_only(database),
+                    Err(DbError::ProjectRootIdentityMissing)
+                ),
+                "ambiguous predecessor candidate was exposed during warm-up",
+            )?;
         }
 
         for (root, database) in [
@@ -17159,6 +17164,62 @@ mod tests {
             require(
                 snapshot(database)? == before,
                 "ambiguous predecessor detection changed database or sidecar state",
+            )?;
+        }
+
+        let collision_raw_root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"nearest-repo\\name".to_vec()));
+        let collision_slash_root = temp.path().join("nearest-repo").join("name");
+        let collision_raw_database = collision_raw_root
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_DB_FILE_NAME);
+        let collision_slash_database = collision_slash_root
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_DB_FILE_NAME);
+        fs::create_dir_all(&collision_raw_root)?;
+        fs::create_dir_all(
+            collision_slash_database
+                .parent()
+                .ok_or_else(|| io::Error::other("slash collision database has no parent"))?,
+        )?;
+        drop(open_atlas_store_for_project(
+            &collision_raw_database,
+            &collision_raw_root,
+        )?);
+        let collision_predecessor = rusqlite::Connection::open(&collision_raw_database)?;
+        collision_predecessor.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
+            [collision_slash_root.to_string_lossy().into_owned()],
+        )?;
+        collision_predecessor.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(collision_predecessor);
+        fs::copy(&collision_raw_database, &collision_slash_database)?;
+        for database in [&collision_raw_database, &collision_slash_database] {
+            require(
+                matches!(
+                    read_legacy_project_root_candidate_read_only(database),
+                    Err(DbError::ProjectRootIdentityMissing)
+                ),
+                "slash-colliding predecessor candidate was exposed during warm-up",
+            )?;
+        }
+        for (root, database) in [
+            (&collision_raw_root, &collision_raw_database),
+            (&collision_slash_root, &collision_slash_database),
+        ] {
+            let before = snapshot(database)?;
+            require(
+                ProjectAtlasMcpServer::indexed_root_from_candidate(root).is_none()
+                    && ProjectAtlasMcpServer::indexed_root_from_lexical_candidate(root).is_none(),
+                "slash-colliding predecessor was admitted by nearest routing",
+            )?;
+            require(
+                snapshot(database)? == before,
+                "slash-colliding predecessor detection changed database or sidecar state",
             )?;
         }
         Ok(())
