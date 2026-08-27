@@ -11,6 +11,7 @@ use crate::project_identity::{
     prove_existing_root_equivalence, require_bound_project_identity, set_graph_generation,
     set_project_identity, verify_project_identity,
 };
+use crate::schema;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
     CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
@@ -3311,10 +3312,30 @@ impl AtlasStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
+        let schema_version = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [schema::SCHEMA_VERSION_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse::<i64>().ok());
+        let Some(schema_version) = schema_version else {
+            return Ok(false);
+        };
         let expected_root = projectatlas_core::CanonicalProjectRoot::from_path(root)?;
-        let roots_match = load_project_root_identity(&connection)?.is_some_and(|stored_root| {
-            prove_existing_root_equivalence(expected_root.as_path(), stored_root.as_path()).is_ok()
-        });
+        let roots_match = match schema_version {
+            schema::SCHEMA_VERSION => {
+                load_project_root_identity(&connection)?.is_some_and(|stored_root| {
+                    prove_existing_root_equivalence(expected_root.as_path(), stored_root.as_path())
+                        .is_ok()
+                })
+            }
+            version if version == schema::SCHEMA_VERSION - 1 => {
+                schema::validate_legacy_project_root_binding(&connection, &expected_root).is_ok()
+            }
+            _ => false,
+        };
         Ok(roots_match
             && load_project_identity(&connection)? == Some(project)
             && marker.as_deref() == Some(GRAPH_STAGING_MARKER_VALUE))

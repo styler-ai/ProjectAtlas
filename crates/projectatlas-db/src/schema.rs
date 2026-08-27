@@ -1468,7 +1468,7 @@ pub(crate) fn preflight_for_project(
 /// transaction begins. The outer read-only preflight is only an admission
 /// hint; it cannot authorize a database or metadata replacement raced between
 /// preflight and migration.
-fn validate_legacy_project_root_binding(
+pub(crate) fn validate_legacy_project_root_binding(
     connection: &Connection,
     expected_root: &CanonicalProjectRoot,
 ) -> DbResult<CanonicalProjectRoot> {
