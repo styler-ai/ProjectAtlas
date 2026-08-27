@@ -403,11 +403,22 @@ pub(crate) fn ensure_project_root_identity(
         }
     }
     connection.execute_batch("BEGIN IMMEDIATE")?;
-    let result = ensure_project_root_identity_in_transaction(connection, expected);
+    let result = ensure_project_root_identity_after_lock(connection, expected);
     match result {
         Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
         Err(error) => Err(schema::rollback_after_error(connection, error)),
     }
+}
+
+/// Recheck required instance identity after the repair transaction acquires its write lock.
+fn ensure_project_root_identity_after_lock(
+    connection: &Connection,
+    expected: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    if load_project_identity(connection)?.is_none() {
+        return Err(DbError::ProjectInstanceIdentityMissing);
+    }
+    ensure_project_root_identity_in_transaction(connection, expected)
 }
 
 /// Repair root identity while the caller already owns the transaction.
@@ -723,6 +734,185 @@ mod tests {
             })?;
         assert_eq!(reopened_metadata, normalize_metadata_path(&alias));
         assert_eq!(reopened_identity_rows, 0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_repair_rechecks_identity_after_lock_without_mutation() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("private-var");
+        let alias = temp.path().join("var");
+        fs::create_dir(&target)?;
+        symlink(&target, &alias)?;
+        let database = temp.path().join("repair-after-lock.db");
+
+        let mut initial = AtlasStore::open_for_project(&database, &target)?;
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("repair-after-lock fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut initial, project)?;
+        let publication_before = initial.index_publication()?;
+        let usage_before = initial.usage_events(Some("identity-test"))?;
+        let overview_before = initial.token_overview(Some("identity-test"))?;
+        let generation_before = load_graph_generation(&initial.connection)?;
+        assert_authored_state(&initial)?;
+        assert_usage_report(&initial, true)?;
+        assert_runtime_scope(&initial, project, 1, 0, 1)?;
+        assert_graph_counts(&initial, [2, 1, 1, 1, 1, 1, 1])?;
+
+        initial.connection.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = ?2",
+            rusqlite::params![normalize_metadata_path(&alias), PROJECT_ROOT_KEY],
+        )?;
+        initial
+            .connection
+            .execute_batch("DELETE FROM project_root_identity; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        drop(initial);
+
+        // Establish the same read-only baseline used by the real admission
+        // path before forcing the writer-phase identity loss.
+        drop(AtlasStore::open_read_only(&database)?);
+        let baseline = AtlasStore::open_read_only(&database)?;
+        let metadata_before = baseline.project_root()?;
+        let native_before = baseline.project_root_identity()?;
+        let instance_before = baseline.project_instance_id()?;
+        require_eq(
+            &metadata_before,
+            &Some(normalize_metadata_path(&alias)),
+            "repair-after-lock legacy metadata before fault",
+        )?;
+        require_eq(
+            &native_before,
+            &None,
+            "repair-after-lock native identity before fault",
+        )?;
+        require_eq(
+            &instance_before,
+            &Some(project),
+            "repair-after-lock instance before fault",
+        )?;
+        require_eq(
+            &load_graph_generation(&baseline.connection)?,
+            &generation_before,
+            "repair-after-lock generation before fault",
+        )?;
+        require_eq(
+            &baseline.index_publication()?,
+            &publication_before,
+            "repair-after-lock publication before fault",
+        )?;
+        require_eq(
+            &baseline.usage_events(Some("identity-test"))?,
+            &usage_before,
+            "repair-after-lock usage before fault",
+        )?;
+        require_eq(
+            &baseline.token_overview(Some("identity-test"))?,
+            &overview_before,
+            "repair-after-lock overview before fault",
+        )?;
+        assert_authored_state(&baseline)?;
+        assert_usage_report(&baseline, true)?;
+        assert_runtime_scope(&baseline, project, 1, 0, 1)?;
+        assert_graph_counts(&baseline, [2, 1, 1, 1, 1, 1, 1])?;
+        drop(baseline);
+
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("repair-after-lock.db{suffix}"))).ok()
+        });
+        let inventory_before = {
+            let mut entries = fs::read_dir(temp.path())?
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.sort();
+            entries
+        };
+
+        let connection = Connection::open(&database)?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        connection.execute("DELETE FROM project_identity", [])?;
+        let expected = CanonicalProjectRoot::from_path(&alias)?;
+        let error = ensure_project_root_identity_after_lock(&connection, &expected)
+            .err()
+            .ok_or_else(|| io::Error::other("post-lock root repair unexpectedly succeeded"))?;
+        require(
+            matches!(error, DbError::ProjectInstanceIdentityMissing),
+            "post-lock root repair returned the wrong error",
+        )?;
+        let rollback_error = schema::rollback_after_error(&connection, error);
+        require(
+            matches!(rollback_error, DbError::ProjectInstanceIdentityMissing),
+            "post-lock rollback changed the initiating error",
+        )?;
+        drop(connection);
+
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "post-lock root repair database bytes",
+        )?;
+        let sidecars_after = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("repair-after-lock.db{suffix}"))).ok()
+        });
+        require_eq(
+            &sidecars_after,
+            &sidecars_before,
+            "post-lock root repair sidecars",
+        )?;
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        require_eq(
+            &inventory_after,
+            &inventory_before,
+            "post-lock root repair inventory",
+        )?;
+
+        let reopened = AtlasStore::open_read_only(&database)?;
+        require_eq(
+            &reopened.project_root()?,
+            &metadata_before,
+            "post-lock root repair legacy metadata",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &native_before,
+            "post-lock root repair native identity",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &instance_before,
+            "post-lock root repair instance",
+        )?;
+        require_eq(
+            &load_graph_generation(&reopened.connection)?,
+            &generation_before,
+            "post-lock root repair generation",
+        )?;
+        require_eq(
+            &reopened.index_publication()?,
+            &publication_before,
+            "post-lock root repair publication",
+        )?;
+        require_eq(
+            &reopened.usage_events(Some("identity-test"))?,
+            &usage_before,
+            "post-lock root repair usage",
+        )?;
+        require_eq(
+            &reopened.token_overview(Some("identity-test"))?,
+            &overview_before,
+            "post-lock root repair overview",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, true)?;
+        assert_runtime_scope(&reopened, project, 1, 0, 1)?;
+        assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
         Ok(())
     }
 
