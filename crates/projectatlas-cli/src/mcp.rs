@@ -6715,8 +6715,7 @@ impl ProjectAtlasMcpServer {
                 ));
             }
         }
-        let registration_root_matches = current_registry_root == registration.last_root
-            || registration.project_instance_id.is_none();
+        let registration_root_matches = current_registry_root == registration.last_root;
         let registration = if registration_root_matches {
             registration
         } else {
@@ -12813,6 +12812,71 @@ mod tests {
             "failed atlas validation refreshed the control registration",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn unbound_registered_worktree_move_refreshes_root_before_missing_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = registered_worktree_race_fixture("unbound-move")?;
+        let original_root_display = normalize_native_path_display(&fixture.state.root);
+        let moved = fixture
+            .primary
+            .parent()
+            .ok_or_else(|| io::Error::other("moved worktree has no parent"))?
+            .join("moved-unbound-worktree");
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&fixture.primary)
+                .args(["worktree", "move"])
+                .arg(&fixture.linked)
+                .arg(&moved),
+        )?;
+        let moved_root = moved.canonicalize()?;
+        let unresolved = fixture
+            .server
+            .state_for_target(None, Some(fixture.alias.to_string()));
+        require(
+            unresolved.is_err(),
+            "unbound moved worktree without an atlas was accepted as initialized",
+        )?;
+
+        let control = AtlasStore::open_for_project(&fixture.control_db, &fixture.control_root)?;
+        let refreshed = control.worktree_registration(&fixture.alias)?;
+        require(
+            refreshed.project_instance_id.is_none()
+                && refreshed.last_root == normalize_native_path_display(&moved_root),
+            "unbound Git move did not refresh its registered root",
+        )?;
+        drop(control);
+
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&fixture.primary)
+                .args(["worktree", "remove", "--force"])
+                .arg(&moved),
+        )?;
+        let missing = fixture
+            .server
+            .atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+                include_retired: Some(false),
+            }));
+        require(
+            missing.contains(&normalize_native_path_display(&moved_root))
+                && !missing.contains(&original_root_display)
+                && missing.contains("\"unbound-move\",linked,missing,registered"),
+            &format!("missing worktree reporting retained the pre-move root: {missing}"),
+        )?;
+        let retired = fixture
+            .server
+            .atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+                worktree: fixture.alias.to_string(),
+            }));
+        require(
+            retired.contains("status: retired")
+                && retired.contains(&normalize_native_path_display(&moved_root))
+                && !retired.contains(&original_root_display),
+            &format!("retirement reporting retained the pre-move root: {retired}"),
+        )
     }
 
     #[test]
