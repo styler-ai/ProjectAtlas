@@ -1503,6 +1503,7 @@ mod tests {
              PRAGMA wal_checkpoint(TRUNCATE);",
         )?;
 
+        drop(store);
         let database_before = fs::read(&database)?;
         let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
             fs::read(database.with_file_name(format!("schema-19-atomic.db{suffix}"))).ok()
@@ -1514,12 +1515,10 @@ mod tests {
 
         let source_identity = CanonicalProjectRoot::from_path(&source_root)?;
         let destination_identity = CanonicalProjectRoot::from_path(&destination_root)?;
-        store.connection.execute_batch("BEGIN IMMEDIATE")?;
-        let source_display = normalize_metadata_path(&source_root);
-        schema::initialize_with_project_root_in_transaction(
-            &store.connection,
-            Some(&source_display),
-            None,
+        let mut store = AtlasStore::open_for_root_transition(&database)?;
+        require(
+            !store.connection.is_autocommit(),
+            "schema-19 transition opener committed migration before transition",
         )?;
         store.connection.execute_batch(
             "CREATE TRIGGER fail_destination_root_metadata_update
@@ -1546,29 +1545,6 @@ mod tests {
             matches!(rollback_error, DbError::Sqlite(_)),
             "schema-19 detach rollback changed the initiating error",
         )?;
-        require_eq(
-            &fs::read(&database)?,
-            &database_before,
-            "schema-19 detach failed database bytes",
-        )?;
-        let sidecars_after = ["-wal", "-shm", "-journal"].map(|suffix| {
-            fs::read(database.with_file_name(format!("schema-19-atomic.db{suffix}"))).ok()
-        });
-        require_eq(
-            &sidecars_after,
-            &sidecars_before,
-            "schema-19 detach failed sidecars",
-        )?;
-        let mut inventory_after = fs::read_dir(temp.path())?
-            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-            .collect::<Result<Vec<_>, _>>()?;
-        inventory_after.sort();
-        require_eq(
-            &inventory_after,
-            &inventory_before,
-            "schema-19 detach failed inventory",
-        )?;
-
         let schema_version = store.connection.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
@@ -1627,6 +1603,28 @@ mod tests {
         )?;
         require_eq(&trigger_count, &0, "schema-19 detach rollback trigger")?;
         drop(store);
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "schema-19 detach failed database bytes",
+        )?;
+        let sidecars_after = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-atomic.db{suffix}"))).ok()
+        });
+        require_eq(
+            &sidecars_after,
+            &sidecars_before,
+            "schema-19 detach failed sidecars",
+        )?;
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        require_eq(
+            &inventory_after,
+            &inventory_before,
+            "schema-19 detach failed inventory",
+        )?;
 
         let detached = AtlasStore::transition_project_root(
             &database,
