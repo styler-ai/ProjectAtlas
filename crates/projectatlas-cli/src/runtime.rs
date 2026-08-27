@@ -2707,11 +2707,34 @@ pub(crate) fn config_root_mismatch_error(
     ))
 }
 
+/// Resolve a predecessor root only as a read-only discovery candidate.
+///
+/// Legacy metadata is a display-only recovery hint. Replacement characters
+/// make its native spelling ambiguous, so reject it before constructing a
+/// path or probing any candidate configuration location.
+fn legacy_project_root_candidate(db: &Path) -> Result<Option<PathBuf>, CliError> {
+    if !db.exists() {
+        return Ok(None);
+    }
+    let Some(project_root) = read_legacy_project_root_candidate_read_only(db)? else {
+        return Ok(None);
+    };
+    if project_root.contains('\u{fffd}') {
+        return Err(project_store_error(
+            projectatlas_db::DbError::ProjectRootIdentityMissing,
+        ));
+    }
+    Ok(Some(canonical_source_project_root(Path::new(
+        &project_root,
+    ))?))
+}
+
 /// Resolve the default MCP project root without trusting the process cwd.
 pub(crate) fn default_mcp_project_root(
     db: &Path,
     config_path: Option<&Path>,
 ) -> Result<PathBuf, CliError> {
+    let legacy_root = legacy_project_root_candidate(db)?;
     if let Some(config_path) = config_path {
         let config = load_atlas_config(Some(config_path))?;
         let config_root = canonical_source_project_root(&config.root)?;
@@ -2732,10 +2755,8 @@ pub(crate) fn default_mcp_project_root(
     {
         return canonical_source_project_root(project_root.as_path());
     }
-    if db.exists()
-        && let Some(project_root) = read_legacy_project_root_candidate_read_only(db)?
-    {
-        return canonical_source_project_root(Path::new(&project_root));
+    if let Some(project_root) = legacy_root {
+        return Ok(project_root);
     }
     if let Some(project_root) = project_root_from_db_path(db) {
         return canonical_source_project_root(&project_root);
@@ -2755,6 +2776,7 @@ pub(crate) fn default_cli_project_root(
 ) -> Result<PathBuf, CliError> {
     if !database_path_is_explicit
         && config_path.is_none()
+        && !db.exists()
         && let Some(project_root) = project_root_from_db_path(db)
     {
         return canonical_source_project_root(&project_root);
@@ -5595,6 +5617,7 @@ pub(crate) fn resolved_mcp_config_path(
     db: &Path,
     config: Option<&Path>,
 ) -> Result<Option<PathBuf>, CliError> {
+    let legacy_root = legacy_project_root_candidate(db)?;
     if let Some(path) = config {
         return Ok(Some(absolute_path(path)?));
     }
@@ -5604,10 +5627,8 @@ pub(crate) fn resolved_mcp_config_path(
     {
         candidate_roots.push(project_root.into_path());
     }
-    if db.exists()
-        && let Some(project_root) = read_legacy_project_root_candidate_read_only(db)?
-    {
-        candidate_roots.push(canonical_source_project_root(Path::new(&project_root))?);
+    if let Some(project_root) = legacy_root {
+        candidate_roots.push(project_root);
     }
     let absolute_db = absolute_path(db)?;
     if let Some(project_root) = project_root_from_db_path(&absolute_db) {
@@ -8854,6 +8875,92 @@ mod tests {
             "custom predecessor root recovery",
         )?;
         drop(AtlasStore::open_for_project(&database, &root)?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_rejects_ambiguous_predecessor_before_config_discovery() -> Result<(), Box<dyn Error>>
+    {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"runtime-raw-root-\x80".to_vec()));
+        let replacement_root = temp.path().join("runtime-raw-root-�");
+        let database = raw_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir(&raw_root)?;
+        fs::create_dir(raw_root.join(".projectatlas"))?;
+        drop(AtlasStore::open_for_project(&database, &raw_root)?);
+        {
+            let connection = rusqlite::Connection::open(&database)?;
+            connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_root', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [replacement_root.to_string_lossy().into_owned()],
+            )?;
+        }
+        let replacement_config = replacement_root.join(".projectatlas/config.toml");
+        fs::create_dir_all(
+            replacement_config
+                .parent()
+                .ok_or_else(|| io::Error::other("replacement config has no parent"))?,
+        )?;
+        fs::write(
+            &replacement_config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(&replacement_root.to_string_lossy())?
+            ),
+        )?;
+        let replacement_config_before = fs::read(&replacement_config)?;
+        fn is_ambiguous_predecessor(error: CliError) -> bool {
+            matches!(error, CliError::Db(DbError::ProjectRootIdentityMissing))
+        }
+
+        require_condition(
+            default_mcp_project_root(&database, None).is_err_and(is_ambiguous_predecessor),
+            "default MCP discovery admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            default_cli_project_root(&database, None, false).is_err_and(is_ambiguous_predecessor),
+            "default CLI discovery admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            resolved_mcp_config_path(&database, None).is_err_and(is_ambiguous_predecessor),
+            "MCP config discovery admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            resolved_mcp_config_path(&database, Some(&replacement_config))
+                .is_err_and(is_ambiguous_predecessor),
+            "explicit MCP config bypassed ambiguous predecessor admission",
+        )?;
+        require_condition(
+            crate::build_harness_mcp_config_report(
+                crate::HarnessConfig::McpJson,
+                "ambiguous-predecessor",
+                &database,
+                None,
+                false,
+            )
+            .is_err_and(is_ambiguous_predecessor),
+            "generated MCP config admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            build_settings_report(&database, None, OutputFormat::Json)
+                .is_err_and(is_ambiguous_predecessor),
+            "settings discovery admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            fs::read(&replacement_config)? == replacement_config_before,
+            "ambiguous predecessor discovery changed the replacement config",
+        )?;
         Ok(())
     }
 
