@@ -35,7 +35,7 @@ use projectatlas_core::toon::{
 };
 use projectatlas_core::{
     IndexWorkControl, IndexWorkStage, PurposeSource, PurposeStatus, normalize_native_path_display,
-    normalize_native_path_display_str, normalize_repo_path_prefix,
+    normalize_repo_path_prefix,
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
@@ -3519,19 +3519,19 @@ fn validate_required_runtime_version(required_version: &str) -> Result<(), CliEr
     }
 }
 
-/// Render a native path for MCP launch config without Windows extended prefixes.
+/// Render a lossless native path for an MCP launch config.
 fn mcp_launch_path(path: &Path) -> Result<String, CliError> {
-    let value = path.to_str().ok_or_else(|| {
-        CliError::InvalidInput(
-            "native MCP configuration path has no lossless UTF-8 representation".to_string(),
-        )
-    })?;
-    Ok(native_launch_path(&normalize_native_path_display_str(
-        value,
-    )))
+    let value = projectatlas_core::lossless_native_path_display(path)
+        .ok()
+        .ok_or_else(|| {
+            CliError::InvalidInput(
+                "native MCP configuration path has no lossless UTF-8 representation".to_string(),
+            )
+        })?;
+    Ok(native_launch_path(&value))
 }
 
-/// Render a normalized diagnostic path as a Windows-native launcher path.
+/// Convert a lossless projected path to a Windows-native launcher path.
 #[cfg(windows)]
 fn native_launch_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("//") {
@@ -6134,6 +6134,79 @@ mod tests {
             !replacement_root.join(".projectatlas").exists()
                 && !replacement_root.join("projectatlas.toml").exists(),
             "lossy recovery failure mutated the replacement-character sibling",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mcp_launch_config_preserves_volume_and_verbatim_paths() -> Result<(), Box<dyn Error>> {
+        let project_root =
+            PathBuf::from(r"\\?\Volume{01234567-89AB-CDEF-0123-456789ABCDEF}\ProjectAtlas\CON.");
+        let executable = project_root.join("projectatlas.exe");
+        let database = project_root.join(".projectatlas").join("projectatlas.db");
+        let config = project_root.join(".projectatlas").join("config.toml");
+
+        let expected = |path: &Path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| io::Error::other("synthetic Windows path was not UTF-8"))
+        };
+        let command = super::mcp_launch_path(&executable)?;
+        let database = super::mcp_launch_path(&database)?;
+        let config = super::mcp_launch_path(&config)?;
+        let cwd = super::mcp_launch_path(&project_root)?;
+        let server = super::McpServerConfig {
+            command: command.clone(),
+            args: vec![
+                "--require-version".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+                "--db".to_string(),
+                database.clone(),
+                "--config".to_string(),
+                config.clone(),
+                "mcp".to_string(),
+            ],
+            cwd: cwd.clone(),
+        };
+        let config_document = serde_json::to_value(super::McpConfigDocument {
+            mcp_servers: BTreeMap::from([("projectatlas".to_string(), server)]),
+        })?;
+        let server = config_document
+            .pointer("/mcpServers/projectatlas")
+            .ok_or_else(|| io::Error::other("serialized MCP server was missing"))?;
+        require_condition(
+            server.get("command") == Some(&Value::String(command.clone()))
+                && server.pointer("/args/3") == Some(&Value::String(database.clone()))
+                && server.pointer("/args/5") == Some(&Value::String(config.clone()))
+                && server.get("cwd") == Some(&Value::String(cwd.clone())),
+            "serialized MCP launch fields changed a verbatim path",
+        )?;
+        for (label, path) in [
+            ("command", command.as_str()),
+            ("database", database.as_str()),
+            ("config", config.as_str()),
+            ("cwd", cwd.as_str()),
+        ] {
+            require_condition(
+                Path::new(path).is_absolute(),
+                &format!("serialized MCP {label} path was not absolute"),
+            )?;
+        }
+        require_condition(
+            command == expected(&executable)?
+                && database
+                    == expected(&project_root.join(".projectatlas").join("projectatlas.db"))?
+                && config == expected(&project_root.join(".projectatlas").join("config.toml"))?
+                && cwd == expected(&project_root)?,
+            "MCP launch configuration lost volume-GUID/verbatim spelling",
+        )?;
+
+        let drive = super::mcp_launch_path(Path::new(r"\\?\C:\repo\projectatlas.exe"))?;
+        let unc = super::mcp_launch_path(Path::new(r"\\?\UNC\server\share\repo"))?;
+        require_condition(
+            drive == r"C:\repo\projectatlas.exe" && unc == r"\\server\share\repo",
+            "ordinary extended drive/UNC MCP launch compatibility changed",
         )?;
         Ok(())
     }
