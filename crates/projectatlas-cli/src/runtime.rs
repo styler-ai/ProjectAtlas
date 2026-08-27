@@ -2533,6 +2533,7 @@ pub(crate) fn run_init_bootstrap(
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
     let root = canonical_source_project_root(root)?;
+    preflight_existing_current_project_binding(db_path, &root)?;
     if db_path.is_file()
         && read_legacy_project_root_candidate_read_only(db_path)?
             .is_some_and(|legacy_root| legacy_root.contains('\u{fffd}'))
@@ -2617,6 +2618,24 @@ pub(crate) fn run_init_bootstrap(
         purpose_handoff: purpose_curator_handoff(purpose_queue),
         next_steps,
     })
+}
+
+/// Refuse an existing current database bound to another root before init writes.
+///
+/// Predecessors intentionally remain on the legacy recovery path below; a
+/// current native identity is authoritative and is admitted through the DB's
+/// read-only equivalence proof before any config or project directory write.
+fn preflight_existing_current_project_binding(db_path: &Path, root: &Path) -> Result<(), CliError> {
+    if !db_path.is_file() {
+        return Ok(());
+    }
+    if read_project_root_identity_read_only(db_path)
+        .map_err(project_store_error)?
+        .is_some()
+    {
+        drop(open_atlas_store_read_only_for_project(db_path, root)?);
+    }
+    Ok(())
 }
 
 /// Return created/existing status for a path.
@@ -8875,6 +8894,69 @@ mod tests {
             "custom predecessor root recovery",
         )?;
         drop(AtlasStore::open_for_project(&database, &root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_current_wrong_root_before_project_writes() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-root");
+        let bound_root = temp.path().join("bound-root");
+        let database = temp.path().join("external-projectatlas.db");
+        let config_path = selected_root.join("external-config/config.toml");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&bound_root)?;
+        let persisted_identity = {
+            let store = AtlasStore::open_for_project(&database, &bound_root)?;
+            store.project_root_identity()?
+        };
+        drop(AtlasStore::open_read_only_for_project(
+            &database,
+            &bound_root,
+        )?);
+        let _ = read_project_root_identity_read_only(&database)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let selected_project_dir = selected_root.join(".projectatlas");
+        let config_parent = config_path
+            .parent()
+            .ok_or_else(|| io::Error::other("selected config has no parent"))?;
+
+        let result = run_init_bootstrap(
+            &selected_root,
+            &database,
+            Some(&config_path),
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        );
+        require_eq(
+            &matches!(result, Err(CliError::ProjectMismatch(_))),
+            &true,
+            "current wrong-root init did not return a typed project mismatch",
+        )?;
+        require_eq(
+            &(!selected_project_dir.exists() && !config_parent.exists() && !config_path.exists()),
+            &true,
+            "current wrong-root init created selected project or config state",
+        )?;
+        require_eq(
+            &(fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"]
+                    .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok())
+                    == sidecars_before),
+            &true,
+            "current wrong-root init changed database or sidecar state",
+        )?;
+        let reopened = AtlasStore::open_read_only_for_project(&database, &bound_root)?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &persisted_identity,
+            "current binding after wrong-root init",
+        )?;
         Ok(())
     }
 

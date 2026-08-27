@@ -16940,6 +16940,78 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn mcp_init_rejects_current_wrong_root_before_project_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-root");
+        let bound_root = temp.path().join("bound-root");
+        let database = temp.path().join("external-projectatlas.db");
+        let config_path = selected_root.join("external-config/config.toml");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&bound_root)?;
+        let persisted_identity = {
+            let store = AtlasStore::open_for_project(&database, &bound_root)?;
+            store.project_root_identity()?
+        };
+        drop(AtlasStore::open_read_only_for_project(
+            &database,
+            &bound_root,
+        )?);
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(crate::runtime::db_sidecar_path(&database, suffix)).ok());
+        let selected_project_dir = selected_root.join(PROJECTATLAS_DIR_NAME);
+        let config_parent = config_path
+            .parent()
+            .ok_or_else(|| io::Error::other("selected config has no parent"))?;
+        let server = ProjectAtlasMcpServer::new(
+            database.clone(),
+            Some(config_path.clone()),
+            "current-wrong-root".to_string(),
+            false,
+        );
+        *server
+            .project_state
+            .write()
+            .map_err(|_poisoned| io::Error::other("MCP project state lock poisoned"))? =
+            McpProjectState {
+                root: selected_root,
+                db_path: database.clone(),
+                config_path: Some(config_path.clone()),
+                worktree: None,
+            };
+
+        let result = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: None,
+            worktree: None,
+            no_scan: Some(true),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            result.contains("does not match selected root"),
+            &format!("current wrong-root MCP init returned an unexpected result: {result}"),
+        )?;
+        require(
+            !selected_project_dir.exists() && !config_parent.exists() && !config_path.exists(),
+            "current wrong-root MCP init created selected project or config state",
+        )?;
+        require(
+            fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"].map(|suffix| {
+                    fs::read(crate::runtime::db_sidecar_path(&database, suffix)).ok()
+                }) == sidecars_before,
+            "current wrong-root MCP init changed database or sidecar state",
+        )?;
+        let reopened = AtlasStore::open_read_only_for_project(&database, &bound_root)?;
+        require(
+            reopened.project_root_identity()? == persisted_identity,
+            "current binding changed after wrong-root MCP init",
+        )?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn nearest_root_rejects_ambiguous_predecessor_without_mutation()
