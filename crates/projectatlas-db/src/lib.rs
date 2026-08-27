@@ -93,13 +93,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
+#[cfg(all(test, windows))]
+use schema::PREVIOUS_SCHEMA_VERSION;
 use schema::{
     FILE_TEXT_FTS_PROJECTION_REVISION_KEY, FILE_TEXT_FTS_SOURCE_REVISION_KEY,
     INDEX_PUBLICATION_FINGERPRINT_KEY, INDEX_PUBLICATION_GENERATION_KEY,
     INDEX_PUBLICATION_STATE_KEY, PROJECT_ROOT_KEY, SchemaState,
 };
 #[cfg(test)]
-use schema::{PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite_sidecar_path};
+use schema::{SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite_sidecar_path};
 use sqlite_profile::{
     DatabaseLocation, JournalModePolicy, SQLITE_BUSY_TIMEOUT, open_writable_connection,
 };
