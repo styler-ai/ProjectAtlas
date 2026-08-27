@@ -378,8 +378,8 @@ pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfi
 /// Render a native path without replacing non-UTF-8 units.
 #[cfg(windows)]
 fn effective_config_path_display(path: &Path) -> Option<String> {
-    path.to_str()
-        .map(projectatlas_core::normalize_native_path_display_str)
+    projectatlas_core::lossless_native_path_display(path)
+        .ok()
         .map(|value| value.replace('/', "\\"))
 }
 
@@ -3436,6 +3436,66 @@ root = "."
         let escaped = expected.replace('\\', "\\\\");
         if !text.contains(&format!("root = \"{escaped}\"")) {
             return Err(io::Error::other("generated volume-GUID root was not TOML-escaped").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reports_preserve_absolute_volume_guid_paths() -> Result<(), Box<dyn Error>> {
+        let root = Path::new(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\repo");
+        let config_path = root.join(".projectatlas").join("config.toml");
+        let map_path = root.join(".projectatlas").join("projectatlas.toon");
+        let nonsource_path = root
+            .join(".projectatlas")
+            .join("projectatlas-nonsource-files.toon");
+        let database_path = root.join(".projectatlas").join("projectatlas.db");
+        let mut config = test_config(map_path.clone());
+        config.root = root.to_path_buf();
+        config.nonsource_files_path = nonsource_path;
+        config.db_path = database_path;
+        let expected = |path: &Path| path.to_str().map(ToOwned::to_owned);
+
+        let effective = super::effective_config_report(&config);
+        if effective.map_path != expected(&map_path)
+            || effective.nonsource_files_path != expected(&config.nonsource_files_path)
+            || effective.db_path != expected(&config.db_path)
+        {
+            return Err(io::Error::other(format!(
+                "effective config report changed the volume-GUID spelling: {effective:?}"
+            ))
+            .into());
+        }
+
+        let ignore = super::ignore_list_report(&config_path, &config);
+        if ignore.config_path != expected(&config_path)
+            || ignore.gitignore_path != expected(&root.join(".gitignore"))
+        {
+            return Err(io::Error::other(format!(
+                "ignore list report changed the volume-GUID spelling: {ignore:?}"
+            ))
+            .into());
+        }
+        let mutation =
+            super::ignore_mutation_report(&config_path, "add", "dir-name", "target", true, &config);
+        if mutation.config_path != expected(&config_path)
+            || mutation.gitignore_path != expected(&root.join(".gitignore"))
+        {
+            return Err(io::Error::other(format!(
+                "ignore mutation report changed the volume-GUID spelling: {mutation:?}"
+            ))
+            .into());
+        }
+
+        if super::effective_config_path_display(Path::new(r"\\?\C:\repo\file"))
+            != Some(r"C:\repo\file".to_string())
+            || super::effective_config_path_display(Path::new(r"\\?\UNC\server\share\repo\file"))
+                != Some(r"\\server\share\repo\file".to_string())
+        {
+            return Err(io::Error::other(
+                "ordinary extended drive or UNC display was not normalized",
+            )
+            .into());
         }
         Ok(())
     }
