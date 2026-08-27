@@ -343,6 +343,18 @@ impl AtlasStore {
                 reason: "hydration target matches the source project root",
             });
         }
+        match crate::project_identity::prove_existing_root_equivalence(
+            target_root_identity.as_path(),
+            source_root.as_path(),
+        ) {
+            Ok(_) => {
+                return Err(DbError::WorktreeHydrationInvalid {
+                    reason: "hydration target matches the source project root",
+                });
+            }
+            Err(DbError::ProjectRootMismatch { .. }) => {}
+            Err(error) => return Err(error),
+        }
         let destination_database =
             validated_target_database(target_root_identity.as_path(), destination_database)?;
         if destination_database.exists() {
@@ -573,6 +585,67 @@ mod tests {
         } else {
             Err(io::Error::other(message).into())
         }
+    }
+
+    #[cfg(windows)]
+    fn hydration_sidecar_snapshot(database: &Path) -> [Option<Vec<u8>>; 3] {
+        ["-wal", "-shm", "-journal"]
+            .map(|suffix| fs::read(sqlite_sidecar_path(database, suffix)).ok())
+    }
+
+    #[cfg(windows)]
+    fn hydration_directory_inventory(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut inventory = fs::read_dir(root)?
+            .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, io::Error>>()?;
+        inventory.sort();
+        Ok(inventory)
+    }
+
+    #[cfg(windows)]
+    fn hydration_state_snapshot(
+        store: &AtlasStore,
+    ) -> Result<
+        (
+            Option<ProjectInstanceId>,
+            Option<CanonicalProjectRoot>,
+            Option<String>,
+            (Option<String>, Option<String>, i64, i64, i64, i64, i64),
+            Option<crate::IndexPublication>,
+        ),
+        Box<dyn Error>,
+    > {
+        let authored_and_private_state = store.connection.query_row(
+            "SELECT
+                (SELECT purpose FROM purposes JOIN nodes ON nodes.id = purposes.node_id
+                   WHERE nodes.path = '.'),
+                (SELECT summary FROM summaries JOIN nodes ON nodes.id = summaries.node_id
+                   WHERE nodes.path = '.'),
+                (SELECT COUNT(*) FROM nodes),
+                (SELECT COUNT(*) FROM purposes),
+                (SELECT COUNT(*) FROM summaries),
+                (SELECT COUNT(*) FROM health_resolutions),
+                (SELECT COUNT(*) FROM usage_global_aggregates)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )?;
+        Ok((
+            store.project_instance_id()?,
+            store.project_root_identity()?,
+            store.project_root()?,
+            authored_and_private_state,
+            store.index_publication()?,
+        ))
     }
 
     /// Seed one complete control atlas with authored state and private control data.
@@ -829,6 +902,162 @@ mod tests {
         require(
             matches!(canceled_result, Err(DbError::IndexWork(_))),
             "canceled hydration did not return the shared typed work failure",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hydration_rejects_case_only_renamed_source_target_before_reservation()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = tempfile::tempdir()?;
+        let original_root = fixture.path().join("HydrationCaseOnly");
+        let staging_root = fixture.path().join("HydrationCaseOnlyStaging");
+        let renamed_root = fixture.path().join("hydrationcaseonly");
+        let source_dir = original_root.join(".projectatlas");
+        fs::create_dir_all(&source_dir)?;
+        let source_database = source_dir.join("projectatlas.db");
+        let mut seeded = AtlasStore::open_for_project(&source_database, &original_root)?;
+        seed_source(&mut seeded, &original_root)?;
+        let expected_state = hydration_state_snapshot(&seeded)?;
+        drop(seeded);
+
+        fs::rename(&original_root, &staging_root)?;
+        fs::rename(&staging_root, &renamed_root)?;
+        let Ok(recanonicalized_original) = CanonicalProjectRoot::from_path(&original_root) else {
+            return Ok(());
+        };
+        let renamed_identity = CanonicalProjectRoot::from_path(&renamed_root)?;
+        require(
+            recanonicalized_original == renamed_identity,
+            "case-only root rename did not preserve a re-canonicalizable directory",
+        )?;
+
+        let source = AtlasStore::open_read_only_for_project(&source_database, &original_root)?;
+        let persisted_identity = source
+            .project_root_identity()?
+            .ok_or_else(|| io::Error::other("hydration source identity is missing"))?;
+        require(
+            persisted_identity != renamed_identity,
+            "case-only fixture lost its stale persisted spelling",
+        )?;
+        let source_state = hydration_state_snapshot(&source)?;
+        let database_before = fs::read(&source_database)?;
+        let sidecars_before = hydration_sidecar_snapshot(&source_database);
+        let inventory_before = hydration_directory_inventory(&source_dir)?;
+        let destination_database = renamed_root.join(".projectatlas").join("alternate.db");
+        require(
+            !destination_database.exists(),
+            "case-only hydration destination unexpectedly exists",
+        )?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let Err(error) =
+            source.prepare_worktree_hydration(&renamed_root, &destination_database, &control)
+        else {
+            return Err(
+                io::Error::other("equivalent case-only hydration target was admitted").into(),
+            );
+        };
+        require(
+            matches!(
+                error,
+                DbError::WorktreeHydrationInvalid {
+                    reason: "hydration target matches the source project root"
+                }
+            ),
+            "equivalent case-only hydration target returned the wrong error",
+        )?;
+        require(
+            fs::read(&source_database)? == database_before,
+            "case-only self-target refusal changed the source database",
+        )?;
+        require(
+            hydration_sidecar_snapshot(&source_database) == sidecars_before,
+            "case-only self-target refusal changed SQLite sidecars",
+        )?;
+        require(
+            hydration_directory_inventory(&source_dir)? == inventory_before,
+            "case-only self-target refusal reserved or removed a candidate",
+        )?;
+        let state_after = hydration_state_snapshot(&source)?;
+        require(
+            state_after == source_state && state_after == expected_state,
+            "case-only self-target refusal changed source identity or authored state",
+        )?;
+        require(
+            !destination_database.exists(),
+            "case-only self-target refusal created the destination database",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hydration_allows_distinct_case_sensitive_roots_without_source_mutation()
+    -> Result<(), Box<dyn Error>> {
+        use std::process::Command;
+
+        let fixture = tempfile::tempdir()?;
+        let case_sensitive_parent = fixture.path().join("hydration-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let source_root = case_sensitive_parent.join("Repo");
+        let target_root = case_sensitive_parent.join("repo");
+        if fs::create_dir(&source_root).is_err() || fs::create_dir(&target_root).is_err() {
+            return Ok(());
+        }
+        let source_identity = CanonicalProjectRoot::from_path(&source_root)?;
+        let target_identity = CanonicalProjectRoot::from_path(&target_root)?;
+        if source_identity == target_identity {
+            return Ok(());
+        }
+        let source_dir = source_root.join(".projectatlas");
+        let target_dir = target_root.join(".projectatlas");
+        fs::create_dir_all(&source_dir)?;
+        fs::create_dir_all(&target_dir)?;
+        let source_database = source_dir.join("projectatlas.db");
+        let destination_database = target_dir.join("alternate.db");
+        let mut source = AtlasStore::open_for_project(&source_database, &source_root)?;
+        seed_source(&mut source, &target_root)?;
+        let source_state = hydration_state_snapshot(&source)?;
+        let source_database_before = fs::read(&source_database)?;
+        let source_identity_before = source.project_root_identity()?;
+        let source_instance_before = source.project_instance_id()?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let candidate =
+            source.prepare_worktree_hydration(&target_root, &destination_database, &control)?;
+        require(
+            candidate.target_root == target_identity,
+            "case-sensitive distinct hydration selected the wrong target root",
+        )?;
+        require(
+            candidate.target_project_instance_id
+                != source_instance_before
+                    .ok_or_else(|| io::Error::other("source project identity is missing"))?,
+            "case-sensitive distinct hydration did not prepare a new target identity",
+        )?;
+        require(
+            !destination_database.exists(),
+            "case-sensitive distinct hydration published before activation",
+        )?;
+        drop(candidate);
+        require(
+            fs::read(&source_database)? == source_database_before
+                && source.project_root_identity()? == source_identity_before
+                && source.project_instance_id()? == source_instance_before,
+            "case-sensitive distinct hydration changed the source binding",
+        )?;
+        require(
+            hydration_state_snapshot(&source)? == source_state,
+            "case-sensitive distinct hydration changed source authored state",
         )?;
         Ok(())
     }
