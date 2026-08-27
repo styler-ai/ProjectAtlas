@@ -8882,6 +8882,10 @@ mod tests {
     #[test]
     fn runtime_rejects_ambiguous_predecessor_before_config_discovery() -> Result<(), Box<dyn Error>>
     {
+        fn is_ambiguous_predecessor(error: &CliError) -> bool {
+            matches!(error, CliError::Db(DbError::ProjectRootIdentityMissing))
+        }
+
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
@@ -8920,25 +8924,25 @@ mod tests {
             ),
         )?;
         let replacement_config_before = fs::read(&replacement_config)?;
-        fn is_ambiguous_predecessor(error: CliError) -> bool {
-            matches!(error, CliError::Db(DbError::ProjectRootIdentityMissing))
-        }
 
         require_condition(
-            default_mcp_project_root(&database, None).is_err_and(is_ambiguous_predecessor),
+            default_mcp_project_root(&database, None)
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
             "default MCP discovery admitted an ambiguous predecessor",
         )?;
         require_condition(
-            default_cli_project_root(&database, None, false).is_err_and(is_ambiguous_predecessor),
+            default_cli_project_root(&database, None, false)
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
             "default CLI discovery admitted an ambiguous predecessor",
         )?;
         require_condition(
-            resolved_mcp_config_path(&database, None).is_err_and(is_ambiguous_predecessor),
+            resolved_mcp_config_path(&database, None)
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
             "MCP config discovery admitted an ambiguous predecessor",
         )?;
         require_condition(
             resolved_mcp_config_path(&database, Some(&replacement_config))
-                .is_err_and(is_ambiguous_predecessor),
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
             "explicit MCP config bypassed ambiguous predecessor admission",
         )?;
         require_condition(
@@ -8949,12 +8953,12 @@ mod tests {
                 None,
                 false,
             )
-            .is_err_and(is_ambiguous_predecessor),
+            .is_err_and(|error| is_ambiguous_predecessor(&error)),
             "generated MCP config admitted an ambiguous predecessor",
         )?;
         require_condition(
             build_settings_report(&database, None, OutputFormat::Json)
-                .is_err_and(is_ambiguous_predecessor),
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
             "settings discovery admitted an ambiguous predecessor",
         )?;
         require_condition(
