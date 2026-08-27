@@ -5924,11 +5924,15 @@ mod tests {
             let parent = database
                 .parent()
                 .ok_or_else(|| io::Error::other("collision database has no parent"))?;
+            // A read-only WAL connection can materialize a shared-memory
+            // sidecar on Unix. Capture logical state first so the baseline
+            // includes that connection lifecycle in the filesystem snapshot.
+            let logical_state = logical_state(database)?;
             Ok((
                 fs::read(database)?,
                 sidecars(database),
                 directory_entry_names(parent)?,
-                logical_state(database)?,
+                logical_state,
             ))
         }
 
@@ -6001,9 +6005,30 @@ mod tests {
                 .into());
             }
             let after = snapshot(&database)?;
-            if after != before {
+            if after.0 != before.0 {
                 return Err(io::Error::other(format!(
-                    "{label} changed predecessor bytes, sidecars, inventory, or logical state"
+                    "{label} changed predecessor database bytes"
+                ))
+                .into());
+            }
+            if after.1 != before.1 {
+                return Err(io::Error::other(format!(
+                    "{label} changed predecessor sidecar bytes: before={:?}, after={:?}",
+                    before.1, after.1
+                ))
+                .into());
+            }
+            if after.2 != before.2 {
+                return Err(io::Error::other(format!(
+                    "{label} changed predecessor sidecar inventory: before={:?}, after={:?}",
+                    before.2, after.2
+                ))
+                .into());
+            }
+            if after.3 != before.3 {
+                return Err(io::Error::other(format!(
+                    "{label} changed predecessor logical state: before={:?}, after={:?}",
+                    before.3, after.3
                 ))
                 .into());
             }
