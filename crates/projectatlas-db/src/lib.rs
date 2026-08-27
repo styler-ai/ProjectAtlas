@@ -8785,6 +8785,7 @@ mod tests {
     }
 
     /// Verify one released schema layout through migration, reopen, and publication.
+    #[cfg(windows)]
     fn assert_released_schema_upgrade_preserves_local_state(
         label: &str,
         write_fixture: fn(&Path, &Path) -> Result<(), Box<dyn Error>>,
@@ -14745,6 +14746,7 @@ mod tests {
     }
 
     /// Write evolved released schema-8 source, authored, telemetry, and publication state.
+    #[cfg(windows)]
     fn write_evolved_released_schema_eight_compatibility_fixture(
         db_path: &Path,
         root: &Path,

@@ -309,7 +309,7 @@ const RELEASED_SCHEMA_EIGHT_SQL: &str = include_str!("../tests/fixtures/released
 const EVOLVED_RELEASED_SCHEMA_EIGHT_SQL: &str =
     include_str!("../tests/fixtures/released-schema-8-evolved.sql");
 /// BLAKE3 of the complete schema-18 contract captured before schema 19 existed.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 const RELEASED_SCHEMA_EIGHTEEN_CONTRACT_BLAKE3: &str =
     "5fbdebf57bae7e3320d000e6c419390380f266d6a426cf0ea236a2728e057673";
 
@@ -3206,9 +3206,12 @@ pub(crate) fn recreate_pre_selector_symbol_storage_for_test(
 mod tests {
     use super::*;
     use crate::{AtlasStore, DbError};
+    #[cfg(windows)]
     use projectatlas_core::graph::{CoverageScope, RepositoryNodePath};
+    use projectatlas_core::telemetry::usage_from_estimates;
+    #[cfg(windows)]
     use projectatlas_core::telemetry::{
-        TokenOverview, TokenTrendPeriod, TokenTrendWindow, UsageEvent, usage_from_estimates,
+        TokenOverview, TokenTrendPeriod, TokenTrendWindow, UsageEvent,
     };
     use rusqlite::types::Value;
     use std::error::Error;
