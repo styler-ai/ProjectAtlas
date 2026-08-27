@@ -710,6 +710,7 @@ fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
             .map_or(component, |(stem, _)| stem);
         let upper = name.to_ascii_uppercase();
         matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || matches!(upper.as_str(), "CONIN$" | "CONOUT$")
             || matches!(
                 upper.as_str(),
                 "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³"
@@ -978,6 +979,21 @@ mod tests {
             normalize_native_path_display_str("src\\main.rs"),
             "src/main.rs"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lossless_display_preserves_verbatim_console_device_components()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for path in [
+            r"\\?\C:\repo\CONIN$",
+            r"\\?\C:\repo\conout$.log",
+            r"\\?\UNC\server\share\CONIN$",
+        ] {
+            let display = super::lossless_native_path_display(Path::new(path))?;
+            require_eq(&display, path)?;
+        }
+        Ok(())
     }
 
     #[cfg(not(windows))]

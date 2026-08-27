@@ -499,6 +499,8 @@ mod tests {
         for path in [
             PathBuf::from(r"\\?\C:\repo\folder."),
             PathBuf::from(r"\\?\C:\repo\CON.txt"),
+            PathBuf::from(r"\\?\C:\repo\CONIN$"),
+            PathBuf::from(r"\\?\C:\repo\conout$.log"),
             PathBuf::from(r"\\?\C:\repo\COM¹.txt"),
             PathBuf::from(r"\\?\C:\repo\COM².dat"),
             PathBuf::from(r"\\?\C:\repo\COM³.bin"),
