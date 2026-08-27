@@ -738,10 +738,6 @@ pub(crate) fn init_project_with_config(
     selected_config: Option<&Path>,
 ) -> AtlasMapResult<String> {
     let project_dir = root.join(".projectatlas");
-    fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
-        path: project_dir.clone(),
-        source,
-    })?;
     let nested_config_path = project_dir.join("config.toml");
     let flat_config_path = root.join("projectatlas.toml");
     let config_path = selected_config.map_or_else(
@@ -756,7 +752,16 @@ pub(crate) fn init_project_with_config(
         },
         Path::to_path_buf,
     );
-    if !config_path.exists() {
+    let default_config = if config_path.exists() {
+        None
+    } else {
+        Some(default_config_text_for(root, &config_path)?)
+    };
+    fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
+        path: project_dir.clone(),
+        source,
+    })?;
+    if let Some(default_config) = default_config {
         if let Some(parent) = config_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -766,12 +771,10 @@ pub(crate) fn init_project_with_config(
                 source,
             })?;
         }
-        fs::write(&config_path, default_config_text_for(root, &config_path)?).map_err(
-            |source| AtlasMapError::Io {
-                path: config_path.clone(),
-                source,
-            },
-        )?;
+        fs::write(&config_path, default_config).map_err(|source| AtlasMapError::Io {
+            path: config_path.clone(),
+            source,
+        })?;
     }
     let nonsource_path = project_dir.join("projectatlas-nonsource-files.toon");
     if !nonsource_path.exists() {
@@ -3373,6 +3376,36 @@ root = "."
                 ))
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_rejects_non_utf8_root_before_writes() -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let config_parent = temp.path().join("external-config").join("nested");
+        let config_path = config_parent.join("projectatlas.toml");
+        fs::create_dir(&raw_root)?;
+
+        let result = super::init_project_with_config(&raw_root, Some(&config_path));
+
+        if !matches!(result, Err(AtlasMapError::InvalidRepositoryPath { .. })) {
+            return Err(io::Error::other(format!(
+                "external config initialization returned an unexpected result: {result:?}"
+            ))
+            .into());
+        }
+        if raw_root.join(".projectatlas").exists() || config_parent.exists() || config_path.exists()
+        {
+            return Err(io::Error::other(
+                "external config refusal left project or config filesystem state",
+            )
+            .into());
         }
         Ok(())
     }
