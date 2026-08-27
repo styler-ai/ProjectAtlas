@@ -1756,82 +1756,135 @@ impl AtlasStore {
             SQLITE_BUSY_TIMEOUT,
             writable_journal_policy(preflight.state),
         )?;
-        if preflight.state == SchemaState::Current
-            && let Some(identity) = expected_identity
-        {
-            project_identity::ensure_project_root_identity(&connection, identity)?;
+        let transition_transaction = preflight.state == SchemaState::UpgradeRequired
+            && identity_requirement == ProjectIdentityRequirement::TransitionOwned;
+        if transition_transaction {
+            connection.execute_batch("BEGIN IMMEDIATE")?;
         }
-        let validated_project_instance_id = if preflight.state == SchemaState::Current {
-            if let Some(expected_identity) = expected_identity {
-                schema::revalidate_current_native_binding(
-                    &connection,
-                    expected_identity,
-                    identity_requirement.is_required(),
-                )?
-            } else if identity_requirement == ProjectIdentityRequirement::TransitionOwned {
-                // Move/Detach revalidate the recorded native identity and
-                // transition state in apply_root_transition. Their recorded
-                // root may intentionally be absent, so do not run the
-                // existing-root admission proof here.
-                project_identity::load_project_identity(&connection)?
-            } else if let Some(stored_identity) =
-                project_identity::load_project_root_identity(&connection)?
+        let opened = (|| {
+            if preflight.state == SchemaState::Current
+                && let Some(identity) = expected_identity
             {
-                schema::revalidate_current_native_binding(
-                    &connection,
-                    &stored_identity,
-                    identity_requirement.is_required(),
-                )?
-            } else {
-                let stored_instance_id = project_identity::load_project_identity(&connection)?;
-                schema::validate_binding_completeness(
-                    validated_project_root.as_deref(),
-                    stored_instance_id,
-                    identity_requirement.is_required(),
-                )?;
-                if stored_instance_id.is_some() {
-                    return Err(DbError::ProjectRootIdentityMissing);
+                project_identity::ensure_project_root_identity(&connection, identity)?;
+            }
+            let validated_project_instance_id = if preflight.state == SchemaState::Current {
+                if let Some(expected_identity) = expected_identity {
+                    schema::revalidate_current_native_binding(
+                        &connection,
+                        expected_identity,
+                        identity_requirement.is_required(),
+                    )?
+                } else if identity_requirement == ProjectIdentityRequirement::TransitionOwned {
+                    // Move/Detach revalidate the recorded native identity and
+                    // transition state in apply_root_transition. Their recorded
+                    // root may intentionally be absent, so do not run the
+                    // existing-root admission proof here.
+                    project_identity::load_project_identity(&connection)?
+                } else if let Some(stored_identity) =
+                    project_identity::load_project_root_identity(&connection)?
+                {
+                    schema::revalidate_current_native_binding(
+                        &connection,
+                        &stored_identity,
+                        identity_requirement.is_required(),
+                    )?
+                } else {
+                    let stored_instance_id = project_identity::load_project_identity(&connection)?;
+                    schema::validate_binding_completeness(
+                        validated_project_root.as_deref(),
+                        stored_instance_id,
+                        identity_requirement.is_required(),
+                    )?;
+                    if stored_instance_id.is_some() {
+                        return Err(DbError::ProjectRootIdentityMissing);
+                    }
+                    None
                 }
-                None
-            }
-        } else {
-            if let Some(expected_identity) = expected_identity {
-                let expected_display = expected_identity.display_string().ok();
-                schema::initialize_with_project_root(
-                    &connection,
-                    expected_display.as_deref(),
-                    Some(expected_identity),
-                )?;
             } else {
-                let initialization_root = expected_root.or(preflight.project_root.as_deref());
-                schema::initialize_with_project_root(&connection, initialization_root, None)?;
+                if let Some(expected_identity) = expected_identity {
+                    let expected_display = expected_identity.display_string().ok();
+                    schema::initialize_with_project_root(
+                        &connection,
+                        expected_display.as_deref(),
+                        Some(expected_identity),
+                    )?;
+                } else {
+                    let initialization_root = expected_root.or(preflight.project_root.as_deref());
+                    if transition_transaction {
+                        schema::initialize_with_project_root_in_transaction(
+                            &connection,
+                            initialization_root,
+                            None,
+                        )?;
+                    } else {
+                        schema::initialize_with_project_root(
+                            &connection,
+                            initialization_root,
+                            None,
+                        )?;
+                    }
+                }
+                project_identity::load_project_identity(&connection)?
+            };
+            let validated_project_root_identity =
+                project_identity::load_project_root_identity(&connection)?;
+            if identity_requirement.is_required()
+                && (validated_project_root.is_some() || validated_project_root_identity.is_some())
+                && validated_project_instance_id.is_none()
+            {
+                return Err(DbError::ProjectInstanceIdentityMissing);
             }
-            project_identity::load_project_identity(&connection)?
-        };
-        let validated_project_root_identity =
-            project_identity::load_project_root_identity(&connection)?;
-        if identity_requirement.is_required()
-            && (validated_project_root.is_some() || validated_project_root_identity.is_some())
-            && validated_project_instance_id.is_none()
-        {
-            return Err(DbError::ProjectInstanceIdentityMissing);
-        }
-        let database_location = if location.database_exists {
-            location
+            let database_location = if location.database_exists {
+                location
+            } else {
+                sqlite_profile::inspect_database_location(path)?
+            };
+            Ok((
+                database_location,
+                validated_project_root,
+                validated_project_root_identity,
+                validated_project_instance_id,
+            ))
+        })();
+        if transition_transaction {
+            match opened {
+                Ok((
+                    database_location,
+                    validated_project_root,
+                    validated_project_root_identity,
+                    validated_project_instance_id,
+                )) => Ok(Self {
+                    connection,
+                    read_snapshot_active: Cell::new(false),
+                    database_path: Some(path.to_path_buf()),
+                    database_location: Some(database_location),
+                    read_only: false,
+                    validated_project_root,
+                    validated_project_root_identity,
+                    validated_project_instance_id,
+                    library_usage_instances: RefCell::new(HashMap::new()),
+                }),
+                Err(error) => Err(schema::rollback_after_error(&connection, error)),
+            }
         } else {
-            sqlite_profile::inspect_database_location(path)?
-        };
-        Ok(Self {
-            connection,
-            read_snapshot_active: Cell::new(false),
-            database_path: Some(path.to_path_buf()),
-            database_location: Some(database_location),
-            read_only: false,
-            validated_project_root,
-            validated_project_root_identity,
-            validated_project_instance_id,
-            library_usage_instances: RefCell::new(HashMap::new()),
-        })
+            let (
+                database_location,
+                validated_project_root,
+                validated_project_root_identity,
+                validated_project_instance_id,
+            ) = opened?;
+            Ok(Self {
+                connection,
+                read_snapshot_active: Cell::new(false),
+                database_path: Some(path.to_path_buf()),
+                database_location: Some(database_location),
+                read_only: false,
+                validated_project_root,
+                validated_project_root_identity,
+                validated_project_instance_id,
+                library_usage_instances: RefCell::new(HashMap::new()),
+            })
+        }
     }
 
     /// Open an existing index without creating, migrating, or backfilling it.

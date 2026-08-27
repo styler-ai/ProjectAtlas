@@ -127,21 +127,51 @@ impl AtlasStore {
 
                 let mut store = Self::open_for_root_transition(database_path)?;
                 let opened_identity = store.project_instance_id()?;
+                let upgrade_transaction = !store.connection.is_autocommit();
                 if previous_identity.is_some() && opened_identity != previous_identity {
-                    return Err(project_transition_changed(
+                    let error = project_transition_changed(
                         previous_root_identity.display_string().ok(),
                         store.project_root()?,
                         previous_identity,
                         opened_identity,
-                    ));
+                    );
+                    return Err(if upgrade_transaction {
+                        schema::rollback_after_error(&store.connection, error)
+                    } else {
+                        error
+                    });
                 }
-                let mut result = apply_root_transition(
-                    &mut store,
-                    transition,
-                    Some(previous_root_identity),
-                    opened_identity,
-                    &destination_identity,
-                )?;
+                let mut result = if upgrade_transaction {
+                    let operation = apply_root_transition_in_transaction(
+                        &mut store,
+                        transition,
+                        Some(previous_root_identity),
+                        opened_identity,
+                        &destination_identity,
+                    );
+                    match operation {
+                        Ok(result) => {
+                            if let Err(source) = store.connection.execute_batch("COMMIT") {
+                                return Err(schema::rollback_after_error(
+                                    &store.connection,
+                                    DbError::Sqlite(source),
+                                ));
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            return Err(schema::rollback_after_error(&store.connection, error));
+                        }
+                    }
+                } else {
+                    apply_root_transition(
+                        &mut store,
+                        transition,
+                        Some(previous_root_identity),
+                        opened_identity,
+                        &destination_identity,
+                    )?
+                };
                 result.identity_changed = previous_identity != Some(result.project_instance_id);
                 Ok(result)
             }
@@ -193,60 +223,13 @@ fn apply_root_transition(
     destination: &CanonicalProjectRoot,
 ) -> DbResult<ProjectRootTransitionResult> {
     store.connection.execute_batch("BEGIN IMMEDIATE")?;
-    let operation = (|| {
-        let found_root = store.project_root()?;
-        let found_root_identity = load_project_root_identity(&store.connection)?;
-        let found_identity = load_project_identity(&store.connection)?;
-        if found_root_identity.as_ref() != expected_root_identity
-            || found_identity != expected_identity
-        {
-            return Err(project_transition_changed(
-                expected_root_identity.map(CanonicalProjectRoot::display_string_lossy),
-                found_root,
-                expected_identity,
-                found_identity,
-            ));
-        }
-
-        if transition == ProjectRootTransition::Detach
-            && let Some(previous_identity) = found_identity
-        {
-            crate::telemetry::seal_project_usage_instances(&store.connection, previous_identity)?;
-        }
-        set_project_root_metadata(&store.connection, destination)?;
-        set_project_root_identity(&store.connection, destination)?;
-        schema::invalidate_derived_publication(&store.connection)?;
-        let (project_instance_id, identity_changed) = match transition {
-            ProjectRootTransition::Bind => unreachable!("bind does not use transition mutation"),
-            ProjectRootTransition::Move => {
-                let (identity, identity_changed) = ensure_project_identity(&store.connection)?;
-                set_graph_generation(&store.connection, IndexGeneration::ZERO)?;
-                (identity, identity_changed)
-            }
-            ProjectRootTransition::Detach => {
-                store
-                    .connection
-                    .execute("DELETE FROM graph_resolution_keys", [])?;
-                store.connection.execute("DELETE FROM graph_coverage", [])?;
-                store
-                    .connection
-                    .execute("DELETE FROM graph_relations", [])?;
-                store.connection.execute("DELETE FROM graph_entities", [])?;
-                let identity = generate_project_identity(&store.connection, found_identity)?;
-                set_project_identity(&store.connection, identity)?;
-                (identity, true)
-            }
-        };
-
-        Ok(ProjectRootTransitionResult {
-            transition,
-            previous_root: expected_root_identity.and_then(|root| root.display_string().ok()),
-            project_root: destination.display_string().ok(),
-            project_instance_id,
-            identity_changed,
-            publication_invalidated: true,
-        })
-    })();
+    let operation = apply_root_transition_in_transaction(
+        store,
+        transition,
+        expected_root_identity,
+        expected_identity,
+        destination,
+    );
     match operation {
         Ok(result) => {
             if let Err(source) = store.connection.execute_batch("COMMIT") {
@@ -265,6 +248,67 @@ fn apply_root_transition(
         }
         Err(error) => Err(schema::rollback_after_error(&store.connection, error)),
     }
+}
+
+/// Apply a move or detach while the caller owns the write transaction.
+fn apply_root_transition_in_transaction(
+    store: &mut AtlasStore,
+    transition: ProjectRootTransition,
+    expected_root_identity: Option<&CanonicalProjectRoot>,
+    expected_identity: Option<ProjectInstanceId>,
+    destination: &CanonicalProjectRoot,
+) -> DbResult<ProjectRootTransitionResult> {
+    let found_root = store.project_root()?;
+    let found_root_identity = load_project_root_identity(&store.connection)?;
+    let found_identity = load_project_identity(&store.connection)?;
+    if found_root_identity.as_ref() != expected_root_identity || found_identity != expected_identity
+    {
+        return Err(project_transition_changed(
+            expected_root_identity.map(CanonicalProjectRoot::display_string_lossy),
+            found_root,
+            expected_identity,
+            found_identity,
+        ));
+    }
+
+    if transition == ProjectRootTransition::Detach
+        && let Some(previous_identity) = found_identity
+    {
+        crate::telemetry::seal_project_usage_instances(&store.connection, previous_identity)?;
+    }
+    set_project_root_metadata(&store.connection, destination)?;
+    set_project_root_identity(&store.connection, destination)?;
+    schema::invalidate_derived_publication(&store.connection)?;
+    let (project_instance_id, identity_changed) = match transition {
+        ProjectRootTransition::Bind => unreachable!("bind does not use transition mutation"),
+        ProjectRootTransition::Move => {
+            let (identity, identity_changed) = ensure_project_identity(&store.connection)?;
+            set_graph_generation(&store.connection, IndexGeneration::ZERO)?;
+            (identity, identity_changed)
+        }
+        ProjectRootTransition::Detach => {
+            store
+                .connection
+                .execute("DELETE FROM graph_resolution_keys", [])?;
+            store.connection.execute("DELETE FROM graph_coverage", [])?;
+            store
+                .connection
+                .execute("DELETE FROM graph_relations", [])?;
+            store.connection.execute("DELETE FROM graph_entities", [])?;
+            let identity = generate_project_identity(&store.connection, found_identity)?;
+            set_project_identity(&store.connection, identity)?;
+            (identity, true)
+        }
+    };
+
+    Ok(ProjectRootTransitionResult {
+        transition,
+        previous_root: expected_root_identity.and_then(|root| root.display_string().ok()),
+        project_root: destination.display_string().ok(),
+        project_instance_id,
+        identity_changed,
+        publication_invalidated: true,
+    })
 }
 
 /// Prove the recorded old root path entry is absent without following links.
@@ -1431,6 +1475,173 @@ mod tests {
             &missing_database,
             &missing_before,
             "schema-19 missing-root detach",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_nineteen_detach_rolls_back_migration_when_transition_fails()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let source_root = temp.path().join("schema-19-atomic-source");
+        let destination_root = temp.path().join("schema-19-atomic-destination");
+        fs::create_dir(&source_root)?;
+        fs::create_dir(&destination_root)?;
+        let database = temp.path().join("schema-19-atomic.db");
+
+        let mut store = AtlasStore::open_for_project(&database, &source_root)?;
+        let previous_project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-19 atomic fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, previous_project)?;
+        let publication_before = store.index_publication()?;
+        let usage_before = store.usage_events(Some("identity-test"))?;
+        let overview_before = store.token_overview(Some("identity-test"))?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-atomic.db{suffix}"))).ok()
+        });
+        let mut inventory_before = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_before.sort();
+
+        let source_identity = CanonicalProjectRoot::from_path(&source_root)?;
+        let destination_identity = CanonicalProjectRoot::from_path(&destination_root)?;
+        store.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let source_display = normalize_metadata_path(&source_root);
+        schema::initialize_with_project_root_in_transaction(
+            &store.connection,
+            Some(&source_display),
+            None,
+        )?;
+        store.connection.execute_batch(
+            "CREATE TRIGGER fail_destination_root_metadata_update
+             BEFORE UPDATE OF value ON metadata
+             WHEN OLD.key = 'project_root' AND NEW.value <> OLD.value
+             BEGIN SELECT RAISE(ABORT, 'injected destination metadata failure'); END;",
+        )?;
+        let transition_error = require_error(
+            apply_root_transition_in_transaction(
+                &mut store,
+                ProjectRootTransition::Detach,
+                Some(&source_identity),
+                Some(previous_project),
+                &destination_identity,
+            ),
+            "schema-19 detach committed migration before its transition failure",
+        )?;
+        require(
+            matches!(transition_error, DbError::Sqlite(_)),
+            "schema-19 detach failure returned the wrong error",
+        )?;
+        let rollback_error = schema::rollback_after_error(&store.connection, transition_error);
+        require(
+            matches!(rollback_error, DbError::Sqlite(_)),
+            "schema-19 detach rollback changed the initiating error",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "schema-19 detach failed database bytes",
+        )?;
+        let sidecars_after = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-atomic.db{suffix}"))).ok()
+        });
+        require_eq(
+            &sidecars_after,
+            &sidecars_before,
+            "schema-19 detach failed sidecars",
+        )?;
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        require_eq(
+            &inventory_after,
+            &inventory_before,
+            "schema-19 detach failed inventory",
+        )?;
+
+        let schema_version = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &schema_version,
+            &"19".to_string(),
+            "schema-19 detach failed schema marker",
+        )?;
+        let native_identity_table = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'project_root_identity'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &native_identity_table,
+            &0,
+            "schema-19 detach failed native identity table",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_metadata_path(&source_root)),
+            "schema-19 detach failed source metadata",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &Some(previous_project),
+            "schema-19 detach failed project identity",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication_before,
+            "schema-19 detach failed publication",
+        )?;
+        require_eq(
+            &store.usage_events(Some("identity-test"))?,
+            &usage_before,
+            "schema-19 detach failed usage",
+        )?;
+        require_eq(
+            &store.token_overview(Some("identity-test"))?,
+            &overview_before,
+            "schema-19 detach failed telemetry overview",
+        )?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_runtime_scope(&store, previous_project, 1, 0, 1)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        let trigger_count = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'fail_destination_root_metadata_update'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&trigger_count, &0, "schema-19 detach rollback trigger")?;
+        drop(store);
+
+        let detached = AtlasStore::transition_project_root(
+            &database,
+            &destination_root,
+            ProjectRootTransition::Detach,
+        )?;
+        require(
+            detached.identity_changed && detached.project_instance_id != previous_project,
+            "schema-19 detach retry did not rotate the project identity",
+        )?;
+        let reopened = AtlasStore::open_read_only_for_project(&database, &destination_root)?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(CanonicalProjectRoot::from_path(&destination_root)?),
+            "schema-19 detach retry native destination",
         )?;
         Ok(())
     }

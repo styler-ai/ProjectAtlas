@@ -1599,73 +1599,76 @@ pub(crate) fn initialize_with_project_root(
 ) -> DbResult<()> {
     configure_writable(connection)?;
     connection.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| {
-        let preflight = if expected_identity.is_some() {
-            inspect_connection_native(connection, expected_identity, false)?
-        } else {
-            inspect_connection(connection, expected_root, false)?
-        };
-        let predecessor_native_identity = if let Some(expected_identity) = expected_identity
-            && preflight.state == SchemaState::UpgradeRequired
-        {
-            Some(validate_legacy_project_root_binding(
-                connection,
-                expected_identity,
-            )?)
-        } else {
-            None
-        };
-        match preflight.state {
-            SchemaState::Fresh => create_fresh(connection, expected_root, expected_identity)?,
-            SchemaState::Current => {}
-            SchemaState::UpgradeRequired => {
-                validate_integrity(connection)?;
-                apply_migrations(connection, stored_schema_version(connection)?)?;
-            }
-        }
-        if let Some(expected) = expected_identity {
-            crate::project_identity::ensure_project_identity(connection)?;
-            if let Some(predecessor_identity) = predecessor_native_identity {
-                // The writer-connection legacy binding recheck above proved
-                // the predecessor metadata still names this root. Seed from
-                // the caller's native authority rather than reconstructing a
-                // possibly lossy display.
-                crate::project_identity::set_project_root_identity(
-                    connection,
-                    &predecessor_identity,
-                )?;
-                crate::project_identity::set_project_root_metadata(
-                    connection,
-                    &predecessor_identity,
-                )?;
-            } else {
-                crate::project_identity::ensure_project_root_identity_in_transaction(
-                    connection, expected,
-                )?;
-            }
-        } else if let Some(expected_root) = expected_root {
-            let expected = CanonicalProjectRoot::from_path(Path::new(expected_root))?;
-            crate::project_identity::ensure_project_identity(connection)?;
-            crate::project_identity::ensure_project_root_identity_in_transaction(
-                connection, &expected,
-            )?;
-        }
-        let current = if expected_identity.is_some() {
-            inspect_connection_native(connection, expected_identity, false)?
-        } else {
-            inspect_connection(connection, expected_root, false)?
-        };
-        if current.state != SchemaState::Current {
-            return Err(DbError::SchemaPostcondition {
-                expected: SCHEMA_VERSION,
-            });
-        }
-        Ok(())
-    })();
+    let result =
+        initialize_with_project_root_in_transaction(connection, expected_root, expected_identity);
     match result {
         Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
         Err(error) => Err(rollback_after_error(connection, error)),
     }
+}
+
+/// Initialize or migrate one writable connection while its caller owns the
+/// surrounding transaction.
+pub(crate) fn initialize_with_project_root_in_transaction(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    expected_identity: Option<&CanonicalProjectRoot>,
+) -> DbResult<()> {
+    let preflight = if expected_identity.is_some() {
+        inspect_connection_native(connection, expected_identity, false)?
+    } else {
+        inspect_connection(connection, expected_root, false)?
+    };
+    let predecessor_native_identity = if let Some(expected_identity) = expected_identity
+        && preflight.state == SchemaState::UpgradeRequired
+    {
+        Some(validate_legacy_project_root_binding(
+            connection,
+            expected_identity,
+        )?)
+    } else {
+        None
+    };
+    match preflight.state {
+        SchemaState::Fresh => create_fresh(connection, expected_root, expected_identity)?,
+        SchemaState::Current => {}
+        SchemaState::UpgradeRequired => {
+            validate_integrity(connection)?;
+            apply_migrations(connection, stored_schema_version(connection)?)?;
+        }
+    }
+    if let Some(expected) = expected_identity {
+        crate::project_identity::ensure_project_identity(connection)?;
+        if let Some(predecessor_identity) = predecessor_native_identity {
+            // The writer-connection legacy binding recheck above proved
+            // the predecessor metadata still names this root. Seed from
+            // the caller's native authority rather than reconstructing a
+            // possibly lossy display.
+            crate::project_identity::set_project_root_identity(connection, &predecessor_identity)?;
+            crate::project_identity::set_project_root_metadata(connection, &predecessor_identity)?;
+        } else {
+            crate::project_identity::ensure_project_root_identity_in_transaction(
+                connection, expected,
+            )?;
+        }
+    } else if let Some(expected_root) = expected_root {
+        let expected = CanonicalProjectRoot::from_path(Path::new(expected_root))?;
+        crate::project_identity::ensure_project_identity(connection)?;
+        crate::project_identity::ensure_project_root_identity_in_transaction(
+            connection, &expected,
+        )?;
+    }
+    let current = if expected_identity.is_some() {
+        inspect_connection_native(connection, expected_identity, false)?
+    } else {
+        inspect_connection(connection, expected_root, false)?
+    };
+    if current.state != SchemaState::Current {
+        return Err(DbError::SchemaPostcondition {
+            expected: SCHEMA_VERSION,
+        });
+    }
+    Ok(())
 }
 
 /// Enable the connection-local integrity rules required for every write path.
