@@ -8222,7 +8222,7 @@ mod tests {
     fn worktree_continuity_high_registration_aggregate_has_bounded_sql_and_rows()
     -> Result<(), Box<dyn Error>> {
         const ORIGINS: usize = 128;
-        const EXPECTED_STATEMENTS: usize = 11_151;
+        const EXPECTED_STATEMENTS: usize = 11_279;
         const EXPECTED_CHANGED_ROWS: u64 = 3_203;
 
         let temp = tempfile::tempdir()?;

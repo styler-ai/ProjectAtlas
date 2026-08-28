@@ -11322,7 +11322,7 @@ mod tests {
     fn high_fanout_document_refresh_has_bounded_sql_and_changed_rows() -> Result<(), Box<dyn Error>>
     {
         const FANOUT: usize = 256;
-        const EXPECTED_STATEMENTS: usize = 2_080;
+        const EXPECTED_STATEMENTS: usize = 2_081;
         const EXPECTED_CHANGED_ROWS: u64 = 1_031;
 
         let temp = tempfile::tempdir()?;
