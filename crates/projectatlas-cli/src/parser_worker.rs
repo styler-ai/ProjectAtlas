@@ -932,7 +932,7 @@ fn load_linux_worker_authority(
 
 /// Return whether one runtime identity is a bounded platform-neutral basename.
 #[cfg(any(test, all(target_os = "linux", target_arch = "x86_64")))]
-fn is_runtime_library_basename(value: &str) -> bool {
+pub(super) fn is_runtime_library_basename(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 255
         && value
