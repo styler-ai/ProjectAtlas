@@ -1,5 +1,15 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "source_contract": {
+    "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
+    "files": {
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "7dc774c2e18c85813ee821d4b42835aa17ba6f7693fd4f4a432a25c7c6f207ee",
+      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "29557f484769e5b0558c4003150e97968afd602ad618db434ba3a69f128cf5f5",
+      "crates/projectatlas-cli/tests/e2e_maintenance.rs": "b1eddac89052449d9673b5be9cb53ff4033ded34d435026e067fcd63e40d8490",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "17fcdfbf7777cf07f996af253d83ca1f424b95ce3f6ec0fed3c1053aa765d49d",
+      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "c4a319f890b8f441d1089bbd4deaf3c3e64087447290661adf894bf68fdd9503"
+    }
+  },
   "baseline_commit": "b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb",
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
@@ -13,6 +23,10 @@
     "e2e_worktrees": "worktree, watcher, freshness, and federation contracts",
     "e2e_maintenance": "purpose, lint, telemetry, and TUI contracts"
   },
+  "enforcement_tests": [
+    "cli_e2e_inventory_contract_matches_split_sources_and_workflows",
+    "cli_e2e_inventory_contract_rejects_source_and_selector_drift"
+  ],
   "tests": [
     {
       "name": "runtime_info_does_not_create_projectatlas_directory",

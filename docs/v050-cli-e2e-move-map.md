@@ -20,6 +20,10 @@ This map freezes the complete pre-move contract before e2e.rs is deleted. The ma
 
 Only concrete process, repository, JSON, platform, and packaged-contract support referenced by more than one owner is repeated/shared at the integration boundary. No new framework, catch-all support module, product code, crate, dependency, or symmetric empty binary is introduced.
 
+## Enforced inventory contract
+
+The e2e_delivery integration binary loads docs/v050-cli-e2e-inventory.json on every normal test run. Schema 2 records the five split source-file SHA-256 digests after normalizing CRLF/CR to LF and excluding absolute paths and line metadata; these digests cover complete test bodies, assertions, helpers, support, and recorded contract facets. The checker separately rescans test names, duplicate/missing ownership, and attributes/platform gates, then compares every recorded CI/release selector by normalized relative workflow path and selector text. Its positive and tamper cases prove source assertion/facet and workflow selector drift fails closed. The two checker tests are recorded outside the 158 moved tests so the frozen pre-move union remains exact.
+
 ## Test-to-domain move map
 
 Every pre-move test is listed with source bounds, preserved attributes, and exactly one owner.

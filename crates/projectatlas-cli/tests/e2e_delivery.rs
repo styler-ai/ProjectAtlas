@@ -52,6 +52,7 @@ use projectatlas_fs::{FsError, ScanOptions, scan_repo};
 use ratatui::buffer::CellWidth;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -412,6 +413,24 @@ const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
 
+const CLI_E2E_INVENTORY_FILE: &str = "docs/v050-cli-e2e-inventory.json";
+
+const CLI_E2E_INVENTORY_NORMALIZATION: &str = "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata";
+
+const CLI_E2E_SOURCE_PATHS: &[&str] = &[
+    "crates/projectatlas-cli/tests/e2e_delivery.rs",
+    "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+    "crates/projectatlas-cli/tests/e2e_maintenance.rs",
+    "crates/projectatlas-cli/tests/e2e_navigation.rs",
+    "crates/projectatlas-cli/tests/e2e_worktrees.rs",
+];
+
+const CLI_E2E_WORKFLOW_PATHS: &[&str] = &[
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/optional-parser-pack.yml",
+];
+
 /// Return one `SQLite` sidecar path for exact no-mutation assertions.
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
@@ -478,6 +497,434 @@ struct SqliteCompatibilitySnapshot {
     sidecars: BTreeSet<String>,
     schema_objects: Vec<String>,
     tables: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eInventory {
+    schema_version: u64,
+    test_count: usize,
+    symbol_count: usize,
+    binaries: BTreeMap<String, String>,
+    enforcement_tests: Vec<String>,
+    tests: Vec<CliE2eInventoryTest>,
+    selectors_after_move: Vec<CliE2eInventorySelector>,
+    source_contract: CliE2eSourceContract,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eInventoryTest {
+    name: String,
+    owner: String,
+    attributes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eInventorySelector {
+    workflow: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eSourceContract {
+    normalization: String,
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ObservedCliE2eTest {
+    owner: String,
+    attributes: Vec<String>,
+}
+
+/// Enforce the frozen CLI E2E ownership contract against current split sources.
+fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dyn Error>> {
+    let inventory_path = workspace_root.join(CLI_E2E_INVENTORY_FILE);
+    let inventory: CliE2eInventory = serde_json::from_str(&fs::read_to_string(&inventory_path)?)?;
+    if inventory.schema_version != 2 {
+        return Err(io::Error::other(format!(
+            "CLI E2E inventory schema must be 2, found {}",
+            inventory.schema_version
+        ))
+        .into());
+    }
+    if inventory.source_contract.normalization != CLI_E2E_INVENTORY_NORMALIZATION {
+        return Err(io::Error::other("CLI E2E inventory normalization contract drifted").into());
+    }
+    if inventory.symbol_count == 0 {
+        return Err(
+            io::Error::other("CLI E2E inventory must retain top-level support coverage").into(),
+        );
+    }
+    let enforcement_tests = inventory
+        .enforcement_tests
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if enforcement_tests.len() != inventory.enforcement_tests.len() {
+        return Err(io::Error::other(
+            "CLI E2E inventory contains duplicate enforcement test names",
+        )
+        .into());
+    }
+
+    let expected_files = CLI_E2E_SOURCE_PATHS
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<BTreeSet<_>>();
+    let discovered_files = discover_cli_e2e_source_paths(workspace_root)?;
+    if discovered_files != expected_files {
+        return Err(io::Error::other(format!(
+            "CLI E2E integration binaries drifted: expected {expected_files:?}, found {discovered_files:?}"
+        ))
+        .into());
+    }
+    let binary_files = inventory
+        .binaries
+        .keys()
+        .map(|owner| format!("crates/projectatlas-cli/tests/{owner}.rs"))
+        .collect::<BTreeSet<_>>();
+    if binary_files != expected_files {
+        return Err(io::Error::other(format!(
+            "CLI E2E binary ownership map drifted: expected {expected_files:?}, found {binary_files:?}"
+        ))
+        .into());
+    }
+    let recorded_files = inventory
+        .source_contract
+        .files
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if recorded_files != expected_files {
+        return Err(io::Error::other(format!(
+            "CLI E2E source contract files drifted: expected {expected_files:?}, found {recorded_files:?}"
+        ))
+        .into());
+    }
+
+    let mut expected_tests = BTreeMap::new();
+    for test in &inventory.tests {
+        if expected_tests
+            .insert(
+                test.name.clone(),
+                (test.owner.clone(), test.attributes.clone()),
+            )
+            .is_some()
+        {
+            return Err(io::Error::other(format!(
+                "CLI E2E inventory contains duplicate test name {:?}",
+                test.name
+            ))
+            .into());
+        }
+    }
+    if expected_tests.len() != inventory.test_count {
+        return Err(io::Error::other(format!(
+            "CLI E2E inventory test_count is {}, but it records {} names",
+            inventory.test_count,
+            expected_tests.len()
+        ))
+        .into());
+    }
+
+    let mut observed_tests = BTreeMap::new();
+    let mut observed_enforcement_tests = BTreeSet::new();
+    for relative_path in CLI_E2E_SOURCE_PATHS {
+        let source = fs::read_to_string(workspace_root.join(relative_path))?;
+        let expected_digest = inventory
+            .source_contract
+            .files
+            .get(*relative_path)
+            .ok_or_else(|| {
+                io::Error::other(format!("missing source digest for {relative_path}"))
+            })?;
+        let observed_digest = sha256_text(&normalize_cli_e2e_text(&source));
+        if observed_digest != *expected_digest {
+            return Err(io::Error::other(format!(
+                "CLI E2E source-content/assertion/facet digest drift in {relative_path}: expected {expected_digest}, found {observed_digest}"
+            ))
+            .into());
+        }
+        let owner = relative_path
+            .strip_prefix("crates/projectatlas-cli/tests/")
+            .and_then(|path| path.strip_suffix(".rs"))
+            .ok_or_else(|| {
+                io::Error::other(format!("invalid CLI E2E source path {relative_path}"))
+            })?;
+        for test in scan_cli_e2e_tests(&source) {
+            if enforcement_tests.contains(&test.name) {
+                if !observed_enforcement_tests.insert(test.name.clone()) {
+                    return Err(io::Error::other(format!(
+                        "CLI E2E enforcement test is duplicated: {}",
+                        test.name
+                    ))
+                    .into());
+                }
+                continue;
+            }
+            if observed_tests
+                .insert(
+                    test.name.clone(),
+                    ObservedCliE2eTest {
+                        owner: owner.to_owned(),
+                        attributes: test.attributes,
+                    },
+                )
+                .is_some()
+            {
+                return Err(io::Error::other(format!(
+                    "CLI E2E split sources contain duplicate test name {:?}",
+                    test.name
+                ))
+                .into());
+            }
+        }
+    }
+    if observed_enforcement_tests != enforcement_tests {
+        return Err(io::Error::other(format!(
+            "CLI E2E enforcement test selection drifted: expected {enforcement_tests:?}, found {observed_enforcement_tests:?}"
+        ))
+        .into());
+    }
+
+    if observed_tests.len() != expected_tests.len() {
+        return Err(io::Error::other(format!(
+            "CLI E2E test count drifted: expected {}, found {}",
+            expected_tests.len(),
+            observed_tests.len()
+        ))
+        .into());
+    }
+    for name in expected_tests.keys() {
+        if !observed_tests.contains_key(name) {
+            return Err(io::Error::other(format!(
+                "CLI E2E test is missing from split sources: {name}"
+            ))
+            .into());
+        }
+    }
+    for name in observed_tests.keys() {
+        if !expected_tests.contains_key(name) {
+            return Err(io::Error::other(format!(
+                "CLI E2E split source contains unrecorded test: {name}"
+            ))
+            .into());
+        }
+    }
+    for (name, (expected_owner, expected_attributes)) in expected_tests {
+        let observed = observed_tests
+            .get(&name)
+            .ok_or_else(|| io::Error::other(format!("missing observed test {name}")))?;
+        if observed.owner != expected_owner {
+            return Err(io::Error::other(format!(
+                "CLI E2E test owner drift for {name}: expected {expected_owner}, found {}",
+                observed.owner
+            ))
+            .into());
+        }
+        if observed.attributes != expected_attributes {
+            return Err(io::Error::other(format!(
+                "CLI E2E attribute/platform facet drift for {name}: expected {expected_attributes:?}, found {:?}",
+                observed.attributes
+            ))
+            .into());
+        }
+    }
+
+    let expected_selectors = inventory
+        .selectors_after_move
+        .iter()
+        .map(|selector| {
+            (
+                selector.workflow.replace('\\', "/"),
+                selector.text.trim().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut workflow_paths = Vec::new();
+    for (workflow, _) in &expected_selectors {
+        if !workflow_paths.iter().any(|path| path == workflow) {
+            workflow_paths.push(workflow.clone());
+        }
+    }
+    let mut observed_selectors = Vec::new();
+    for workflow in workflow_paths {
+        let workflow_path = workspace_root.join(&workflow);
+        let workflow_text = fs::read_to_string(&workflow_path)?;
+        for line in normalize_cli_e2e_text(&workflow_text).lines() {
+            if is_cli_e2e_selector(line) {
+                observed_selectors.push((workflow.clone(), line.trim().to_owned()));
+            }
+        }
+    }
+    if observed_selectors != expected_selectors {
+        return Err(io::Error::other(format!(
+            "CLI E2E workflow selector drift: expected {} selectors, found {}",
+            expected_selectors.len(),
+            observed_selectors.len()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ObservedCliE2eTestDeclaration {
+    name: String,
+    attributes: Vec<String>,
+}
+
+/// Scan only test attributes and declarations in the five known integration files.
+fn scan_cli_e2e_tests(source: &str) -> Vec<ObservedCliE2eTestDeclaration> {
+    let mut pending_attributes = Vec::new();
+    let mut tests = Vec::new();
+    for line in normalize_cli_e2e_text(source).lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("#[") && trimmed.ends_with(']') {
+            pending_attributes.push(trimmed.to_owned());
+            continue;
+        }
+        if let Some(name) = trimmed
+            .strip_prefix("fn ")
+            .and_then(|declaration| declaration.split(['(', '<', ' ', '\t']).next())
+            .filter(|name| !name.is_empty())
+            && pending_attributes
+                .iter()
+                .any(|attribute| attribute == "#[test]")
+        {
+            tests.push(ObservedCliE2eTestDeclaration {
+                name: name.to_owned(),
+                attributes: pending_attributes.clone(),
+            });
+        }
+        pending_attributes.clear();
+    }
+    tests
+}
+
+fn discover_cli_e2e_source_paths(
+    workspace_root: &Path,
+) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let tests_dir = workspace_root.join("crates/projectatlas-cli/tests");
+    let mut paths = BTreeSet::new();
+    for entry in fs::read_dir(tests_dir)? {
+        let path = entry?.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+            && file_name.starts_with("e2e_")
+        {
+            paths.insert(format!("crates/projectatlas-cli/tests/{file_name}"));
+        }
+    }
+    Ok(paths)
+}
+
+fn is_cli_e2e_selector(line: &str) -> bool {
+    line.match_indices("--test e2e").any(|(index, _)| {
+        let suffix = &line[index + "--test e2e".len()..];
+        suffix
+            .chars()
+            .next()
+            .is_none_or(|character| character == '_' || character.is_whitespace())
+    })
+}
+
+fn normalize_cli_e2e_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn sha256_text(text: &str) -> String {
+    sha256_hex(text.as_bytes())
+}
+
+fn copy_cli_e2e_contract_fixture(
+    workspace_root: &Path,
+    fixture_root: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut paths = CLI_E2E_SOURCE_PATHS.to_vec();
+    paths.extend_from_slice(CLI_E2E_WORKFLOW_PATHS);
+    paths.push(CLI_E2E_INVENTORY_FILE);
+    for relative_path in paths {
+        let destination = fixture_root.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(workspace_root.join(relative_path), destination)?;
+    }
+    Ok(())
+}
+
+fn require_cli_e2e_contract_rejection(
+    result: Result<(), Box<dyn Error>>,
+    expected_fragment: &str,
+) -> Result<(), Box<dyn Error>> {
+    let error = result
+        .err()
+        .ok_or_else(|| io::Error::other("CLI E2E drift fixture unexpectedly passed"))?;
+    if error.to_string().contains(expected_fragment) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "CLI E2E drift fixture returned an unexpected error: {error}"
+        ))
+        .into())
+    }
+}
+
+#[test]
+fn cli_e2e_inventory_contract_matches_split_sources_and_workflows() -> Result<(), Box<dyn Error>> {
+    assert_cli_e2e_inventory_contract(&workspace_root()?)
+}
+
+#[test]
+fn cli_e2e_inventory_contract_rejects_source_and_selector_drift() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let fixture = tempfile::tempdir()?;
+    copy_cli_e2e_contract_fixture(&workspace_root, fixture.path())?;
+    assert_cli_e2e_inventory_contract(fixture.path())?;
+
+    let delivery_path = fixture.path().join(CLI_E2E_SOURCE_PATHS[0]);
+    let delivery_source = fs::read_to_string(&delivery_path)?;
+    let weakened_source = delivery_source.replacen("assert!(", "assert!(false && ", 1);
+    if weakened_source == delivery_source {
+        return Err(io::Error::other("assertion tamper fixture did not change source").into());
+    }
+    fs::write(&delivery_path, weakened_source)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "source-content/assertion/facet digest drift",
+    )?;
+    fs::write(&delivery_path, &delivery_source)?;
+
+    let facet_source = delivery_source.replacen(
+        ".env(\"PROJECTATLAS_NO_TELEMETRY\", \"1\")",
+        ".env(\"PROJECTATLAS_DRIFTED_FACET\", \"1\")",
+        1,
+    );
+    if facet_source == delivery_source {
+        return Err(io::Error::other("facet tamper fixture did not change source").into());
+    }
+    fs::write(&delivery_path, facet_source)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "source-content/assertion/facet digest drift",
+    )?;
+    fs::write(&delivery_path, &delivery_source)?;
+
+    let ci_path = fixture.path().join(CLI_E2E_WORKFLOW_PATHS[0]);
+    let ci_source = fs::read_to_string(&ci_path)?;
+    let selector_source = ci_source.replacen("--test e2e_worktrees", "--test e2e_lifecycle", 1);
+    if selector_source == ci_source {
+        return Err(io::Error::other("selector tamper fixture did not change workflow").into());
+    }
+    fs::write(&ci_path, selector_source)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "workflow selector drift",
+    )?;
+    Ok(())
 }
 
 #[test]
