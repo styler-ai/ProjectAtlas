@@ -133,10 +133,10 @@
 
 ## 20. macOS all-features warning cleanliness (#486)
 
-- [ ] 20.1 On actual macOS x64 and arm64 with Rust 1.98.0, run the locked release-equivalent all-target/all-feature check and pedantic Clippy commands and record every warning name, file:line diagnostic, target/features, runtime reachability, and owning module; trace current diagnostics to #483's canonical capability authority or retain current behavior with reproducible no-change evidence when the matrix is clean.
-- [ ] 20.2 For reproduced warnings only, move impossible backend/lifecycle code behind the smallest owning target/feature module or item so supported configurations compile reachable code, shared built-in fallback remains present, and no crate/module-wide `allow(dead_code)`, duplicated platform matrix, or warning downgrade is added.
-- [ ] 20.3 Run warnings-as-errors for default, no-default, all-feature, all-target, and release-owned combinations on macOS x64/arm64 and supported Linux/Windows optional-parser tuples; cover typed unavailability, built-in fallback, supported worker startup, and Cargo check/Clippy compatibility.
-- [ ] 20.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 20.1 On actual macOS x64 and arm64 with Rust 1.98.0, run the locked release-equivalent all-target/all-feature check and pedantic Clippy commands and record every warning name, file:line diagnostic, target/features, runtime reachability, and owning module; trace current diagnostics to #483's canonical capability authority or retain current behavior with reproducible no-change evidence when the matrix is clean.
+- [x] 20.2 For reproduced warnings only, move impossible backend/lifecycle code behind the smallest owning target/feature module or item so supported configurations compile reachable code, shared built-in fallback remains present, and no crate/module-wide `allow(dead_code)`, duplicated platform matrix, or warning downgrade is added.
+- [x] 20.3 Run warnings-as-errors for default, no-default, all-feature, all-target, and release-owned combinations on macOS x64/arm64 and supported Linux/Windows optional-parser tuples; cover typed unavailability, built-in fallback, supported worker startup, and Cargo check/Clippy compatibility.
+- [x] 20.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 21. CLI E2E suite contract split (#487)
 
