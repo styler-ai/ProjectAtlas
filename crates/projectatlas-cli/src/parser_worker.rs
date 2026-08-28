@@ -14,6 +14,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use super::parser_worker_contract::{self, WorkerContractError, WorkerOperation};
+#[cfg(test)]
+use super::parser_worker_contract::{
+    ParserPackBuildEnvironment, SERVE_ARGUMENT, VERIFY_BUILD_CONTRACT_ARGUMENT,
+};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use libloading::Library;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -31,7 +36,6 @@ use tree_sitter_language_pack::LanguageRegistry;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use parser_linux_authority::{
     ACCEPTED_FD_ARGUMENT, ARTIFACT_FD_ARGUMENT, GRAMMAR_FD_ARGUMENT, POLICY_FD_ARGUMENT,
-    SERVE_ARGUMENT,
 };
 use projectatlas_core::optional_parser_pack::{
     AcceptedGrammar, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES, OptionalParserPackManifest,
@@ -62,42 +66,6 @@ const ACCEPTED_MANIFEST_FILE_NAME: &str = "accepted-capabilities.json";
 /// Immutable artifact manifest whose exact bytes identify the running pack.
 #[cfg(any(test, not(all(target_os = "linux", target_arch = "x86_64"))))]
 const ARTIFACT_MANIFEST_FILE_NAME: &str = "artifact-manifest.json";
-/// Required offline build flag for the optional grammar dependency.
-const OFFLINE_BUILD_VARIABLE: &str = "TSLP_OFFLINE";
-/// Required dynamic-link build flag for the optional grammar dependency.
-const LINK_MODE_BUILD_VARIABLE: &str = "TSLP_LINK_MODE";
-/// Build selector that must stay absent because platform libraries are repackaged.
-const LANGUAGE_FILTER_BUILD_VARIABLE: &str = "TSLP_LANGUAGES";
-/// Build escape hatch that must stay absent so failed grammars fail the build.
-const ALLOW_FAILED_GRAMMARS_BUILD_VARIABLE: &str = "TSLP_ALLOW_FAILED_GRAMMARS";
-/// Release-tool probe that validates the worker without opening a parser pack.
-const VERIFY_BUILD_CONTRACT_ARGUMENT: &str = "--verify-build-contract";
-/// Only production worker invocation accepted from either platform adapter.
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-const SERVE_ARGUMENT: &str = "--serve";
-
-/// Compile-time values that governed this worker and its optional dependency.
-const COMPILED_BUILD_ENVIRONMENT: ParserPackBuildEnvironment<'static> =
-    ParserPackBuildEnvironment {
-        offline: option_env!("TSLP_OFFLINE"),
-        link_mode: option_env!("TSLP_LINK_MODE"),
-        language_filter: option_env!("TSLP_LANGUAGES"),
-        allow_failed_grammars: option_env!("TSLP_ALLOW_FAILED_GRAMMARS"),
-    };
-
-/// Build-time environment accepted for a releasable optional parser worker.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ParserPackBuildEnvironment<'a> {
-    /// Whether dependency construction was forced offline.
-    offline: Option<&'a str>,
-    /// Whether grammars were built as independently loaded libraries.
-    link_mode: Option<&'a str>,
-    /// Optional upstream source-build selector, which `ProjectAtlas` forbids.
-    language_filter: Option<&'a str>,
-    /// Optional upstream partial-success escape hatch, which `ProjectAtlas` forbids.
-    allow_failed_grammars: Option<&'a str>,
-}
-
 /// Closed startup operations accepted by the separately packaged worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerInvocation {
@@ -443,68 +411,49 @@ enum WorkerStartupError {
 }
 
 /// Validate the compile-time dependency build policy.
+#[cfg(test)]
 fn validate_build_environment(
     environment: ParserPackBuildEnvironment<'_>,
 ) -> Result<(), WorkerStartupError> {
-    require_build_value(environment.offline, OFFLINE_BUILD_VARIABLE, "1")?;
-    require_build_value(environment.link_mode, LINK_MODE_BUILD_VARIABLE, "dynamic")?;
-    require_absent_build_value(environment.language_filter, LANGUAGE_FILTER_BUILD_VARIABLE)?;
-    require_absent_build_value(
-        environment.allow_failed_grammars,
-        ALLOW_FAILED_GRAMMARS_BUILD_VARIABLE,
-    )?;
-    Ok(())
+    parser_worker_contract::validate_build_environment(environment).map_err(map_contract_error)
 }
 
 /// Validate every build property that must hold without a parser pack.
 fn validate_worker_build_contract() -> Result<(), WorkerStartupError> {
-    validate_build_environment(COMPILED_BUILD_ENVIRONMENT)?;
-    validate_empty_compiled_registry(&LanguageRegistry::new().available_languages())
+    parser_worker_contract::validate_worker_build_contract().map_err(map_contract_error)
 }
 
 /// Require the upstream registry to expose no built-in grammar identities.
+#[cfg(test)]
 fn validate_empty_compiled_registry(languages: &[String]) -> Result<(), WorkerStartupError> {
-    if languages.is_empty() {
-        return Ok(());
-    }
-    Err(WorkerStartupError::CompiledGrammarRegistryNotEmpty {
-        count: languages.len(),
-    })
+    parser_worker_contract::validate_empty_compiled_registry(languages).map_err(map_contract_error)
 }
 
-/// Require one exact build-time value.
-fn require_build_value(
-    actual: Option<&str>,
-    name: &'static str,
-    expected: &'static str,
-) -> Result<(), WorkerStartupError> {
-    if actual == Some(expected) {
-        return Ok(());
-    }
-    Err(WorkerStartupError::InvalidBuildVariable {
-        name,
-        expected,
-        observed: if actual.is_some() {
-            "invalid"
-        } else {
-            "absent"
+/// Preserve the worker's existing typed startup errors at the implementation boundary.
+fn map_contract_error(error: WorkerContractError) -> WorkerStartupError {
+    match error {
+        WorkerContractError::InvalidBuildVariable {
+            name,
+            expected,
+            observed,
+        } => WorkerStartupError::InvalidBuildVariable {
+            name,
+            expected,
+            observed,
         },
-    })
-}
-
-/// Reject a build-time variable even when Cargo supplied an empty value.
-fn require_absent_build_value(
-    actual: Option<&str>,
-    name: &'static str,
-) -> Result<(), WorkerStartupError> {
-    if actual.is_none() {
-        return Ok(());
+        WorkerContractError::CompiledGrammarRegistryNotEmpty { count } => {
+            WorkerStartupError::CompiledGrammarRegistryNotEmpty { count }
+        }
+        WorkerContractError::MissingInvocation => WorkerStartupError::MissingInvocation,
+        WorkerContractError::UnexpectedArguments => WorkerStartupError::UnexpectedArguments,
+        #[cfg(not(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "x86_64")
+        )))]
+        WorkerContractError::UnsupportedTarget { os, architecture } => {
+            WorkerStartupError::UnsupportedTarget { os, architecture }
+        }
     }
-    Err(WorkerStartupError::InvalidBuildVariable {
-        name,
-        expected: "absent",
-        observed: "present",
-    })
 }
 
 /// Resolve the pack root exclusively from an absolute running executable path.
@@ -549,18 +498,14 @@ fn validated_pack_root(pack_root: &Path) -> Result<PathBuf, WorkerStartupError> 
 fn parse_worker_invocation(
     mut arguments: impl Iterator<Item = OsString>,
 ) -> Result<WorkerInvocation, WorkerStartupError> {
-    let argument = arguments
-        .next()
-        .ok_or(WorkerStartupError::MissingInvocation)?;
-    if argument == VERIFY_BUILD_CONTRACT_ARGUMENT {
+    let operation = parser_worker_contract::parse_worker_operation(&mut arguments)
+        .map_err(map_contract_error)?;
+    if operation == WorkerOperation::VerifyBuildContract {
         return if arguments.next().is_none() {
             Ok(WorkerInvocation::VerifyBuildContract)
         } else {
             Err(WorkerStartupError::UnexpectedArguments)
         };
-    }
-    if argument != SERVE_ARGUMENT {
-        return Err(WorkerStartupError::UnexpectedArguments);
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

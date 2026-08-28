@@ -4,6 +4,7 @@
 mod parser_linux_authority;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod parser_worker_containment;
+mod parser_worker_contract;
 
 #[cfg(not(any(
     test,
@@ -42,16 +43,14 @@ fn main() -> ExitCode {
     all(target_os = "windows", target_arch = "x86_64")
 )))]
 fn main() -> ExitCode {
-    let mut standard_error = io::stderr().lock();
-    if writeln!(
-        standard_error,
-        "optional parser containment is unsupported on {}-{}",
-        env::consts::OS,
-        env::consts::ARCH
-    )
-    .is_err()
-    {
-        return ExitCode::FAILURE;
+    match parser_worker_contract::unsupported_host_startup(env::args_os().skip(1)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let mut standard_error = io::stderr().lock();
+            if writeln!(standard_error, "{error}").is_err() {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::FAILURE
+        }
     }
-    ExitCode::FAILURE
 }
