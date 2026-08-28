@@ -152,6 +152,12 @@ jobs:
           RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --all-features --locked
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+      - name: macOS optional parser worker platform regression
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        shell: bash
+        run: cargo test --locked -p projectatlas-cli --all-features --test optional_parser_worker_platform
+
       - name: Holistic classified worktree agent E2E
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture

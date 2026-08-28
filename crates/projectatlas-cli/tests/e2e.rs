@@ -9689,6 +9689,41 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         ))
         .into());
     }
+
+    let platform_regression = workflow_job_step(
+        &ci,
+        "e2e-smoke",
+        "macOS optional parser worker platform regression",
+    )?;
+    for (field, actual, expected) in [
+        (
+            "if",
+            platform_regression["if"].as_str(),
+            Some("runner.os == 'macOS'"),
+        ),
+        ("shell", platform_regression["shell"].as_str(), Some("bash")),
+        (
+            "run",
+            platform_regression["run"].as_str().map(str::trim),
+            Some(
+                "cargo test --locked -p projectatlas-cli --all-features --test optional_parser_worker_platform",
+            ),
+        ),
+    ] {
+        if actual != expected {
+            return Err(io::Error::other(format!(
+                "macOS platform regression field {field:?} must be {expected:?}, found {actual:?}"
+            ))
+            .into());
+        }
+    }
+    if platform_regression["timeout-minutes"].as_i64() != Some(15) {
+        return Err(io::Error::other(format!(
+            "macOS platform regression timeout must be 15 minutes, found {:?}",
+            platform_regression["timeout-minutes"]
+        ))
+        .into());
+    }
     Ok(())
 }
 
