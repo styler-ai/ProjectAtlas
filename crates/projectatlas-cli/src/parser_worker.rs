@@ -1,9 +1,7 @@
 //! Serve the closed optional-parser protocol from a separately packaged worker.
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-mod parser_linux_authority;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-mod parser_worker_containment;
+use super::{parser_linux_authority, parser_worker_containment};
 
 use std::env;
 use std::ffi::OsString;
@@ -1291,6 +1289,10 @@ fn serve_session(
 }
 
 /// Lock the process standard streams and run the contained protocol loop.
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "x86_64")
+))]
 fn serve_standard_streams(
     runtime: &mut PreparedParserRuntime,
     artifact: &ParserArtifactIdentity,
@@ -1400,7 +1402,7 @@ fn write_startup_error(error: &WorkerStartupError) -> io::Result<()> {
 }
 
 /// Start the optional parser worker and map failure to the process boundary.
-fn main() -> ExitCode {
+pub(super) fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

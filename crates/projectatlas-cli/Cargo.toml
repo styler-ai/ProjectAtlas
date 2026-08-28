@@ -14,7 +14,7 @@ required-features = ["cli-core"]
 
 [[bin]]
 name = "projectatlas-parser-worker"
-path = "src/parser_worker.rs"
+path = "src/parser_worker_entry.rs"
 required-features = ["optional-parser-worker"]
 
 [[bin]]
