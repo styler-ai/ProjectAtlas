@@ -149,19 +149,19 @@ jobs:
 
       - name: Holistic classified worktree agent E2E
         timeout-minutes: 10
-        run: cargo test --locked -p projectatlas-cli --test e2e holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
+        run: cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
 
       - name: Graph, symbol, purpose, and viewport regressions
         timeout-minutes: 10
         run: |
-          cargo test --locked -p projectatlas-cli --test e2e csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e partial_markdown_limit_persists_without_losing_complete_publication -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e lint_formats_share_typed_cli_and_mcp_report -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation partial_markdown_limit_persists_without_losing_complete_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance lint_formats_share_typed_cli_and_mcp_report -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture
           cargo test --locked -p projectatlas-cli token_tui::tests -- --nocapture
 
       - name: Filtered custom harness compatibility
@@ -236,15 +236,49 @@ jobs:
 
       - name: Build packaged contract runner
         run: |
-          cargo test --locked --release -p projectatlas-cli --test e2e --no-run
-          contract="$(find target/release/deps -maxdepth 1 -type f -name 'e2e-*' -perm -111 -print -quit)"
-          if [[ -z "$contract" ]]; then
-            echo "Compiled packaged contract runner was not found" >&2
-            exit 1
-          fi
-          "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
+          cargo test --locked --release -p projectatlas-cli \
+            --test e2e_delivery --test e2e_lifecycle --test e2e_navigation \
+            --test e2e_worktrees --test e2e_maintenance --no-run
           mkdir -p contract-artifacts
-          cp "$contract" contract-artifacts/projectatlas-packaged-contract
+          mkdir -p contract-artifacts/bin
+          for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
+            binary="$(find target/release/deps -maxdepth 1 -type f -name "\${binary_name}-*" -perm -111 -print -quit)"
+            if [[ -z "$binary" ]]; then
+              echo "Compiled packaged contract binary was not found: $binary_name" >&2
+              exit 1
+            fi
+            cp "$binary" "contract-artifacts/bin/$binary_name"
+          done
+          cat > contract-artifacts/projectatlas-packaged-contract <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          root="$(cd "$(dirname "$0")" && pwd)"
+          if [[ "\${1:-}" == "--list" ]]; then
+            for binary in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
+              "$root/bin/$binary" --list
+            done
+            exit 0
+          fi
+          case "\${1:-}" in
+            mcp_advertised_tools_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
+              binary=e2e_delivery ;;
+            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|installed_candidate_without_git_*|compiler_config_*)
+              binary=e2e_navigation ;;
+            lint_formats_*|token_tui_*|conditional_purpose_*|persistent_mcp_purpose_*)
+              binary=e2e_maintenance ;;
+            holistic_agent_worktree_*|*watch*|*federation*)
+              binary=e2e_worktrees ;;
+            installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|parser_pack_*|linux_btrfs_*)
+              binary=e2e_lifecycle ;;
+            *)
+              echo "unknown packaged contract test: \${1:-<missing>}" >&2
+              exit 2 ;;
+          esac
+          exec "$root/bin/$binary" "$@"
+          SH
+          chmod +x contract-artifacts/projectatlas-packaged-contract
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
 
       - name: Package
         run: |
@@ -294,29 +328,65 @@ jobs:
       - name: Build packaged contract runner
         shell: pwsh
         run: |
-          cargo test --locked --release -p projectatlas-cli --test e2e --no-run
-          $contracts = @(Get-ChildItem -LiteralPath "target\release\deps" -Filter "e2e-*.exe" -File)
-          if ($contracts.Count -ne 1) {
-            throw "Expected one compiled packaged contract runner, found $($contracts.Count)."
-          }
-          & $contracts[0].FullName persistent_mcp_stdin_does_not_block_repository_startup_probes --exact --include-ignored --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw "Persistent MCP Git config stdin release regression failed with exit code $LASTEXITCODE."
-          }
-          & $contracts[0].FullName mcp_advertised_tools_own_their_real_sqlite_effects --exact --include-ignored --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw "Advertised MCP tool contract release regression failed with exit code $LASTEXITCODE."
-          }
-          & $contracts[0].FullName implicit_bare_root --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw "Bare-root database preflight release regression failed with exit code $LASTEXITCODE."
-          }
-          & $contracts[0].FullName generated_mcp_config_preserves_explicit_conventional_database_authority --exact --include-ignored --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw "Generated MCP database authority release regression failed with exit code $LASTEXITCODE."
-          }
+          cargo test --locked --release -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
           New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
-          Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\projectatlas-packaged-contract.exe"
+          New-Item -ItemType Directory -Force -Path "contract-artifacts\bin" | Out-Null
+          foreach ($binaryName in @("e2e_delivery", "e2e_lifecycle", "e2e_navigation", "e2e_worktrees", "e2e_maintenance")) {
+            $contracts = @(Get-ChildItem -LiteralPath "target\release\deps" -Filter "$binaryName-*.exe" -File)
+            if ($contracts.Count -ne 1) {
+              throw "Expected one packaged contract binary for $binaryName, found $($contracts.Count)."
+            }
+            Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\bin\$binaryName.exe"
+          }
+          @'
+          param(
+            [Parameter(ValueFromRemainingArguments = $true)]
+            [string[]] $Arguments
+          )
+          $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+          function Resolve-ContractBinary([string] $TestName) {
+            switch -Wildcard ($TestName) {
+              "mcp_advertised_tools_*" { return "e2e_delivery.exe" }
+              "packaged_cli_*" { return "e2e_delivery.exe" }
+              "installed_candidate_version_*" { return "e2e_lifecycle.exe" }
+              "*plugin*" { return "e2e_delivery.exe" }
+              "*installer*" { return "e2e_delivery.exe" }
+              "*release_binary*" { return "e2e_delivery.exe" }
+              "mcp_tools_list_*" { return "e2e_navigation.exe" }
+              "csharp_symbol_*" { return "e2e_navigation.exe" }
+              "deep_qualified_*" { return "e2e_navigation.exe" }
+              "partial_markdown_*" { return "e2e_navigation.exe" }
+              "classified_document_*" { return "e2e_navigation.exe" }
+              "installed_candidate_without_git_*" { return "e2e_navigation.exe" }
+              "compiler_config_*" { return "e2e_navigation.exe" }
+              "lint_formats_*" { return "e2e_maintenance.exe" }
+              "token_tui_*" { return "e2e_maintenance.exe" }
+              "conditional_purpose_*" { return "e2e_maintenance.exe" }
+              "persistent_mcp_purpose_*" { return "e2e_maintenance.exe" }
+              "holistic_agent_worktree_*" { return "e2e_worktrees.exe" }
+              "*watch*" { return "e2e_worktrees.exe" }
+              "*federation*" { return "e2e_worktrees.exe" }
+              "persistent_mcp_stdin_*" { return "e2e_lifecycle.exe" }
+              "supported_predecessor_*" { return "e2e_lifecycle.exe" }
+              "implicit_bare_root*" { return "e2e_lifecycle.exe" }
+              "generated_mcp_config_*" { return "e2e_lifecycle.exe" }
+              "mcp_server_*" { return "e2e_lifecycle.exe" }
+              "parser_pack_*" { return "e2e_lifecycle.exe" }
+              "linux_btrfs_*" { return "e2e_lifecycle.exe" }
+              default { throw "Unknown packaged contract test: $TestName" }
+            }
+          }
+          if ($Arguments.Count -eq 1 -and $Arguments[0] -eq "--list") {
+            foreach ($binaryName in @("e2e_delivery.exe", "e2e_lifecycle.exe", "e2e_navigation.exe", "e2e_worktrees.exe", "e2e_maintenance.exe")) {
+              & (Join-Path $root "bin\$binaryName") --list
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+            exit 0
+          }
+          $binary = Resolve-ContractBinary $Arguments[0]
+          & (Join-Path $root "bin\$binary") @Arguments
+          exit $LASTEXITCODE
+          '@ | Set-Content -LiteralPath "contract-artifacts\projectatlas-packaged-contract.ps1" -Encoding utf8
 
       - name: Package
         shell: pwsh
@@ -628,8 +698,8 @@ jobs:
           Assert-Equal ([System.IO.Path]::GetFullPath($opencodeServer.cwd)) $expectedRoot "OpenCode cwd mismatch"
           $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = $expectedRuntime
           $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"))
-          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.exe"
-          $inventory = @(& $contractRunner --list)
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
+          $inventory = @(& pwsh -NoProfile -File $contractRunner --list)
           if ($LASTEXITCODE -ne 0) {
             throw "Packaged contract inventory failed with exit code $LASTEXITCODE."
           }
@@ -643,7 +713,7 @@ jobs:
             if ($matches -ne 1) {
               throw "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches."
             }
-            & $contractRunner $test --exact --include-ignored --nocapture
+            & pwsh -NoProfile -File $contractRunner $test --exact --include-ignored --nocapture
             if ($LASTEXITCODE -ne 0) {
               throw "Packaged contract '$test' failed with exit code $LASTEXITCODE."
             }
@@ -657,8 +727,8 @@ jobs:
         run: |
           $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish\projectatlas.exe"
           $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"
-          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.exe"
-          $inventory = @(& $contractRunner --list)
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
+          $inventory = @(& pwsh -NoProfile -File $contractRunner --list)
           if ($LASTEXITCODE -ne 0) {
             throw "Installed-candidate contract inventory failed with exit code $LASTEXITCODE."
           }
@@ -692,7 +762,7 @@ jobs:
             if ($matches -ne 1) {
               throw "Installed-candidate contract inventory must contain exactly one '${test}: test' line; found $matches."
             }
-            & $contractRunner $test --exact --include-ignored --nocapture
+            & pwsh -NoProfile -File $contractRunner $test --exact --include-ignored --nocapture
             if ($LASTEXITCODE -ne 0) {
               throw "Installed-candidate contract '$test' failed with exit code $LASTEXITCODE."
             }

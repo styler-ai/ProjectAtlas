@@ -178,25 +178,25 @@ jobs:
 
       - name: Holistic classified worktree agent E2E
         timeout-minutes: 10
-        run: cargo test --locked -p projectatlas-cli --test e2e holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
+        run: cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
 
       - name: Causal E2E process observer deadline regression
         timeout-minutes: 10
-        run: cargo test --locked -p projectatlas-cli --test e2e e2e_process_observers_ -- --nocapture
+        run: cargo test --locked -p projectatlas-cli --test e2e_delivery e2e_process_observers_ -- --nocapture
 
       - name: Graph, symbol, purpose, and viewport regressions
         timeout-minutes: 10
         shell: bash
         run: |
-          cargo test --locked -p projectatlas-cli --test e2e csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage -- --exact --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e partial_markdown_limit_persists_without_losing_complete_publication -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e lint_formats_share_typed_cli_and_mcp_report -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation partial_markdown_limit_persists_without_losing_complete_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance lint_formats_share_typed_cli_and_mcp_report -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture
           cargo test --locked -p projectatlas-cli token_tui::tests -- --nocapture
 
       - name: Capture hosted PTY token dashboards
@@ -283,7 +283,7 @@ jobs:
           cargo build --locked -p projectatlas-cli
           PROJECTATLAS_BTRFS_TEST_ROOT="$subvolume" \
           PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$GITHUB_WORKSPACE/target/debug/projectatlas" \
-            cargo test --locked -p projectatlas-cli --test e2e linux_btrfs_subvolume_database_supports_cli_and_persistent_mcp_reopen -- --exact --include-ignored --nocapture
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle linux_btrfs_subvolume_database_supports_cli_and_persistent_mcp_reopen -- --exact --include-ignored --nocapture
 
       - name: Worktree lifecycle race regressions
         timeout-minutes: 10
@@ -297,95 +297,95 @@ jobs:
 
       - name: Plugin installer E2E
         timeout-minutes: 10
-        run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e_delivery
 
       - name: Installer RC pin E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli installer_workflow_pin_reports_preserve_exact_rc_identity --test e2e
+        run: cargo test --locked -p projectatlas-cli installer_workflow_pin_reports_preserve_exact_rc_identity --test e2e_delivery
 
       - name: Plugin update E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp --test e2e_delivery
 
       - name: Plugin update non-official marketplace E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_skips_non_official_codex_marketplace --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_skips_non_official_codex_marketplace --test e2e_delivery
 
       - name: Plugin update already-current marketplace E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_leaves_current_codex_marketplace_untouched --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_leaves_current_codex_marketplace_untouched --test e2e_delivery
 
       - name: Plugin update stale source manifest E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_repairs_current_codex_plugin_with_stale_source_manifest --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_repairs_current_codex_plugin_with_stale_source_manifest --test e2e_delivery
 
       - name: Plugin update restore-on-failure E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails --test e2e_delivery
 
       - name: Plugin update total-offline preservation E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_preserves_prior_integration_when_all_replacement_adds_fail --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_preserves_prior_integration_when_all_replacement_adds_fail --test e2e_delivery
 
       - name: Plugin update strict inventory E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_unavailable_or_ambiguous_inventory --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_unavailable_or_ambiguous_inventory --test e2e_delivery
 
       - name: POSIX plugin inventory no-jq E2E
         if: matrix.label != 'windows'
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli posix_plugin_inventory_without_jq_rejects_split_object_fields --test e2e -- --exact
+        run: cargo test --locked -p projectatlas-cli posix_plugin_inventory_without_jq_rejects_split_object_fields --test e2e_delivery -- --exact
 
       - name: Plugin update concurrent rollback serialization E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_serializes_restore_before_the_next_installer_reads_state --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_serializes_restore_before_the_next_installer_reads_state --test e2e_delivery
 
       - name: Windows plugin lock canonicalization failure E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized --test e2e -- --exact
+        run: cargo test --locked -p projectatlas-cli windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized --test e2e_delivery -- --exact
 
       - name: Plugin update retained recovery refusal E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_retained_recovery_state_before_mutation --test e2e
+        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_retained_recovery_state_before_mutation --test e2e_delivery
 
       - name: POSIX plugin restore trust-boundary E2E
         if: matrix.label != 'windows'
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state --test e2e -- --exact
+        run: cargo test --locked -p projectatlas-cli posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state --test e2e_delivery -- --exact
 
       - name: POSIX plugin lock crash and trust-boundary E2E
         if: matrix.label != 'windows'
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli posix_plugin_lock_rejects_indirection_and_survives_crash --test e2e -- --exact
+        run: cargo test --locked -p projectatlas-cli posix_plugin_lock_rejects_indirection_and_survives_crash --test e2e_delivery -- --exact
 
       - name: Windows plugin snapshot trust-boundary E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5
         shell: pwsh
         run: |
-          cargo test --locked -p projectatlas-cli windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot --test e2e -- --exact
+          cargo test --locked -p projectatlas-cli windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot --test e2e_delivery -- --exact
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation --test e2e -- --exact
+          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation --test e2e_delivery -- --exact
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion --test e2e -- --exact
+          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion --test e2e_delivery -- --exact
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot --test e2e -- --exact
+          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot --test e2e_delivery -- --exact
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p projectatlas-cli windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot --test e2e -- --exact
+          cargo test --locked -p projectatlas-cli windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot --test e2e_delivery -- --exact
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Windows recovery config selection E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli windows_installer_recovery_operation_preserves_config_selection --test e2e -- --exact
+        run: cargo test --locked -p projectatlas-cli windows_installer_recovery_operation_preserves_config_selection --test e2e_delivery -- --exact
 
       - name: Windows locked runtime update E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5
         env:
           PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}
-        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e -- --exact
+        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e_delivery -- --exact
 
       - name: Windows persisted User PATH E2E
         if: matrix.label == 'windows'
@@ -393,12 +393,12 @@ jobs:
         env:
           PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}
           PROJECTATLAS_TEST_PERSIST_USER_PATH: "1"
-        run: cargo test --locked -p projectatlas-cli windows_installer_fresh_path_probe_respects_machine_precedence --test e2e -- --exact
+        run: cargo test --locked -p projectatlas-cli windows_installer_fresh_path_probe_respects_machine_precedence --test e2e_delivery -- --exact
 
       - name: Windows stale MCP registry update E2E
         if: matrix.label == 'windows'
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e
+        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e_delivery
 
       - name: Windows installer trust boundaries
         if: matrix.label == 'windows'
@@ -408,25 +408,25 @@ jobs:
       - name: Windows obsolete MCP handoff E2E
         if: matrix.label == 'windows'
         timeout-minutes: 10
-        run: cargo test --locked -p projectatlas-cli --test e2e windows_installer_obsolete_mcp_handoff_ -- --test-threads=1
+        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_installer_obsolete_mcp_handoff_ -- --test-threads=1
 
       - name: macOS unsupported parser-pack boundary E2E
         if: runner.os == 'macOS'
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access --test e2e
+        run: cargo test --locked -p projectatlas-cli parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access --test e2e_lifecycle
 
       - name: MCP project binding E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e
+        run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e_lifecycle
 
       - name: Persistent MCP Git config stdin E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli persistent_mcp_stdin_does_not_block_repository_startup_probes --test e2e
+        run: cargo test --locked -p projectatlas-cli persistent_mcp_stdin_does_not_block_repository_startup_probes --test e2e_lifecycle
 
       - name: Bare-root database preflight E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli implicit_bare_root --test e2e -- --nocapture
+        run: cargo test --locked -p projectatlas-cli implicit_bare_root --test e2e_lifecycle -- --nocapture
 
       - name: Generated MCP database authority E2E
         timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e -- --exact --nocapture
+        run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e_lifecycle -- --exact --nocapture
