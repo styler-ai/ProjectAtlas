@@ -111,8 +111,12 @@ const MAX_GRAPH_IDENTITY_REJECTIONS: usize = GraphLimits::MAX_ROWS as usize;
 struct IdentitySpan {
     /// One-based first line containing the parser fact.
     start_line: usize,
+    /// Zero-based first column when the parser provides one.
+    start_column: usize,
     /// One-based last line containing the parser fact.
     end_line: usize,
+    /// Zero-based exclusive end column when the parser provides one.
+    end_column: usize,
 }
 
 /// Bounded admission report shared by entity, relation, and key projection.
@@ -145,11 +149,17 @@ impl GraphIdentityAdmission {
             u32::try_from(span.start_line).map_err(|error| {
                 CliError::InvalidInput(format!("identity rejection start line overflowed: {error}"))
             })?,
-            0,
+            u32::try_from(span.start_column).map_err(|error| {
+                CliError::InvalidInput(format!(
+                    "identity rejection start column overflowed: {error}"
+                ))
+            })?,
             u32::try_from(span.end_line).map_err(|error| {
                 CliError::InvalidInput(format!("identity rejection end line overflowed: {error}"))
             })?,
-            0,
+            u32::try_from(span.end_column).map_err(|error| {
+                CliError::InvalidInput(format!("identity rejection end column overflowed: {error}"))
+            })?,
         )
         .map_err(invalid_graph_contract)?;
         let mut recorded_fact = false;
@@ -2692,7 +2702,9 @@ fn project_graph_rows(
                 &graph.path,
                 IdentitySpan {
                     start_line: fact.relation.line.max(1),
+                    start_column: 0,
                     end_line: fact.relation.line.max(1),
+                    end_column: 0,
                 },
                 fact.relation.parser,
                 &failures,
@@ -4110,7 +4122,9 @@ fn admit_symbol_graph<'a>(
         check_graph_work(control, index)?;
         let span = IdentitySpan {
             start_line: symbol.line_start.max(1),
+            start_column: 0,
             end_line: symbol.line_end.max(symbol.line_start).max(1),
+            end_column: 0,
         };
         let mut failures = Vec::new();
         let name_field = if symbol.kind == SymbolKind::Package {
@@ -4138,7 +4152,9 @@ fn admit_symbol_graph<'a>(
         check_graph_work(control, index)?;
         let span = IdentitySpan {
             start_line: relation.line.max(1),
+            start_column: 0,
             end_line: relation.line.max(1),
+            end_column: 0,
         };
         let mut failures = Vec::new();
         record_identity_failure(
@@ -4331,14 +4347,18 @@ fn resolution_projection_span(graph: &SymbolGraph, fact: ResolutionProjectionFac
             || graph_identity_span(graph),
             |symbol| IdentitySpan {
                 start_line: symbol.line_start.max(1),
+                start_column: 0,
                 end_line: symbol.line_end.max(symbol.line_start).max(1),
+                end_column: 0,
             },
         ),
         ResolutionProjectionFact::Relation(index) => graph.relations.get(index).map_or_else(
             || graph_identity_span(graph),
             |relation| IdentitySpan {
                 start_line: relation.line.max(1),
+                start_column: 0,
                 end_line: relation.line.max(1),
+                end_column: 0,
             },
         ),
     }
@@ -4362,7 +4382,9 @@ fn graph_identity_span(graph: &SymbolGraph) -> IdentitySpan {
         } else {
             start_line
         },
+        start_column: 0,
         end_line,
+        end_column: 0,
     }
 }
 
@@ -4411,17 +4433,21 @@ fn admit_markdown_fact_batch(
         if let Err(error) = GraphIdentityText::validate(&candidate.selector) {
             rejected.push((
                 candidate.source.line_start,
+                candidate.source.column_start,
                 candidate.source.line_end,
+                candidate.source.column_end,
                 GraphIdentityRejectionReason::from_error(&error),
             ));
         }
     }
-    for (start_line, end_line, reason) in rejected {
+    for (start_line, start_column, end_line, end_column, reason) in rejected {
         report.record(
             path,
             IdentitySpan {
                 start_line,
+                start_column,
                 end_line,
+                end_column,
             },
             parser,
             &[(GraphIdentityField::RelationTarget, reason)],
@@ -8442,18 +8468,20 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = fs::canonicalize(temp.path())?;
         fs::create_dir_all(root.join("docs"))?;
-        fs::write(
-            root.join("docs/guide.md"),
-            "# Guide\n\n[valid](target.md#target)\n",
-        )?;
+        let guide_source = "# Guide\n\n[invalid](<target.md\u{1}>)\n[valid](target.md#target)\n";
+        fs::write(root.join("docs/guide.md"), guide_source)?;
         fs::write(root.join("docs/target.md"), "# Target\n")?;
-        let mut source_facts =
-            projectatlas_symbols::extract_markdown_facts("# Guide\n\n[valid](target.md#target)\n");
-        let mut invalid = source_facts.link_candidates[0].clone();
-        invalid.selector = "target.md\u{1}".to_string();
-        invalid.source.line_start = 3;
-        invalid.source.line_end = 3;
-        source_facts.link_candidates.insert(0, invalid);
+        let source_facts = projectatlas_symbols::extract_markdown_facts(guide_source);
+        require_eq(
+            &source_facts.link_candidates.len(),
+            &2,
+            "parser Markdown sibling candidate count",
+        )?;
+        require_eq(
+            &source_facts.link_candidates[0].selector,
+            &"target.md\u{1}".to_string(),
+            "parser Markdown control selector",
+        )?;
         let source_graph = source_facts.symbol_graph("docs/guide.md", Some("markdown"));
         let target_facts = projectatlas_symbols::extract_markdown_facts("# Target\n");
         let target_graph = target_facts.symbol_graph("docs/target.md", Some("markdown"));
@@ -8469,7 +8497,7 @@ mod tests {
         symbols.changes = vec![
             SymbolProjectionChange::Parsed(SymbolParseSuccess {
                 path: "docs/guide.md".to_string(),
-                graph: source_graph,
+                graph: source_graph.clone(),
                 markdown_facts: Some(Box::new(source_facts)),
                 source_parser: ParserKind::Structural,
                 summary: "Guide".to_string(),
@@ -8478,7 +8506,7 @@ mod tests {
             }),
             SymbolProjectionChange::Parsed(SymbolParseSuccess {
                 path: "docs/target.md".to_string(),
-                graph: target_graph,
+                graph: target_graph.clone(),
                 markdown_facts: Some(Box::new(target_facts)),
                 source_parser: ParserKind::Structural,
                 summary: "Target".to_string(),
@@ -8522,8 +8550,26 @@ mod tests {
             &3,
             "Markdown rejection start line",
         )?;
+        require_eq(
+            &rejection.span.start_column(),
+            &0,
+            "Markdown rejection start column",
+        )?;
+        require_eq(
+            &rejection.span.end_line(),
+            &3,
+            "Markdown rejection end line",
+        )?;
+        require_eq(
+            &rejection.span.end_column(),
+            &23,
+            "Markdown rejection end column",
+        )?;
         let database = root.join("projectatlas.db");
         let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&nodes)?;
+        store.replace_symbol_graph(&source_graph)?;
+        store.replace_symbol_graph(&target_graph)?;
         let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
         let staged = stage_full_repository_graph(
             &store,
@@ -8572,7 +8618,7 @@ mod tests {
         )?;
         publish_full_staged_graph(&mut store, &nodes, &staged, &control, "markdown-admission")?;
         drop(store);
-        let store = AtlasStore::open_for_project(&database, &root)?;
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
         let project = store
             .project_instance_id()?
             .ok_or("Markdown admission project identity is missing")?;
@@ -8586,6 +8632,29 @@ mod tests {
             &persisted_rejections.len(),
             &1,
             "persisted Markdown rejection detail count",
+        )?;
+        let persisted_rejection = persisted_rejections
+            .first()
+            .ok_or("persisted Markdown rejection detail is missing")?;
+        require_eq(
+            &persisted_rejection.span.start_line(),
+            &3,
+            "persisted Markdown rejection start line",
+        )?;
+        require_eq(
+            &persisted_rejection.span.start_column(),
+            &0,
+            "persisted Markdown rejection start column",
+        )?;
+        require_eq(
+            &persisted_rejection.span.end_line(),
+            &3,
+            "persisted Markdown rejection end line",
+        )?;
+        require_eq(
+            &persisted_rejection.span.end_column(),
+            &23,
+            "persisted Markdown rejection end column",
         )?;
         let persisted_wire = serde_json::to_string(&persisted_rejections)?;
         require(
@@ -8618,6 +8687,154 @@ mod tests {
                 )
             }),
             "reopened valid Markdown sibling was not resolved",
+        )?;
+
+        let base_generation = store
+            .index_publication()?
+            .ok_or("Markdown admission publication is missing")?
+            .generation;
+        let mut incremental_symbols = symbol_build_stage_for_markdown(
+            source_graph.clone(),
+            projectatlas_symbols::extract_markdown_facts(guide_source),
+        );
+        incremental_symbols.identity_admission =
+            super::admit_symbol_build_stage(&mut incremental_symbols, &control)?;
+        let incremental_stage = stage_incremental_repository_graph(
+            &store,
+            &root,
+            base_generation,
+            &nodes,
+            &["docs/guide.md".to_string()],
+            &scan_policy,
+            &incremental_symbols,
+            &control,
+        )?;
+        require_eq(
+            &incremental_stage.identity_rejections.len(),
+            &1,
+            "incremental Markdown rejection detail count",
+        )?;
+        require_eq(
+            &incremental_stage.relations.len(),
+            &1,
+            "incremental valid Markdown relation count",
+        )?;
+        let canceled = IndexWorkControl::new(IndexCancellation::new(), None);
+        canceled.cancel();
+        {
+            let mut publication = store.begin_index_publication("markdown-admission-cancel")?;
+            let error = incremental_stage.apply(&mut publication, &canceled).err();
+            require(
+                matches!(
+                    error,
+                    Some(CliError::IndexWork(IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::Publication
+                    }))
+                ),
+                "incremental Markdown cancellation was not observed",
+            )?;
+        }
+        require_eq(
+            &store
+                .index_publication()?
+                .map(|publication| publication.generation),
+            &Some(base_generation),
+            "publication after canceled Markdown refresh",
+        )?;
+        {
+            let mut publication =
+                store.begin_index_publication("markdown-admission-incremental")?;
+            incremental_stage.apply(&mut publication, &control)?;
+            publication.complete()?;
+        }
+        let incremental_publication = store
+            .index_publication()?
+            .ok_or("incremental Markdown publication is missing")?;
+        require_eq(
+            &incremental_publication.generation,
+            &base_generation
+                .checked_next()
+                .ok_or("Markdown generation overflowed")?,
+            "incremental Markdown generation",
+        )?;
+        drop(store);
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let reopened_incremental =
+            store.repository_graph_identity_rejections(project, &paths, 16, None)?;
+        require_eq(
+            &reopened_incremental,
+            &persisted_rejections,
+            "reopened incremental Markdown rejection details",
+        )?;
+
+        let fault_generation = store
+            .index_publication()?
+            .ok_or("incremental Markdown publication disappeared")?
+            .generation;
+        let mut fault_symbols = symbol_build_stage_for_markdown(
+            source_graph.clone(),
+            projectatlas_symbols::extract_markdown_facts(guide_source),
+        );
+        fault_symbols.identity_admission =
+            super::admit_symbol_build_stage(&mut fault_symbols, &control)?;
+        let mut fault_stage = stage_incremental_repository_graph(
+            &store,
+            &root,
+            fault_generation,
+            &nodes,
+            &["docs/guide.md".to_string()],
+            &scan_policy,
+            &fault_symbols,
+            &control,
+        )?;
+        fault_stage.identity_rejections.resize(
+            usize::try_from(GraphLimits::MAX_ROWS)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+            fault_stage.identity_rejections[0].clone(),
+        );
+        {
+            let mut publication = store.begin_index_publication("markdown-admission-fault")?;
+            require(
+                fault_stage.apply(&mut publication, &control).is_err(),
+                "late Markdown rejection-detail fault did not fail",
+            )?;
+        }
+        require_eq(
+            &store
+                .index_publication()?
+                .map(|publication| publication.generation),
+            &Some(fault_generation),
+            "generation after late Markdown rejection-detail fault",
+        )?;
+        require_eq(
+            &store.repository_graph_identity_rejections(project, &paths, 16, None)?,
+            &reopened_incremental,
+            "previous Markdown generation after late fault",
+        )?;
+        let retry_symbols = symbol_build_stage_for_markdown(
+            source_graph,
+            projectatlas_symbols::extract_markdown_facts(guide_source),
+        );
+        let retry_stage = stage_incremental_repository_graph(
+            &store,
+            &root,
+            fault_generation,
+            &nodes,
+            &["docs/guide.md".to_string()],
+            &scan_policy,
+            &retry_symbols,
+            &control,
+        )?;
+        {
+            let mut publication = store.begin_index_publication("markdown-admission-retry")?;
+            retry_stage.apply(&mut publication, &control)?;
+            publication.complete()?;
+        }
+        require_eq(
+            &store.repository_graph_identity_rejections(project, &paths, 16, None)?,
+            &reopened_incremental,
+            "deterministic Markdown retry",
         )?;
         Ok(())
     }
@@ -10420,6 +10637,26 @@ mod tests {
         staged.apply(&mut publication, control)?;
         publication.complete()?;
         Ok(())
+    }
+
+    fn symbol_build_stage_for_markdown(
+        graph: SymbolGraph,
+        markdown_facts: projectatlas_symbols::MarkdownFacts,
+    ) -> SymbolBuildStage {
+        let mut stage = empty_symbol_build_stage();
+        stage.report.candidates = 1;
+        stage.report.parsed = 1;
+        stage.report.summaries = 1;
+        stage.changes = vec![SymbolProjectionChange::Parsed(SymbolParseSuccess {
+            path: graph.path.clone(),
+            source_parser: ParserKind::Structural,
+            graph,
+            markdown_facts: Some(Box::new(markdown_facts)),
+            summary: "markdown identity admission fixture".to_string(),
+            summary_is_structural: true,
+            purpose_suggestion: None,
+        })];
+        stage
     }
 
     fn symbol_build_stage_for_graphs(graphs: Vec<SymbolGraph>) -> SymbolBuildStage {
