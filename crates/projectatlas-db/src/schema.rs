@@ -1814,6 +1814,13 @@ pub(crate) fn validate_active_native_binding(
     expected_root: Option<&CanonicalProjectRoot>,
     expected_identity: Option<ProjectInstanceId>,
 ) -> DbResult<()> {
+    let found_version = stored_schema_version(connection)?;
+    if found_version != SCHEMA_VERSION {
+        return Err(DbError::SchemaVersion {
+            found: found_version,
+            expected: SCHEMA_VERSION,
+        });
+    }
     let found_root = crate::project_identity::load_project_root_identity(connection)?;
     if let (Some(expected), Some(found)) = (expected_root, found_root.as_ref()) {
         if crate::project_identity::prove_existing_root_equivalence(

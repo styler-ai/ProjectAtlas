@@ -10214,6 +10214,22 @@ mod tests {
             "validated write rollback",
         )?;
 
+        with_validated_native_write_transaction(
+            &store.connection,
+            store.validated_project_root_identity.as_ref(),
+            Some(expected_identity),
+            |connection| set_metadata(connection, sentinel_key, "native-committed"),
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [sentinel_key],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"native-committed".to_string(),
+            "native validated write positive control",
+        )?;
+
         let future_schema = schema::SCHEMA_VERSION + 1;
         let newer_owner = Connection::open(&db_path)?;
         newer_owner.execute(
@@ -10221,9 +10237,9 @@ mod tests {
             params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
         )?;
         let operation_invoked = Cell::new(false);
-        let Err(binding_error) = with_validated_write_transaction(
+        let Err(binding_error) = with_validated_native_write_transaction(
             &store.connection,
-            store.validated_project_root.as_deref(),
+            store.validated_project_root_identity.as_ref(),
             Some(expected_identity),
             |connection| {
                 operation_invoked.set(true);
@@ -10252,7 +10268,7 @@ mod tests {
                 [sentinel_key],
                 |row| row.get::<_, String>(0),
             )?,
-            &"committed".to_string(),
+            &"native-committed".to_string(),
             "newer-schema sentinel value",
         )?;
         Ok(())
