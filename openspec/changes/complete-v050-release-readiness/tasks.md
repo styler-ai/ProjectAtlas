@@ -70,10 +70,10 @@
 
 ## 11. Deterministic architecture-community analysis (#464)
 
-- [x] 11.1 Freeze deterministic weighted label-propagation v1, admitted resolved local relation families/weights, stable node/label order and tie-breaks, iteration and resource ceilings, stable community IDs, coverage/truncation semantics, no-persistence decision, and planted-partition acceptance bounds against the current weak-component baseline.
-- [x] 11.2 Replace only the existing optional `Community` projection inside the bounded service analysis path; reuse the current normalized graph/cursor/cancellation/output machinery and add no visualization, rewrite authority, persisted table, new crate, or algorithm framework.
-- [x] 11.3 Cover planted cohesive groups, giant weak component, sparse/disconnected/singleton/cyclic/high-degree graphs, equal-score ties, invalid parameters, non-convergence, incomplete/stale/wrong-root evidence, cancellation/truncation, deterministic repeat, CLI/MCP parity, and representative-scale CPU/RSS/latency/output bounds.
-- [x] 11.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [ ] 11.1 Freeze deterministic weighted label-propagation v1, admitted resolved local relation families/weights, stable node/label order and tie-breaks, iteration and resource ceilings, stable community IDs, coverage/truncation semantics, no-persistence decision, and planted-partition acceptance bounds against the current weak-component baseline.
+- [ ] 11.2 Replace only the existing optional `Community` projection inside the bounded service analysis path; reuse the current normalized graph/cursor/cancellation/output machinery and add no visualization, rewrite authority, persisted table, new crate, or algorithm framework.
+- [ ] 11.3 Cover planted cohesive groups, giant weak component, sparse/disconnected/singleton/cyclic/high-degree graphs, equal-score ties, invalid parameters, non-convergence, incomplete/stale/wrong-root evidence, cancellation/truncation, deterministic repeat, CLI/MCP parity, and representative-scale CPU/RSS/latency/output bounds.
+- [ ] 11.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 12. Bounded PDF and DOCX extraction (#465)
 

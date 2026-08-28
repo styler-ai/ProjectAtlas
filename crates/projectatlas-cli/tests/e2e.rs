@@ -778,7 +778,17 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
         source_dir.join("lib.rs"),
         "pub fn first() { second(); third(); fourth(); fifth(); sixth(); seventh(); eighth(); ninth(); }\n\
          fn second() {}\nfn third() {}\nfn fourth() {}\nfn fifth() {}\n\
-         fn sixth() {}\nfn seventh() {}\nfn eighth() {}\nfn ninth() {}\n",
+         fn sixth() {}\nfn seventh() {}\nfn eighth() {}\nfn ninth() {}\n\
+         fn group_a_root() { group_a_one(); group_a_two(); }\n\
+         fn group_a_one() { group_a_two(); }\n\
+         fn group_a_two() { group_a_root(); }\n\
+         fn group_b_root() { group_b_one(); group_b_two(); }\n\
+         fn group_b_one() { group_b_two(); }\n\
+         fn group_b_two() { group_b_root(); }\n\
+         fn architecture_root() {\n\
+             group_a_root(); group_a_one(); group_a_two();\n\
+             group_b_root(); group_b_one(); group_b_two();\n\
+         }\n",
     )?;
 
     let scan = Command::cargo_bin("projectatlas")?
@@ -989,6 +999,121 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
     {
         return Err(io::Error::other(
             "public relation analysis CLI omitted findings or reusable next-call routing",
+        )
+        .into());
+    }
+
+    let community_args = vec![
+        "--format".to_string(),
+        "json".to_string(),
+        "symbols".to_string(),
+        "relations".to_string(),
+        "--view".to_string(),
+        "analysis".to_string(),
+        "--file".to_string(),
+        "src/lib.rs".to_string(),
+        "--symbol".to_string(),
+        "architecture_root".to_string(),
+        "--direction".to_string(),
+        "outbound".to_string(),
+        "--depth".to_string(),
+        "3".to_string(),
+        "--limit".to_string(),
+        "100".to_string(),
+        "--output-bytes".to_string(),
+        page_output_bytes.to_string(),
+        "--include-communities".to_string(),
+    ];
+    let community_first_payload = run_json_analysis_to_completion(&repo, &community_args)?;
+    let community_second_payload = run_json_analysis_to_completion(&repo, &community_args)?;
+    let first_communities = json_community_values_from_pages(&community_first_payload)?;
+    let second_communities = json_community_values_from_pages(&community_second_payload)?;
+    if serde_json::to_vec(&first_communities)? != serde_json::to_vec(&second_communities)? {
+        return Err(io::Error::other("repeated CLI community fields were not byte stable").into());
+    }
+    assert_planted_community_values(&first_communities, "CLI")?;
+
+    let bounded_output_bytes = 64 * 1024_usize;
+    let bounded_community = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "architecture_root",
+            "--direction",
+            "outbound",
+            "--depth",
+            "3",
+            "--limit",
+            "100",
+            "--edge-limit",
+            "1",
+            "--output-bytes",
+            &bounded_output_bytes.to_string(),
+            "--include-communities",
+        ])
+        .output()?;
+    if !bounded_community.status.success() {
+        return Err(io::Error::other(format!(
+            "bounded community CLI analysis failed: {}",
+            String::from_utf8_lossy(&bounded_community.stderr)
+        ))
+        .into());
+    }
+    if bounded_community.stdout.len() > bounded_output_bytes {
+        return Err(io::Error::other(format!(
+            "bounded community CLI emitted {} bytes above its {bounded_output_bytes}-byte ceiling",
+            bounded_community.stdout.len()
+        ))
+        .into());
+    }
+    let bounded_payload: Value = serde_json::from_slice(&bounded_community.stdout)?;
+    require_json_bool(&bounded_payload, &["symbol_relations", "truncated"], true)?;
+    if bounded_payload
+        .pointer("/symbol_relations/continuation")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Err(io::Error::other(
+            "bounded community CLI output omitted its continuation cursor",
+        )
+        .into());
+    }
+    require_json_usize(
+        &bounded_payload,
+        &["symbol_relations", "work", "rendered_output_bytes"],
+        bounded_community.stdout.len(),
+    )?;
+    let bounded_communities = json_community_values(&bounded_payload)?;
+    if !bounded_communities.iter().any(|community| {
+        community
+            .get("coverage")
+            .and_then(Value::as_str)
+            .is_some_and(|coverage| coverage == "partial")
+            && community
+                .get("convergence")
+                .and_then(Value::as_str)
+                .is_some_and(|convergence| convergence == "inconclusive")
+    }) || !bounded_payload
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                finding.get("kind").and_then(Value::as_str) == Some("community")
+                    && finding.get("status").and_then(Value::as_str) == Some("inconclusive")
+            })
+        })
+    {
+        return Err(io::Error::other(
+            "bounded CLI output lost the typed inconclusive community outcome",
         )
         .into());
     }
@@ -22161,7 +22286,18 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
         repo.join(SRC_DIR_NAME).join("lib.rs"),
-        "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n",
+        "pub fn indexed() {\n    helper();\n}\n\
+         fn group_a_root() { group_a_one(); group_a_two(); }\n\
+         fn group_a_one() { group_a_two(); }\n\
+         fn group_a_two() { group_a_root(); }\n\
+         fn group_b_root() { group_b_one(); group_b_two(); }\n\
+         fn group_b_one() { group_b_two(); }\n\
+         fn group_b_two() { group_b_root(); }\n\
+         fn architecture_root() {\n\
+             group_a_root(); group_a_one(); group_a_two();\n\
+             group_b_root(); group_b_one(); group_b_two();\n\
+         }\n\
+         fn helper() {}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
 
@@ -22209,7 +22345,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"atlas_task_status","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"atlas_task_cancel","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"atlas_health","arguments":{"coverage":true,"path_prefix":"src/lib.rs","parser":"tree-sitter","provider":"tree-sitter","coverage_state":"complete","limit":1}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/lib.rs","symbol":"helper","symbol_kind":"function","symbol_signature":"fn helper ( )"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs","compact":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","analysis_mode":"impact","vcs":"working_tree","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536}}}"#.to_string(),
@@ -22221,6 +22357,8 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"detailed","compact":true,"file":"src/lib.rs","symbol":"indexed","symbol_parent":"","direction":"outbound","include_occurrences":true,"limit":10,"output_bytes":65536}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"detailed","compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","include_occurrences":true,"limit":10,"output_bytes":2048}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","limit":10}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"edge_limit":1,"output_bytes":65536,"include_communities":true}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let stdout = run_mcp_stdio(
@@ -22236,6 +22374,8 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     assert_frozen_mcp_surfaces_compatible(&stdout)?;
     let session_brief_text = mcp_tool_text(&stdout, 19)?;
     let analysis_text = mcp_tool_text(&stdout, 23)?;
+    let repeated_analysis_text = mcp_tool_text(&stdout, 35)?;
+    let bounded_analysis_text = mcp_tool_text(&stdout, 36)?;
     let next_call_text = mcp_tool_text(&stdout, 24)?;
     let recommended_summary_text = mcp_tool_text(&stdout, 25)?;
     let impact_text = mcp_tool_text(&stdout, 26)?;
@@ -22247,7 +22387,67 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     let compact_relations_text = mcp_tool_text(&stdout, 32)?;
     let bounded_compact_relations_text = mcp_tool_text(&stdout, 33)?;
     let rejected_legacy_compact_text = mcp_tool_text(&stdout, 34)?;
-    let session_brief_has_ready_call = session_brief_text.contains("target: atlas_file_summary")
+    let analysis_payload: Value = toon_format::decode_default(&analysis_text)?;
+    let repeated_analysis_payload: Value = toon_format::decode_default(&repeated_analysis_text)?;
+    let first_communities = json_community_values(&analysis_payload)?;
+    let repeated_communities = json_community_values(&repeated_analysis_payload)?;
+    if serde_json::to_vec(&first_communities)? != serde_json::to_vec(&repeated_communities)? {
+        return Err(io::Error::other(
+            "repeated MCP community fields were not byte stable after TOON decoding",
+        )
+        .into());
+    }
+    assert_planted_community_values(&first_communities, "MCP")?;
+    if bounded_analysis_text.len() > 65536 {
+        return Err(io::Error::other(format!(
+            "bounded community MCP TOON emitted {} bytes above its 65536-byte ceiling",
+            bounded_analysis_text.len()
+        ))
+        .into());
+    }
+    let bounded_payload: Value = toon_format::decode_default(&bounded_analysis_text)?;
+    require_json_bool(&bounded_payload, &["symbol_relations", "truncated"], true)?;
+    require_json_usize(
+        &bounded_payload,
+        &["symbol_relations", "work", "rendered_output_bytes"],
+        bounded_analysis_text.len(),
+    )?;
+    if bounded_payload
+        .pointer("/symbol_relations/continuation")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Err(
+            io::Error::other("bounded community MCP TOON omitted its continuation cursor").into(),
+        );
+    }
+    let bounded_communities = json_community_values(&bounded_payload)?;
+    if !bounded_communities.iter().any(|community| {
+        community
+            .get("coverage")
+            .and_then(Value::as_str)
+            .is_some_and(|coverage| coverage == "partial")
+            && community
+                .get("convergence")
+                .and_then(Value::as_str)
+                .is_some_and(|convergence| convergence == "inconclusive")
+    }) || !bounded_payload
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                finding.get("kind").and_then(Value::as_str) == Some("community")
+                    && finding.get("status").and_then(Value::as_str) == Some("inconclusive")
+            })
+        })
+    {
+        return Err(io::Error::other(
+            "bounded MCP TOON lost the typed inconclusive community outcome",
+        )
+        .into());
+    }
+    let session_brief_has_ready_call = (session_brief_text.contains("target: atlas_file_summary")
+        || session_brief_text.contains("target: atlas_symbol_relations"))
         && session_brief_text.contains("file: src/lib.rs");
     if !compact_session_brief_text
         .contains("recommended_subagent_reasoning: lowest_reliable_host_supported")
@@ -36578,6 +36778,191 @@ fn require_same_canonical_path(
         ))
         .into())
     }
+}
+
+/// Follow the existing analysis cursor until the complete bounded page returns.
+fn run_json_analysis_to_completion(
+    repo: &Path,
+    base_args: &[String],
+) -> Result<Vec<Value>, Box<dyn Error>> {
+    let mut args = base_args.to_vec();
+    let mut pages = Vec::new();
+    for _ in 0..8 {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(&args)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "JSON analysis continuation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let payload: Value = serde_json::from_slice(&output.stdout)?;
+        let cursor = payload
+            .pointer("/symbol_relations/continuation")
+            .and_then(Value::as_str)
+            .filter(|cursor| !cursor.is_empty())
+            .map(str::to_string);
+        pages.push(payload);
+        let Some(cursor) = cursor else {
+            return Ok(pages);
+        };
+        if args.len() >= 2 && args[args.len() - 2] == "--cursor" {
+            args.pop();
+            args.pop();
+        }
+        args.extend(["--cursor".to_string(), cursor.to_string()]);
+    }
+    Err(io::Error::other("JSON analysis continuation exceeded its test bound").into())
+}
+
+/// Return the community metadata findings from one analysis response.
+fn json_community_values(value: &Value) -> Result<Vec<&Value>, Box<dyn Error>> {
+    let findings = value
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("analysis response omitted findings"))?;
+    let communities = findings
+        .iter()
+        .filter(|finding| finding.get("kind").and_then(Value::as_str) == Some("community"))
+        .filter_map(|finding| finding.get("community"))
+        .collect::<Vec<_>>();
+    if communities.is_empty() {
+        return Err(io::Error::other("analysis response omitted community metadata").into());
+    }
+    Ok(communities)
+}
+
+/// Return community metadata across every bounded continuation page.
+fn json_community_values_from_pages(pages: &[Value]) -> Result<Vec<&Value>, Box<dyn Error>> {
+    let mut communities = Vec::new();
+    for page in pages {
+        if let Ok(page_communities) = json_community_values(page) {
+            communities.extend(page_communities);
+        }
+    }
+    if communities.is_empty() {
+        return Err(io::Error::other("analysis pages omitted community metadata").into());
+    }
+    Ok(communities)
+}
+
+/// Verify stable IDs/order, containment exclusion, and the planted partition.
+fn assert_planted_community_values(
+    communities: &[&Value],
+    adapter: &str,
+) -> Result<(), Box<dyn Error>> {
+    let expected_group_a = BTreeSet::from([
+        "group_a_one".to_string(),
+        "group_a_root".to_string(),
+        "group_a_two".to_string(),
+    ]);
+    let expected_group_b = BTreeSet::from([
+        "group_b_one".to_string(),
+        "group_b_root".to_string(),
+        "group_b_two".to_string(),
+    ]);
+    let mut community_ids = BTreeSet::new();
+    let mut member_sets = Vec::new();
+    for community in communities {
+        let id = community.get("id").and_then(Value::as_str).ok_or_else(|| {
+            io::Error::other(format!("{adapter} community omitted its stable ID"))
+        })?;
+        if !id.starts_with("community-v1-") || !community_ids.insert(id.to_string()) {
+            return Err(io::Error::other(format!(
+                "{adapter} community IDs were missing or duplicated: {community_ids:?}"
+            ))
+            .into());
+        }
+        if community.get("coverage").and_then(Value::as_str) != Some("complete")
+            || community.get("convergence").and_then(Value::as_str) != Some("converged")
+            || community.get("truncated").and_then(Value::as_bool) != Some(false)
+        {
+            return Err(io::Error::other(format!(
+                "{adapter} planted community did not report complete converged coverage: {community:?}"
+            ))
+            .into());
+        }
+        let members = community
+            .get("members")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other(format!("{adapter} community omitted members")))?;
+        let member_keys = members
+            .iter()
+            .map(|member| {
+                member
+                    .pointer("/node/entity/key/stable/canonical_identity")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        io::Error::other(format!("{adapter} community member lacked a stable key"))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if member_keys.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err(io::Error::other(format!(
+                "{adapter} community members were not in stable key order: {member_keys:?}"
+            ))
+            .into());
+        }
+        if community
+            .get("evidence")
+            .and_then(Value::as_array)
+            .is_some_and(|evidence| {
+                evidence.iter().any(|edge| {
+                    edge.get("source")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                        || edge
+                            .get("target")
+                            .and_then(Value::as_str)
+                            .is_none_or(str::is_empty)
+                        || edge.get("weight").and_then(Value::as_u64) == Some(0)
+                        || edge.pointer("/relation/value").and_then(Value::as_str)
+                            == Some("contains")
+                })
+            })
+        {
+            return Err(io::Error::other(format!(
+                "{adapter} community evidence emitted a containment relation"
+            ))
+            .into());
+        }
+        let member_names = members
+            .iter()
+            .map(|member| {
+                member
+                    .pointer("/node/entity/selector/symbol/name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "{adapter} community member lacked a stable symbol name"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        member_sets.push(member_names.into_iter().collect::<BTreeSet<_>>());
+    }
+    let group_a_partition = member_sets
+        .iter()
+        .any(|members| expected_group_a.is_subset(members));
+    let group_b_partition = member_sets
+        .iter()
+        .any(|members| expected_group_b.is_subset(members));
+    let groups_are_separate = member_sets.iter().all(|members| {
+        !(members.iter().any(|name| expected_group_a.contains(name))
+            && members.iter().any(|name| expected_group_b.contains(name)))
+    });
+    if !group_a_partition || !group_b_partition || !groups_are_separate {
+        return Err(io::Error::other(format!(
+            "{adapter} community projection did not preserve planted groups: {member_sets:?}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// Require a nested JSON string value.

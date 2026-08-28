@@ -129,10 +129,11 @@ flowchart LR
 flowchart LR
     normalized_graph[(Current normalized graph)] --> admit[Resolved local non-containment edges]
     admit --> bound[Node, edge, time, memory, iteration bounds]
-    bound --> labels[Stable-order weighted label propagation]
+    bound -->|complete and within bounds| labels[Stable-order weighted label propagation]
+    bound -->|partial coverage or node/edge overflow| uncertain[Typed inconclusive or truncated result]
     labels --> ids[Stable parameter-and-member community IDs]
-    ids --> result[Members, evidence, coverage, convergence, truncation]
-    gap[Incomplete or stale evidence] --> unresolved[Typed inconclusive result]
+    ids --> result[Bounded returned output: members, evidence, coverage, convergence, truncation]
+    uncertain --> result
 ```
 
 ## Bounded PDF and DOCX extraction
