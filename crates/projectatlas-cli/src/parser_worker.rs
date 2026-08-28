@@ -448,10 +448,13 @@ fn map_contract_error(error: WorkerContractError) -> WorkerStartupError {
         }
         WorkerContractError::MissingInvocation => WorkerStartupError::MissingInvocation,
         WorkerContractError::UnexpectedArguments => WorkerStartupError::UnexpectedArguments,
-        #[cfg(not(any(
-            all(target_os = "linux", target_arch = "x86_64"),
-            all(target_os = "windows", target_arch = "x86_64")
-        )))]
+        #[cfg(all(
+            not(test),
+            not(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "windows", target_arch = "x86_64")
+            ))
+        ))]
         WorkerContractError::UnsupportedTarget { os, architecture } => {
             WorkerStartupError::UnsupportedTarget { os, architecture }
         }

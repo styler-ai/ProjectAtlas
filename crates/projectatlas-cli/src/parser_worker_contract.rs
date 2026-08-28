@@ -71,10 +71,13 @@ pub(super) enum WorkerContractError {
     #[error("optional parser worker accepts only --serve or --verify-build-contract")]
     UnexpectedArguments,
     /// The current platform cannot establish an accepted optional-parser boundary.
-    #[cfg(not(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "windows", target_arch = "x86_64")
-    )))]
+    #[cfg(all(
+        not(test),
+        not(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "x86_64")
+        ))
+    ))]
     #[error("optional parser containment is unsupported on {os}-{architecture}")]
     UnsupportedTarget {
         /// Rust target-operating-system identity.
@@ -179,10 +182,13 @@ pub(super) fn parse_worker_operation(
 }
 
 /// Run the unsupported-host entrypoint without opening a parser pack.
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "windows", target_arch = "x86_64")
-)))]
+#[cfg(all(
+    not(test),
+    not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64")
+    ))
+))]
 pub(super) fn unsupported_host_startup(
     arguments: impl Iterator<Item = OsString>,
 ) -> Result<(), WorkerContractError> {
