@@ -7956,6 +7956,18 @@ mod tests {
         Ok(())
     }
 
+    /// Downgrade a current fixture to the released schema-19 worktree shape.
+    fn drop_native_worktree_identity_schema(connection: &Connection) -> rusqlite::Result<()> {
+        connection.execute_batch(
+            "DROP INDEX IF EXISTS idx_worktree_registrations_active_native_administrative_directory;
+             DROP INDEX IF EXISTS idx_worktree_registrations_active_native_root;
+             ALTER TABLE worktree_registrations DROP COLUMN git_common_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN git_administrative_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN last_root_identity;",
+        )
+    }
+    }
+
     #[cfg(unix)]
     fn create_directory_link(target: &Path, link: &Path) -> io::Result<()> {
         std::os::unix::fs::symlink(target, link)
@@ -9087,6 +9099,7 @@ mod tests {
                     stage_project,
                 )?);
                 let connection = Connection::open(database)?;
+                drop_native_worktree_identity_schema(&connection)?;
                 connection.execute_batch(
                     "DROP TABLE project_root_identity;
                  DROP TABLE IF EXISTS graph_identity_rejections;

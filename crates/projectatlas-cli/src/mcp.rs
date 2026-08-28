@@ -706,9 +706,9 @@ const MCP_HYDRATION_NO_SCAN_REASON: &str =
 /// Worktree aliases require one structurally verified Git control repository.
 const MCP_ERROR_WORKTREE_CONTROL_REPOSITORY_REQUIRED: &str =
     "worktree aliases require a structurally valid Git control repository";
-/// `SQLite` metadata and MCP JSON require lossless UTF-8 worktree identity paths.
+/// UTF-8-only display terminals cannot render some native worktree paths.
 const MCP_ERROR_WORKTREE_PATH_NON_UTF8: &str =
-    "ProjectAtlas worktree registration requires UTF-8 common, administrative, and source paths";
+    "native worktree identity is not available as UTF-8; use its stable alias or selector";
 /// Active registrations must agree with their local atlas identity.
 const MCP_ERROR_WORKTREE_IDENTITY_CONFLICT: &str =
     "local atlas identity conflicts with its active registration";
@@ -1864,6 +1864,8 @@ struct McpWorktreeRow {
     alias: Option<String>,
     /// Structural primary/linked role.
     role: McpGitWorktreeRole,
+    /// Whether all displayed native paths have a lossless UTF-8 projection.
+    path_display: McpWorktreePathDisplayState,
     /// Current reciprocal Git state.
     git_state: McpGitWorktreeState,
     /// `ProjectAtlas` registration relationship.
@@ -1893,6 +1895,8 @@ struct McpRetiredWorktreeRow {
     alias: String,
     /// Last structurally validated source root.
     last_root: Option<String>,
+    /// Whether the retained root has a lossless UTF-8 projection.
+    path_display: McpWorktreePathDisplayState,
     /// Exact initialized project identity when one was bound.
     project_instance_id: Option<String>,
     /// Last local aggregate revision accepted before retirement.
@@ -1906,6 +1910,8 @@ struct McpWorktreeCandidate {
     selector: String,
     /// Exact active source root.
     root: Option<String>,
+    /// Whether the candidate root has a lossless UTF-8 projection.
+    path_display: McpWorktreePathDisplayState,
     /// Structural primary/linked role.
     role: McpGitWorktreeRole,
 }
@@ -1923,6 +1929,8 @@ struct McpWorktreeMutationReport {
     alias: Option<String>,
     /// Exact source root when known.
     root: Option<String>,
+    /// Display state for the selected native source root.
+    path_display: Option<McpWorktreePathDisplayState>,
     /// Stable control-database registration identity when committed.
     registration_id: Option<i64>,
     /// Final local telemetry synchronization outcome when attempted.
@@ -1978,6 +1986,16 @@ enum McpWorktreeRegistrationState {
     Registered,
     /// Git knows the worktree but `ProjectAtlas` does not.
     Unregistered,
+}
+
+/// Lossless UTF-8 availability for native paths at the display boundary.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpWorktreePathDisplayState {
+    /// The native path can be rendered as UTF-8 without changing bytes.
+    Available,
+    /// The native path remains routable by identity but cannot be rendered as UTF-8.
+    Unavailable,
 }
 
 /// Exact local atlas availability without modifying its database.
@@ -4592,12 +4610,10 @@ impl ProjectAtlasMcpServer {
         else {
             return Ok(());
         };
-        if !Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry) {
-            return Ok(());
-        }
-        let administrative_directory =
-            normalize_native_path_display(&entry.administrative_directory);
         let administrative_identity = git_administrative_identity(&entry.administrative_directory)?;
+        let administrative_directory =
+            CanonicalProjectRoot::from_path(&entry.administrative_directory)
+                .map_err(|source| CliError::InvalidInput(source.to_string()))?;
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         let control_project_instance_id = control.captured_project_binding()?.project_instance_id;
         let Some(registration) =
@@ -4605,7 +4621,7 @@ impl ProjectAtlasMcpServer {
                 .worktree_registrations(false)?
                 .into_iter()
                 .find(|registration| {
-                    registration.git_administrative_directory == administrative_directory
+                    registration.git_administrative_directory_identity == administrative_directory
                         && registration.git_administrative_identity == administrative_identity
                 })
         else {
@@ -5803,22 +5819,28 @@ impl ProjectAtlasMcpServer {
         selector
     }
 
+    /// Derive the same selector from a persisted native identity that a live
+    /// Git entry would expose, retaining the exact bytes when UTF-8 display is
+    /// unavailable.
+    fn worktree_candidate_selector_from_canonical_identity(
+        identity: &CanonicalProjectRoot,
+    ) -> String {
+        identity.display_string().map_or_else(
+            |_| {
+                Self::worktree_candidate_selector_from_native_identity(
+                    identity.as_path().as_os_str().as_encoded_bytes(),
+                )
+            },
+            |display| Self::worktree_candidate_selector_from_identity(&display),
+        )
+    }
+
     /// Borrow one active source root from structural worktree evidence.
     fn active_worktree_root(entry: &GitWorktreeEntry) -> Option<&Path> {
         match &entry.state {
             GitWorktreeState::Active { root, .. } => Some(root),
             GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
         }
-    }
-
-    /// Return whether `SQLite` text and MCP JSON can preserve this identity exactly.
-    fn worktree_registration_paths_are_utf8(
-        common_directory: &Path,
-        entry: &GitWorktreeEntry,
-    ) -> bool {
-        common_directory.to_str().is_some()
-            && entry.administrative_directory.to_str().is_some()
-            && Self::active_worktree_root(entry).is_none_or(|root| root.to_str().is_some())
     }
 
     /// Return whether one short selector identifies this structural candidate.
@@ -5846,9 +5868,6 @@ impl ProjectAtlasMcpServer {
         repository
             .worktrees
             .iter()
-            .filter(|entry| {
-                Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry)
-            })
             .filter(|entry| {
                 Self::active_worktree_root(entry)
                     .is_some_and(|root| root != self.control_state.root)
@@ -5897,12 +5916,18 @@ impl ProjectAtlasMcpServer {
         common_directory: &Path,
         entry: &GitWorktreeEntry,
     ) -> Option<McpWorktreeCandidate> {
-        if !Self::worktree_registration_paths_are_utf8(common_directory, entry) {
-            return None;
-        }
+        let root = Self::active_worktree_root(entry)?;
         Some(McpWorktreeCandidate {
             selector: Self::worktree_candidate_selector(entry),
-            root: lossless_project_root_display(Self::active_worktree_root(entry)?),
+            path_display: if common_directory.to_str().is_some()
+                && entry.administrative_directory.to_str().is_some()
+                && root.to_str().is_some()
+            {
+                McpWorktreePathDisplayState::Available
+            } else {
+                McpWorktreePathDisplayState::Unavailable
+            },
+            root: lossless_project_root_display(root),
             role: entry.role.into(),
         })
     }
@@ -6227,18 +6252,18 @@ impl ProjectAtlasMcpServer {
     ) -> McpWorktreeRow {
         let administrative_directory =
             lossless_native_path_display(&entry.administrative_directory);
-        let registration_paths_are_utf8 =
-            Self::worktree_registration_paths_are_utf8(common_directory, entry);
-        let registration = registration_paths_are_utf8
-            .then(|| {
-                administrative_directory.as_deref().and_then(|directory| {
-                    registrations.iter().find(|registration| {
-                        registration.state == WorktreeRegistrationState::Active
-                            && registration.git_administrative_directory == directory
-                    })
+        let common_identity = CanonicalProjectRoot::from_path(common_directory).ok();
+        let administrative_identity =
+            CanonicalProjectRoot::from_path(&entry.administrative_directory).ok();
+        let registration = registrations.iter().find(|registration| {
+            registration.state == WorktreeRegistrationState::Active
+                && common_identity
+                    .as_ref()
+                    .is_some_and(|identity| *identity == registration.git_common_directory_identity)
+                && administrative_identity.as_ref().is_some_and(|identity| {
+                    *identity == registration.git_administrative_directory_identity
                 })
-            })
-            .flatten();
+        });
         let administrative_identity = git_administrative_identity(&entry.administrative_directory);
         let lifecycle_matches = registration.is_none_or(|registration| {
             administrative_identity
@@ -6246,6 +6271,14 @@ impl ProjectAtlasMcpServer {
                 .is_ok_and(|identity| identity == &registration.git_administrative_identity)
         });
         let root = Self::active_worktree_root(entry);
+        let path_display = if common_directory.to_str().is_some()
+            && entry.administrative_directory.to_str().is_some()
+            && root.is_none_or(|root| root.to_str().is_some())
+        {
+            McpWorktreePathDisplayState::Available
+        } else {
+            McpWorktreePathDisplayState::Unavailable
+        };
         let control = root.is_some_and(|root| root == self.control_state.root);
         let alias = if control {
             Some(MCP_MAIN_WORKTREE_ALIAS.to_string())
@@ -6263,16 +6296,15 @@ impl ProjectAtlasMcpServer {
         let mut telemetry_state = McpWorktreeTelemetryState::Unavailable;
         let mut local_telemetry_revision = None;
         let mut project_instance_id = None;
-        let mut blocker = if registration_paths_are_utf8 {
-            (!lifecycle_matches)
-                .then(|| MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string())
-                .or_else(|| administrative_identity.err().map(|error| error.to_string()))
-        } else {
-            Some(MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string())
-        };
+        let mut blocker = (!lifecycle_matches)
+            .then(|| MCP_ERROR_WORKTREE_LIFECYCLE_CHANGED.to_string())
+            .or_else(|| administrative_identity.err().map(|error| error.to_string()));
+        if matches!(path_display, McpWorktreePathDisplayState::Unavailable) && blocker.is_none() {
+            blocker = Some(MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string());
+        }
         let git_state = match &entry.state {
             GitWorktreeState::Active { root, .. } => {
-                if registration_paths_are_utf8 && lifecycle_matches {
+                if lifecycle_matches {
                     match Self::local_worktree_atlas(root) {
                         Ok(Some(local)) => {
                             let identity_matches = registration
@@ -6336,15 +6368,14 @@ impl ProjectAtlasMcpServer {
             }
         };
         McpWorktreeRow {
-            selector: registration_paths_are_utf8.then(|| Self::worktree_candidate_selector(entry)),
+            selector: Some(Self::worktree_candidate_selector(entry)),
             alias,
             role: entry.role.into(),
+            path_display,
             git_state,
             registration: registration_state,
             administrative_directory,
-            root: root
-                .filter(|_| registration_paths_are_utf8)
-                .and_then(lossless_project_root_display),
+            root: root.and_then(lossless_project_root_display),
             atlas_state,
             telemetry_state,
             accepted_telemetry_revision: registration
@@ -6357,16 +6388,30 @@ impl ProjectAtlasMcpServer {
 
     /// Preserve one active alias when Git no longer reports its worktree registration.
     fn missing_registered_worktree_row(registration: &WorktreeRegistration) -> McpWorktreeRow {
+        let path_display = if registration.last_root_identity.display_string().is_ok()
+            && registration
+                .git_administrative_directory_identity
+                .display_string()
+                .is_ok()
+        {
+            McpWorktreePathDisplayState::Available
+        } else {
+            McpWorktreePathDisplayState::Unavailable
+        };
         McpWorktreeRow {
-            selector: Some(Self::worktree_candidate_selector_from_identity(
-                &registration.git_administrative_directory,
+            selector: Some(Self::worktree_candidate_selector_from_canonical_identity(
+                &registration.git_administrative_directory_identity,
             )),
             alias: Some(registration.alias.to_string()),
             role: McpGitWorktreeRole::Linked,
+            path_display,
             git_state: McpGitWorktreeState::Missing,
             registration: McpWorktreeRegistrationState::Registered,
-            administrative_directory: Some(registration.git_administrative_directory.clone()),
-            root: Some(registration.last_root.clone()),
+            administrative_directory: registration
+                .git_administrative_directory_identity
+                .display_string()
+                .ok(),
+            root: registration.last_root_identity.display_string().ok(),
             atlas_state: McpWorktreeAtlasState::Unavailable,
             telemetry_state: McpWorktreeTelemetryState::Unavailable,
             accepted_telemetry_revision: Some(registration.accepted_telemetry_revision),
@@ -6481,14 +6526,9 @@ impl ProjectAtlasMcpServer {
         let control_project_instance_id = control.captured_project_binding()?.project_instance_id;
         let registration = control.worktree_registration(alias)?;
         let repository = self.control_git_repository()?;
-        if repository.common_directory.to_str().is_none() {
-            return Err(CliError::InvalidInput(
-                MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string(),
-            ));
-        }
-        if normalize_native_path_display(&repository.common_directory)
-            != registration.git_common_directory
-        {
+        let common_identity = CanonicalProjectRoot::from_path(&repository.common_directory)
+            .map_err(|source| CliError::InvalidInput(source.to_string()))?;
+        if common_identity != registration.git_common_directory_identity {
             return Err(CliError::InvalidInput(format!(
                 "registered worktree '{}' belongs to a different Git common directory",
                 alias.as_str()
@@ -6498,9 +6538,9 @@ impl ProjectAtlasMcpServer {
             .worktrees
             .iter()
             .find(|entry| {
-                Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry)
-                    && normalize_native_path_display(&entry.administrative_directory)
-                        == registration.git_administrative_directory
+                CanonicalProjectRoot::from_path(&entry.administrative_directory).is_ok_and(
+                    |identity| identity == registration.git_administrative_directory_identity,
+                )
             })
             .ok_or_else(|| {
                 CliError::InvalidInput(format!(
@@ -6541,10 +6581,8 @@ impl ProjectAtlasMcpServer {
             message.push_str(&source.to_string());
             CliError::InvalidInput(message)
         })?;
-        let current_registry_root = root
-            .to_str()
-            .map(normalize_native_path_display_str)
-            .ok_or_else(|| CliError::InvalidInput(MCP_ERROR_WORKTREE_PATH_NON_UTF8.to_string()))?;
+        let current_registry_root = CanonicalProjectRoot::from_path(&root)
+            .map_err(|source| CliError::InvalidInput(source.to_string()))?;
         // Validate a bound local atlas before any control-catalog refresh. A Git
         // move alone is not enough evidence to rewrite `last_root`; the local
         // atlas must first be opened through its native admission boundary and
@@ -6561,7 +6599,7 @@ impl ProjectAtlasMcpServer {
                 ));
             }
         }
-        let registration_root_matches = current_registry_root == registration.last_root;
+        let registration_root_matches = current_registry_root == registration.last_root_identity;
         let registration = if registration_root_matches {
             registration
         } else {
@@ -7769,10 +7807,9 @@ impl ProjectAtlasMcpServer {
             let structural_identities = repository
                 .worktrees
                 .iter()
-                .filter(|entry| {
-                    Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry)
+                .filter_map(|entry| {
+                    CanonicalProjectRoot::from_path(&entry.administrative_directory).ok()
                 })
-                .map(|entry| normalize_native_path_display(&entry.administrative_directory))
                 .collect::<HashSet<_>>();
             let (mut worktrees, unregistered): (Vec<_>, Vec<_>) = repository
                 .worktrees
@@ -7789,7 +7826,7 @@ impl ProjectAtlasMcpServer {
                     .filter(|registration| {
                         registration.state == WorktreeRegistrationState::Active
                             && !structural_identities
-                                .contains(&registration.git_administrative_directory)
+                                .contains(&registration.git_administrative_directory_identity)
                     })
                     .map(Self::missing_registered_worktree_row),
             );
@@ -7805,7 +7842,12 @@ impl ProjectAtlasMcpServer {
                 .filter(|registration| registration.state == WorktreeRegistrationState::Retired)
                 .map(|registration| McpRetiredWorktreeRow {
                     alias: registration.alias.to_string(),
-                    last_root: Some(registration.last_root.clone()),
+                    path_display: if registration.last_root_identity.display_string().is_ok() {
+                        McpWorktreePathDisplayState::Available
+                    } else {
+                        McpWorktreePathDisplayState::Unavailable
+                    },
+                    last_root: registration.last_root_identity.display_string().ok(),
                     project_instance_id: registration
                         .project_instance_id
                         .map(|identity| identity.to_string()),
@@ -7881,6 +7923,7 @@ impl ProjectAtlasMcpServer {
                         selector: None,
                         alias: None,
                         root: None,
+                        path_display: None,
                         registration_id: None,
                         telemetry_sync: None,
                         candidates: candidate_rows,
@@ -7973,6 +8016,16 @@ impl ProjectAtlasMcpServer {
                     selector: Some(Self::worktree_candidate_selector(&entry)),
                     alias: Some(alias.to_string()),
                     root: lossless_project_root_display(root),
+                    path_display: Some(
+                        if root.to_str().is_some()
+                            && repository.common_directory.to_str().is_some()
+                            && entry.administrative_directory.to_str().is_some()
+                        {
+                            McpWorktreePathDisplayState::Available
+                        } else {
+                            McpWorktreePathDisplayState::Unavailable
+                        },
+                    ),
                     registration_id: Some(registration.registration_id),
                     telemetry_sync,
                     candidates: Vec::new(),
@@ -8000,9 +8053,9 @@ impl ProjectAtlasMcpServer {
             let registration = control.worktree_registration(&alias)?;
             let mut blocker = None;
             let entry = repository.worktrees.iter().find(|entry| {
-                Self::worktree_registration_paths_are_utf8(&repository.common_directory, entry)
-                    && normalize_native_path_display(&entry.administrative_directory)
-                        == registration.git_administrative_directory
+                CanonicalProjectRoot::from_path(&entry.administrative_directory).is_ok_and(
+                    |identity| identity == registration.git_administrative_directory_identity,
+                )
             });
             let entry = match entry {
                 Some(entry) => match git_administrative_identity(&entry.administrative_directory) {
@@ -8036,7 +8089,7 @@ impl ProjectAtlasMcpServer {
                 Some(GitWorktreeState::Missing { .. }) | None => {
                     blocker
                         .get_or_insert_with(|| MCP_WORKTREE_MISSING_RETENTION_REASON.to_string());
-                    (Some(registration.last_root.clone()), None)
+                    (registration.last_root_identity.display_string().ok(), None)
                 }
             };
             let (retired, telemetry_sync, final_blocker) = Self::retire_registered_worktree(
@@ -8054,6 +8107,31 @@ impl ProjectAtlasMcpServer {
                     selector: entry.map(Self::worktree_candidate_selector),
                     alias: Some(alias.to_string()),
                     root: root_display,
+                    path_display: Some(entry.map_or_else(
+                        || {
+                            if registration.last_root_identity.display_string().is_ok()
+                                && registration
+                                    .git_administrative_directory_identity
+                                    .display_string()
+                                    .is_ok()
+                            {
+                                McpWorktreePathDisplayState::Available
+                            } else {
+                                McpWorktreePathDisplayState::Unavailable
+                            }
+                        },
+                        |entry| {
+                            if Self::active_worktree_root(entry).is_some_and(|root| {
+                                root.to_str().is_some()
+                                    && repository.common_directory.to_str().is_some()
+                                    && entry.administrative_directory.to_str().is_some()
+                            }) {
+                                McpWorktreePathDisplayState::Available
+                            } else {
+                                McpWorktreePathDisplayState::Unavailable
+                            }
+                        },
+                    )),
                     registration_id: Some(retired.registration_id),
                     telemetry_sync,
                     candidates: Vec::new(),
@@ -10059,6 +10137,19 @@ mod tests {
         }
     }
 
+    /// Downgrade a current fixture to the released schema-19 worktree shape.
+    fn drop_native_worktree_identity_schema(
+        connection: &rusqlite::Connection,
+    ) -> rusqlite::Result<()> {
+        connection.execute_batch(
+            "DROP INDEX IF EXISTS idx_worktree_registrations_active_native_administrative_directory;
+             DROP INDEX IF EXISTS idx_worktree_registrations_active_native_root;
+             ALTER TABLE worktree_registrations DROP COLUMN git_common_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN git_administrative_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN last_root_identity;",
+        )
+    }
+
     /// Execute one test-owned Git fixture command and retain exact diagnostics on failure.
     fn run_fixture_command(command: &mut StdCommand) -> Result<String, Box<dyn std::error::Error>> {
         let output = command.output()?;
@@ -12056,7 +12147,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn non_utf8_worktree_identities_are_blocked_before_join_or_selection()
+    fn non_utf8_worktree_identities_retain_native_join_and_display_state()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let control_root = temp.path().join("control");
@@ -12092,11 +12183,16 @@ mod tests {
                 alias: WorktreeAlias::parse(&format!("shadow-{index}"))?,
                 state: WorktreeRegistrationState::Active,
                 git_common_directory: normalize_native_path_display(&common_directory),
+                git_common_directory_identity: CanonicalProjectRoot::from_path(&common_directory)?,
                 git_administrative_directory: normalize_native_path_display(
                     &administrative_directory,
                 ),
+                git_administrative_directory_identity: CanonicalProjectRoot::from_path(
+                    &administrative_directory,
+                )?,
                 git_administrative_identity: "ab".repeat(32),
                 last_root: normalize_native_path_display(&root),
+                last_root_identity: CanonicalProjectRoot::from_path(&root)?,
                 project_instance_id: None,
                 accepted_telemetry_revision: 0,
                 created_at_epoch: 1,
@@ -12104,13 +12200,16 @@ mod tests {
             };
             let row = server.worktree_list_row(&common_directory, &entry, &[shadow]);
             require(
-                row.selector.is_none()
-                    && row.alias.is_none()
-                    && matches!(row.registration, McpWorktreeRegistrationState::Unregistered)
+                row.selector.is_some()
+                    && row
+                        .alias
+                        .as_deref()
+                        .is_some_and(|alias| alias == format!("shadow-{index}"))
+                    && matches!(row.registration, McpWorktreeRegistrationState::Registered)
                     && matches!(row.atlas_state, McpWorktreeAtlasState::Invalid)
                     && row.root.is_none()
-                    && row.blocker.as_deref() == Some(MCP_ERROR_WORKTREE_PATH_NON_UTF8),
-                "non-UTF-8 structural row was advertised or joined as registrable",
+                    && matches!(row.path_display, McpWorktreePathDisplayState::Unavailable),
+                "non-UTF-8 structural row lost its native selector or typed display state",
             )?;
             entries.push(entry);
         }
@@ -12129,15 +12228,22 @@ mod tests {
             },
             worktrees: entries,
         };
+        let candidates = server.matching_worktree_candidates(&repository, &first_selector);
         require(
-            server
-                .matching_worktree_candidates(&repository, &first_selector)
-                .is_empty()
-                && repository.worktrees.iter().all(|entry| {
-                    ProjectAtlasMcpServer::worktree_candidate(&repository.common_directory, entry)
-                        .is_none()
+            candidates.len() == 1
+                && ProjectAtlasMcpServer::worktree_candidate(
+                    &repository.common_directory,
+                    candidates[0],
+                )
+                .is_some_and(|candidate| {
+                    candidate.selector == first_selector
+                        && candidate.root.is_none()
+                        && matches!(
+                            candidate.path_display,
+                            McpWorktreePathDisplayState::Unavailable
+                        )
                 }),
-            "non-UTF-8 structural identity remained selectable for registration",
+            "non-UTF-8 structural identity was not selectable with typed display state",
         )?;
         require(
             store.worktree_registrations(true)?.is_empty(),
@@ -12147,22 +12253,33 @@ mod tests {
         let non_utf8_common = temp
             .path()
             .join(std::ffi::OsString::from_vec(b"common-\xff".to_vec()));
+        let non_utf8_administrative = non_utf8_common.join("worktrees/utf8");
+        let non_utf8_root = temp.path().join("utf8");
+        fs::create_dir_all(&non_utf8_administrative)?;
+        fs::create_dir(&non_utf8_root)?;
         let utf8_entry = GitWorktreeEntry {
             role: GitWorktreeRole::Linked,
-            administrative_directory: common_directory.join("worktrees").join("utf8"),
+            administrative_directory: non_utf8_administrative,
             state: GitWorktreeState::Active {
-                git_control_path: temp.path().join("utf8").join(".git"),
-                root: temp.path().join("utf8"),
+                git_control_path: non_utf8_root.join(".git"),
+                root: non_utf8_root,
             },
         };
         let row = server.worktree_list_row(&non_utf8_common, &utf8_entry, &[]);
         require(
-            row.selector.is_none()
-                && row.root.is_none()
+            row.selector.is_some()
+                && row.root.is_some()
+                && matches!(row.path_display, McpWorktreePathDisplayState::Unavailable)
                 && row.blocker.as_deref() == Some(MCP_ERROR_WORKTREE_PATH_NON_UTF8)
                 && ProjectAtlasMcpServer::worktree_candidate(&non_utf8_common, &utf8_entry)
-                    .is_none(),
-            "non-UTF-8 common-directory identity remained registrable",
+                    .is_some_and(|candidate| {
+                        candidate.root.is_some()
+                            && matches!(
+                                candidate.path_display,
+                                McpWorktreePathDisplayState::Unavailable
+                            )
+                    }),
+            "non-UTF-8 common-directory identity lost its selector or display state",
         )
     }
 
@@ -12737,7 +12854,7 @@ mod tests {
         require(
             missing.contains(&normalize_native_path_display(&moved_root))
                 && !missing.contains(&original_root_display)
-                && missing.contains("\"unbound-move\",linked,missing,registered"),
+                && missing.contains("\"unbound-move\",linked,available,missing,registered"),
             &format!("missing worktree reporting retained the pre-move root: {missing}"),
         )?;
         let retired = fixture
@@ -12862,7 +12979,7 @@ mod tests {
         require(
             missing.contains(&normalize_native_path_display(&moved_root))
                 && !missing.contains(&original_root_display)
-                && missing.contains("\"moved-root\",linked,missing,registered"),
+                && missing.contains("\"moved-root\",linked,available,missing,registered"),
             &format!("missing worktree reporting regressed to the pre-move root: {missing}"),
         )?;
         let retired = fixture
@@ -14049,7 +14166,8 @@ mod tests {
                 include_retired: Some(false),
             }));
         require(
-            missing_registration.contains("\"replacement-check\",linked,missing,registered")
+            missing_registration
+                .contains("\"replacement-check\",linked,available,missing,registered")
                 && missing_registration.contains(&normalize_native_path_display(&original))
                 && missing_registration.contains(",unavailable,unavailable,0,")
                 && missing_registration.contains(MCP_WORKTREE_MISSING_RETENTION_REASON),
@@ -16511,6 +16629,7 @@ mod tests {
         let store = open_atlas_store_for_project(&database, &root)?;
         drop(store);
         let predecessor = rusqlite::Connection::open(&database)?;
+        drop_native_worktree_identity_schema(&predecessor)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -16651,6 +16770,7 @@ mod tests {
         let store = AtlasStore::open_for_project(&database, &raw_root)?;
         drop(store);
         let predecessor = rusqlite::Connection::open(&database)?;
+        drop_native_worktree_identity_schema(&predecessor)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -16813,6 +16933,7 @@ mod tests {
         drop(AtlasStore::open_for_project(&database, &bound_root)?);
         {
             let connection = rusqlite::Connection::open(&database)?;
+            drop_native_worktree_identity_schema(&connection)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
                  DROP TABLE IF EXISTS graph_identity_rejections;
@@ -16921,6 +17042,7 @@ mod tests {
         let store = open_atlas_store_for_project(&raw_database, &raw_root)?;
         drop(store);
         let predecessor = rusqlite::Connection::open(&raw_database)?;
+        drop_native_worktree_identity_schema(&predecessor)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -16982,6 +17104,7 @@ mod tests {
             "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
             [collision_slash_root.to_string_lossy().into_owned()],
         )?;
+        drop_native_worktree_identity_schema(&collision_predecessor)?;
         collision_predecessor.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;

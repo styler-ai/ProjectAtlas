@@ -1,10 +1,11 @@
 //! Durable `ProjectAtlas` worktree registrations owned by one control atlas.
 
 use crate::{
-    AtlasStore, DbError, DbResult, WorktreeUsageSnapshot, WorktreeUsageSyncState,
-    normalize_metadata_path, telemetry,
+    AtlasStore, DbError, DbResult, WorktreeUsageSnapshot, WorktreeUsageSyncState, telemetry,
 };
-use projectatlas_core::{MAX_GIT_WORKTREE_REGISTRATIONS, graph::ProjectInstanceId};
+use projectatlas_core::{
+    CanonicalProjectRoot, MAX_GIT_WORKTREE_REGISTRATIONS, graph::ProjectInstanceId,
+};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::fmt;
 use std::path::Path;
@@ -108,14 +109,23 @@ pub struct WorktreeRegistration {
     pub alias: WorktreeAlias,
     /// Whether the selector remains active.
     pub state: WorktreeRegistrationState,
-    /// Structurally validated Git common directory.
+    /// UTF-8 compatibility projection of the Git common directory. The native
+    /// identity field beside it is authoritative for routing and persistence.
     pub git_common_directory: String,
-    /// Stable linked-worktree administrative identity.
+    /// Lossless native identity authority for the Git common directory.
+    pub git_common_directory_identity: CanonicalProjectRoot,
+    /// UTF-8 compatibility projection of the administrative directory. The
+    /// native identity field beside it is authoritative.
     pub git_administrative_directory: String,
+    /// Lossless native identity authority for the administrative directory.
+    pub git_administrative_directory_identity: CanonicalProjectRoot,
     /// Opaque identity for the current administrative-directory lifecycle.
     pub git_administrative_identity: String,
-    /// Last structurally validated canonical source root.
+    /// UTF-8 compatibility projection of the last source root. The native
+    /// identity field beside it is authoritative.
     pub last_root: String,
+    /// Lossless native identity authority for the source root.
+    pub last_root_identity: CanonicalProjectRoot,
     /// Exact worktree atlas identity after initialization.
     pub project_instance_id: Option<ProjectInstanceId>,
     /// Last local aggregate revision accepted by the control atlas.
@@ -156,7 +166,7 @@ impl ActiveWorktreeRegistrationGuard<'_> {
         root: &Path,
         project_instance_id: ProjectInstanceId,
     ) -> DbResult<WorktreeRegistration> {
-        let root = normalized_absolute_path("root", root)?;
+        let root = worktree_identity("root", root)?;
         let bound = bind_registration_project(
             self.connection,
             &self.registration,
@@ -179,7 +189,7 @@ impl ActiveWorktreeRegistrationGuard<'_> {
         project_instance_id: ProjectInstanceId,
         snapshot: &WorktreeUsageSnapshot,
     ) -> DbResult<(WorktreeRegistration, WorktreeUsageSyncState)> {
-        let root = normalized_absolute_path("root", root)?;
+        let root = worktree_identity("root", root)?;
         let bound = bind_registration_project(
             self.connection,
             &self.registration,
@@ -263,12 +273,18 @@ struct PersistedWorktreeRegistration {
     state: String,
     /// Persisted normalized common-directory path.
     git_common_directory: String,
+    /// Persisted lossless common-directory codec bytes.
+    git_common_directory_identity: Vec<u8>,
     /// Persisted normalized administrative-directory path.
     git_administrative_directory: String,
+    /// Persisted lossless administrative-directory codec bytes.
+    git_administrative_directory_identity: Vec<u8>,
     /// Persisted opaque administrative-directory lifecycle identity.
     git_administrative_identity: String,
     /// Persisted last structurally validated root.
     last_root: String,
+    /// Persisted lossless source-root codec bytes.
+    last_root_identity: Vec<u8>,
     /// Optional exact initialized atlas identity bytes.
     project_instance_id: Option<Vec<u8>>,
     /// Last accepted local aggregate revision.
@@ -302,19 +318,28 @@ impl AtlasStore {
         project_instance_id: Option<ProjectInstanceId>,
         created_at_epoch: u64,
     ) -> DbResult<WorktreeRegistration> {
-        let git_common_directory =
-            normalized_absolute_path("git_common_directory", git_common_directory)?;
-        let git_administrative_directory =
-            normalized_absolute_path("git_administrative_directory", git_administrative_directory)?;
+        let git_common_directory_identity =
+            worktree_identity("git_common_directory", git_common_directory)?;
+        let git_administrative_directory_identity =
+            worktree_identity("git_administrative_directory", git_administrative_directory)?;
         let git_administrative_identity =
             validated_administrative_identity(git_administrative_identity)?;
-        let root = normalized_absolute_path("root", root)?;
+        let root_identity = worktree_identity("root", root)?;
+        let git_common_directory = native_path_projection(&git_common_directory_identity)?;
+        let git_administrative_directory =
+            native_path_projection(&git_administrative_directory_identity)?;
+        let root = native_path_projection(&root_identity)?;
         let created_at_epoch = epoch_to_sqlite(created_at_epoch)?;
         let project_bytes = project_instance_id.map(ProjectInstanceId::as_bytes);
+        let common_identity_bytes = git_common_directory_identity.encode()?;
+        let administrative_identity_bytes = git_administrative_directory_identity.encode()?;
+        let root_identity_bytes = root_identity.encode()?;
 
         self.with_validated_write(|transaction| {
             if let Some(existing) = load_active_by_alias(transaction, alias.as_str())? {
-                if existing.git_administrative_directory != git_administrative_directory {
+                if existing.git_administrative_directory_identity
+                    != git_administrative_directory_identity
+                {
                     return Err(DbError::WorktreeRegistrationConflict {
                         field: "alias",
                         value: alias.to_string(),
@@ -346,14 +371,27 @@ impl AtlasStore {
                             .map_or_else(String::new, |value| value.to_string()),
                     });
                 }
+                if native_root_identity_exists_for_other(
+                    transaction,
+                    Some(existing.registration_id),
+                    root_identity_bytes.as_slice(),
+                )? {
+                    return Err(DbError::WorktreeRegistrationConflict {
+                        field: "root",
+                        value: root,
+                    });
+                }
                 transaction.execute(
                     "UPDATE worktree_registrations
-                 SET git_common_directory = ?1, last_root = ?2,
-                     project_instance_id = COALESCE(project_instance_id, ?3)
-                 WHERE registration_id = ?4",
+                 SET git_common_directory = ?1, git_common_directory_identity = ?2,
+                     last_root = ?3, last_root_identity = ?4,
+                     project_instance_id = COALESCE(project_instance_id, ?5)
+                 WHERE registration_id = ?6",
                     params![
                         git_common_directory,
+                        common_identity_bytes.as_slice(),
                         root,
+                        root_identity_bytes.as_slice(),
                         project_bytes.as_ref().map(<[u8; 16]>::as_slice),
                         existing.registration_id,
                     ],
@@ -363,13 +401,13 @@ impl AtlasStore {
 
             let retired_id = load_matching_retired_id(
                 transaction,
-                &git_administrative_directory,
+                &administrative_identity_bytes,
                 &git_administrative_identity,
                 project_bytes.as_ref(),
             )?;
             if active_git_identity_exists(
                 transaction,
-                &git_administrative_directory,
+                &administrative_identity_bytes,
                 &git_administrative_identity,
             )? {
                 return Err(DbError::WorktreeRegistrationConflict {
@@ -389,18 +427,36 @@ impl AtlasStore {
                     value: project_instance_id.map_or_else(String::new, |value| value.to_string()),
                 });
             }
+            if native_root_identity_exists_for_other(
+                transaction,
+                retired_id,
+                root_identity_bytes.as_slice(),
+            )? {
+                return Err(DbError::WorktreeRegistrationConflict {
+                    field: "root",
+                    value: root,
+                });
+            }
             let registration_id = if let Some(registration_id) = retired_id {
                 transaction.execute(
                     "UPDATE worktree_registrations
                  SET alias = ?1, state = 'active', git_common_directory = ?2,
-                     git_administrative_identity = ?3, last_root = ?4,
-                     project_instance_id = ?5, retired_at_epoch = NULL
-                 WHERE registration_id = ?6",
+                     git_common_directory_identity = ?3,
+                     git_administrative_directory = ?4,
+                     git_administrative_directory_identity = ?5,
+                     git_administrative_identity = ?6, last_root = ?7,
+                     last_root_identity = ?8, project_instance_id = ?9,
+                     retired_at_epoch = NULL
+                 WHERE registration_id = ?10",
                     params![
                         alias.as_str(),
                         git_common_directory,
+                        common_identity_bytes.as_slice(),
+                        git_administrative_directory,
+                        administrative_identity_bytes.as_slice(),
                         git_administrative_identity,
                         root,
+                        root_identity_bytes.as_slice(),
                         project_bytes.as_ref().map(<[u8; 16]>::as_slice),
                         registration_id,
                     ],
@@ -424,16 +480,20 @@ impl AtlasStore {
                 }
                 transaction.execute(
                     "INSERT INTO worktree_registrations(
-                    alias, state, git_common_directory, git_administrative_directory,
-                    git_administrative_identity, last_root, project_instance_id,
-                    created_at_epoch
-                 ) VALUES(?1, 'active', ?2, ?3, ?4, ?5, ?6, ?7)",
+                    alias, state, git_common_directory, git_common_directory_identity,
+                    git_administrative_directory, git_administrative_directory_identity,
+                    git_administrative_identity, last_root, last_root_identity,
+                    project_instance_id, created_at_epoch
+                 ) VALUES(?1, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         alias.as_str(),
                         git_common_directory,
+                        common_identity_bytes.as_slice(),
                         git_administrative_directory,
+                        administrative_identity_bytes.as_slice(),
                         git_administrative_identity,
                         root,
+                        root_identity_bytes.as_slice(),
                         project_bytes.as_ref().map(<[u8; 16]>::as_slice),
                         created_at_epoch,
                     ],
@@ -495,14 +555,17 @@ impl AtlasStore {
         registration: &WorktreeRegistration,
         root: &Path,
     ) -> DbResult<WorktreeRegistration> {
-        let root = normalized_absolute_path("root", root)?;
+        let root_identity = worktree_identity("root", root)?;
+        let root = native_path_projection(&root_identity)?;
+        let root_identity_bytes = root_identity.encode()?;
         self.with_validated_write(|transaction| {
             let updated = transaction.execute(
                 "UPDATE worktree_registrations
-                 SET last_root = ?1
-                 WHERE registration_id = ?2 AND alias = ?3 AND state = 'active'",
+                 SET last_root = ?1, last_root_identity = ?2
+                 WHERE registration_id = ?3 AND alias = ?4 AND state = 'active'",
                 params![
                     root,
+                    root_identity_bytes.as_slice(),
                     registration.registration_id,
                     registration.alias.as_str()
                 ],
@@ -541,8 +604,10 @@ impl AtlasStore {
     ) -> DbResult<Vec<WorktreeRegistration>> {
         let mut statement = self.connection.prepare(
             "SELECT registration_id, alias, state, git_common_directory,
-                    git_administrative_directory, git_administrative_identity,
-                    last_root, project_instance_id,
+                    git_common_directory_identity,
+                    git_administrative_directory, git_administrative_directory_identity,
+                    git_administrative_identity, last_root, last_root_identity,
+                    project_instance_id,
                     accepted_telemetry_revision, created_at_epoch, retired_at_epoch
              FROM worktree_registrations
              WHERE state = 'active' OR ?1
@@ -792,7 +857,7 @@ impl AtlasStore {
 fn bind_registration_project(
     connection: &Connection,
     registration: &WorktreeRegistration,
-    root: &str,
+    root: &CanonicalProjectRoot,
     project_instance_id: ProjectInstanceId,
 ) -> DbResult<WorktreeRegistration> {
     if identities_conflict(registration.project_instance_id, Some(project_instance_id)) {
@@ -812,12 +877,15 @@ fn bind_registration_project(
             value: project_instance_id.to_string(),
         });
     }
+    let root_display = native_path_projection(root)?;
+    let root_identity = root.encode()?;
     let updated = connection.execute(
         "UPDATE worktree_registrations
-         SET last_root = ?1, project_instance_id = ?2
-         WHERE registration_id = ?3 AND alias = ?4 AND state = 'active'",
+         SET last_root = ?1, last_root_identity = ?2, project_instance_id = ?3
+         WHERE registration_id = ?4 AND alias = ?5 AND state = 'active'",
         params![
-            root,
+            root_display,
+            root_identity.as_slice(),
             project_bytes.as_slice(),
             registration.registration_id,
             registration.alias.as_str()
@@ -868,22 +936,35 @@ fn invalid_alias<T>(value: &str, reason: &'static str) -> DbResult<T> {
     })
 }
 
-/// Normalize one caller-validated absolute path into bounded metadata text.
-fn normalized_absolute_path(field: &'static str, path: &Path) -> DbResult<String> {
-    if path.to_str().is_none() {
+/// Admit one caller-validated absolute path through the shared native identity.
+fn worktree_identity(field: &'static str, path: &Path) -> DbResult<CanonicalProjectRoot> {
+    let byte_len = path.as_os_str().as_encoded_bytes().len();
+    if !path.is_absolute() || byte_len > MAX_WORKTREE_REGISTRATION_PATH_BYTES {
         return Err(DbError::InvalidWorktreeRegistrationPath {
             field,
             path: path.to_string_lossy().into_owned(),
         });
     }
-    let normalized = normalize_metadata_path(path);
-    if !path.is_absolute() || normalized.len() > MAX_WORKTREE_REGISTRATION_PATH_BYTES {
-        return Err(DbError::InvalidWorktreeRegistrationPath {
-            field,
-            path: normalized,
-        });
+    // Existing worktree paths are canonicalized against the filesystem. The
+    // persisted-path fallback keeps registration/recovery usable for a
+    // retired or moved worktree whose old directory is absent, while still
+    // rejecting an existing regular file at an active boundary.
+    if path.exists() {
+        CanonicalProjectRoot::from_path(path).map_err(DbError::from)
+    } else {
+        CanonicalProjectRoot::from_persisted_path(path.to_path_buf()).map_err(DbError::from)
     }
-    Ok(normalized)
+}
+
+/// Return the UTF-8 projection retained for compatibility metadata.
+fn native_path_projection(identity: &CanonicalProjectRoot) -> DbResult<String> {
+    identity.display_string().or_else(|_| {
+        let encoded = identity.encode()?;
+        Ok(format!(
+            "native-path-unavailable:{}",
+            blake3::hash(&encoded).to_hex()
+        ))
+    })
 }
 
 /// Validate one filesystem-derived opaque administrative identity.
@@ -922,18 +1003,26 @@ fn persisted_registration(row: &Row<'_>) -> rusqlite::Result<PersistedWorktreeRe
         alias: row.get(1)?,
         state: row.get(2)?,
         git_common_directory: row.get(3)?,
-        git_administrative_directory: row.get(4)?,
-        git_administrative_identity: row.get(5)?,
-        last_root: row.get(6)?,
-        project_instance_id: row.get(7)?,
-        accepted_telemetry_revision: row.get(8)?,
-        created_at_epoch: row.get(9)?,
-        retired_at_epoch: row.get(10)?,
+        git_common_directory_identity: row.get(4)?,
+        git_administrative_directory: row.get(5)?,
+        git_administrative_directory_identity: row.get(6)?,
+        git_administrative_identity: row.get(7)?,
+        last_root: row.get(8)?,
+        last_root_identity: row.get(9)?,
+        project_instance_id: row.get(10)?,
+        accepted_telemetry_revision: row.get(11)?,
+        created_at_epoch: row.get(12)?,
+        retired_at_epoch: row.get(13)?,
     })
 }
 
 /// Validate and convert one persisted registration row.
 fn try_registration(row: PersistedWorktreeRegistration) -> DbResult<WorktreeRegistration> {
+    let git_common_directory_identity =
+        CanonicalProjectRoot::decode(&row.git_common_directory_identity)?;
+    let git_administrative_directory_identity =
+        CanonicalProjectRoot::decode(&row.git_administrative_directory_identity)?;
+    let last_root_identity = CanonicalProjectRoot::decode(&row.last_root_identity)?;
     let project_instance_id = row
         .project_instance_id
         .map(|value| {
@@ -972,11 +1061,14 @@ fn try_registration(row: PersistedWorktreeRegistration) -> DbResult<WorktreeRegi
         alias: WorktreeAlias::parse(&row.alias)?,
         state: WorktreeRegistrationState::parse(&row.state)?,
         git_common_directory: row.git_common_directory,
+        git_common_directory_identity,
         git_administrative_directory: row.git_administrative_directory,
+        git_administrative_directory_identity,
         git_administrative_identity: validated_administrative_identity(
             &row.git_administrative_identity,
         )?,
         last_root: row.last_root,
+        last_root_identity,
         project_instance_id,
         accepted_telemetry_revision,
         created_at_epoch,
@@ -986,8 +1078,9 @@ fn try_registration(row: PersistedWorktreeRegistration) -> DbResult<WorktreeRegi
 
 /// Common typed registration projection shared by bounded lookups.
 const REGISTRATION_SELECT: &str = "SELECT registration_id, alias, state, git_common_directory,
-            git_administrative_directory, git_administrative_identity, last_root,
-            project_instance_id,
+            git_common_directory_identity, git_administrative_directory,
+            git_administrative_directory_identity, git_administrative_identity,
+            last_root, last_root_identity, project_instance_id,
             accepted_telemetry_revision, created_at_epoch, retired_at_epoch
      FROM worktree_registrations";
 
@@ -1016,14 +1109,14 @@ fn load_by_id(connection: &Connection, registration_id: i64) -> DbResult<Worktre
 /// Check active Git identity conflicts through owned indexes.
 fn active_git_identity_exists(
     connection: &Connection,
-    administrative_directory: &str,
+    administrative_directory: &[u8],
     administrative_identity: &str,
 ) -> DbResult<bool> {
     let administrative_identity_exists = connection.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM worktree_registrations
-                 INDEXED BY idx_worktree_registrations_active_administrative_directory
-            WHERE state = 'active' AND git_administrative_directory = ?1
+                 INDEXED BY idx_worktree_registrations_active_native_administrative_directory
+            WHERE state = 'active' AND git_administrative_directory_identity = ?1
          )",
         [administrative_directory],
         |row| row.get::<_, bool>(0),
@@ -1063,10 +1156,31 @@ fn project_identity_exists_for_other(
     Ok(found)
 }
 
+/// Check whether another active registration owns the native source root.
+fn native_root_identity_exists_for_other(
+    connection: &Connection,
+    registration_id: Option<i64>,
+    root_identity: &[u8],
+) -> DbResult<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM worktree_registrations
+                INDEXED BY idx_worktree_registrations_active_native_root
+                WHERE state = 'active'
+                  AND registration_id IS NOT ?1
+                  AND last_root_identity = ?2
+             )",
+            params![registration_id, root_identity],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(DbError::from)
+}
+
 /// Find the newest retired history row with the exact same stable identities.
 fn load_matching_retired_id(
     connection: &Connection,
-    administrative_directory: &str,
+    administrative_directory: &[u8],
     administrative_identity: &str,
     project_instance_id: Option<&[u8; 16]>,
 ) -> DbResult<Option<i64>> {
@@ -1075,7 +1189,7 @@ fn load_matching_retired_id(
             "SELECT registration_id
              FROM worktree_registrations
              WHERE state = 'retired'
-               AND git_administrative_directory = ?1
+               AND git_administrative_directory_identity = ?1
                AND git_administrative_identity = ?2
                AND project_instance_id IS ?3
              ORDER BY registration_id DESC
@@ -1100,6 +1214,7 @@ mod tests {
     use std::io;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     /// Return a test error instead of panicking inside a fallible test.
@@ -1160,61 +1275,131 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn registry_rejects_non_utf8_identity_paths_before_writing() -> Result<(), Box<dyn Error>> {
+    fn registry_round_trips_non_utf8_identity_paths_without_lossy_keys()
+    -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let control = temp.path().join("control");
         let common = temp.path().join("common.git");
         let administrative = common.join("worktrees").join("linked");
         let root = temp.path().join("linked");
-        fs::create_dir_all(&control)?;
-        let store = AtlasStore::open_for_project(&control.join("projectatlas.db"), &control)?;
-        let invalid = temp
+        let invalid_common = temp
             .path()
-            .join(std::ffi::OsString::from_vec(b"invalid-\xff".to_vec()));
-        let alias = WorktreeAlias::parse("non-utf8")?;
-
-        for (field, common_path, administrative_path, root_path) in [
+            .join(std::ffi::OsString::from_vec(b"common-\xff".to_vec()));
+        let invalid_administrative = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"admin-\xff".to_vec()));
+        let invalid_root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"root-\xff".to_vec()));
+        let invalid_administrative_two = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"admin-\xfe".to_vec()));
+        fs::create_dir_all(&control)?;
+        for path in [
+            &common,
+            &administrative,
+            &root,
+            &invalid_common,
+            &invalid_administrative,
+            &invalid_root,
+            &invalid_administrative_two,
+        ] {
+            fs::create_dir_all(path)?;
+        }
+        let store = AtlasStore::open_for_project(&control.join("projectatlas.db"), &control)?;
+        // Keep the temporary paths in owned variables while registration uses
+        // them; this also makes each active root identity distinct.
+        let second_root = temp.path().join("second");
+        let third_administrative = common.join("worktrees/third");
+        fs::create_dir_all(&second_root)?;
+        fs::create_dir_all(&third_administrative)?;
+        let mut rows = Vec::new();
+        for (alias, common_path, administrative_path, root_path, identity) in [
             (
-                "git_common_directory",
-                invalid.as_path(),
+                "nonutf-common",
+                invalid_common.as_path(),
                 administrative.as_path(),
                 root.as_path(),
+                1,
             ),
             (
-                "git_administrative_directory",
+                "nonutf-admin",
                 common.as_path(),
-                invalid.as_path(),
-                root.as_path(),
+                invalid_administrative.as_path(),
+                second_root.as_path(),
+                2,
             ),
             (
-                "root",
+                "nonutf-root",
                 common.as_path(),
-                administrative.as_path(),
-                invalid.as_path(),
+                third_administrative.as_path(),
+                invalid_root.as_path(),
+                3,
             ),
         ] {
+            rows.push(store.register_worktree(
+                &WorktreeAlias::parse(alias)?,
+                common_path,
+                administrative_path,
+                &administrative_identity(identity),
+                root_path,
+                None,
+                1,
+            )?);
+        }
+        for row in &rows {
             require(
-                matches!(
-                    store.register_worktree(
-                        &alias,
-                        common_path,
-                        administrative_path,
-                        &administrative_identity(1),
-                        root_path,
-                        None,
-                        1,
-                    ),
-                    Err(DbError::InvalidWorktreeRegistrationPath {
-                        field: rejected,
-                        ..
-                    }) if rejected == field
-                ),
-                "non-UTF-8 registration identity was accepted",
+                row.git_common_directory_identity.encode()?.len() >= 3
+                    && row.git_administrative_directory_identity.encode()?.len() >= 3
+                    && row.last_root_identity.encode()?.len() >= 3,
+                "native identity codec bytes were not persisted",
+            )?;
+            require(
+                row.git_common_directory.contains("native-path-unavailable")
+                    || row
+                        .git_administrative_directory
+                        .contains("native-path-unavailable")
+                    || row.last_root.contains("native-path-unavailable"),
+                "non-UTF-8 display projection was not typed as unavailable",
             )?;
         }
         require(
-            store.worktree_registrations(true)?.is_empty(),
-            "rejected non-UTF-8 identity wrote a registration row",
+            matches!(
+                store.register_worktree(
+                    &WorktreeAlias::parse("duplicate-native-admin")?,
+                    &common,
+                    &invalid_administrative,
+                    &administrative_identity(4),
+                    &temp.path().join("duplicate-root"),
+                    None,
+                    1,
+                ),
+                Err(DbError::WorktreeRegistrationConflict { .. })
+            ),
+            "duplicate native administrative identity was accepted",
+        )?;
+        fs::create_dir_all(temp.path().join("distinct-root"))?;
+        store.register_worktree(
+            &WorktreeAlias::parse("distinct-native-admin")?,
+            &common,
+            &invalid_administrative_two,
+            &administrative_identity(5),
+            &temp.path().join("distinct-root"),
+            None,
+            1,
+        )?;
+        let reopened = AtlasStore::open_for_project(&control.join("projectatlas.db"), &control)?;
+        require_eq(
+            &reopened.worktree_registrations(false)?.len(),
+            &4,
+            "native rows",
+        )?;
+        require(
+            reopened
+                .worktree_registrations(false)?
+                .iter()
+                .any(|row| row.last_root_identity.display_string().is_err()),
+            "native non-UTF-8 root did not remain lossless after reopen",
         )
     }
 
@@ -1337,7 +1522,8 @@ mod tests {
         let replacement = store.worktree_registration(&alias)?;
         require(
             replacement.project_instance_id.is_none()
-                && replacement.last_root == normalized_absolute_path("root", &second_root)?,
+                && replacement.last_root
+                    == native_path_projection(&worktree_identity("root", &second_root)?)?,
             "stale bind changed the replacement registration",
         )?;
         let all = store.worktree_registrations(true)?;
@@ -1897,6 +2083,122 @@ mod tests {
     }
 
     #[test]
+    fn schema_twenty_worktree_identity_migration_backfills_and_retries_atomically()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control = temp.path().join("control");
+        let common = temp.path().join("common.git");
+        let administrative = common.join("worktrees/legacy");
+        let root = temp.path().join("legacy");
+        for path in [&control, &common, &administrative, &root] {
+            fs::create_dir_all(path)?;
+        }
+        let database = control.join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &control)?;
+        let common_display = projectatlas_core::normalize_native_path_display(&common);
+        let administrative_display =
+            projectatlas_core::normalize_native_path_display(&administrative);
+        let root_display = projectatlas_core::normalize_native_path_display(&root);
+        store.connection.execute(
+            "INSERT INTO worktree_registrations(
+                alias, state, git_common_directory, git_administrative_directory,
+                git_administrative_identity, last_root, created_at_epoch
+             ) VALUES('legacy', 'active', ?1, ?2, ?3, ?4, 1)",
+            params![
+                common_display,
+                administrative_display,
+                administrative_identity(9),
+                root_display,
+            ],
+        )?;
+        crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
+        store.connection.execute(
+            "UPDATE metadata SET value = '20' WHERE key = 'schema_version'",
+            [],
+        )?;
+        drop(store);
+
+        let migrated = AtlasStore::open_for_project(&database, &control)?;
+        let registration = migrated.worktree_registration(&WorktreeAlias::parse("legacy")?)?;
+        require_eq(
+            &registration.git_common_directory_identity,
+            &CanonicalProjectRoot::from_persisted_path(PathBuf::from(common_display.clone()))?,
+            "migrated common identity",
+        )?;
+        require_eq(
+            &registration.git_administrative_directory_identity,
+            &CanonicalProjectRoot::from_persisted_path(PathBuf::from(
+                administrative_display.clone(),
+            ))?,
+            "migrated administrative identity",
+        )?;
+        require_eq(
+            &registration.last_root_identity,
+            &CanonicalProjectRoot::from_persisted_path(PathBuf::from(root_display.clone()))?,
+            "migrated root identity",
+        )?;
+        drop(migrated);
+
+        let failed_database = control.join("failed-projectatlas.db");
+        let failed = AtlasStore::open_for_project(&failed_database, &control)?;
+        failed.connection.execute(
+            "INSERT INTO worktree_registrations(
+                alias, state, git_common_directory, git_administrative_directory,
+                git_administrative_identity, last_root, created_at_epoch
+             ) VALUES('legacy', 'active', ?1, ?2, ?3, ?4, 1)",
+            params![
+                common_display,
+                administrative_display,
+                administrative_identity(10),
+                root_display,
+            ],
+        )?;
+        crate::schema::drop_worktree_native_identity_schema(&failed.connection)?;
+        failed.connection.execute_batch(
+            "UPDATE metadata SET value = '20' WHERE key = 'schema_version';
+             UPDATE worktree_registrations SET last_root = 'relative';",
+        )?;
+        let failed_database_path = failed_database;
+        drop(failed);
+        let migration_result = AtlasStore::open_for_project(&failed_database_path, &control);
+        require(
+            matches!(&migration_result, Err(DbError::ProjectRootIdentity(_))),
+            &format!(
+                "injected native identity migration failure was not returned: {:?}",
+                migration_result.as_ref().err().map(ToString::to_string)
+            ),
+        )?;
+        let inspect = Connection::open(&failed_database_path)?;
+        let marker = inspect.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(&marker, &"20".to_string(), "failed migration marker")?;
+        require_eq(
+            &inspect.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('worktree_registrations')
+                 WHERE name = 'last_root_identity'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &0,
+            "failed migration native columns",
+        )?;
+        inspect.execute(
+            "UPDATE worktree_registrations SET last_root = ?1",
+            [root_display.as_str()],
+        )?;
+        let retried = AtlasStore::open_for_project(&failed_database_path, &control)?;
+        require_eq(
+            &retried.worktree_registrations(false)?.len(),
+            &1,
+            "retried migration registration",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn hot_registry_and_aggregate_lookups_use_owning_indexes() -> Result<(), Box<dyn Error>> {
         let connection = Connection::open_in_memory()?;
         crate::schema::initialize(&connection, None)?;
@@ -1921,6 +2223,20 @@ mod tests {
                        INDEXED BY idx_worktree_registrations_active_administrative_identity
                  WHERE state = 'active' AND git_administrative_identity = 'identity'",
                 "idx_worktree_registrations_active_administrative_identity",
+            ),
+            (
+                "EXPLAIN QUERY PLAN
+                 SELECT registration_id FROM worktree_registrations
+                       INDEXED BY idx_worktree_registrations_active_native_administrative_directory
+                 WHERE state = 'active' AND git_administrative_directory_identity = zeroblob(3)",
+                "idx_worktree_registrations_active_native_administrative_directory",
+            ),
+            (
+                "EXPLAIN QUERY PLAN
+                 SELECT registration_id FROM worktree_registrations
+                       INDEXED BY idx_worktree_registrations_active_native_root
+                 WHERE state = 'active' AND last_root_identity = zeroblob(3)",
+                "idx_worktree_registrations_active_native_root",
             ),
             (
                 "EXPLAIN QUERY PLAN

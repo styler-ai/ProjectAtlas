@@ -2857,6 +2857,70 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn real_git_worktree_preserves_non_utf8_native_paths() -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let primary = temp
+            .path()
+            .join(OsString::from_vec(b"primary-\xff".to_vec()));
+        fs::create_dir(&primary)?;
+        run_git(&primary, ["init"])?;
+        run_git(&primary, ["config", "user.name", "ProjectAtlas Test"])?;
+        run_git(
+            &primary,
+            ["config", "user.email", "projectatlas@example.invalid"],
+        )?;
+        fs::write(primary.join("README.md"), "native worktree identity\n")?;
+        run_git(&primary, ["add", "."])?;
+        run_git(&primary, ["commit", "-m", "fixture"])?;
+
+        let linked = temp
+            .path()
+            .join(OsString::from_vec(b"linked-\xfe".to_vec()));
+        add_worktree(&primary, "native-bytes", &linked)?;
+
+        let primary = primary.canonicalize()?;
+        let linked = linked.canonicalize()?;
+        let structure = require_git(discover_repository_structure(&linked)?)?;
+        let entry = structure
+            .worktrees
+            .iter()
+            .find(|entry| {
+                matches!(
+                    &entry.state,
+                    GitWorktreeState::Active { root, .. } if root == &linked
+                )
+            })
+            .ok_or_else(|| io::Error::other("native linked worktree was not discovered"))?;
+
+        require(
+            !primary.to_str().is_some()
+                && !linked.to_str().is_some()
+                && !structure.common_directory.to_str().is_some()
+                && !entry.administrative_directory.to_str().is_some(),
+            "native invalid-byte worktree paths unexpectedly became UTF-8",
+        )?;
+        require(
+            structure.common_directory == primary.join(".git"),
+            "native linked worktree changed its common directory bytes",
+        )?;
+        let administrative_identity = git_administrative_identity(&entry.administrative_directory)?;
+        require(
+            git_worktree_lifecycle_matches(
+                &linked,
+                &structure.common_directory,
+                &entry.administrative_directory,
+                &administrative_identity,
+            )?,
+            "native linked worktree lifecycle did not round-trip through Git evidence",
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn git_config_values_accept_mixed_quotes_without_weakening_syntax_checks() {
         for (raw, expected) in [
