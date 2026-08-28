@@ -13300,13 +13300,13 @@ mod tests {
             "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
             [worktree_b.join(".").to_string_lossy().into_owned()],
         )?;
-        // Exercise the supported predecessor migration path. A genuinely
-        // absent native-identity table may still be admitted from its legacy
-        // root metadata; a present table without its singleton is corruption
-        // and must remain fail-closed.
+        // Exercise the cross-platform typed predecessor migration path. The
+        // schema-19 table-absent route is supported only where its legacy
+        // display is lossless (Windows); Unix must reject that non-injective
+        // predecessor before any write. Schema 20 retains the typed singleton
+        // and is the common predecessor for this alias-routed lifecycle test.
         incomplete_current.execute_batch(
-            "UPDATE metadata SET value = '19' WHERE key = 'schema_version';
-             DROP TABLE project_root_identity;
+            "UPDATE metadata SET value = '20' WHERE key = 'schema_version';
              DROP TABLE graph_identity_rejections;",
         )?;
         drop(incomplete_current);
