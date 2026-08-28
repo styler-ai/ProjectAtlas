@@ -3233,7 +3233,7 @@ fn default_storage_root() -> Result<PathBuf, OptionalParserPackLifecycleError> {
     }
     #[cfg(target_os = "macos")]
     {
-        return env::var_os("HOME")
+        env::var_os("HOME")
             .map(PathBuf::from)
             .map(|root| {
                 root.join("Library")
@@ -3241,7 +3241,7 @@ fn default_storage_root() -> Result<PathBuf, OptionalParserPackLifecycleError> {
                     .join("ProjectAtlas")
                     .join("parser-packs")
             })
-            .ok_or(OptionalParserPackLifecycleError::StorageRootUnavailable);
+            .ok_or(OptionalParserPackLifecycleError::StorageRootUnavailable)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
