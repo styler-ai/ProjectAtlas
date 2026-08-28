@@ -54,7 +54,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-#[cfg(feature = "optional-parser-supervisor")]
+#[cfg(any(windows, feature = "optional-parser-supervisor"))]
 use std::ffi::OsStr;
 #[cfg(all(target_os = "macos", feature = "optional-parser-supervisor"))]
 use std::ffi::OsString;
@@ -98,6 +98,7 @@ const ATLAS_DIR_NAME: &str = ".projectatlas";
 const MISSING_INDEX_DIR_NAME: &str = "missing-index";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
+#[cfg(feature = "optional-parser-supervisor")]
 const VERSIONS_DIR_NAME: &str = "versions";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const TS_CONFIG_FILE_NAME: &str = "tsconfig.json";
