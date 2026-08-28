@@ -479,7 +479,7 @@ that revision; a memory update cannot bless or advance structural data.
 
 ```mermaid
 ---
-title: Current graph tables inside the same single projectatlas.db
+title: Current schema-22 graph tables inside the same single projectatlas.db
 ---
 erDiagram
     PROJECT_IDENTITY {
@@ -536,6 +536,20 @@ erDiagram
         TEXT relation_kind
         TEXT state
     }
+    GRAPH_IDENTITY_REJECTION {
+        INTEGER id PK
+        BLOB project_instance_id FK
+        INTEGER generation
+        TEXT file_path FK
+        INTEGER start_line
+        INTEGER start_column
+        INTEGER end_line
+        INTEGER end_column
+        TEXT parser
+        TEXT field
+        TEXT reason
+        INTEGER fact_index
+    }
     RESOLUTION_KEY {
         BLOB project_instance_id PK,FK
         TEXT resolution_domain PK
@@ -560,10 +574,12 @@ erDiagram
     PROJECT_IDENTITY ||--o{ GRAPH_ENTITY : scopes
     PROJECT_IDENTITY ||--o{ GRAPH_RELATION : scopes
     PROJECT_IDENTITY ||--o{ GRAPH_COVERAGE : reports
+    PROJECT_IDENTITY ||--o{ GRAPH_IDENTITY_REJECTION : reports
     PROJECT_IDENTITY ||--o{ RESOLUTION_KEY : scopes
     NODE ||--o| PURPOSE : owns
     NODE o|--o{ GRAPH_ENTITY : anchors
     NODE ||--o{ GRAPH_OCCURRENCE : locates
+    NODE ||--o{ GRAPH_IDENTITY_REJECTION : locates
     GRAPH_ENTITY ||--o{ GRAPH_RELATION : source
     GRAPH_ENTITY o|--o{ GRAPH_RELATION : target
     GRAPH_ENTITY ||--o{ ENTITY_EXPORT : exports
@@ -573,8 +589,8 @@ erDiagram
     RESOLUTION_KEY ||--o{ RELATION_DEPENDENCY : identifies
 ```
 
-The diagram shows the current schema-21 normalized hot relationship model, not
-every compatibility or telemetry table. Schema 21 retains the
+The diagram shows the current schema-22 normalized hot relationship model, not
+every compatibility or telemetry table. Schema 22 retains the
 `graph_resolution_keys` authority plus `graph_entity_exports` and
 `graph_relation_dependencies` owner bindings. The registry permits only one
 canonical collision witness for a project/domain/digest identity, even when the
@@ -587,7 +603,12 @@ identities. Stable fixed-width entity, relation, and resolution-key digests stay
 independent of display labels and line movement. A logical relation is traversed
 once while every exact supporting span remains available through occurrence
 rows. Ambiguous and unresolved references retain typed dependency facts without
-a fabricated target.
+a fabricated target. Generation-owned `graph_identity_rejections` rows retain
+only typed parser, field, path, reason, and exact span data; they never retain
+the rejected identity value. The private non-negative `fact_index` is the
+deterministic parser-fact identity that completes the durable rejection
+uniqueness key and follows the span in the path index ordering. It is an
+internal storage key and is omitted from JSON, TOON, and MCP wire shapes.
 
 Index ownership follows accepted queries rather than columns in isolation:
 
@@ -868,7 +889,7 @@ are added.
 
 | CLI route | MCP route | Physical database and source access | Freshness and generation contract | Transaction, bounds, telemetry, and target owner |
 | --- | --- | --- | --- | --- |
-| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate authoritative product database. Introduced in schema 11 and preserved in schema 21, bounded telemetry, passive checkpoint state, reusable-page state, and ownership-validated private graph staging remain part of the current contract. |
+| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate authoritative product database. Introduced in schema 11 and preserved in schema 22, bounded telemetry, passive checkpoint state, reusable-page state, and ownership-validated private graph staging remain part of the current contract. |
 | `scan` | `atlas_scan` | Read/hash/parse current included source off-writer, stage bounded typed batches, and replace the complete derived projection in the same database. | Revalidate source, configuration, purpose inputs, and base generation before publication. Readers keep the last complete generation until commit. | One short `BEGIN IMMEDIATE` publication owns all prepared mutations and one generation advance; failure/cancellation rolls back. Background MCP execution changes task delivery, not database ownership. No navigation telemetry is appended. |
 | `symbols build` | `atlas_symbols_build` | Read selected indexed source off-writer and rebuild compatible symbol plus normalized graph projections in the same database. | Revalidate the source and publication contract; preserve the last complete generation on failure. | Bounded parser workers, source bytes, retained parser output, deadline, and cancellation feed one publication transaction. No navigation telemetry is appended. |
 | `watch` and `watch --once` | `atlas_watch_once` | Observe or poll current local source, derive one changed-path batch off-writer, and publish affected text/symbol/graph rows in the same database; a correctness-required event may request a full scan. | Each successful batch revalidates source/policy/base generation and advances exactly once. Failed batches remain eligible for retry and expose no partial generation. | Each batch has bounded path/source/parser/worker/deadline/cancellation controls and one short publication transaction. The long-lived verified observation epoch is current. Database maintenance is bounded, content-free, and never introduces an abandoned spill authority. |
@@ -1222,7 +1243,7 @@ distributed filesystems remain typed `unsupported`; ProjectAtlas never falls
 back to a weaker journal or synchronous mode.
 
 SQLite auto-checkpoint remains the engine baseline for structural publication.
-Introduced in schema 11 and preserved by schema 21, the telemetry lifecycle
+Introduced in schema 11 and preserved by schema 22, the telemetry lifecycle
 additionally counts committed telemetry writes and, after 1,024
 writes by default, attempts one `PASSIVE` checkpoint only after the event
 transaction has committed. Busy or failed checkpoint state is recorded for
@@ -1433,7 +1454,7 @@ flowchart TB
     Lookalike[Foreign, linked, or lookalike state] --> Retain
 ```
 
-The current schema 21 implements this bounded lifecycle in the one authoritative database.
+The current schema 22 implements this bounded lifecycle in the one authoritative database.
 The normal read path never performs an unbounded purge, blocking truncate
 checkpoint, blind `VACUUM`, or destructive rebuild. Telemetry compaction
 preserves supported all-time totals and declared trend windows; retained,
@@ -1609,14 +1630,14 @@ The durable responsibilities and access paths are:
 
 | Responsibility | Principal physical state | Authority and primary access | Current/target state |
 | --- | --- | --- | --- |
-| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 21 is current and retains one append-only migration owner. |
-| Local structure | `nodes`, `summaries`, `file_texts`, `file_text_fts`, `source_parse_metadata`, `file_content_classifications` | Rebuildable exact path/parent/kind, authoritative persisted text, a trigger-free rebuildable FTS5 trigram candidate projection keyed by `file_texts.rowid`, summary, hash, source-parse provenance, independently persisted fact-graph parser provenance, and one closed classification per current file. | Parser-provenance separation introduced in schema 13 remains authoritative in schema 21; parser/provider discovery uses `(source_parser, path)` and `(fact_parser, path)` indexes without duplicating provenance into coverage rows. Schema 17 added indexed classification/path ownership. FTS mutation, revision publication, and backfill share the authoritative text transaction; revision drift disables acceleration and never replaces exact fallback semantics. |
-| Purpose | `purposes` joined to `nodes` plus an authored-purpose revision | Generated/suggested versus agent/approved lifecycle; accepted path-owned responsibility remains authored across derived changes and is projected by exact owning path or nearest applicable folder. | Schema 21 preserves the schema-17 accepted-purpose contract without hash-driven invalidation; bounded projection and cursor revision binding are current. |
-| Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbols, exact current-source selectors, and relation calls. | Schema 17 introduced optional heading byte/column selectors; schema 21 preserves those rows and their co-publication with normalized graph facts. |
-| Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`, `graph_identity_rejections`, `graph_resolution_keys`, `graph_entity_exports`, `graph_relation_dependencies`, `document_unresolved_reason` | Rebuildable stable identity, source/target adjacency, occurrences, coverage, generation-owned bounded identity rejection details (typed reason, field, parser, path, and span), dependency-key closure, and one coarse compatible coverage reason. | Schema 21 preserves the schema-20 graph model while adding generation-atomic identity rejection provenance; migration preserves project identity and authored state while invalidating only derived publication. Bounded hydration, traversal, cursors, coverage-detail reads, and aggregate budgets are current. |
+| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 22 is current and retains one append-only migration owner. |
+| Local structure | `nodes`, `summaries`, `file_texts`, `file_text_fts`, `source_parse_metadata`, `file_content_classifications` | Rebuildable exact path/parent/kind, authoritative persisted text, a trigger-free rebuildable FTS5 trigram candidate projection keyed by `file_texts.rowid`, summary, hash, source-parse provenance, independently persisted fact-graph parser provenance, and one closed classification per current file. | Parser-provenance separation introduced in schema 13 remains authoritative in schema 22; parser/provider discovery uses `(source_parser, path)` and `(fact_parser, path)` indexes without duplicating provenance into coverage rows. Schema 17 added indexed classification/path ownership. FTS mutation, revision publication, and backfill share the authoritative text transaction; revision drift disables acceleration and never replaces exact fallback semantics. |
+| Purpose | `purposes` joined to `nodes` plus an authored-purpose revision | Generated/suggested versus agent/approved lifecycle; accepted path-owned responsibility remains authored across derived changes and is projected by exact owning path or nearest applicable folder. | Schema 22 preserves the schema-17 accepted-purpose contract without hash-driven invalidation; bounded projection and cursor revision binding are current. |
+| Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbols, exact current-source selectors, and relation calls. | Schema 17 introduced optional heading byte/column selectors; schema 22 preserves those rows and their co-publication with normalized graph facts. |
+| Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`, `graph_identity_rejections`, `graph_resolution_keys`, `graph_entity_exports`, `graph_relation_dependencies`, `document_unresolved_reason` | Rebuildable stable identity, source/target adjacency, occurrences, coverage, generation-owned bounded identity rejection details (typed reason, field, parser, path, and span), dependency-key closure, and one coarse compatible coverage reason. | Schema 22 preserves the schema-20 graph model and schema-21 rejection table while adding the private non-negative `fact_index` to durable rejection uniqueness and path-index ordering. The 20→21 migration creates generation-atomic typed rejection provenance; 21→22 atomically rebuilds that table, backfills `fact_index` from the predecessor row identity, recreates its constraints/index, and verifies the contract after reopen. Neither migration stores rejected raw identity values; rollback retains the complete predecessor for deterministic retry. |
 | Health resolution | `health_resolutions` | Authored exact finding disposition. | Current and preserved across derived publication. |
-| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Introduced by schema 11 and preserved by schema 21; every detail dimension is bounded independently, supported totals remain exact after pruning, and retained/partial/expired/unavailable detail is reported without a second database. |
-| Worktree coordination | `usage_aggregate_revisions`, `worktree_registrations`, `worktree_usage_aggregates`, `usage_instance_worktree_origins` | Bounded active/retired alias identity, exact routed origins, monotonic synchronized lifetime/daily aggregates, and repository-total attribution in the explicitly selected control atlas. | Schema 18 adds the indexed local-control model and schema 21 preserves it; each worktree graph remains private and independently writable. |
+| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Introduced by schema 11 and preserved by schema 22; every detail dimension is bounded independently, supported totals remain exact after pruning, and retained/partial/expired/unavailable detail is reported without a second database. |
+| Worktree coordination | `usage_aggregate_revisions`, `worktree_registrations`, `worktree_usage_aggregates`, `usage_instance_worktree_origins` | Bounded active/retired alias identity, exact routed origins, monotonic synchronized lifetime/daily aggregates, and repository-total attribution in the explicitly selected control atlas. | Schema 18 adds the indexed local-control model and schema 22 preserves it; each worktree graph remains private and independently writable. |
 | Future Memory Atlas | #314-owned tables | Separately capped authored context and independent context revision. | Conceptual boundary only; #308 does not prebuild its schema. |
 
 Legacy symbol rows and normalized graph rows are compatible co-published
@@ -1627,7 +1648,7 @@ The validated SQLite operating profile is explicit:
 
 | Concern | Current live state | Accepted target and owner |
 | --- | --- | --- |
-| Schema | Version 21 with append-only 8 through 21 migration ownership; 10 to 11 streams telemetry into normalized instances, dimensions, aggregates, raw detail, and retention state, 11 to 12 adds dependency-resolution keys and normalizes the accepted-purpose lifecycle, 12 to 13 records parser provenance and parser-failure state, 13 to 14 adds bounded coverage-discovery indexes, 14 to 15 adds the trigger-free FTS5 candidate projection, 15 to 16 compacts stable graph-key storage, 16 to 17 adds constrained file classifications, exact symbol selectors, and typed unresolved-document evidence, 17 to 18 adds local worktree registrations and normalized synchronized aggregates, 18 to 19 widens only the graph coverage limit domain through the existing disposable graph rebuild, 19 to 20 adds the lossless native project-root identity, and 20 to 21 adds generation-owned bounded graph identity rejection provenance. | Keep one append-only owner; migration rollback preserves the complete predecessor for deterministic retry, and incompatible future state is refused without mutation. |
+| Schema | Version 22 with append-only 8 through 22 migration ownership; 10 to 11 streams telemetry into normalized instances, dimensions, aggregates, raw detail, and retention state, 11 to 12 adds dependency-resolution keys and normalizes the accepted-purpose lifecycle, 12 to 13 records parser provenance and parser-failure state, 13 to 14 adds bounded coverage-discovery indexes, 14 to 15 adds the trigger-free FTS5 candidate projection, 15 to 16 compacts stable graph-key storage, 16 to 17 adds constrained file classifications, exact symbol selectors, and typed unresolved-document evidence, 17 to 18 adds local worktree registrations and normalized synchronized aggregates, 18 to 19 widens only the graph coverage limit domain through the existing disposable graph rebuild, 19 to 20 adds the lossless native project-root identity, 20 to 21 adds generation-owned bounded graph identity rejection provenance, and 21 to 22 atomically rebuilds that table, backfills private `fact_index` from the predecessor row identity, and restores its durable uniqueness and path-index ordering before reopen validation. | Keep one append-only owner; migration rollback preserves the complete predecessor for deterministic retry, and incompatible future state is refused without mutation. |
 | Rust/SQLite build | Workspace `rusqlite` 0.40.2, `libsqlite3-sys` 0.38.2, bundled SQLite 3.53.2. | Settings reports the actual linked runtime version and a bounded compile-option identity; source package versions alone are not runtime proof. |
 | Filesystem | One project-local database on a filesystem with supported SQLite locking/shared-memory behavior; writable preflight returns typed supported, unsupported, or uncertain state before mutation. | Keep rejecting unsupported or uncertain live network filesystems without a silent durability downgrade. |
 | Writable connections | `foreign_keys=ON`, WAL, `synchronous=FULL`, five-second ordinary busy timeout with bounded WAL-establishment retry for concurrent validated openers; publication acquisition remains fail-fast and ancillary telemetry remains 25 ms. | The accepted mixed authored/derived durability profile is enforced and verified on production writable paths, including concurrent MCP requests with short authored and telemetry writes. |
@@ -1883,7 +1904,7 @@ references become relations. Ordinary prose, similarity, topic overlap, and
 unproven implementation claims create no edges. Complete extraction with no
 supported candidates remains graph-visible as trusted `no_candidates` coverage;
 an admitted candidate that cannot resolve remains a typed relation with its
-exact unresolved reason. Schema 21 stores the trusted zero state through its
+exact unresolved reason. Schema 22 stores the trusted zero state through its
 existing constrained complete-zero row. RC1's older projection fingerprint
 forces one typed full refresh before stale heading-owned rows can be served;
 authored purpose and project identity remain intact.
@@ -1897,8 +1918,8 @@ flowchart TB
     Revalidate --> Registry[Worktree list and lifecycle-bound registration]
     Resolver -->|active-row CAS for a moved root| Registry
     Registry --> Control
-    Resolver -->|read registry or select main| Control[(Control schema-21 atlas and registry)]
-    Resolver -->|issue alias| DbB[(Private ignored schema-21 target atlas)]
+    Resolver -->|read registry or select main| Control[(Control schema-22 atlas and registry)]
+    Resolver -->|issue alias| DbB[(Private ignored schema-22 target atlas)]
     Control -->|safe reusable baseline| Candidate[Private hydration candidate]
     Candidate --> Reconcile[Reconcile exact branch and dirty bytes]
     Reconcile --> DbB
@@ -1913,7 +1934,7 @@ flowchart TB
     Control -. never one shared writable graph .- DbB
 ```
 
-The selected worktree's active schema-21 generation owns classifications,
+The selected worktree's active schema-22 generation owns classifications,
 headings, exact selectors, canonical document relations, completeness,
 provenance, purposes, and typed unresolved evidence. A valid released database
 migrates in place. An absent registered target may hydrate reusable graph,
