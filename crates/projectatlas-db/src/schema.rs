@@ -1762,6 +1762,7 @@ pub(crate) fn revalidate_current_native_binding(
     let transaction =
         rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Deferred)?;
     let result = (|| {
+        validate_current_schema_version(&transaction)?;
         let found_root = crate::project_identity::load_project_root_identity(&transaction)?
             .ok_or(DbError::ProjectRootIdentityMissing)?;
         crate::project_identity::prove_existing_root_equivalence(

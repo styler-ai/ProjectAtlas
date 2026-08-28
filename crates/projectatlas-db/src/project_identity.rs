@@ -456,6 +456,7 @@ pub(crate) fn ensure_project_root_identity(
     if let Some(found) = load_project_root_identity(connection)? {
         let selected = prove_existing_root_equivalence(expected.as_path(), found.as_path())?;
         if metadata.as_deref() == selected.display_string().ok().as_deref() {
+            schema::validate_current_schema_version(connection)?;
             return Ok(());
         }
     }
@@ -976,6 +977,67 @@ mod tests {
         assert_usage_report(&reopened, true)?;
         assert_runtime_scope(&reopened, project, 1, 0, 1)?;
         assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_no_repair_open_rechecks_schema_after_preflight() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-race-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("schema-race.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        let expected = CanonicalProjectRoot::from_path(&root)?;
+
+        let stale = Connection::open(&database)?;
+        let (preflight, _) = schema::preflight_for_project(&database, &expected)?;
+        require_eq(
+            &preflight.state,
+            &SchemaState::Current,
+            "schema-race preflight",
+        )?;
+        let updater = Connection::open(&database)?;
+        let future_schema = schema::SCHEMA_VERSION + 1;
+        updater.execute(
+            "UPDATE metadata SET value = ?2 WHERE key = ?1",
+            rusqlite::params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+        )?;
+        drop(updater);
+        let before = fs::read(&database)?;
+
+        let repair_error = ensure_project_root_identity(&stale, &expected)
+            .err()
+            .ok_or_else(|| io::Error::other("stale no-repair open unexpectedly succeeded"))?;
+        require(
+            matches!(
+                repair_error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == schema::SCHEMA_VERSION
+            ),
+            "stale no-repair open returned the wrong error",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &before,
+            "stale no-repair repair mutation",
+        )?;
+
+        let revalidation_error = schema::revalidate_current_native_binding(&stale, &expected, true)
+            .err()
+            .ok_or_else(|| io::Error::other("stale revalidation unexpectedly succeeded"))?;
+        require(
+            matches!(
+                revalidation_error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == schema::SCHEMA_VERSION
+            ),
+            "stale revalidation returned the wrong error",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &before,
+            "stale revalidation mutation",
+        )?;
         Ok(())
     }
 
