@@ -6,16 +6,14 @@ use super::relations::{
     DetailedRelationReport, ExternalRelationIdentity, external_relation_identities,
     relation_request_control, serialized_equivalent_bytes,
 };
-use super::{ServiceError, ServiceResult, selected_project_binding};
+use super::{ServiceError, ServiceResult, canonical_root_digest, selected_project_binding};
 use projectatlas_core::graph::{
     ExtendedRelationKind, ExternalSelector, GraphLimitKind, GraphRelationKind, LogicalRelation,
     ProjectInstanceId, RelationResolution,
 };
 use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::RelationKind;
-use projectatlas_core::{
-    IndexGeneration, IndexWorkControl, IndexWorkStage, normalize_native_path_display,
-};
+use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
 use projectatlas_db::{AtlasStore, DbError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -163,8 +161,9 @@ impl FederatedStore {
                 "federation accepts only read-only stores with active snapshots".to_string(),
             ));
         }
-        let binding = selected_project_binding(&store)?;
-        if binding.project_root != normalize_native_path_display(&root) {
+        let explicit_root = CanonicalProjectRoot::from_path(&root)
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        if !store.project_root_identity_matches(&explicit_root) {
             return Err(ServiceError::InvalidInput(
                 "federated store does not match its explicit root".to_string(),
             ));
@@ -739,7 +738,7 @@ fn capture_federation(
             ));
         }
         let binding = selected_project_binding(&participant.store)?;
-        let root_digest = federated_root_digest(&binding.project_root);
+        let root_digest = federated_root_digest(&binding.project_root_identity)?;
         if !roots.insert(root_digest) || projects.contains(&binding.project_instance_id) {
             return Err(ServiceError::InvalidInput(
                 "federated roots or project identities must be unique".to_string(),
@@ -978,16 +977,20 @@ fn close_participants(
         drop(participant.store);
         match (binding, generation, purpose_revision) {
             (Ok(binding), Ok(Some(generation)), Ok(authored_purpose_revision)) => {
-                closed.push(ClosedParticipant {
-                    database_path: participant.database_path,
-                    root: participant.root,
-                    cursor: FederatedCursorParticipant {
-                        project: binding.project_instance_id,
-                        root_digest: federated_root_digest(&binding.project_root),
-                        generation,
-                        authored_purpose_revision,
-                    },
-                });
+                match federated_root_digest(&binding.project_root_identity) {
+                    Ok(root_digest) => closed.push(ClosedParticipant {
+                        database_path: participant.database_path,
+                        root: participant.root,
+                        cursor: FederatedCursorParticipant {
+                            project: binding.project_instance_id,
+                            root_digest,
+                            generation,
+                            authored_purpose_revision,
+                        },
+                    }),
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
             }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error))
                 if first_error.is_none() =>
@@ -1030,7 +1033,7 @@ fn revalidate_participants(
         let purpose_revision = store.authored_purpose_revision()?;
         let current = FederatedCursorParticipant {
             project: binding.project_instance_id,
-            root_digest: federated_root_digest(&binding.project_root),
+            root_digest: federated_root_digest(&binding.project_root_identity)?,
             generation,
             authored_purpose_revision: purpose_revision,
         };
@@ -1200,12 +1203,8 @@ fn aggregate_row_limit(budget: DetailedRelationBudget) -> u64 {
 }
 
 /// Bind a root without returning its machine-local path.
-fn federated_root_digest(root: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(FEDERATED_ROOT_DIGEST_DOMAIN.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(root.as_bytes());
-    *hasher.finalize().as_bytes()
+fn federated_root_digest(root: &CanonicalProjectRoot) -> ServiceResult<[u8; 32]> {
+    canonical_root_digest(FEDERATED_ROOT_DIGEST_DOMAIN, root)
 }
 
 /// Observe request cancellation at a repository-traversal boundary.
@@ -1255,6 +1254,192 @@ mod tests {
     use std::io;
     use std::path::Path;
     use std::rc::Rc;
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_root_digest_preserves_non_utf8_root_collisions() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let native = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b'r', b'o', b'o', 0x80]));
+        let replacement = temp.path().join("roo�");
+        fs::create_dir(&native)?;
+        fs::create_dir(&replacement)?;
+        let native_root = CanonicalProjectRoot::from_path(&native)?;
+        let replacement_root = CanonicalProjectRoot::from_path(&replacement)?;
+        require(
+            federated_root_digest(&native_root)? != federated_root_digest(&replacement_root)?,
+            "federation identity collapsed non-UTF-8 and replacement roots",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn federation_recanonicalizes_case_only_root_and_rejects_case_sensitive_sibling()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original_root = temp.path().join("FederatedCaseRoot");
+        let staging_root = temp.path().join("FederatedCaseRootStaging");
+        let renamed_root = temp.path().join("federatedcaseroot");
+        let original_database = original_root.join("projectatlas.db");
+        publish_fixture(
+            &original_root,
+            &original_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        let duplicate_database = temp.path().join("federated-duplicate.db");
+        publish_fixture(
+            &original_root,
+            &duplicate_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        let captured_root = CanonicalProjectRoot::from_path(&original_root)?;
+        fs::rename(&original_root, &staging_root)?;
+        fs::rename(&staging_root, &renamed_root)?;
+
+        let renamed_identity = CanonicalProjectRoot::from_path(&renamed_root)?;
+        let renamed_database = renamed_root.join("projectatlas.db");
+        let before_repair_store =
+            AtlasStore::open_read_only_for_project(&renamed_database, &renamed_root)?;
+        let before_repair = crate::relations::load_detailed_relations(
+            &before_repair_store,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        )?;
+        before_repair_store.finish_index_read_snapshot()?;
+        drop(before_repair_store);
+        let captured_digest = federated_root_digest(&captured_root)?;
+        require(
+            captured_digest == federated_root_digest(&renamed_identity)?,
+            "case-only root rename changed the service root digest",
+        )?;
+        let repair_store = AtlasStore::open_for_project(&renamed_database, &renamed_root)?;
+        drop(repair_store);
+        let after_repair_store =
+            AtlasStore::open_read_only_for_project(&renamed_database, &renamed_root)?;
+        let resumed = crate::relations::load_detailed_relations(
+            &after_repair_store,
+            &relation_query(
+                Some(
+                    before_repair
+                        .continuation
+                        .ok_or("case-only rename fixture omitted a relation continuation")?,
+                ),
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        );
+        after_repair_store.finish_index_read_snapshot()?;
+        drop(after_repair_store);
+        require(
+            resumed.is_ok(),
+            "case-only root rename invalidated a relation continuation",
+        )?;
+
+        let repaired_binding =
+            AtlasStore::open_read_only(&renamed_database)?.captured_project_binding()?;
+        let duplicate_binding =
+            AtlasStore::open_read_only(&duplicate_database)?.captured_project_binding()?;
+        require(
+            repaired_binding.project_instance_id != duplicate_binding.project_instance_id,
+            "duplicate federation fixture reused the repaired project identity",
+        )?;
+        require(
+            repaired_binding.project_root_identity.encode()?
+                != duplicate_binding.project_root_identity.encode()?,
+            "duplicate federation fixture did not retain old and fresh root spellings",
+        )?;
+
+        let secondary_root = temp.path().join("federated-secondary");
+        let secondary_database = secondary_root.join("projectatlas.db");
+        publish_fixture(
+            &secondary_root,
+            &secondary_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        let participants = open_participants(&[
+            (renamed_root.clone(), renamed_database.clone()),
+            (secondary_root, secondary_database),
+        ])?;
+        let draft = load_federated_detailed_relations(
+            participants,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        )?;
+        let (report, _) = draft.fit_output(None, |report| {
+            serde_json::to_string(report).map_err(ServiceError::from)
+        })?;
+        require(
+            report.participants.len() == 2,
+            "federated query rejected a case-only root rename",
+        )?;
+
+        let duplicate = load_federated_detailed_relations(
+            open_participants(&[
+                (renamed_root.clone(), renamed_database),
+                (renamed_root, duplicate_database),
+            ])?,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        );
+        require(
+            matches!(
+                duplicate,
+                Err(ServiceError::InvalidInput(message))
+                    if message == "federated roots or project identities must be unique"
+            ),
+            "federation admitted two databases for one case-renamed root",
+        )?;
+
+        let case_sensitive_parent = temp.path().join("federated-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = std::process::Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let stored_root = case_sensitive_parent.join("Repo");
+        let selected_root = case_sensitive_parent.join("repo");
+        let stored_database = stored_root.join("projectatlas.db");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        publish_fixture(&stored_root, &stored_database, IndexGeneration::new(1), 1)?;
+        let store = AtlasStore::open_read_only(&stored_database)?;
+        let result = FederatedStore::new(
+            store,
+            stored_database,
+            selected_root,
+            FederatedInputWork::default(),
+        );
+        require(
+            matches!(result, Err(ServiceError::InvalidInput(message)) if message == "federated store does not match its explicit root"),
+            "federated admission accepted a case-sensitive sibling",
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn federation_is_project_qualified_fresh_bounded_and_handle_free() -> Result<(), Box<dyn Error>>

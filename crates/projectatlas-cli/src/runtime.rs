@@ -57,8 +57,8 @@ use projectatlas_core::telemetry::{
 };
 use projectatlas_core::toon::{encode_agent_payload, render_ranked_node_rows, render_symbol_rows};
 use projectatlas_core::{
-    IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
-    IndexWorkStage, Node, NodeKind, Overview, PurposeSource, PurposeStatus,
+    CanonicalProjectRoot, IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure,
+    IndexWorkResource, IndexWorkStage, Node, NodeKind, Overview, PurposeSource, PurposeStatus,
     normalize_native_path_display, normalize_native_path_display_str, normalize_repo_path,
     purpose_review_signal, repo_path_to_native, validated_repo_file_key, validated_repo_node_key,
 };
@@ -69,7 +69,8 @@ use projectatlas_db::{
     IndexPublicationState, IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
     MAX_PURPOSE_CURATION_BATCH_ROWS, PurposeConditionalApplyRequest, PurposeConditionalApplyState,
     TelemetryRetentionState, WorktreeRegistration, WorktreeUsageSnapshot, database_settings_report,
-    read_project_root_read_only, validate_database_location,
+    preflight_project_binding_read_only, read_legacy_project_root_candidate_read_only,
+    read_project_root_identity_read_only, validate_database_location,
 };
 use projectatlas_fs::worktree::{
     GitManagerSourceSelection, GitRepositorySelection, GitWorktreeState, RepositoryStructure,
@@ -365,9 +366,9 @@ pub(crate) enum IndexVerificationReason {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexInitRequired {
     /// Canonical selected project root that needs initialization.
-    pub(crate) project_root: String,
+    pub(crate) project_root: Option<String>,
     /// Project-local durable index path that initialization will create.
-    pub(crate) database: String,
+    pub(crate) database: Option<String>,
     /// Registered MCP alias when the selected root came from worktree routing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) worktree: Option<String>,
@@ -379,7 +380,7 @@ pub(crate) struct IndexInitRequired {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ProjectWorktreeRequired {
     /// Canonical bare/common Git directory that was selected.
-    pub(crate) project_root: String,
+    pub(crate) project_root: Option<String>,
     /// Stable source-selection state for adapters.
     pub(crate) status: IndexReadStatus,
 }
@@ -388,7 +389,7 @@ pub(crate) struct ProjectWorktreeRequired {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexRefreshRequired {
     /// Canonical selected project root for a reusable recovery call.
-    pub(crate) project_root: String,
+    pub(crate) project_root: Option<String>,
     /// Registered MCP alias when the selected root came from worktree routing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) worktree: Option<String>,
@@ -414,7 +415,7 @@ pub(crate) struct IndexRefreshRequired {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexVerificationIncomplete {
     /// Selected project root whose current source could not be verified.
-    pub(crate) project_root: String,
+    pub(crate) project_root: Option<String>,
     /// Registered alias when one selected this project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) worktree: Option<String>,
@@ -436,10 +437,35 @@ pub(crate) struct IndexProjectMismatch {
     /// Registered alias when one selected this project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) worktree: Option<String>,
-    /// Canonical project root selected for this read.
-    pub(crate) selected_project_root: String,
-    /// Canonical project root recorded by the opened index.
-    pub(crate) indexed_project_root: String,
+    /// Lossless UTF-8 display of the canonical root selected for this read.
+    ///
+    /// `None` means that the native identity is valid but has no UTF-8 display
+    /// projection. Adapters must not use this field as identity authority.
+    pub(crate) selected_project_root: Option<String>,
+    /// Lossless UTF-8 display of the canonical root recorded by the opened index.
+    ///
+    /// `None` means that the native identity is valid but has no UTF-8 display
+    /// projection. Adapters must not use this field as identity authority.
+    pub(crate) indexed_project_root: Option<String>,
+    /// Terminal-only diagnostic retained when a lower layer supplied lossy text.
+    #[serde(skip)]
+    diagnostic: Option<String>,
+}
+
+impl IndexProjectMismatch {
+    /// Build adapter fields from native identities without lossy conversion.
+    pub(crate) fn from_native_roots(
+        selected: &CanonicalProjectRoot,
+        indexed: &CanonicalProjectRoot,
+    ) -> Self {
+        Self {
+            status: IndexReadStatus::ProjectMismatch,
+            worktree: None,
+            selected_project_root: selected.display_string().ok(),
+            indexed_project_root: indexed.display_string().ok(),
+            diagnostic: None,
+        }
+    }
 }
 
 impl fmt::Display for IndexRefreshRequired {
@@ -478,13 +504,21 @@ impl fmt::Display for IndexInitRequired {
             return write!(
                 formatter,
                 "init_required: ProjectAtlas index '{}' is missing for registered worktree '{}'; call `atlas_init` with `worktree: {alias}`",
-                self.database, alias,
+                self.database
+                    .as_deref()
+                    .unwrap_or("<native display unavailable>"),
+                alias,
             );
         }
         write!(
             formatter,
             "init_required: ProjectAtlas index '{}' is missing for selected project root '{}'; run `projectatlas init` from that exact root or call `atlas_init` with that exact `project_path`",
-            self.database, self.project_root
+            self.database
+                .as_deref()
+                .unwrap_or("<native display unavailable>"),
+            self.project_root
+                .as_deref()
+                .unwrap_or("<native display unavailable>")
         )
     }
 }
@@ -495,6 +529,8 @@ impl fmt::Display for ProjectWorktreeRequired {
             formatter,
             "worktree_required: '{}' is a bare/common Git directory without checked-out source; select a checked-out worktree and initialize that exact root",
             self.project_root
+                .as_deref()
+                .unwrap_or("<native display unavailable>")
         )
     }
 }
@@ -511,10 +547,18 @@ impl fmt::Display for IndexVerificationIncomplete {
 
 impl fmt::Display for IndexProjectMismatch {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(diagnostic) = self.diagnostic.as_deref() {
+            return formatter.write_str(diagnostic);
+        }
         write!(
             formatter,
             "project_mismatch: selected project root '{}' does not match index root '{}'",
-            self.selected_project_root, self.indexed_project_root
+            self.selected_project_root
+                .as_deref()
+                .unwrap_or("<native display unavailable>"),
+            self.indexed_project_root
+                .as_deref()
+                .unwrap_or("<native display unavailable>"),
         )
     }
 }
@@ -942,10 +986,11 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
         .worktrees
         .iter()
         .filter_map(|entry| match &entry.state {
-            GitWorktreeState::Active { root, .. } => Some((
-                normalize_native_path_display(&entry.administrative_directory),
-                root.as_path(),
-            )),
+            GitWorktreeState::Active { root, .. } => entry
+                .administrative_directory
+                .to_str()
+                .map(normalize_native_path_display_str)
+                .map(|administrative_directory| (administrative_directory, root.as_path())),
             GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
         })
         .collect::<HashMap<_, _>>();
@@ -1128,7 +1173,7 @@ fn automatic_refresh_write_is_unavailable(error: &CliError) -> bool {
 /// Return the typed full-refresh state for a changed derivation contract.
 fn index_policy_refresh_required(root: &Path) -> IndexRefreshRequired {
     IndexRefreshRequired {
-        project_root: normalize_native_path_display(root),
+        project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::PolicyDrift,
@@ -1260,7 +1305,7 @@ fn source_node_delta(
         .collect();
     Some(IndexFreshnessDelta {
         report: IndexRefreshRequired {
-            project_root: normalize_native_path_display(root),
+            project_root: lossless_project_root_display(root),
             worktree: None,
             status: IndexReadStatus::RefreshRequired,
             reason: if added_paths.is_empty() && removed_paths.is_empty() {
@@ -1288,35 +1333,24 @@ fn source_node_delta(
 
 /// Verify that the opened database belongs to the selected canonical root.
 fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result<(), CliError> {
-    let Some(indexed_root) = store.project_root()? else {
+    let Some(indexed_root) = store.project_root_identity()? else {
         return Err(verification_incomplete(
             selected_root,
             IndexVerificationReason::ProjectIdentityUnavailable,
             &CliError::InvalidInput("index project root metadata is missing".to_string()),
         ));
     };
-    let indexed_root_path = PathBuf::from(&indexed_root);
-    let indexed_root = canonical_project_root(&indexed_root_path).map_err(|source| {
-        verification_incomplete(
-            selected_root,
-            IndexVerificationReason::ProjectIdentityUnavailable,
-            &source,
-        )
-    })?;
-    let selected_root = canonical_project_root(selected_root).map_err(|source| {
+    let selected_root = CanonicalProjectRoot::from_path(selected_root).map_err(|source| {
         verification_incomplete(
             selected_root,
             IndexVerificationReason::SourceInspectionFailed,
-            &source,
+            &CliError::InvalidInput(source.to_string()),
         )
     })?;
-    if indexed_root != selected_root {
-        return Err(CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
-            status: IndexReadStatus::ProjectMismatch,
-            worktree: None,
-            selected_project_root: normalize_native_path_display(selected_root),
-            indexed_project_root: normalize_native_path_display(indexed_root),
-        })));
+    if !store.project_root_identity_matches(&selected_root) {
+        return Err(CliError::ProjectMismatch(Box::new(
+            IndexProjectMismatch::from_native_roots(&selected_root, &indexed_root),
+        )));
     }
     Ok(())
 }
@@ -1616,7 +1650,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
         FsError::IndexWork(failure) => failure.into(),
         FsError::RepositoryBoundary { .. } => {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
-                project_root: normalize_native_path_display(root),
+                project_root: lossless_project_root_display(root),
                 worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,
                 reason: IndexVerificationReason::PolicyUnavailable,
@@ -1625,7 +1659,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
             }))
         }
         other => CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
-            project_root: normalize_native_path_display(root),
+            project_root: lossless_project_root_display(root),
             worktree: None,
             status: IndexReadStatus::VerificationIncomplete,
             reason: IndexVerificationReason::SourceInspectionFailed,
@@ -1653,6 +1687,14 @@ fn hash_index_contract_value(hasher: &mut Hasher, field: &str, value: &str) {
     hasher.update(&[0xff]);
 }
 
+/// Add one native path to a fingerprint without a lossy text projection.
+fn hash_index_contract_native_path(hasher: &mut Hasher, field: &str, path: &Path) {
+    hasher.update(field.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(path.as_os_str().as_encoded_bytes());
+    hasher.update(&[0xff]);
+}
+
 /// Convert a policy/root preflight failure into a non-destructive read refusal.
 fn verification_incomplete(
     root: &Path,
@@ -1660,7 +1702,7 @@ fn verification_incomplete(
     source: &CliError,
 ) -> CliError {
     CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
-        project_root: normalize_native_path_display(root),
+        project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::VerificationIncomplete,
         reason,
@@ -1683,7 +1725,7 @@ fn same_indexed_source(current: &Node, indexed: &Node) -> bool {
 /// Refuse publication when source bytes no longer match their staged node.
 fn source_changed_during_derivation(root: &Path, path: &str) -> CliError {
     CliError::RefreshRequired(Box::new(IndexRefreshRequired {
-        project_root: normalize_native_path_display(root),
+        project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::SourceChanged,
@@ -2138,7 +2180,7 @@ fn hash_publication_input_file_controlled(
     path: &Path,
     reader: &mut PurposeInputReader<'_>,
 ) -> Result<(), CliError> {
-    hash_index_contract_value(hasher, role, &normalize_native_path_display(path));
+    hash_index_contract_native_path(hasher, role, path);
     if !path.exists() {
         hash_index_contract_value(hasher, "input_state", "missing");
         return Ok(());
@@ -2215,7 +2257,7 @@ pub(crate) struct InitSetupReport {
     /// Whether every init phase completed successfully.
     pub(crate) ok: bool,
     /// Canonical project root initialized by this command.
-    pub(crate) root: String,
+    pub(crate) root: Option<String>,
     /// Project-local directory status.
     pub(crate) project_dir: InitPathStatus,
     /// Project-local config status.
@@ -2242,8 +2284,8 @@ pub(crate) struct InitSetupReport {
 pub(crate) struct InitPathStatus {
     /// Path status.
     pub(crate) status: InitPhaseStatus,
-    /// Normalized native display path.
-    pub(crate) path: String,
+    /// Lossless UTF-8 path, when one is available.
+    pub(crate) path: Option<String>,
 }
 
 /// Status for one generated host integration config.
@@ -2253,8 +2295,8 @@ pub(crate) struct InitHostConfigStatus {
     pub(crate) harness: &'static str,
     /// File status.
     pub(crate) status: InitPhaseStatus,
-    /// Normalized native display path.
-    pub(crate) path: String,
+    /// Lossless UTF-8 path, when one is available.
+    pub(crate) path: Option<String>,
     /// Error text when this host config could not be generated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
@@ -2346,6 +2388,18 @@ pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf, CliError> {
     })
 }
 
+/// Return a lossless UTF-8 display for one existing canonical project root.
+pub(crate) fn lossless_project_root_display(root: &Path) -> Option<String> {
+    CanonicalProjectRoot::from_path(root)
+        .ok()
+        .and_then(|root| root.display_string().ok())
+}
+
+/// Return a lossless UTF-8 display for one native path.
+pub(crate) fn lossless_native_path_display(path: &Path) -> Option<String> {
+    projectatlas_core::lossless_native_path_display(path).ok()
+}
+
 /// Return one exact source root from structural Git or non-Git evidence.
 pub(crate) fn canonical_source_project_root(root: &Path) -> Result<PathBuf, CliError> {
     match projectatlas_fs::worktree::discover_repository_structure(root)? {
@@ -2357,7 +2411,7 @@ pub(crate) fn canonical_source_project_root(root: &Path) -> Result<PathBuf, CliE
             } => Ok(root),
             GitRepositorySelection::CommonManager { .. } => Err(CliError::WorktreeRequired(
                 Box::new(ProjectWorktreeRequired {
-                    project_root: normalize_native_path_display(repository.common_directory),
+                    project_root: lossless_project_root_display(&repository.common_directory),
                     status: IndexReadStatus::WorktreeRequired,
                 }),
             )),
@@ -2377,8 +2431,8 @@ pub(crate) fn canonical_source_project_root(root: &Path) -> Result<PathBuf, CliE
 /// Return a typed, non-mutating first-use handoff for one selected root.
 pub(crate) fn index_init_required(root: &Path, database: &Path) -> CliError {
     CliError::InitRequired(Box::new(IndexInitRequired {
-        project_root: normalize_native_path_display(root),
-        database: normalize_native_path_display(database),
+        project_root: lossless_project_root_display(root),
+        database: lossless_native_path_display(database),
         worktree: None,
         status: IndexReadStatus::InitRequired,
     }))
@@ -2436,14 +2490,23 @@ pub(crate) fn open_atlas_store_read_only_for_project(
 /// Preserve typed selected-root mismatch diagnostics across store adapters.
 pub(crate) fn project_store_error(source: projectatlas_db::DbError) -> CliError {
     match source {
-        projectatlas_db::DbError::ProjectRootMismatch { expected, found } => {
-            CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
-                status: IndexReadStatus::ProjectMismatch,
-                worktree: None,
-                selected_project_root: expected,
-                indexed_project_root: found,
-            }))
-        }
+        projectatlas_db::DbError::ProjectRootMismatch {
+            expected,
+            found,
+            identities,
+        } => CliError::ProjectMismatch(Box::new(IndexProjectMismatch {
+            status: IndexReadStatus::ProjectMismatch,
+            worktree: None,
+            selected_project_root: identities
+                .as_ref()
+                .and_then(|identities| identities.expected.display_string().ok()),
+            indexed_project_root: identities
+                .as_ref()
+                .and_then(|identities| identities.found.display_string().ok()),
+            diagnostic: Some(format!(
+                "database project root {found:?} does not match selected root {expected:?}"
+            )),
+        })),
         other => CliError::Db(other),
     }
 }
@@ -2476,6 +2539,7 @@ pub(crate) fn run_init_bootstrap(
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
     let root = canonical_source_project_root(root)?;
+    preflight_existing_project_binding(db_path, &root)?;
     let project_dir = root.join(".projectatlas");
     let config_file = init_config_path(&root, config_path);
     let nonsource_file = project_dir.join("projectatlas-nonsource-files.toon");
@@ -2523,22 +2587,22 @@ pub(crate) fn run_init_bootstrap(
 
     Ok(InitSetupReport {
         ok,
-        root: normalize_native_path_display(&root),
+        root: lossless_project_root_display(&root),
         project_dir: InitPathStatus {
             status: init_path_status(project_dir_existed),
-            path: normalize_native_path_display(project_dir),
+            path: lossless_native_path_display(&project_dir),
         },
         config: InitPathStatus {
             status: init_path_status(config_existed),
-            path: normalize_native_path_display(config_file),
+            path: lossless_native_path_display(&config_file),
         },
         nonsource_files: InitPathStatus {
             status: init_path_status(nonsource_existed),
-            path: normalize_native_path_display(nonsource_file),
+            path: lossless_native_path_display(&nonsource_file),
         },
         db: InitPathStatus {
             status: init_path_status(db_existed),
-            path: normalize_native_path_display(db_path),
+            path: lossless_native_path_display(db_path),
         },
         host_configs: Vec::new(),
         scan: InitScanPhase {
@@ -2552,6 +2616,19 @@ pub(crate) fn run_init_bootstrap(
         purpose_handoff: purpose_curator_handoff(purpose_queue),
         next_steps,
     })
+}
+
+/// Refuse an existing database binding before init writes.
+///
+/// The storage owner performs one read-only admission for both current native
+/// identities and supported predecessor metadata. Fresh databases remain
+/// available to the initializer, while the later writer still revalidates under
+/// its transaction for races.
+pub(crate) fn preflight_existing_project_binding(
+    db_path: &Path,
+    root: &Path,
+) -> Result<(), CliError> {
+    preflight_project_binding_read_only(db_path, root).map_err(project_store_error)
 }
 
 /// Return created/existing status for a path.
@@ -2642,11 +2719,29 @@ pub(crate) fn config_root_mismatch_error(
     ))
 }
 
+/// Resolve a predecessor root only as a read-only discovery candidate.
+///
+/// Legacy metadata is a display-only recovery hint. The database-owned
+/// candidate reader rejects projections without native authority before this
+/// function constructs a path or probes any candidate configuration location.
+fn legacy_project_root_candidate(db: &Path) -> Result<Option<PathBuf>, CliError> {
+    if !db.exists() {
+        return Ok(None);
+    }
+    let Some(project_root) = read_legacy_project_root_candidate_read_only(db)? else {
+        return Ok(None);
+    };
+    Ok(Some(canonical_source_project_root(Path::new(
+        &project_root,
+    ))?))
+}
+
 /// Resolve the default MCP project root without trusting the process cwd.
 pub(crate) fn default_mcp_project_root(
     db: &Path,
     config_path: Option<&Path>,
 ) -> Result<PathBuf, CliError> {
+    let legacy_root = legacy_project_root_candidate(db)?;
     if let Some(config_path) = config_path {
         let config = load_atlas_config(Some(config_path))?;
         let config_root = canonical_source_project_root(&config.root)?;
@@ -2663,9 +2758,12 @@ pub(crate) fn default_mcp_project_root(
         return Ok(config_root);
     }
     if db.exists()
-        && let Some(project_root) = read_project_root_read_only(db)?
+        && let Some(project_root) = read_project_root_identity_read_only(db)?
     {
-        return canonical_source_project_root(Path::new(&project_root));
+        return canonical_source_project_root(project_root.as_path());
+    }
+    if let Some(project_root) = legacy_root {
+        return Ok(project_root);
     }
     if let Some(project_root) = project_root_from_db_path(db) {
         return canonical_source_project_root(&project_root);
@@ -2685,6 +2783,7 @@ pub(crate) fn default_cli_project_root(
 ) -> Result<PathBuf, CliError> {
     if !database_path_is_explicit
         && config_path.is_none()
+        && !db.exists()
         && let Some(project_root) = project_root_from_db_path(db)
     {
         return canonical_source_project_root(&project_root);
@@ -2973,7 +3072,7 @@ fn staged_string_bytes(values: &[String]) -> u64 {
 
 /// Count the selected root and derivation identity retained by one batch.
 fn staged_publication_identity_bytes(root: &Path, contract_fingerprint: &str) -> u64 {
-    (normalize_native_path_display(root).len() as u64)
+    (root.as_os_str().as_encoded_bytes().len() as u64)
         .saturating_add(contract_fingerprint.len() as u64)
 }
 
@@ -4965,7 +5064,7 @@ pub(crate) struct SettingsReport {
     /// Config file used for map/lint/scan imports, when discovered.
     pub(crate) config_path: Option<String>,
     /// Repository root used by map/lint config.
-    pub(crate) repo_root: String,
+    pub(crate) repo_root: Option<String>,
     /// Source that selected the repository root.
     pub(crate) root_detection_source: String,
     /// Whether config and DB root metadata agree.
@@ -4973,9 +5072,9 @@ pub(crate) struct SettingsReport {
     /// Root mismatches that should be fixed before trusting the binding.
     pub(crate) root_mismatches: Vec<String>,
     /// Generated map path.
-    pub(crate) map_path: String,
+    pub(crate) map_path: Option<String>,
     /// Non-source summary path.
-    pub(crate) nonsource_files_path: String,
+    pub(crate) nonsource_files_path: Option<String>,
     /// Default output format.
     pub(crate) default_format: String,
     /// Default search case sensitivity.
@@ -5100,8 +5199,8 @@ pub(crate) struct OptionalParserSettingsReport {
 /// Filesystem status for a diagnostic path.
 #[derive(Debug, Serialize)]
 pub(crate) struct PathStatus {
-    /// Normalized native path.
-    pub(crate) path: String,
+    /// Lossless UTF-8 path, when one is available.
+    pub(crate) path: Option<String>,
     /// Whether the path exists.
     pub(crate) exists: bool,
     /// File size in bytes when the path is an existing file.
@@ -5179,13 +5278,18 @@ pub(crate) fn build_settings_report(
         let project_root = default_mcp_project_root(&absolute_db, None)?;
         load_atlas_config_for_root(&project_root)?
     };
+    let config_root_identity = CanonicalProjectRoot::from_path(&config.root).ok();
     let cache_dir = absolute_db
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let database = database_settings_report(&absolute_db)?;
-    let (index, telemetry, file_text_fts) =
+    let (index, telemetry, file_text_fts, db_root_identity, db_root_matches_config) =
         if database.schema.compatibility == DatabaseSchemaCompatibility::Current {
             let store = AtlasStore::open_read_only(&absolute_db)?;
+            let db_root_identity = store.project_root_identity()?;
+            let db_root_matches_config = config_root_identity
+                .as_ref()
+                .is_some_and(|config_root| store.project_root_identity_matches(config_root));
             let snapshot_publication = store.index_publication()?;
             if settings_publication_matches(
                 database.publication.as_ref(),
@@ -5195,29 +5299,40 @@ pub(crate) fn build_settings_report(
                     Some(settings_index_stats(&store)?),
                     Some(store.telemetry_retention_state()?),
                     Some(store.file_text_fts_state()?),
+                    db_root_identity,
+                    db_root_matches_config,
                 )
             } else {
-                (None, None, None)
+                (None, None, None, db_root_identity, db_root_matches_config)
             }
         } else {
-            (None, None, None)
+            (None, None, None, None, false)
         };
-    let repo_root = normalize_display_path(&config.root);
-    let db_project_root = index
+    let repo_root = config_root_identity
         .as_ref()
-        .and_then(|stats| stats.project_root.as_ref())
-        .cloned();
+        .and_then(|root| root.display_string().ok());
     let mut root_mismatches = Vec::new();
-    if let Some(db_root) = db_project_root.as_ref()
-        && db_root != &repo_root
+    if let (Some(db_root), Some(config_root)) =
+        (db_root_identity.as_ref(), config_root_identity.as_ref())
     {
-        root_mismatches.push(format!(
-            "db root {db_root:?} does not match config root {repo_root:?}"
-        ));
+        if !db_root_matches_config {
+            root_mismatches.push(format!(
+                "db root {:?} does not match config root {:?}",
+                db_root
+                    .display_string()
+                    .unwrap_or_else(|_| "<native display unavailable>".to_string()),
+                config_root
+                    .display_string()
+                    .unwrap_or_else(|_| "<native display unavailable>".to_string())
+            ));
+        }
+    } else if db_root_identity.is_some() != config_root_identity.is_some() {
+        root_mismatches
+            .push("db root and config root do not both have a usable native identity".to_string());
     }
     let root_detection_source = if resolved_config.is_some() {
         "config"
-    } else if db_project_root.is_some() {
+    } else if db_root_identity.is_some() {
         "db"
     } else {
         "db-path-or-cwd"
@@ -5271,13 +5386,15 @@ pub(crate) fn build_settings_report(
         db_shm: path_status(&db_sidecar_path(&absolute_db, "shm"))?,
         db_journal: path_status(&db_sidecar_path(&absolute_db, "journal"))?,
         mcp_config: path_status(&mcp_config_path_for_db(&absolute_db))?,
-        config_path: resolved_config.map(|path| normalize_display_path(&path)),
+        config_path: resolved_config
+            .as_deref()
+            .and_then(lossless_native_path_display),
         repo_root,
         root_detection_source,
         root_verified: root_mismatches.is_empty(),
         root_mismatches,
-        map_path: normalize_display_path(&config.map_path),
-        nonsource_files_path: normalize_display_path(&config.nonsource_files_path),
+        map_path: lossless_native_path_display(&config.map_path),
+        nonsource_files_path: lossless_native_path_display(&config.nonsource_files_path),
         default_format: format!("{format:?}").to_ascii_lowercase(),
         default_search_case_sensitive: false,
         search_source: "sqlite-file-text".to_string(),
@@ -5327,8 +5444,8 @@ pub(crate) fn settings_index_stats(store: &AtlasStore) -> Result<SettingsIndexSt
     let health_findings = store.unresolved_health_finding_count_current()?;
     Ok(SettingsIndexStats {
         project_root: store
-            .project_root()?
-            .map(|path| normalize_native_path_display_str(&path)),
+            .project_root_identity()?
+            .and_then(|root| root.display_string().ok()),
         files: overview.files,
         folders: overview.folders,
         missing_purposes: overview.missing_purposes,
@@ -5507,14 +5624,18 @@ pub(crate) fn resolved_mcp_config_path(
     db: &Path,
     config: Option<&Path>,
 ) -> Result<Option<PathBuf>, CliError> {
+    let legacy_root = legacy_project_root_candidate(db)?;
     if let Some(path) = config {
         return Ok(Some(absolute_path(path)?));
     }
     let mut candidate_roots = Vec::new();
     if db.exists()
-        && let Some(project_root) = read_project_root_read_only(db)?
+        && let Some(project_root) = read_project_root_identity_read_only(db)?
     {
-        candidate_roots.push(PathBuf::from(project_root));
+        candidate_roots.push(project_root.into_path());
+    }
+    if let Some(project_root) = legacy_root {
+        candidate_roots.push(project_root);
     }
     let absolute_db = absolute_path(db)?;
     if let Some(project_root) = project_root_from_db_path(&absolute_db) {
@@ -5555,7 +5676,7 @@ pub(crate) fn path_status(path: &Path) -> Result<PathStatus, CliError> {
     let absolute = absolute_path(path)?;
     let metadata = fs::metadata(&absolute).ok();
     Ok(PathStatus {
-        path: normalize_display_path(&absolute),
+        path: lossless_native_path_display(&absolute),
         exists: metadata.is_some(),
         size_bytes: metadata
             .as_ref()
@@ -5565,7 +5686,9 @@ pub(crate) fn path_status(path: &Path) -> Result<PathStatus, CliError> {
 
 /// Return the path to a `SQLite` sidecar file.
 pub(crate) fn db_sidecar_path(db: &Path, suffix: &str) -> PathBuf {
-    PathBuf::from(format!("{}-{suffix}", db.display()))
+    let mut sidecar = db.as_os_str().to_os_string();
+    sidecar.push(format!("-{suffix}"));
+    PathBuf::from(sidecar)
 }
 
 /// Return the project-local MCP config path associated with a database path.
@@ -5574,11 +5697,6 @@ pub(crate) fn mcp_config_path_for_db(db: &Path) -> PathBuf {
         || PathBuf::from("projectatlas.mcp.json"),
         |parent| parent.join("projectatlas.mcp.json"),
     )
-}
-
-/// Normalize a path for JSON/TOON diagnostics.
-pub(crate) fn normalize_display_path(path: &Path) -> String {
-    normalize_native_path_display(path)
 }
 
 /// Build a watcher status report from a lightweight runtime probe.
@@ -7101,12 +7219,15 @@ pub(crate) fn validated_indexed_file_key(
 
 /// Load the project root recorded by the latest scan.
 pub(crate) fn indexed_project_root(store: &AtlasStore) -> Result<PathBuf, CliError> {
-    store.project_root()?.map(PathBuf::from).ok_or_else(|| {
-        CliError::InvalidInput(
-            "indexed project root is missing; run projectatlas scan <project-root> first"
-                .to_string(),
-        )
-    })
+    store
+        .project_root_identity()?
+        .map(CanonicalProjectRoot::into_path)
+        .ok_or_else(|| {
+            CliError::InvalidInput(
+                "indexed project root is missing; run projectatlas scan <project-root> first"
+                    .to_string(),
+            )
+        })
 }
 
 /// Build an absolute native path for a previously validated indexed file key.
@@ -7123,7 +7244,7 @@ pub(crate) fn read_indexed_file_content(
     let indexed = store.load_node_by_path(file_key)?.ok_or_else(|| {
         CliError::InvalidInput(format!("indexed file {file_key:?} was not found"))
     })?;
-    let project_root = normalize_native_path_display(indexed_project_root(store)?);
+    let project_root = lossless_project_root_display(&indexed_project_root(store)?);
     let metadata = match fs::metadata(&native) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
@@ -7869,7 +7990,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
             Err(source) => {
                 return Err(CliError::VerificationIncomplete(Box::new(
                     IndexVerificationIncomplete {
-                        project_root: normalize_native_path_display(root),
+                        project_root: lossless_project_root_display(root),
                         worktree: None,
                         status: IndexReadStatus::VerificationIncomplete,
                         reason: IndexVerificationReason::SourceInspectionFailed,
@@ -8738,6 +8859,260 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn default_mcp_project_root_recovers_custom_predecessor_candidate() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("legacy-project");
+        let database = temp.path().join("custom-projectatlas.db");
+        fs::create_dir(&root)?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        {
+            let connection = rusqlite::Connection::open(&database)?;
+            connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+        }
+
+        let resolved = default_mcp_project_root(&database, None)?;
+        require_eq(
+            &resolved,
+            &canonical_source_project_root(&root)?,
+            "custom predecessor root recovery",
+        )?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_current_wrong_root_before_project_writes() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-root");
+        let bound_root = temp.path().join("bound-root");
+        let database = temp.path().join("external-projectatlas.db");
+        let config_path = selected_root.join("external-config/config.toml");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&bound_root)?;
+        let persisted_identity = {
+            let store = AtlasStore::open_for_project(&database, &bound_root)?;
+            store.project_root_identity()?
+        };
+        drop(AtlasStore::open_read_only_for_project(
+            &database,
+            &bound_root,
+        )?);
+        let _ = read_project_root_identity_read_only(&database)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let selected_project_dir = selected_root.join(".projectatlas");
+        let config_parent = config_path
+            .parent()
+            .ok_or_else(|| io::Error::other("selected config has no parent"))?;
+
+        let result = run_init_bootstrap(
+            &selected_root,
+            &database,
+            Some(&config_path),
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        );
+        require_eq(
+            &matches!(result, Err(CliError::ProjectMismatch(_))),
+            &true,
+            "current wrong-root init did not return a typed project mismatch",
+        )?;
+        require_eq(
+            &(!selected_project_dir.exists() && !config_parent.exists() && !config_path.exists()),
+            &true,
+            "current wrong-root init created selected project or config state",
+        )?;
+        require_eq(
+            &(fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"]
+                    .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok())
+                    == sidecars_before),
+            &true,
+            "current wrong-root init changed database or sidecar state",
+        )?;
+        let reopened = AtlasStore::open_read_only_for_project(&database, &bound_root)?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &persisted_identity,
+            "current binding after wrong-root init",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn init_rejects_predecessor_wrong_root_before_project_writes() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-predecessor-root");
+        let bound_root = temp.path().join("bound-predecessor-root");
+        let database = temp.path().join("external-predecessor.db");
+        let config_path = selected_root.join("external-config/config.toml");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&bound_root)?;
+        drop(AtlasStore::open_for_project(&database, &bound_root)?);
+        {
+            let connection = rusqlite::Connection::open(&database)?;
+            connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+        }
+        read_legacy_project_root_candidate_read_only(&database)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let selected_project_dir = selected_root.join(".projectatlas");
+        let config_parent = config_path
+            .parent()
+            .ok_or_else(|| io::Error::other("selected predecessor config has no parent"))?;
+
+        let result = run_init_bootstrap(
+            &selected_root,
+            &database,
+            Some(&config_path),
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        );
+        require_eq(
+            &matches!(result, Err(CliError::ProjectMismatch(_))),
+            &true,
+            "predecessor wrong-root init did not return a typed project mismatch",
+        )?;
+        require_eq(
+            &(!selected_project_dir.exists() && !config_parent.exists() && !config_path.exists()),
+            &true,
+            "predecessor wrong-root init created selected project or config state",
+        )?;
+        require_eq(
+            &(fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"]
+                    .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok())
+                    == sidecars_before),
+            &true,
+            "predecessor wrong-root init changed database or sidecar state",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_rejects_non_authoritative_predecessor_before_config_discovery()
+    -> Result<(), Box<dyn Error>> {
+        fn is_ambiguous_predecessor(error: &CliError) -> bool {
+            matches!(error, CliError::Db(DbError::ProjectRootIdentityMissing))
+        }
+
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"runtime-repo\\name".to_vec()));
+        let replacement_root = temp.path().join("runtime-repo/name");
+        let database = temp.path().join("runtime-custom-predecessor.db");
+        fs::create_dir_all(&raw_root)?;
+        drop(AtlasStore::open_for_project(&database, &raw_root)?);
+        {
+            let connection = rusqlite::Connection::open(&database)?;
+            connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('project_root', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [replacement_root.to_string_lossy().into_owned()],
+            )?;
+        }
+        let replacement_config = replacement_root.join(".projectatlas/config.toml");
+        fs::create_dir_all(
+            replacement_config
+                .parent()
+                .ok_or_else(|| io::Error::other("replacement config has no parent"))?,
+        )?;
+        fs::write(
+            &replacement_config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(&replacement_root.to_string_lossy())?
+            ),
+        )?;
+        let replacement_config_before = fs::read(&replacement_config)?;
+        require_condition(
+            matches!(
+                read_legacy_project_root_candidate_read_only(&database),
+                Err(DbError::ProjectRootIdentityMissing)
+            ),
+            "non-authoritative predecessor candidate was exposed",
+        )?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+
+        require_condition(
+            default_mcp_project_root(&database, None)
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
+            "default MCP discovery admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            default_cli_project_root(&database, None, false)
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
+            "default CLI discovery admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            resolved_mcp_config_path(&database, None)
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
+            "MCP config discovery admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            resolved_mcp_config_path(&database, Some(&replacement_config))
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
+            "explicit MCP config bypassed ambiguous predecessor admission",
+        )?;
+        require_condition(
+            crate::build_harness_mcp_config_report(
+                crate::HarnessConfig::McpJson,
+                "ambiguous-predecessor",
+                &database,
+                None,
+                false,
+            )
+            .is_err_and(|error| is_ambiguous_predecessor(&error)),
+            "generated MCP config admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            build_settings_report(&database, None, OutputFormat::Json)
+                .is_err_and(|error| is_ambiguous_predecessor(&error)),
+            "settings discovery admitted an ambiguous predecessor",
+        )?;
+        require_condition(
+            fs::read(&replacement_config)? == replacement_config_before,
+            "ambiguous predecessor discovery changed the replacement config",
+        )?;
+        require_condition(
+            fs::read(&database)? == database_before
+                && ["wal", "shm", "journal"]
+                    .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok())
+                    == sidecars_before,
+            "ambiguous predecessor discovery changed database or sidecars",
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn synchronized_repository_read_holds_catalog_writer_exclusion() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -9239,6 +9614,394 @@ mod tests {
             Some(&invalid),
             Some(&matching)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_report_uses_native_db_identity_when_display_is_unavailable()
+    -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_name = OsString::from_vec(vec![b'r', b'o', b'o', b't', 0x80]);
+        let root = temp.path().join(&raw_name);
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("raw-root database has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+
+        let report = build_settings_report(&database, None, OutputFormat::Json)?;
+        require_eq(
+            &report.root_detection_source,
+            &"db".to_string(),
+            "native database root detection source",
+        )?;
+        require_eq(
+            &report.repo_root,
+            &None,
+            "unavailable native database root display",
+        )?;
+        let serialized = serde_json::to_string(&report)?;
+        require_eq(
+            &serialized.contains('\u{fffd}'),
+            &false,
+            "serialized settings fabricated a replacement root",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lossless_native_path_display_preserves_absolute_volume_guid_paths()
+    -> Result<(), Box<dyn Error>> {
+        let volume = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\repo\file";
+        let volume_display = lossless_native_path_display(Path::new(volume))
+            .ok_or_else(|| io::Error::other("volume-GUID path was not UTF-8"))?;
+        require_eq(
+            &volume_display,
+            &volume.to_string(),
+            "lossless volume-GUID display",
+        )?;
+        require_eq(
+            &Path::new(&volume_display).is_absolute(),
+            &true,
+            "volume-GUID display remained absolute",
+        )?;
+
+        let drive = lossless_native_path_display(Path::new(r"\\?\C:\repo\file"))
+            .ok_or_else(|| io::Error::other("extended drive path was not UTF-8"))?;
+        require_eq(
+            &drive,
+            &"C:/repo/file".to_string(),
+            "normalized extended drive display",
+        )?;
+        require_eq(
+            &Path::new(&drive).is_absolute(),
+            &true,
+            "extended drive display remained absolute",
+        )?;
+
+        let unc = lossless_native_path_display(Path::new(r"\\?\UNC\server\share\repo\file"))
+            .ok_or_else(|| io::Error::other("extended UNC path was not UTF-8"))?;
+        require_eq(
+            &unc,
+            &"//server/share/repo/file".to_string(),
+            "normalized extended UNC display",
+        )?;
+        require_eq(
+            &Path::new(&unc).is_absolute(),
+            &true,
+            "extended UNC display remained absolute",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_report_preserves_verbatim_native_root_projection() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp
+            .path()
+            .to_str()
+            .ok_or("temporary directory was not UTF-8")?;
+        let long_component = "a".repeat(220);
+        let root = PathBuf::from(format!(r"\\?\{base}\{long_component}"));
+        fs::create_dir(&root)?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or("verbatim settings database has no parent")?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &root)?);
+
+        let config = temp.path().join("verbatim-settings-config.toml");
+        fs::write(
+            &config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(
+                    &root
+                        .to_str()
+                        .ok_or("verbatim root was not UTF-8")?
+                        .to_owned()
+                )?
+            ),
+        )?;
+        let expected = CanonicalProjectRoot::from_path(&root)?.display_string()?;
+        if !expected.starts_with(r"\\?\") {
+            return Err("verbatim root lost its extended prefix".into());
+        }
+
+        let report = build_settings_report(&database, Some(&config), OutputFormat::Json)?;
+        require_eq(
+            &report.repo_root,
+            &Some(expected.clone()),
+            "JSON settings verbatim root",
+        )?;
+        let json = serde_json::to_value(&report)?;
+        require_eq(
+            &json.get("repo_root"),
+            &Some(&Value::String(expected.clone())),
+            "JSON settings verbatim root field",
+        )?;
+        let toon = crate::render_settings_report(&report);
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_eq(
+            &toon_value.pointer("/settings/repo_root"),
+            &Some(&Value::String(expected)),
+            "TOON settings verbatim root field",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_report_accepts_case_only_root_rename() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original = temp.path().join("CaseOnlyRoot");
+        let staging = temp.path().join("CaseOnlyRootStaging");
+        let renamed = temp.path().join("caseonlyroot");
+        fs::create_dir(&original)?;
+        let database = original.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-only database has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &original)?);
+
+        fs::rename(&original, &staging)?;
+        fs::rename(&staging, &renamed)?;
+        let renamed_database = renamed.join(".projectatlas/projectatlas.db");
+        let config = temp.path().join("case-only-config.toml");
+        fs::write(
+            &config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(&renamed.to_string_lossy())?
+            ),
+        )?;
+
+        let report = build_settings_report(&renamed_database, Some(&config), OutputFormat::Json)?;
+        require_eq(
+            &report.root_verified,
+            &true,
+            "settings accepted case-only root rename",
+        )?;
+        require_eq(
+            &report.root_mismatches.is_empty(),
+            &true,
+            "case-only root rename mismatch diagnostics",
+        )?;
+        let json = serde_json::to_value(&report)?;
+        require_eq(
+            &json.get("root_verified"),
+            &Some(&Value::Bool(true)),
+            "JSON settings root verification",
+        )?;
+        let toon = crate::render_settings_report(&report);
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_eq(
+            &toon_value.pointer("/settings/root_verified"),
+            &Some(&Value::Bool(true)),
+            "TOON settings root verification",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_report_rejects_case_sensitive_sibling() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("case-sensitive-parent");
+        fs::create_dir(&parent)?;
+        let enabled = StdCommand::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+
+        let stored_root = parent.join("Repo");
+        let selected_root = parent.join("repo");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        let database = stored_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-sensitive database has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &stored_root)?);
+        let config = temp.path().join("case-sensitive-config.toml");
+        fs::write(
+            &config,
+            format!(
+                "[project]\nroot = {}\n",
+                serde_json::to_string(&selected_root.to_string_lossy())?
+            ),
+        )?;
+
+        let report = build_settings_report(&database, Some(&config), OutputFormat::Json)?;
+        require_eq(
+            &report.root_verified,
+            &false,
+            "settings rejected case-sensitive sibling",
+        )?;
+        require_eq(
+            &report.root_mismatches.is_empty(),
+            &false,
+            "case-sensitive sibling mismatch diagnostics",
+        )?;
+        let json = serde_json::to_value(&report)?;
+        require_eq(
+            &json.get("root_verified"),
+            &Some(&Value::Bool(false)),
+            "JSON case-sensitive sibling verification",
+        )?;
+        let toon = crate::render_settings_report(&report);
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_eq(
+            &toon_value.pointer("/settings/root_verified"),
+            &Some(&Value::Bool(false)),
+            "TOON case-sensitive sibling verification",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn freshness_and_symbol_build_revalidate_case_only_root_without_sibling_mutation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original = temp.path().join("CaseOnlyRuntimeRoot");
+        let staging = temp.path().join("CaseOnlyRuntimeRootStaging");
+        let renamed = temp.path().join("caseonlyruntimeroot");
+        fs::create_dir(&original)?;
+        fs::write(original.join("lib.rs"), "pub fn runtime_root() {}\n")?;
+        let database = original.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-only runtime database has no parent"))?,
+        )?;
+        let original_plan = ScanRuntimePlan::for_path(None, &original, None)?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut original_store = open_atlas_store_for_project(&database, &original)?;
+        run_scan_pipeline(&mut original_store, &original_plan, &symbol_options)?;
+        let initial_project = original_store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("case-only runtime project identity is missing"))?;
+        drop(original_store);
+
+        fs::rename(&original, &staging)?;
+        fs::rename(&staging, &renamed)?;
+        let renamed_database = renamed.join(".projectatlas/projectatlas.db");
+        let fresh = open_fresh_atlas_store_for_project(&renamed_database, &renamed, None)?;
+        require_eq(
+            &fresh.project_instance_id()?,
+            &Some(initial_project),
+            "fresh read after case-only root rename",
+        )?;
+        drop(fresh);
+
+        let renamed_plan = ScanRuntimePlan::for_path(None, &renamed, None)?;
+        let mut renamed_store = open_atlas_store_for_project(&renamed_database, &renamed)?;
+        run_symbol_build_pipeline(&mut renamed_store, &renamed_plan, &symbol_options, None)?;
+        require_eq(
+            &renamed_store.project_instance_id()?,
+            &Some(initial_project),
+            "symbol build after case-only root rename",
+        )?;
+        drop(renamed_store);
+
+        let case_sensitive_parent = temp.path().join("runtime-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = StdCommand::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let stored_root = case_sensitive_parent.join("Repo");
+        let selected_root = case_sensitive_parent.join("repo");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        fs::write(stored_root.join("lib.rs"), "pub fn stored_root() {}\n")?;
+        let sibling_database = stored_root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            sibling_database
+                .parent()
+                .ok_or_else(|| io::Error::other("case-sensitive runtime database has no parent"))?,
+        )?;
+        let sibling_plan = ScanRuntimePlan::for_path(None, &stored_root, None)?;
+        let mut sibling_store = open_atlas_store_for_project(&sibling_database, &stored_root)?;
+        run_scan_pipeline(&mut sibling_store, &sibling_plan, &symbol_options)?;
+        drop(sibling_store);
+
+        let sidecar_bytes = |path: &Path| -> Result<Vec<Option<Vec<u8>>>, Box<dyn Error>> {
+            [
+                path.to_path_buf(),
+                db_sidecar_path(path, "wal"),
+                db_sidecar_path(path, "shm"),
+                db_sidecar_path(path, "journal"),
+            ]
+            .into_iter()
+            .map(|candidate| match fs::read(candidate) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            })
+            .collect()
+        };
+        let durable_state = |path: &Path| -> Result<
+            (
+                Option<CanonicalProjectRoot>,
+                Option<ProjectInstanceId>,
+                Option<IndexPublication>,
+            ),
+            Box<dyn Error>,
+        > {
+            let store = AtlasStore::open_read_only(path)?;
+            Ok((
+                store.project_root_identity()?,
+                store.project_instance_id()?,
+                store.index_publication()?,
+            ))
+        };
+
+        drop(AtlasStore::open_read_only(&sibling_database)?);
+        let before_sidecars = sidecar_bytes(&sibling_database)?;
+        let before_state = durable_state(&sibling_database)?;
+        let Err(CliError::ProjectMismatch(_)) =
+            open_fresh_atlas_store_for_project(&sibling_database, &selected_root, None)
+        else {
+            return Err(io::Error::other("case-sensitive sibling was admitted").into());
+        };
+        let after_sidecars = sidecar_bytes(&sibling_database)?;
+        let after_state = durable_state(&sibling_database)?;
+        require_eq(
+            &after_sidecars,
+            &before_sidecars,
+            "case-sensitive sibling sidecar state",
+        )?;
+        require_eq(
+            &after_state,
+            &before_state,
+            "case-sensitive sibling durable state",
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -12265,6 +13028,16 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "native Unix watcher paths",
         )?;
         Ok(())
+    }
+
+    /// Require a test condition without relying on a crate-level test helper.
+    #[cfg(unix)]
+    fn require_condition(condition: bool, label: &str) -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(label).into())
+        }
     }
 
     /// Require equal test values without panicking from a fallible test.

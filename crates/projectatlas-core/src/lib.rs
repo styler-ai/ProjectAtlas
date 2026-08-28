@@ -7,6 +7,7 @@ pub mod language;
 pub mod optional_parser_pack;
 pub mod optional_parser_protocol;
 pub mod outline;
+pub mod project_root;
 pub mod relation_capabilities;
 pub mod support_catalog;
 pub mod symbols;
@@ -16,6 +17,7 @@ pub mod toon;
 pub use index_work::{
     IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource, IndexWorkStage,
 };
+pub use project_root::CanonicalProjectRoot;
 
 /// Maximum Git worktree registrations admitted for one repository.
 pub const MAX_GIT_WORKTREE_REGISTRATIONS: usize = 1_024;
@@ -28,6 +30,29 @@ use thiserror::Error;
 /// Core error type for `ProjectAtlas` domain operations.
 #[derive(Debug, Error)]
 pub enum CoreError {
+    /// A project root does not satisfy the native absolute-path contract.
+    #[error("invalid canonical project root {path:?}: {reason}")]
+    InvalidCanonicalProjectRoot {
+        /// Path rejected before it became a native identity.
+        path: PathBuf,
+        /// Stable validation reason.
+        reason: &'static str,
+    },
+    /// Canonicalization of a project root failed.
+    #[error("could not canonicalize project root {path:?}: {source}")]
+    CanonicalProjectRootIo {
+        /// Path passed to the native canonicalizer.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A persisted native-root codec value is not supported or lossless.
+    #[error("invalid canonical project-root codec value: {reason}")]
+    CanonicalProjectRootCodec {
+        /// Stable decoding failure.
+        reason: &'static str,
+    },
     /// A path could not be represented relative to the repository root.
     #[error("path is outside the repository root: {path}")]
     PathOutsideRoot {
@@ -585,10 +610,13 @@ pub fn normalize_repo_path(root: &Path, path: &Path) -> CoreResult<String> {
 
 /// Normalize a native filesystem path for stable diagnostics and metadata.
 ///
-/// The returned path uses forward slashes, strips Windows extended path
-/// prefixes such as `\\?\`, and converts extended UNC paths to `//server/share`
-/// form. This helper is for persisted metadata and agent-facing output; use
-/// `Path`/`PathBuf` for host filesystem access.
+/// On Windows, the returned path uses forward slashes, strips extended path
+/// prefixes such as `\\?\`, and converts extended UNC paths to
+/// `//server/share` form. On Unix, native backslashes are preserved because
+/// they are valid filename characters rather than separators. This helper is
+/// for legacy compatibility metadata and agent-facing output; use
+/// [`CanonicalProjectRoot`] for persisted project identity and `Path`/`PathBuf`
+/// for host filesystem access.
 #[must_use]
 pub fn normalize_native_path_display(path: impl AsRef<Path>) -> String {
     normalize_native_path_display_str(&path.as_ref().to_string_lossy())
@@ -600,14 +628,122 @@ pub fn normalize_native_path_display(path: impl AsRef<Path>) -> String {
 /// before they are converted back into a platform `Path`.
 #[must_use]
 pub fn normalize_native_path_display_str(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = normalized.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        normalized
+    #[cfg(windows)]
+    {
+        let normalized = path.replace('\\', "/");
+        if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+            format!("//{rest}")
+        } else if let Some(rest) = normalized.strip_prefix("//?/") {
+            rest.to_string()
+        } else {
+            normalized
+        }
     }
+    #[cfg(not(windows))]
+    {
+        path.to_owned()
+    }
+}
+
+/// Return a lossless UTF-8 display projection for a native path.
+///
+/// Windows extended prefixes are normalized only when the conversion keeps
+/// the path absolute and does not discard Win32 verbatim semantics. A native
+/// path that cannot be represented as UTF-8 returns [`CoreError::NonUtf8Path`]
+/// instead of a replacement-character path that could select a different
+/// filesystem object.
+///
+/// # Errors
+///
+/// Returns [`CoreError::NonUtf8Path`] when `path` contains native data that is
+/// not losslessly representable as UTF-8.
+pub fn lossless_native_path_display(path: &Path) -> CoreResult<String> {
+    let original = path.to_str().ok_or_else(|| CoreError::NonUtf8Path {
+        path: path.to_path_buf(),
+    })?;
+    let normalized = normalize_native_path_display_str(original);
+    if Path::new(&normalized).is_absolute() && !windows_verbatim_semantics_require_prefix(path) {
+        Ok(normalized)
+    } else {
+        Ok(original.to_owned())
+    }
+}
+
+#[cfg(windows)]
+/// Preserve the extended prefix when a component relies on Win32 verbatim semantics.
+fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
+    let Some(value) = path.to_str() else {
+        return true;
+    };
+    if !value.starts_with("\\\\?\\") {
+        return false;
+    }
+
+    // A project root is immediately extended with ProjectAtlas children.
+    // Preserve the namespace before the ordinary Win32 limit is reached so
+    // that the child path remains usable without changing its semantics.
+    let normalized = normalize_native_path_display_str(value);
+    let project_atlas_suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
+    if normalized
+        .encode_utf16()
+        .count()
+        .saturating_add(project_atlas_suffix_units)
+        >= 260
+    {
+        return true;
+    }
+
+    windows_path_requires_verbatim_semantics(path)
+}
+
+/// Return whether a Windows path contains a component that requires verbatim semantics.
+///
+/// This predicate deliberately operates on native path components rather than display text
+/// normalization. The database crate also uses it to reject historical display projections that
+/// cannot establish native authority after verbatim semantics were stripped.
+#[must_use]
+pub fn windows_path_requires_verbatim_semantics(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+
+        path.components().any(|component| {
+            let Component::Normal(component) = component else {
+                return false;
+            };
+            let Some(component) = component.to_str() else {
+                return true;
+            };
+            if component.ends_with(['.', ' ']) {
+                return true;
+            }
+            let name = component
+                .split_once('.')
+                .map_or(component, |(stem, _)| stem);
+            let upper = name.to_ascii_uppercase();
+            matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || matches!(upper.as_str(), "CONIN$" | "CONOUT$")
+                || matches!(
+                    upper.as_str(),
+                    "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³"
+                )
+                || (upper.len() == 4
+                    && (upper.starts_with("COM") || upper.starts_with("LPT"))
+                    && upper.as_bytes()[3].is_ascii_digit()
+                    && upper.as_bytes()[3] != b'0')
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+#[cfg(not(windows))]
+/// Unix and fallback hosts do not assign Win32 verbatim semantics to paths.
+fn windows_verbatim_semantics_require_prefix(_path: &Path) -> bool {
+    false
 }
 
 /// Normalize and validate a user-supplied path as a repository-relative file key.
@@ -842,6 +978,7 @@ mod tests {
         assert!(is_high_impact_file_path(".github/workflows/release.yml"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn native_path_display_removes_windows_extended_prefixes() {
         assert_eq!(
@@ -860,6 +997,58 @@ mod tests {
             normalize_native_path_display_str("src\\main.rs"),
             "src/main.rs"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lossless_display_preserves_verbatim_console_device_components()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for path in [
+            r"\\?\C:\repo\CONIN$",
+            r"\\?\C:\repo\conout$.log",
+            r"\\?\UNC\server\share\CONIN$",
+        ] {
+            let display = super::lossless_native_path_display(Path::new(path))?;
+            require_eq(&display, path)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_component_classifier_covers_legacy_spellings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for path in [
+            r"C:\repo.",
+            r"C:\repo ",
+            r"C:\repo\CON",
+            r"C:\repo\CONIN$",
+            r"C:\repo\conout$.log",
+            r"C:\repo\COM1.txt",
+            r"C:\repo\LPT3.cfg",
+            r"C:\repo\COM¹",
+            r"C:\repo\LPT³.log",
+        ] {
+            if !super::windows_path_requires_verbatim_semantics(Path::new(path)) {
+                return Err(format!("verbatim component was not classified: {path}").into());
+            }
+        }
+        for path in [r"C:\repo", r"C:\repo\ordinary.txt", r"\\server\share\repo"] {
+            if super::windows_path_requires_verbatim_semantics(Path::new(path)) {
+                return Err(
+                    format!("ordinary component was classified as verbatim: {path}").into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn native_path_display_preserves_unix_backslashes() {
+        let path = r"/tmp/repo\name";
+        assert_eq!(normalize_native_path_display_str(path), path);
+        assert_eq!(super::normalize_native_path_display(Path::new(path)), path);
     }
 
     fn require_eq(left: &str, right: &str) -> Result<(), Box<dyn std::error::Error>> {

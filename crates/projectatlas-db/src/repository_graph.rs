@@ -7,10 +7,11 @@ use super::{
 use crate::content_classification::parse_classification;
 use crate::derived_snapshot::{CapturedGraph, SnapshotBudget};
 use crate::project_identity::{
-    load_graph_generation, load_project_identity, require_bound_project_identity,
-    set_graph_generation, set_project_identity, verify_project_identity,
+    load_graph_generation, load_project_identity, load_project_root_identity,
+    prove_existing_root_equivalence, require_bound_project_identity, set_graph_generation,
+    set_project_identity, verify_project_identity,
 };
-use crate::schema::PROJECT_ROOT_KEY;
+use crate::schema;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
     CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
@@ -25,7 +26,6 @@ use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolKind};
 use projectatlas_core::{
     IndexGeneration, IndexWorkControl, IndexWorkStage, NodeKind, RankedConnection,
     RankedConnectionCount, RankedConnectionDirection, RankedConnectionKind, RankedConnectionTarget,
-    normalize_native_path_display,
 };
 use rusqlite::types::Value;
 use rusqlite::{
@@ -3305,13 +3305,6 @@ impl AtlasStore {
         project: ProjectInstanceId,
     ) -> DbResult<bool> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let project_root = connection
-            .query_row(
-                "SELECT value FROM metadata WHERE key = ?1",
-                [PROJECT_ROOT_KEY],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
         let marker = connection
             .query_row(
                 "SELECT value FROM metadata WHERE key = ?1",
@@ -3319,11 +3312,35 @@ impl AtlasStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        Ok(
-            project_root.as_deref() == Some(normalize_native_path_display(root).as_str())
-                && load_project_identity(&connection)? == Some(project)
-                && marker.as_deref() == Some(GRAPH_STAGING_MARKER_VALUE),
-        )
+        let schema_version = connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [schema::SCHEMA_VERSION_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse::<i64>().ok());
+        let Some(schema_version) = schema_version else {
+            return Ok(false);
+        };
+        let expected_root = projectatlas_core::CanonicalProjectRoot::from_path(root)?;
+        let roots_match = match schema_version {
+            schema::SCHEMA_VERSION => {
+                load_project_root_identity(&connection)?.is_some_and(|stored_root| {
+                    prove_existing_root_equivalence(expected_root.as_path(), stored_root.as_path())
+                        .is_ok()
+                })
+            }
+            // Predecessor stages intentionally lack native identity. The
+            // staging marker and project identity checked below are their
+            // staging-specific ownership proof; general predecessor admission
+            // remains strict about legacy root authority.
+            schema::CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION => true,
+            _ => false,
+        };
+        Ok(roots_match
+            && load_project_identity(&connection)? == Some(project)
+            && marker.as_deref() == Some(GRAPH_STAGING_MARKER_VALUE))
     }
 
     /// Create a new disposable graph staging store with the selected project identity.
@@ -9130,6 +9147,39 @@ mod tests {
                 project,
             )?,
             "staging ownership depended on WAL sidecars before graph writes",
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repository_graph_staging_accepts_case_only_root_rename() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original_root = temp.path().join("CaseOnlyStageRoot");
+        let intermediate_root = temp.path().join("CaseOnlyStageRoot-intermediate");
+        let renamed_root = temp.path().join("caseonlystageroot");
+        let stage = original_root.join(".projectatlas").join("graph-stage-case");
+        fs::create_dir_all(&stage)?;
+        let database = stage.join("projectatlas.db");
+        let project = ProjectInstanceId::from_bytes([8; 16])?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &database,
+            &original_root,
+            project,
+        )?);
+
+        fs::rename(&original_root, &intermediate_root)?;
+        fs::rename(&intermediate_root, &renamed_root)?;
+        let renamed_database = renamed_root
+            .join(".projectatlas")
+            .join("graph-stage-case")
+            .join("projectatlas.db");
+        require(
+            AtlasStore::repository_graph_staging_belongs_to(
+                &renamed_database,
+                &renamed_root,
+                project,
+            )?,
+            "case-only renamed staging root was not re-canonicalized",
         )
     }
 

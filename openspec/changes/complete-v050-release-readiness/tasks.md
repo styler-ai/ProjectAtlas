@@ -3,14 +3,14 @@
 - [x] 1.1 Freeze the v0.5.0 proposal, design, capability specifications, non-goals, dependency order, CLI-versus-MCP policy, and RC-first publication contract.
 - [x] 1.2 Classify database, path, parser, platform, performance, installer, compatibility, security, and release-proof implications before implementation ownership begins.
 - [x] 1.3 Add the durable issue-specific v0.5.0 architecture views, render every Mermaid block with Mermaid CLI, and inspect both visual communication and semantic truth.
-- [ ] 1.4 Map ordered issue-owned task slices, prepare exact sanitized issue-body mirrors, reconcile the native release hierarchy/dependency graph, preserve candidate-local OpenSpec/Mermaid validation for planning PRs, and require an exact clean live-default-branch IssueOps readback before readiness, milestone assignment, native relationships, or implementation handoff.
+- [x] 1.4 Map ordered issue-owned task slices, prepare exact sanitized issue-body mirrors, reconcile the native release hierarchy/dependency graph, preserve candidate-local OpenSpec/Mermaid validation for planning PRs, and require an exact clean live-default-branch IssueOps readback before readiness, milestone assignment, native relationships, or implementation handoff.
 
 ## 2. Canonical project-root identity (#481)
 
-- [ ] 2.1 Design and land one concrete typed native project identity plus lossless/versioned SQLite encoding, key/comparison rules, constraints, legacy migration, transaction, rollback, recovery, EXPLAIN/query-plan, and real write/read coverage before adapters change.
-- [ ] 2.2 Route CLI, MCP, configuration, watcher, worktree, telemetry, graph, and persistence through that identity; make UTF-8 display terminal and forbid lossy identity, implicit missing-index initialization, and wrong-root mutation.
-- [ ] 2.3 Cover `/var` and `/private/var` equivalence, symlinks, unrelated roots, missing indexes, legacy metadata equivalence/refusal, non-UTF-8 native round-trip where supported, concurrent repair/open, injected failure, rollback, and unchanged purposes, telemetry, and current generation through unit, SQLite, CLI/MCP, watcher, worktree, and macOS tests.
-- [ ] 2.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 2.1 Design and land one concrete typed native project identity plus lossless/versioned SQLite encoding, key/comparison rules, constraints, legacy migration, transaction, rollback, recovery, EXPLAIN/query-plan, and real write/read coverage before adapters change.
+- [x] 2.2 Route CLI, MCP, configuration, watcher, worktree, telemetry, graph, and persistence through that identity; make UTF-8 display terminal and forbid lossy identity, implicit missing-index initialization, and wrong-root mutation.
+- [x] 2.3 Cover `/var` and `/private/var` equivalence, symlinks, unrelated roots, missing indexes, legacy metadata equivalence/refusal, non-UTF-8 native round-trip where supported, concurrent repair/open, injected failure, rollback, and unchanged purposes, telemetry, and current generation through unit, SQLite, CLI/MCP, watcher, worktree, and macOS tests.
+- [x] 2.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 3. PHP language guidance (#339)
 

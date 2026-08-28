@@ -757,7 +757,7 @@ mod tests {
         )?;
         require_eq(
             &predecessor.schema.migration_steps_remaining,
-            &Some(11),
+            &Some(12),
             "predecessor migration steps",
         )?;
         require_eq(
@@ -774,7 +774,8 @@ mod tests {
              DROP TABLE usage_instance_worktree_origins;
              DROP TABLE worktree_usage_aggregates;
              DROP TABLE worktree_registrations;
-             DROP TABLE usage_aggregate_revisions;",
+             DROP TABLE usage_aggregate_revisions;
+             DROP TABLE project_root_identity;",
         )?;
         crate::schema::recreate_disposable_graph_projection(&resolution_store.connection, false)?;
         crate::schema::recreate_pre_selector_symbol_storage_for_test(&resolution_store.connection)?;
@@ -810,7 +811,7 @@ mod tests {
         )?;
         require_eq(
             &resolution.schema.migration_steps_remaining,
-            &Some(7),
+            &Some(8),
             "schema-12 migration steps",
         )?;
         require_eq(

@@ -11,15 +11,18 @@ use crate::CliError;
 use blake3::Hasher;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use projectatlas_core::graph::ProjectInstanceId;
-use projectatlas_core::{IndexGeneration, IndexWorkControl, IndexWorkStage};
+use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
 use projectatlas_db::{AtlasStore, CapturedProjectBinding, IndexPublicationState};
 use std::collections::HashMap;
+#[cfg(windows)]
+use std::ffi::{OsStr, OsString};
 use std::fmt;
-#[cfg(test)]
 use std::fs;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{Read, Take};
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
@@ -557,30 +560,85 @@ fn is_database_runtime_path(candidate: &Path, database: &Path) -> bool {
     if same_native_path(candidate, database) {
         return true;
     }
-    let Some(database_name) = database.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    candidate.parent().is_some_and(|parent| {
-        database
-            .parent()
-            .is_some_and(|database_parent| same_native_path(parent, database_parent))
-    }) && candidate
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name.strip_prefix(database_name)
-                .is_some_and(|suffix| matches!(suffix, "-wal" | "-shm" | "-journal"))
-        })
+    ["-wal", "-shm", "-journal"].into_iter().any(|suffix| {
+        let mut sidecar = database.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar = Path::new(&sidecar);
+        same_native_path(candidate, sidecar) || {
+            #[cfg(windows)]
+            {
+                missing_windows_sidecar_matches(candidate, sidecar, database, suffix)
+            }
+            #[cfg(not(windows))]
+            {
+                false
+            }
+        }
+    })
 }
 
-/// Compare normalized native paths using platform case semantics.
+/// Match a removed sidecar through its existing database leaf on ordinary
+/// case-insensitive Windows directories. The base-file proof keeps a
+/// case-sensitive directory's distinct spelling fail-closed.
+#[cfg(windows)]
+fn missing_windows_sidecar_matches(
+    candidate: &Path,
+    sidecar: &Path,
+    database: &Path,
+    suffix: &str,
+) -> bool {
+    if candidate.exists() || sidecar.exists() {
+        return false;
+    }
+    let (Some(parent), Some(leaf)) = (candidate.parent(), candidate.file_name()) else {
+        return false;
+    };
+    let suffix_units: Vec<u16> = OsStr::new(suffix).encode_wide().collect();
+    let leaf_units: Vec<u16> = leaf.encode_wide().collect();
+    if leaf_units.len() <= suffix_units.len()
+        || !leaf_units[leaf_units.len() - suffix_units.len()..]
+            .iter()
+            .zip(&suffix_units)
+            .all(|(actual, expected)| {
+                let actual = *actual;
+                let expected = *expected;
+                let fold_ascii = |unit: u16| {
+                    if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+                        unit + (u16::from(b'a') - u16::from(b'A'))
+                    } else {
+                        unit
+                    }
+                };
+                actual == expected || fold_ascii(actual) == fold_ascii(expected)
+            })
+    {
+        return false;
+    }
+    let base = parent.join(OsString::from_wide(
+        &leaf_units[..leaf_units.len() - suffix_units.len()],
+    ));
+    // An unresolved candidate whose base spelling is already exact has no
+    // native evidence that the missing suffix belongs to a case-insensitive
+    // namespace; leave that event observable instead of guessing.
+    base != database && same_native_path(&base, database)
+}
+
+/// Compare native paths without converting identity through display text.
 fn same_native_path(left: &Path, right: &Path) -> bool {
-    let left = projectatlas_core::normalize_native_path_display(left);
-    let right = projectatlas_core::normalize_native_path_display(right);
-    if cfg!(windows) {
-        left.eq_ignore_ascii_case(&right)
-    } else {
-        left == right
+    if left == right {
+        return true;
+    }
+    let canonical = |path: &Path| -> Option<PathBuf> {
+        if let Ok(path) = fs::canonicalize(path) {
+            return Some(path);
+        }
+        let parent = path.parent()?;
+        let identity = CanonicalProjectRoot::from_path(parent).ok()?;
+        Some(identity.as_path().join(path.file_name()?))
+    };
+    match (canonical(left), canonical(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -1143,10 +1201,15 @@ fn source_policy_witness(
         "contract",
         plan.publication_contract_fingerprint().as_bytes(),
     );
-    hash_field(&mut hasher, "root", plan.root.to_string_lossy().as_bytes());
+    let root_identity = CanonicalProjectRoot::from_path(&plan.root)
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let root_identity_bytes = root_identity
+        .encode()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    hash_field(&mut hasher, "root", &root_identity_bytes);
     for path in source_policy_paths(plan, control)? {
         control.check(IndexWorkStage::Publication)?;
-        hash_field(&mut hasher, "path", path.to_string_lossy().as_bytes());
+        hash_field(&mut hasher, "path", path.as_os_str().as_encoded_bytes());
         match path.metadata() {
             Ok(metadata) if metadata.is_file() => {
                 let file = File::open(&path).map_err(|source| CliError::Io {
@@ -1305,6 +1368,8 @@ mod tests {
     use notify::{EventKind, event::AccessKind};
     use projectatlas_core::{IndexCancellation, PurposeSource};
     use std::error::Error;
+    #[cfg(windows)]
+    use std::process::Command;
 
     /// Create and publish a minimal indexed repository for observer tests.
     fn indexed_project(root: &Path) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
@@ -2073,6 +2138,131 @@ mod tests {
             "canceled mutation changed the purpose row",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn same_native_path_rejects_distinct_unresolved_paths() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let left = temp.path().join("missing-left").join("leaf");
+        let right = temp.path().join("missing-right").join("leaf");
+
+        require(
+            !super::same_native_path(&left, &right),
+            "unresolved distinct paths were treated as equal",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn same_native_path_matches_paths_below_a_canonicalizable_parent() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("canonical-parent");
+        let nested = parent.join("nested");
+        fs::create_dir(&parent)?;
+        fs::create_dir(&nested)?;
+        let left = parent.join("missing");
+        let right = nested.join("..").join("missing");
+
+        require(
+            super::same_native_path(&left, &right),
+            "equivalent paths below a canonicalizable parent diverged",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn observer_filters_case_variant_database_sidecars_without_rescan() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("MiXeDAtlasRoot");
+        let metadata = root.join(".projectatlas");
+        fs::create_dir_all(&metadata)?;
+        let database = metadata.join("ProjectAtlas.db");
+        fs::write(&database, b"SQLite format 3\0")?;
+        let sidecars = ["-wal", "-shm", "-journal"].map(|suffix| {
+            let mut sidecar = database.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            PathBuf::from(sidecar)
+        });
+        for sidecar in &sidecars {
+            fs::write(sidecar, b"SQLite sidecar")?;
+        }
+        let source = root.join("source.rs");
+        fs::write(&source, "fn source() {}\n")?;
+        let binding = SourceBinding::new(&database, &root, None)?;
+        let scan_options = projectatlas_fs::ScanOptions::default();
+        let differently_cased = |path: &Path| -> Result<PathBuf, Box<dyn Error>> {
+            let path = path
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("test path was not UTF-8"))?;
+            Ok(PathBuf::from(path.to_ascii_uppercase()))
+        };
+
+        for path in std::iter::once(&database).chain(sidecars.iter()) {
+            let event =
+                Event::new(EventKind::Modify(ModifyKind::Any)).add_path(differently_cased(path)?);
+            let changes = super::observer_event_changes(&binding, &scan_options, &event);
+            require(
+                !changes.has_changes(),
+                "case-variant SQLite runtime event triggered a rescan",
+            )?;
+        }
+
+        for sidecar in &sidecars {
+            fs::remove_file(sidecar)?;
+            let event = Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(differently_cased(sidecar)?);
+            let changes = super::observer_event_changes(&binding, &scan_options, &event);
+            require(
+                !changes.has_changes(),
+                "case-variant removed SQLite sidecar event triggered a rescan",
+            )?;
+        }
+
+        let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source);
+        let changes = super::observer_event_changes(&binding, &scan_options, &event);
+        require(
+            changes.has_changes(),
+            "non-runtime source event was incorrectly filtered",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn observer_keeps_case_variant_sidecar_event_in_case_sensitive_directory()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("case-sensitive-observer");
+        fs::create_dir(&parent)?;
+        let enabled = Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let root = parent.join("Root");
+        let metadata = root.join(".projectatlas");
+        fs::create_dir_all(&metadata)?;
+        let database = metadata.join("ProjectAtlas.db");
+        fs::write(&database, b"SQLite format 3\0")?;
+        let binding = SourceBinding::new(&database, &root, None)?;
+        let event_path = metadata.join("PROJECTATLAS.DB-WAL");
+        let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(event_path);
+        let changes = super::observer_event_changes(
+            &binding,
+            &projectatlas_fs::ScanOptions::default(),
+            &event,
+        );
+        require(
+            changes.has_changes(),
+            "case-variant sidecar event was suppressed in a case-sensitive directory",
+        )
     }
 
     #[test]

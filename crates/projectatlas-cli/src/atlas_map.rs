@@ -2,7 +2,7 @@
 
 use blake3::Hasher;
 use projectatlas_core::{
-    Node, NodeKind,
+    CanonicalProjectRoot, Node, NodeKind,
     language::{BROAD_SOURCE_EXTENSIONS, canonical_language_id},
     validated_repo_file_key,
 };
@@ -11,6 +11,7 @@ use projectatlas_fs::{ScanOptions, scan_repo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -233,7 +234,7 @@ struct RawUntracked {
 pub(crate) struct AtlasMapConfig {
     /// Repository root.
     pub(crate) root: PathBuf,
-    /// Generated TOON map path.
+    /// Lossless UTF-8 generated TOON map path, when one is available.
     pub(crate) map_path: PathBuf,
     /// Non-source file summary path.
     pub(crate) nonsource_files_path: PathBuf,
@@ -313,14 +314,14 @@ impl AtlasMapConfig {
 /// Serializable view of the effective `ProjectAtlas` configuration.
 #[derive(Debug, Serialize)]
 pub(crate) struct EffectiveConfigReport {
-    /// Repository root.
-    pub(crate) root: String,
-    /// Generated TOON map path.
-    pub(crate) map_path: String,
-    /// Non-source purpose registry path.
-    pub(crate) nonsource_files_path: String,
-    /// Durable `SQLite` index path.
-    pub(crate) db_path: String,
+    /// Lossless UTF-8 repository root, when one is available.
+    pub(crate) root: Option<String>,
+    /// Lossless UTF-8 generated TOON map path, when one is available.
+    pub(crate) map_path: Option<String>,
+    /// Lossless UTF-8 non-source purpose registry path, when one is available.
+    pub(crate) nonsource_files_path: Option<String>,
+    /// Lossless UTF-8 durable `SQLite` index path, when one is available.
+    pub(crate) db_path: Option<String>,
     /// Purpose metadata filename.
     pub(crate) purpose_filename: String,
     /// Source extensions treated as indexable project content.
@@ -352,7 +353,9 @@ pub(crate) struct EffectiveConfigReport {
 /// Build the effective configuration report used by agents and docs.
 pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfigReport {
     EffectiveConfigReport {
-        root: effective_config_path_display(&config.root),
+        root: CanonicalProjectRoot::from_path(&config.root)
+            .ok()
+            .and_then(|root| root.display_string().ok()),
         map_path: effective_config_path_display(&config.map_path),
         nonsource_files_path: effective_config_path_display(&config.nonsource_files_path),
         db_path: effective_config_path_display(&config.db_path),
@@ -372,16 +375,18 @@ pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfi
     }
 }
 
-/// Render canonical paths without leaking Windows extended-path prefixes.
+/// Render a native path without replacing non-UTF-8 units.
 #[cfg(windows)]
-fn effective_config_path_display(path: &Path) -> String {
-    projectatlas_core::normalize_native_path_display(path).replace('/', "\\")
+fn effective_config_path_display(path: &Path) -> Option<String> {
+    projectatlas_core::lossless_native_path_display(path)
+        .ok()
+        .map(|value| value.replace('/', "\\"))
 }
 
-/// Render native paths unchanged on hosts without Windows extended prefixes.
+/// Render a native path without replacing non-UTF-8 units.
 #[cfg(not(windows))]
-fn effective_config_path_display(path: &Path) -> String {
-    path.display().to_string()
+fn effective_config_path_display(path: &Path) -> Option<String> {
+    path.to_str().map(ToOwned::to_owned)
 }
 
 /// `ProjectAtlas` map record.
@@ -627,10 +632,10 @@ impl IgnoreEntryKind {
 /// Current `ProjectAtlas` ignore configuration report.
 #[derive(Debug, Serialize)]
 pub(crate) struct IgnoreListReport {
-    /// Config file used for the manual `ProjectAtlas` ignore layer.
-    pub(crate) config_path: String,
-    /// `.gitignore` file that the scanner will honor when it exists.
-    pub(crate) gitignore_path: String,
+    /// Lossless UTF-8 config path used for the manual `ProjectAtlas` ignore layer.
+    pub(crate) config_path: Option<String>,
+    /// Lossless UTF-8 `.gitignore` path that the scanner will honor when it exists.
+    pub(crate) gitignore_path: Option<String>,
     /// Whether a `.gitignore` file currently exists at the project root.
     pub(crate) gitignore_present: bool,
     /// Scanner behavior for `.gitignore`.
@@ -646,8 +651,8 @@ pub(crate) struct IgnoreListReport {
 /// Result of creating a project-root `.gitignore` when it is missing.
 #[derive(Debug, Serialize)]
 pub(crate) struct GitignoreInitReport {
-    /// `.gitignore` path that was checked.
-    pub(crate) gitignore_path: String,
+    /// Lossless UTF-8 `.gitignore` path that was checked, when one is available.
+    pub(crate) gitignore_path: Option<String>,
     /// Whether the file already existed before the command.
     pub(crate) existed: bool,
     /// Whether the command created the file.
@@ -659,10 +664,10 @@ pub(crate) struct GitignoreInitReport {
 /// Result of adding or removing a manual `ProjectAtlas` ignore entry.
 #[derive(Debug, Serialize)]
 pub(crate) struct IgnoreMutationReport {
-    /// Config file that was edited.
-    pub(crate) config_path: String,
-    /// `.gitignore` file that the scanner will honor when it exists.
-    pub(crate) gitignore_path: String,
+    /// Lossless UTF-8 config path that was edited, when one is available.
+    pub(crate) config_path: Option<String>,
+    /// Lossless UTF-8 `.gitignore` path that the scanner will honor when it exists.
+    pub(crate) gitignore_path: Option<String>,
     /// Whether a `.gitignore` file currently exists at the project root.
     pub(crate) gitignore_present: bool,
     /// Mutation action.
@@ -734,10 +739,6 @@ pub(crate) fn init_project_with_config(
     selected_config: Option<&Path>,
 ) -> AtlasMapResult<String> {
     let project_dir = root.join(".projectatlas");
-    fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
-        path: project_dir.clone(),
-        source,
-    })?;
     let nested_config_path = project_dir.join("config.toml");
     let flat_config_path = root.join("projectatlas.toml");
     let config_path = selected_config.map_or_else(
@@ -752,7 +753,16 @@ pub(crate) fn init_project_with_config(
         },
         Path::to_path_buf,
     );
-    if !config_path.exists() {
+    let default_config = if config_path.exists() {
+        None
+    } else {
+        Some(default_config_text_for(root, &config_path)?)
+    };
+    fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
+        path: project_dir.clone(),
+        source,
+    })?;
+    if let Some(default_config) = default_config {
         if let Some(parent) = config_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -762,11 +772,9 @@ pub(crate) fn init_project_with_config(
                 source,
             })?;
         }
-        fs::write(&config_path, default_config_text_for(root, &config_path)).map_err(|source| {
-            AtlasMapError::Io {
-                path: config_path.clone(),
-                source,
-            }
+        fs::write(&config_path, default_config).map_err(|source| AtlasMapError::Io {
+            path: config_path.clone(),
+            source,
         })?;
     }
     let nonsource_path = project_dir.join("projectatlas-nonsource-files.toon");
@@ -817,7 +825,7 @@ pub(crate) fn init_gitignore(
         })?;
     }
     Ok(GitignoreInitReport {
-        gitignore_path: gitignore_path.display().to_string(),
+        gitignore_path: effective_config_path_display(&gitignore_path),
         existed,
         created: !existed,
         gitignore_inherited: true,
@@ -1468,8 +1476,8 @@ fn exclude_dir_name_set(values: Option<Vec<String>>) -> BTreeSet<String> {
 fn ignore_list_report(path: &Path, config: &AtlasMapConfig) -> IgnoreListReport {
     let gitignore_path = config.root.join(".gitignore");
     IgnoreListReport {
-        config_path: path.display().to_string(),
-        gitignore_path: gitignore_path.display().to_string(),
+        config_path: effective_config_path_display(path),
+        gitignore_path: effective_config_path_display(&gitignore_path),
         gitignore_present: gitignore_path.exists(),
         gitignore_mode: "inherited-when-present".to_string(),
         manual_layer_order: "after-gitignore".to_string(),
@@ -1489,8 +1497,8 @@ fn ignore_mutation_report(
 ) -> IgnoreMutationReport {
     let gitignore_path = config.root.join(".gitignore");
     IgnoreMutationReport {
-        config_path: path.display().to_string(),
-        gitignore_path: gitignore_path.display().to_string(),
+        config_path: effective_config_path_display(path),
+        gitignore_path: effective_config_path_display(&gitignore_path),
         gitignore_present: gitignore_path.exists(),
         action: action.to_string(),
         kind: kind.to_string(),
@@ -2826,24 +2834,25 @@ fn default_config_text() -> String {
 }
 
 /// Build default config text for a config file created by init.
-fn default_config_text_for(root: &Path, config_path: &Path) -> String {
-    default_config_text_with_root(&default_config_root_value(root, config_path))
+fn default_config_text_for(root: &Path, config_path: &Path) -> AtlasMapResult<String> {
+    Ok(default_config_text_with_root(&default_config_root_value(
+        root,
+        config_path,
+    )?))
 }
 
 /// Return the `[project].root` value that keeps an explicit init config bound to `root`.
-fn default_config_root_value(root: &Path, config_path: &Path) -> String {
+fn default_config_root_value(root: &Path, config_path: &Path) -> AtlasMapResult<String> {
     if config_path_is_projectatlas(Some(config_path)) {
-        return ".".to_string();
+        return Ok(".".to_string());
     }
     let Some(parent) = config_path.parent() else {
-        return ".".to_string();
+        return Ok(".".to_string());
     };
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let parent = parent
-        .canonicalize()
-        .unwrap_or_else(|_| parent.to_path_buf());
+    let parent = resolve_config_parent(parent);
     if parent == root {
-        return ".".to_string();
+        return Ok(".".to_string());
     }
     if let Ok(relative_parent) = parent.strip_prefix(&root) {
         let depth = relative_parent
@@ -2851,14 +2860,47 @@ fn default_config_root_value(root: &Path, config_path: &Path) -> String {
             .filter(|component| matches!(component, std::path::Component::Normal(_)))
             .count();
         if depth == 0 {
-            ".".to_string()
+            Ok(".".to_string())
         } else {
-            std::iter::repeat_n("..", depth)
+            Ok(std::iter::repeat_n("..", depth)
                 .collect::<Vec<_>>()
-                .join("/")
+                .join("/"))
         }
     } else {
-        root.to_string_lossy().replace('\\', "/")
+        projectatlas_core::lossless_native_path_display(&root).map_err(|_error| {
+            AtlasMapError::InvalidRepositoryPath {
+                path: "<native project root>".to_string(),
+                message: "cannot serialize a non-UTF-8 root into an external TOML config"
+                    .to_string(),
+            }
+        })
+    }
+}
+
+/// Resolve a config parent through existing symlinks while preserving missing native components.
+fn resolve_config_parent(parent: &Path) -> PathBuf {
+    let mut missing_components = Vec::new();
+    let mut candidate = parent;
+    loop {
+        match candidate.canonicalize() {
+            Ok(mut resolved) => {
+                for component in missing_components.iter().rev() {
+                    resolved.push(component);
+                }
+                return resolved;
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                let Some(component) = candidate.file_name() else {
+                    return parent.to_path_buf();
+                };
+                missing_components.push(component.to_os_string());
+                let Some(next) = candidate.parent() else {
+                    return parent.to_path_buf();
+                };
+                candidate = next;
+            }
+            Err(_) => return parent.to_path_buf(),
+        }
     }
 }
 
@@ -2867,7 +2909,10 @@ fn default_config_text_with_root(root_value: &str) -> String {
     let source_extensions = toml_array(DEFAULT_SOURCE_EXTENSIONS);
     [
         "[project]",
-        &format!("root = \"{}\"", root_value.replace('"', "\\\"")),
+        &format!(
+            "root = \"{}\"",
+            root_value.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
         "map_path = \".projectatlas/projectatlas.toon\"",
         "nonsource_files_path = \".projectatlas/projectatlas-nonsource-files.toon\"",
         "",
@@ -3127,6 +3172,31 @@ root = "."
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn effective_config_report_does_not_replace_native_root_bytes() -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        fs::create_dir(&raw_root)?;
+        let config = super::load_atlas_config_for_root(&raw_root)?;
+        let report = super::effective_config_report(&config);
+        let value = serde_json::to_value(report)?;
+        if value.get("root") != Some(&serde_json::Value::Null)
+            || value.get("map_path") != Some(&serde_json::Value::Null)
+            || value.get("db_path") != Some(&serde_json::Value::Null)
+            || value.to_string().contains("repo-�")
+        {
+            return Err(io::Error::other(
+                "effective config report exposed a lossy native root projection",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     #[test]
     fn config_rejects_unknown_language_override_target() {
         let result = load_atlas_config_from_text(
@@ -3328,13 +3398,221 @@ root = "."
             (config_dir.join("projectatlas.toml"), "../.."),
         ];
         for (config_path, expected_root) in cases {
-            let actual_root = default_config_root_value(root, &config_path);
+            let actual_root = default_config_root_value(root, &config_path)?;
             if actual_root != expected_root {
                 return Err(std::io::Error::other(format!(
                     "default config root mismatch for {config_path:?}: expected {expected_root}, got {actual_root}"
                 ))
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_config_preserves_absolute_volume_guid_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = Path::new(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\repo");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
+
+        let text = super::default_config_text_for(root, &config_path)?;
+        let expected = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("synthetic volume-GUID root was not UTF-8"))?;
+        let parsed = toml::from_str::<toml::Value>(&text)?;
+        let decoded = parsed
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|project| project.get("root"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| io::Error::other("generated volume-GUID root was not a TOML string"))?;
+        if !Path::new(decoded).is_absolute() || decoded != expected {
+            return Err(io::Error::other(format!(
+                "generated volume-GUID root lost its absolute native spelling: {decoded:?}"
+            ))
+            .into());
+        }
+        let escaped = expected.replace('\\', "\\\\");
+        if !text.contains(&format!("root = \"{escaped}\"")) {
+            return Err(io::Error::other("generated volume-GUID root was not TOML-escaped").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reports_preserve_absolute_volume_guid_paths() -> Result<(), Box<dyn Error>> {
+        let root = Path::new(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\repo");
+        let config_path = root.join(".projectatlas").join("config.toml");
+        let map_path = root.join(".projectatlas").join("projectatlas.toon");
+        let nonsource_path = root
+            .join(".projectatlas")
+            .join("projectatlas-nonsource-files.toon");
+        let database_path = root.join(".projectatlas").join("projectatlas.db");
+        let mut config = test_config(map_path.clone());
+        config.root = root.to_path_buf();
+        config.nonsource_files_path = nonsource_path;
+        config.db_path = database_path;
+        let expected = |path: &Path| path.to_str().map(ToOwned::to_owned);
+
+        let effective = super::effective_config_report(&config);
+        if effective.map_path != expected(&map_path)
+            || effective.nonsource_files_path != expected(&config.nonsource_files_path)
+            || effective.db_path != expected(&config.db_path)
+        {
+            return Err(io::Error::other(format!(
+                "effective config report changed the volume-GUID spelling: {effective:?}"
+            ))
+            .into());
+        }
+
+        let ignore = super::ignore_list_report(&config_path, &config);
+        if ignore.config_path != expected(&config_path)
+            || ignore.gitignore_path != expected(&root.join(".gitignore"))
+        {
+            return Err(io::Error::other(format!(
+                "ignore list report changed the volume-GUID spelling: {ignore:?}"
+            ))
+            .into());
+        }
+        let mutation =
+            super::ignore_mutation_report(&config_path, "add", "dir-name", "target", true, &config);
+        if mutation.config_path != expected(&config_path)
+            || mutation.gitignore_path != expected(&root.join(".gitignore"))
+        {
+            return Err(io::Error::other(format!(
+                "ignore mutation report changed the volume-GUID spelling: {mutation:?}"
+            ))
+            .into());
+        }
+
+        if super::effective_config_path_display(Path::new(r"\\?\C:\repo\file"))
+            != Some(r"C:\repo\file".to_string())
+            || super::effective_config_path_display(Path::new(r"\\?\UNC\server\share\repo\file"))
+                != Some(r"\\server\share\repo\file".to_string())
+        {
+            return Err(io::Error::other(
+                "ordinary extended drive or UNC display was not normalized",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_config_preserves_verbatim_drive_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = Path::new(r"\\?\C:\repo\folder.");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
+        let text = super::default_config_text_for(root, &config_path)?;
+        let expected = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("synthetic verbatim root was not UTF-8"))?;
+        let parsed = toml::from_str::<toml::Value>(&text)?;
+        let decoded = parsed
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|project| project.get("root"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| io::Error::other("generated verbatim root was not a TOML string"))?;
+        if !Path::new(decoded).is_absolute() || decoded != expected {
+            return Err(io::Error::other(format!(
+                "generated verbatim root changed its absolute spelling: {decoded:?}"
+            ))
+            .into());
+        }
+        let escaped = expected.replace('\\', "\\\\");
+        if !text.contains(&format!("root = \"{escaped}\"")) {
+            return Err(io::Error::other("generated verbatim root was not TOML-escaped").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_through_symlink_preserves_canonical_project_root()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root)?;
+        fs::create_dir(&outside)?;
+        symlink(&outside, root.join("link"))?;
+
+        let config_path = root.join("link").join("nested").join("projectatlas.toml");
+        super::init_project_with_config(&root, Some(&config_path))?;
+
+        let config = super::load_atlas_config(Some(&config_path))?;
+        let expected_root = root.canonicalize()?;
+        if config.root != expected_root {
+            return Err(io::Error::other(format!(
+                "symlinked external config selected {:?}, expected {expected_root:?}",
+                config.root
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_preserves_unix_backslash_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo\\name");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
+        fs::create_dir(&root)?;
+
+        super::init_project_with_config(&root, Some(&config_path))?;
+
+        let config_text = fs::read_to_string(&config_path)?;
+        if !config_text.contains("repo\\\\name") {
+            return Err(io::Error::other(
+                "external config did not TOML-escape its literal Unix backslash",
+            )
+            .into());
+        }
+        let config = super::load_atlas_config(Some(&config_path))?;
+        let expected_root = root.canonicalize()?;
+        if config.root != expected_root {
+            return Err(io::Error::other(format!(
+                "external config selected {:?}, expected {expected_root:?}",
+                config.root
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_rejects_non_utf8_root_before_writes() -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let config_parent = temp.path().join("external-config").join("nested");
+        let config_path = config_parent.join("projectatlas.toml");
+        fs::create_dir(&raw_root)?;
+
+        let result = super::init_project_with_config(&raw_root, Some(&config_path));
+
+        if !matches!(result, Err(AtlasMapError::InvalidRepositoryPath { .. })) {
+            return Err(io::Error::other(format!(
+                "external config initialization returned an unexpected result: {result:?}"
+            ))
+            .into());
+        }
+        if raw_root.join(".projectatlas").exists() || config_parent.exists() || config_path.exists()
+        {
+            return Err(io::Error::other(
+                "external config refusal left project or config filesystem state",
+            )
+            .into());
         }
         Ok(())
     }

@@ -685,9 +685,9 @@ impl AtlasStore {
     ) -> DbResult<T> {
         let binding = self.captured_project_binding()?;
         self.with_telemetry_connection(|connection| {
-            crate::with_validated_write_transaction(
+            crate::with_validated_native_write_transaction(
                 connection,
-                Some(&binding.project_root),
+                Some(&binding.project_root_identity),
                 Some(binding.project_instance_id),
                 |transaction| {
                     let snapshot = telemetry::export_worktree_usage_snapshot(transaction)?;

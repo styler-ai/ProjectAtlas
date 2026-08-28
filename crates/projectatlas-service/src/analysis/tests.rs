@@ -11,7 +11,33 @@ use std::error::Error;
 use std::fs;
 use std::io;
 use std::num::NonZeroU32;
+use std::path::Path;
 use std::rc::Rc;
+
+#[cfg(unix)]
+#[test]
+fn analysis_cursor_identity_preserves_non_utf8_root_collisions() -> Result<(), Box<dyn Error>> {
+    use projectatlas_core::CanonicalProjectRoot;
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = tempfile::tempdir()?;
+    let native = temp
+        .path()
+        .join(std::ffi::OsString::from_vec(vec![b'r', b'o', b'o', 0x80]));
+    let replacement = temp.path().join("roo�");
+    fs::create_dir(&native)?;
+    fs::create_dir(&replacement)?;
+    let native_root = CanonicalProjectRoot::from_path(&native)?;
+    let replacement_root = CanonicalProjectRoot::from_path(&replacement)?;
+    let query = analysis_query(RelationAnalysisMode::Architecture)?;
+    let native_binding = analysis_cursor_binding(&query, &native_root)?;
+    let replacement_binding = analysis_cursor_binding(&query, &replacement_root)?;
+    require(
+        native_binding.root_digest != replacement_binding.root_digest,
+        "analysis cursor identity collapsed non-UTF-8 and replacement roots",
+    )?;
+    Ok(())
+}
 
 fn cancel_at_analysis_phase<T>(
     phase: AnalysisPhaseEvent,

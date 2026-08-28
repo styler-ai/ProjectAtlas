@@ -1,9 +1,12 @@
 //! Durable project identity and explicit root-binding transitions.
 
-use super::{AtlasStore, DbError, DbResult, normalize_metadata_path, set_metadata};
+use super::{
+    AtlasStore, DbError, DbResult, ProjectRootMismatchIdentities, normalize_metadata_path,
+    set_metadata,
+};
 use crate::schema::{self, PROJECT_ROOT_KEY, SchemaState};
-use projectatlas_core::IndexGeneration;
 use projectatlas_core::graph::ProjectInstanceId;
+use projectatlas_core::{CanonicalProjectRoot, IndexGeneration};
 use rusqlite::{Connection, OptionalExtension};
 use std::fs;
 use std::path::Path;
@@ -27,10 +30,14 @@ pub enum ProjectRootTransition {
 pub struct ProjectRootTransitionResult {
     /// Transition selected by the caller.
     pub transition: ProjectRootTransition,
-    /// Root stored before the transition, when one existed.
+    /// Lossless UTF-8 display of the native root stored before the transition,
+    /// when one existed and had a display projection.
     pub previous_root: Option<String>,
-    /// Canonical root stored after the transition.
-    pub project_root: String,
+    /// Lossless UTF-8 display of the canonical root stored after the
+    /// transition, when one exists.
+    ///
+    /// `None` is the typed unavailable state for a native non-UTF-8 root.
+    pub project_root: Option<String>,
     /// Durable identity owned by the destination after the transition.
     pub project_instance_id: ProjectInstanceId,
     /// Whether this operation created or replaced the project identity.
@@ -57,32 +64,52 @@ impl AtlasStore {
         destination: &Path,
         transition: ProjectRootTransition,
     ) -> DbResult<ProjectRootTransitionResult> {
-        let destination = validate_project_root_destination(destination)?;
+        let destination_identity = validate_project_root_destination(destination)?;
+        let destination = destination_identity.display_string().ok();
         let (preflight, _) = schema::preflight(database_path, None)?;
         let previous_root = preflight.project_root.clone();
-        let previous_identity = if preflight.state == SchemaState::Current {
-            read_current_project_identity(database_path)?
+        let previous_identity = preflight.project_instance_id;
+        if preflight.state == SchemaState::UpgradeRequired
+            && schema::legacy_root_requires_native_authority(previous_root.as_deref())
+        {
+            return Err(DbError::ProjectRootIdentityMissing);
+        }
+        let previous_root_identity = if preflight.state == SchemaState::Current {
+            read_current_project_root_identity(database_path)?
+        } else if (transition == ProjectRootTransition::Bind
+            || transition == ProjectRootTransition::Detach)
+            && preflight.state == SchemaState::UpgradeRequired
+        {
+            previous_root
+                .as_deref()
+                .map(Path::new)
+                .map(CanonicalProjectRoot::from_path)
+                .transpose()?
         } else {
             None
         };
-
         match transition {
             ProjectRootTransition::Bind => {
-                if let Some(found) = previous_root.as_deref()
-                    && found != destination
-                {
-                    return Err(DbError::ProjectRootMismatch {
-                        expected: destination,
-                        found: found.to_string(),
-                    });
+                if let Some(found) = previous_root_identity.as_ref() {
+                    prove_existing_root_equivalence(
+                        destination_identity.as_path(),
+                        found.as_path(),
+                    )?;
+                } else if let Some(found) = previous_root.as_deref() {
+                    prove_existing_root_equivalence(
+                        destination_identity.as_path(),
+                        Path::new(found),
+                    )?;
                 }
-                let store = Self::open_for_project(database_path, Path::new(&destination))?;
+                let store = Self::open_for_project(database_path, destination_identity.as_path())?;
                 let project_instance_id = store
                     .project_instance_id()?
                     .ok_or(DbError::ProjectInstanceIdentityMissing)?;
                 Ok(ProjectRootTransitionResult {
                     transition,
-                    previous_root,
+                    previous_root: previous_root_identity
+                        .as_ref()
+                        .and_then(|root| root.display_string().ok()),
                     project_root: destination,
                     project_instance_id,
                     identity_changed: previous_identity != Some(project_instance_id),
@@ -90,34 +117,69 @@ impl AtlasStore {
                 })
             }
             ProjectRootTransition::Move | ProjectRootTransition::Detach => {
-                let previous_root =
-                    previous_root.ok_or(DbError::ProjectRootTransitionRequiresExistingRoot)?;
+                let previous_root_identity = match previous_root_identity.as_ref() {
+                    Some(identity) => identity,
+                    None if preflight.state == SchemaState::UpgradeRequired => {
+                        return Err(DbError::ProjectRootIdentityMissing);
+                    }
+                    None => return Err(DbError::ProjectRootTransitionRequiresExistingRoot),
+                };
                 if transition == ProjectRootTransition::Move {
-                    if previous_root == destination {
+                    if previous_root_identity == &destination_identity {
                         return Err(DbError::ProjectRootTransitionRequiresDifferentRoot {
-                            root: destination,
+                            root: destination_identity.display_string_lossy(),
                         });
                     }
-                    verify_root_absent(&previous_root)?;
+                    verify_root_absent(previous_root_identity)?;
                 }
 
                 let mut store = Self::open_for_root_transition(database_path)?;
                 let opened_identity = store.project_instance_id()?;
+                let upgrade_transaction = !store.connection.is_autocommit();
                 if previous_identity.is_some() && opened_identity != previous_identity {
-                    return Err(project_transition_changed(
-                        Some(previous_root),
+                    let error = project_transition_changed(
+                        previous_root_identity.display_string().ok(),
                         store.project_root()?,
                         previous_identity,
                         opened_identity,
-                    ));
+                    );
+                    return Err(if upgrade_transaction {
+                        schema::rollback_after_error(&store.connection, error)
+                    } else {
+                        error
+                    });
                 }
-                let mut result = apply_root_transition(
-                    &mut store,
-                    transition,
-                    &previous_root,
-                    opened_identity,
-                    &destination,
-                )?;
+                let mut result = if upgrade_transaction {
+                    let operation = apply_root_transition_in_transaction(
+                        &mut store,
+                        transition,
+                        Some(previous_root_identity),
+                        opened_identity,
+                        &destination_identity,
+                    );
+                    match operation {
+                        Ok(result) => {
+                            if let Err(source) = store.connection.execute_batch("COMMIT") {
+                                return Err(schema::rollback_after_error(
+                                    &store.connection,
+                                    DbError::Sqlite(source),
+                                ));
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            return Err(schema::rollback_after_error(&store.connection, error));
+                        }
+                    }
+                } else {
+                    apply_root_transition(
+                        &mut store,
+                        transition,
+                        Some(previous_root_identity),
+                        opened_identity,
+                        &destination_identity,
+                    )?
+                };
                 result.identity_changed = previous_identity != Some(result.project_instance_id);
                 Ok(result)
             }
@@ -135,7 +197,7 @@ impl AtlasStore {
 }
 
 /// Validate and canonicalize a transition destination before touching its database.
-fn validate_project_root_destination(destination: &Path) -> DbResult<String> {
+fn validate_project_root_destination(destination: &Path) -> DbResult<CanonicalProjectRoot> {
     let root = normalize_metadata_path(destination);
     if !destination.is_absolute() {
         return Err(DbError::ProjectRootDestinationInvalid {
@@ -146,87 +208,36 @@ fn validate_project_root_destination(destination: &Path) -> DbResult<String> {
             ),
         });
     }
-    let canonical =
-        fs::canonicalize(destination).map_err(|source| DbError::ProjectRootDestinationInvalid {
-            root: root.clone(),
-            source,
-        })?;
-    let metadata =
-        fs::metadata(&canonical).map_err(|source| DbError::ProjectRootDestinationInvalid {
-            root: root.clone(),
-            source,
-        })?;
-    if !metadata.is_dir() {
-        return Err(DbError::ProjectRootDestinationInvalid {
-            root,
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "project root destination is not a directory",
-            ),
-        });
-    }
-    Ok(normalize_metadata_path(&canonical))
+    CanonicalProjectRoot::from_path(destination).map_err(|error| match error {
+        projectatlas_core::CoreError::CanonicalProjectRootIo { source, .. } => {
+            DbError::ProjectRootDestinationInvalid { root, source }
+        }
+        projectatlas_core::CoreError::InvalidCanonicalProjectRoot { reason, .. } => {
+            DbError::ProjectRootDestinationInvalid {
+                root,
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, reason),
+            }
+        }
+        other => DbError::from(other),
+    })
 }
 
 /// Apply move or detach after non-mutating preflight has captured expected state.
 fn apply_root_transition(
     store: &mut AtlasStore,
     transition: ProjectRootTransition,
-    expected_root: &str,
+    expected_root_identity: Option<&CanonicalProjectRoot>,
     expected_identity: Option<ProjectInstanceId>,
-    destination: &str,
+    destination: &CanonicalProjectRoot,
 ) -> DbResult<ProjectRootTransitionResult> {
     store.connection.execute_batch("BEGIN IMMEDIATE")?;
-    let operation = (|| {
-        let found_root = store.project_root()?;
-        let found_identity = load_project_identity(&store.connection)?;
-        if found_root.as_deref() != Some(expected_root) || found_identity != expected_identity {
-            return Err(project_transition_changed(
-                Some(expected_root.to_string()),
-                found_root,
-                expected_identity,
-                found_identity,
-            ));
-        }
-
-        if transition == ProjectRootTransition::Detach
-            && let Some(previous_identity) = found_identity
-        {
-            crate::telemetry::seal_project_usage_instances(&store.connection, previous_identity)?;
-        }
-        set_metadata(&store.connection, PROJECT_ROOT_KEY, destination)?;
-        schema::invalidate_derived_publication(&store.connection)?;
-        let (project_instance_id, identity_changed) = match transition {
-            ProjectRootTransition::Bind => unreachable!("bind does not use transition mutation"),
-            ProjectRootTransition::Move => {
-                let (identity, identity_changed) = ensure_project_identity(&store.connection)?;
-                set_graph_generation(&store.connection, IndexGeneration::ZERO)?;
-                (identity, identity_changed)
-            }
-            ProjectRootTransition::Detach => {
-                store
-                    .connection
-                    .execute("DELETE FROM graph_resolution_keys", [])?;
-                store.connection.execute("DELETE FROM graph_coverage", [])?;
-                store
-                    .connection
-                    .execute("DELETE FROM graph_relations", [])?;
-                store.connection.execute("DELETE FROM graph_entities", [])?;
-                let identity = generate_project_identity(&store.connection, found_identity)?;
-                set_project_identity(&store.connection, identity)?;
-                (identity, true)
-            }
-        };
-
-        Ok(ProjectRootTransitionResult {
-            transition,
-            previous_root: Some(expected_root.to_string()),
-            project_root: destination.to_string(),
-            project_instance_id,
-            identity_changed,
-            publication_invalidated: true,
-        })
-    })();
+    let operation = apply_root_transition_in_transaction(
+        store,
+        transition,
+        expected_root_identity,
+        expected_identity,
+        destination,
+    );
     match operation {
         Ok(result) => {
             if let Err(source) = store.connection.execute_batch("COMMIT") {
@@ -235,7 +246,8 @@ fn apply_root_transition(
                     DbError::Sqlite(source),
                 ));
             }
-            store.validated_project_root = Some(destination.to_string());
+            store.validated_project_root = destination.display_string().ok();
+            store.validated_project_root_identity = Some(destination.clone());
             store.validated_project_instance_id = Some(result.project_instance_id);
             if result.identity_changed {
                 store.library_usage_instances.get_mut().clear();
@@ -246,19 +258,74 @@ fn apply_root_transition(
     }
 }
 
-/// Prove the recorded old root path entry is absent without following links.
-fn verify_root_absent(root: &str) -> DbResult<()> {
-    let path = Path::new(root);
-    if !path.is_absolute() {
-        return Err(DbError::ProjectRootAbsenceUncertain {
-            root: root.to_string(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "stored project root is not absolute",
-            ),
-        });
+/// Apply a move or detach while the caller owns the write transaction.
+fn apply_root_transition_in_transaction(
+    store: &mut AtlasStore,
+    transition: ProjectRootTransition,
+    expected_root_identity: Option<&CanonicalProjectRoot>,
+    expected_identity: Option<ProjectInstanceId>,
+    destination: &CanonicalProjectRoot,
+) -> DbResult<ProjectRootTransitionResult> {
+    schema::validate_current_schema_version(&store.connection)?;
+    let found_root = store.project_root()?;
+    let found_root_identity = load_project_root_identity(&store.connection)?;
+    let found_identity = load_project_identity(&store.connection)?;
+    if found_root_identity.as_ref() != expected_root_identity || found_identity != expected_identity
+    {
+        return Err(project_transition_changed(
+            expected_root_identity.map(CanonicalProjectRoot::display_string_lossy),
+            found_root,
+            expected_identity,
+            found_identity,
+        ));
     }
-    classify_root_absence(root, fs::symlink_metadata(path).map(|_| ()))
+
+    if transition == ProjectRootTransition::Detach
+        && let Some(previous_identity) = found_identity
+    {
+        crate::telemetry::seal_project_usage_instances(&store.connection, previous_identity)?;
+    }
+    set_project_root_metadata(&store.connection, destination)?;
+    set_project_root_identity(&store.connection, destination)?;
+    schema::invalidate_derived_publication(&store.connection)?;
+    let (project_instance_id, identity_changed) = match transition {
+        ProjectRootTransition::Bind => unreachable!("bind does not use transition mutation"),
+        ProjectRootTransition::Move => {
+            let (identity, identity_changed) = ensure_project_identity(&store.connection)?;
+            set_graph_generation(&store.connection, IndexGeneration::ZERO)?;
+            (identity, identity_changed)
+        }
+        ProjectRootTransition::Detach => {
+            store
+                .connection
+                .execute("DELETE FROM graph_resolution_keys", [])?;
+            store.connection.execute("DELETE FROM graph_coverage", [])?;
+            store
+                .connection
+                .execute("DELETE FROM graph_relations", [])?;
+            store.connection.execute("DELETE FROM graph_entities", [])?;
+            let identity = generate_project_identity(&store.connection, found_identity)?;
+            set_project_identity(&store.connection, identity)?;
+            (identity, true)
+        }
+    };
+
+    Ok(ProjectRootTransitionResult {
+        transition,
+        previous_root: expected_root_identity.and_then(|root| root.display_string().ok()),
+        project_root: destination.display_string().ok(),
+        project_instance_id,
+        identity_changed,
+        publication_invalidated: true,
+    })
+}
+
+/// Prove the recorded old root path entry is absent without following links.
+fn verify_root_absent(root: &CanonicalProjectRoot) -> DbResult<()> {
+    classify_root_absence(
+        &root.display_string_lossy(),
+        fs::symlink_metadata(root.as_path()).map(|_| ()),
+    )
 }
 
 /// Classify a non-following filesystem probe without weakening uncertain failures.
@@ -275,10 +342,10 @@ fn classify_root_absence(root: &str, result: std::io::Result<()>) -> DbResult<()
     }
 }
 
-/// Load identity through a validated current read-only snapshot.
-fn read_current_project_identity(path: &Path) -> DbResult<Option<ProjectInstanceId>> {
+/// Load a current database's native project-root identity without mutation.
+fn read_current_project_root_identity(path: &Path) -> DbResult<Option<CanonicalProjectRoot>> {
     let (connection, _) = schema::open_current_read_only(path, None)?;
-    load_project_identity(&connection)
+    load_project_root_identity(&connection)
 }
 
 /// Read and validate the project singleton identity.
@@ -293,6 +360,167 @@ pub(crate) fn load_project_identity(
         )
         .optional()?;
     bytes.map(project_identity_from_blob).transpose()
+}
+
+/// Load the lossless native project-root identity owned by the database.
+pub(crate) fn load_project_root_identity(
+    connection: &Connection,
+) -> DbResult<Option<CanonicalProjectRoot>> {
+    let encoded = connection
+        .query_row(
+            "SELECT codec_version, root FROM project_root_identity WHERE singleton = 1",
+            [],
+            |row| {
+                let version = row.get::<_, i64>(0)?;
+                let root = row.get::<_, Vec<u8>>(1)?;
+                Ok((version, root))
+            },
+        )
+        .optional()?;
+    encoded
+        .map(|(version, root)| {
+            if version
+                != i64::from(projectatlas_core::project_root::CANONICAL_PROJECT_ROOT_CODEC_VERSION)
+            {
+                return Err(DbError::ProjectRootIdentity(
+                    projectatlas_core::CoreError::CanonicalProjectRootCodec {
+                        reason: "unsupported codec version",
+                    },
+                ));
+            }
+            CanonicalProjectRoot::decode(&root).map_err(DbError::ProjectRootIdentity)
+        })
+        .transpose()
+}
+
+/// Insert or replace the native project-root identity in the caller's transaction.
+pub(crate) fn set_project_root_identity(
+    connection: &Connection,
+    identity: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    let encoded = identity.encode()?;
+    connection.execute(
+        "INSERT INTO project_root_identity(singleton, codec_version, root)
+         VALUES(1, ?1, ?2)
+         ON CONFLICT(singleton) DO UPDATE SET
+            codec_version = excluded.codec_version,
+            root = excluded.root",
+        rusqlite::params![
+            i64::from(projectatlas_core::project_root::CANONICAL_PROJECT_ROOT_CODEC_VERSION),
+            encoded,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Re-canonicalize two existing roots and return the fresh selected identity
+/// only when their native paths are exactly equal.
+///
+/// This is intentionally an admission-only proof. It must not be used for a
+/// move's recorded-root absence check: a move has a different contract and
+/// requires the old native path to remain an exact, absent witness.
+pub(crate) fn prove_existing_root_equivalence(
+    selected: &Path,
+    persisted: &Path,
+) -> DbResult<CanonicalProjectRoot> {
+    let selected = CanonicalProjectRoot::from_path(selected)?;
+    let persisted = CanonicalProjectRoot::from_path(persisted)?;
+    if selected.as_path() != persisted.as_path() {
+        return Err(DbError::ProjectRootMismatch {
+            expected: selected.display_string_lossy(),
+            found: persisted.display_string_lossy(),
+            identities: Some(Box::new(ProjectRootMismatchIdentities {
+                expected: selected,
+                found: persisted,
+            })),
+        });
+    }
+    Ok(selected)
+}
+
+/// Validate and atomically repair the root metadata and native identity.
+pub(crate) fn ensure_project_root_identity(
+    connection: &Connection,
+    expected: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    if load_project_identity(connection)?.is_none() {
+        return Err(DbError::ProjectInstanceIdentityMissing);
+    }
+    let metadata = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [PROJECT_ROOT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(found) = load_project_root_identity(connection)? {
+        let selected = prove_existing_root_equivalence(expected.as_path(), found.as_path())?;
+        if metadata.as_deref() == selected.display_string().ok().as_deref() {
+            schema::validate_current_schema_version(connection)?;
+            return Ok(());
+        }
+    }
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    let result = ensure_project_root_identity_after_lock(connection, expected);
+    match result {
+        Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
+        Err(error) => Err(schema::rollback_after_error(connection, error)),
+    }
+}
+
+/// Recheck required instance identity after the repair transaction acquires its write lock.
+fn ensure_project_root_identity_after_lock(
+    connection: &Connection,
+    expected: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    schema::validate_current_schema_version(connection)?;
+    if load_project_identity(connection)?.is_none() {
+        return Err(DbError::ProjectInstanceIdentityMissing);
+    }
+    ensure_project_root_identity_in_transaction(connection, expected)
+}
+
+/// Repair root identity while the caller already owns the transaction.
+pub(crate) fn ensure_project_root_identity_in_transaction(
+    connection: &Connection,
+    expected: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    let found_metadata = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [PROJECT_ROOT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let found_identity = load_project_root_identity(connection)?;
+    let selected = if let Some(found) = found_identity.as_ref() {
+        prove_existing_root_equivalence(expected.as_path(), found.as_path())?
+    } else {
+        let Some(legacy) = found_metadata.as_deref() else {
+            return Err(DbError::ProjectRootMissing);
+        };
+        prove_existing_root_equivalence(expected.as_path(), Path::new(legacy))?
+    };
+    set_project_root_identity(connection, &selected)?;
+    set_project_root_metadata(connection, &selected)?;
+    Ok(())
+}
+
+/// Keep the legacy text projection only when it is lossless UTF-8.
+///
+/// Native identity remains authoritative for every current binding. An
+/// unrepresentable root clears the compatibility metadata rather than
+/// persisting replacement characters that could name a different directory.
+pub(crate) fn set_project_root_metadata(
+    connection: &Connection,
+    identity: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    if let Ok(display) = identity.display_string() {
+        set_metadata(connection, PROJECT_ROOT_KEY, &display)?;
+    } else {
+        connection.execute("DELETE FROM metadata WHERE key = ?1", [PROJECT_ROOT_KEY])?;
+    }
+    Ok(())
 }
 
 /// Read the typed graph generation owned by the project singleton.
@@ -454,6 +682,558 @@ mod tests {
     use std::error::Error;
     use std::fmt::Debug;
     use std::io;
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::panic_in_result_fn)]
+    fn canonical_root_repairs_equivalent_alias_without_changing_project_identity()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("private-var");
+        let alias = temp.path().join("var");
+        fs::create_dir(&target)?;
+        symlink(&target, &alias)?;
+        let database = temp.path().join("projectatlas.db");
+        let initial = AtlasStore::open_for_project(&database, &target)?;
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("fresh identity is missing"))?;
+        drop(initial);
+
+        let connection = Connection::open(&database)?;
+        connection.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = ?2",
+            rusqlite::params![normalize_metadata_path(&alias), PROJECT_ROOT_KEY],
+        )?;
+        connection.execute("DELETE FROM project_root_identity", [])?;
+        drop(connection);
+
+        let repaired = AtlasStore::open_for_project(&database, &alias)?;
+        require_eq(
+            &repaired.project_instance_id()?,
+            &Some(project),
+            "alias repair project identity",
+        )?;
+        require_eq(
+            &repaired.project_root()?,
+            &Some(normalize_metadata_path(&target)),
+            "alias repair display metadata",
+        )?;
+        require_eq(
+            &repaired.project_root_identity()?,
+            &Some(CanonicalProjectRoot::from_path(&target)?),
+            "alias repair native identity",
+        )?;
+        let plan = repaired.connection.query_row(
+            "EXPLAIN QUERY PLAN
+             SELECT root FROM project_root_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(3),
+        )?;
+        assert!(
+            plan.contains("INTEGER PRIMARY KEY"),
+            "unexpected root identity plan: {plan}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::panic_in_result_fn)]
+    fn canonical_root_repair_rolls_back_when_identity_write_fails() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("private-var");
+        let alias = temp.path().join("var");
+        fs::create_dir(&target)?;
+        symlink(&target, &alias)?;
+        let database = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&database, &target)?);
+        let connection = Connection::open(&database)?;
+        connection.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = ?2",
+            rusqlite::params![normalize_metadata_path(&alias), PROJECT_ROOT_KEY],
+        )?;
+        connection.execute("DELETE FROM project_root_identity", [])?;
+        connection.execute_batch(
+            "CREATE TEMP TRIGGER fail_project_root_identity_insert
+             BEFORE INSERT ON project_root_identity
+             BEGIN SELECT RAISE(ABORT, 'injected root identity failure'); END;",
+        )?;
+        let expected = CanonicalProjectRoot::from_path(&alias)?;
+        let error = ensure_project_root_identity(&connection, &expected)
+            .err()
+            .ok_or_else(|| io::Error::other("repair unexpectedly succeeded"))?;
+        assert!(matches!(error, DbError::Sqlite(_)));
+        let metadata = connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [PROJECT_ROOT_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        let identity_rows =
+            connection.query_row("SELECT COUNT(*) FROM project_root_identity", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        assert_eq!(metadata, normalize_metadata_path(&alias));
+        assert_eq!(identity_rows, 0);
+        drop(connection);
+
+        let connection = Connection::open(&database)?;
+        let reopened_metadata = connection.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            [PROJECT_ROOT_KEY],
+            |row| row.get::<_, String>(0),
+        )?;
+        let reopened_identity_rows =
+            connection.query_row("SELECT COUNT(*) FROM project_root_identity", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        assert_eq!(reopened_metadata, normalize_metadata_path(&alias));
+        assert_eq!(reopened_identity_rows, 0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_repair_rechecks_identity_after_lock_without_mutation() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("private-var");
+        let alias = temp.path().join("var");
+        fs::create_dir(&target)?;
+        symlink(&target, &alias)?;
+        let database = temp.path().join("repair-after-lock.db");
+
+        let mut initial = AtlasStore::open_for_project(&database, &target)?;
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("repair-after-lock fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut initial, project)?;
+        let publication_before = initial.index_publication()?;
+        let usage_before = initial.usage_events(Some("identity-test"))?;
+        let overview_before = initial.token_overview(Some("identity-test"))?;
+        let generation_before = load_graph_generation(&initial.connection)?;
+        assert_authored_state(&initial)?;
+        assert_usage_report(&initial, true)?;
+        assert_runtime_scope(&initial, project, 1, 0, 1)?;
+        assert_graph_counts(&initial, [2, 1, 1, 1, 1, 1, 1])?;
+
+        initial.connection.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = ?2",
+            rusqlite::params![normalize_metadata_path(&alias), PROJECT_ROOT_KEY],
+        )?;
+        initial
+            .connection
+            .execute_batch("DELETE FROM project_root_identity; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        drop(initial);
+
+        // Establish the same read-only baseline used by the real admission
+        // path before forcing the writer-phase identity loss.
+        drop(AtlasStore::open_read_only(&database)?);
+        let baseline = AtlasStore::open_read_only(&database)?;
+        let metadata_before = baseline.project_root()?;
+        let native_before = baseline.project_root_identity()?;
+        let instance_before = baseline.project_instance_id()?;
+        require_eq(
+            &metadata_before,
+            &Some(normalize_metadata_path(&alias)),
+            "repair-after-lock legacy metadata before fault",
+        )?;
+        require_eq(
+            &native_before,
+            &None,
+            "repair-after-lock native identity before fault",
+        )?;
+        require_eq(
+            &instance_before,
+            &Some(project),
+            "repair-after-lock instance before fault",
+        )?;
+        require_eq(
+            &load_graph_generation(&baseline.connection)?,
+            &generation_before,
+            "repair-after-lock generation before fault",
+        )?;
+        require_eq(
+            &baseline.index_publication()?,
+            &publication_before,
+            "repair-after-lock publication before fault",
+        )?;
+        require_eq(
+            &baseline.usage_events(Some("identity-test"))?,
+            &usage_before,
+            "repair-after-lock usage before fault",
+        )?;
+        require_eq(
+            &baseline.token_overview(Some("identity-test"))?,
+            &overview_before,
+            "repair-after-lock overview before fault",
+        )?;
+        assert_authored_state(&baseline)?;
+        assert_usage_report(&baseline, true)?;
+        assert_runtime_scope(&baseline, project, 1, 0, 1)?;
+        assert_graph_counts(&baseline, [2, 1, 1, 1, 1, 1, 1])?;
+        drop(baseline);
+
+        let database_before = fs::read(&database)?;
+        let is_sqlite_sidecar = |name: &str| {
+            [
+                "repair-after-lock.db-wal",
+                "repair-after-lock.db-shm",
+                "repair-after-lock.db-journal",
+            ]
+            .contains(&name)
+        };
+        let inventory_before = {
+            let mut entries = fs::read_dir(temp.path())?
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .filter(|entry| match entry {
+                    Ok(name) => !is_sqlite_sidecar(name),
+                    Err(_) => true,
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.sort();
+            entries
+        };
+
+        let connection = Connection::open(&database)?;
+        connection.execute_batch("BEGIN IMMEDIATE; PRAGMA defer_foreign_keys = ON;")?;
+        connection.execute("DELETE FROM project_identity", [])?;
+        let expected = CanonicalProjectRoot::from_path(&alias)?;
+        let error = ensure_project_root_identity_after_lock(&connection, &expected)
+            .err()
+            .ok_or_else(|| io::Error::other("post-lock root repair unexpectedly succeeded"))?;
+        require(
+            matches!(error, DbError::ProjectInstanceIdentityMissing),
+            "post-lock root repair returned the wrong error",
+        )?;
+        let rollback_error = schema::rollback_after_error(&connection, error);
+        require(
+            matches!(rollback_error, DbError::ProjectInstanceIdentityMissing),
+            "post-lock rollback changed the initiating error",
+        )?;
+        drop(connection);
+
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "post-lock root repair database bytes",
+        )?;
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .filter(|entry| match entry {
+                Ok(name) => !is_sqlite_sidecar(name),
+                Err(_) => true,
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        require_eq(
+            &inventory_after,
+            &inventory_before,
+            "post-lock root repair inventory",
+        )?;
+
+        let reopened = AtlasStore::open_read_only(&database)?;
+        require_eq(
+            &reopened.project_root()?,
+            &metadata_before,
+            "post-lock root repair legacy metadata",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &native_before,
+            "post-lock root repair native identity",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &instance_before,
+            "post-lock root repair instance",
+        )?;
+        require_eq(
+            &load_graph_generation(&reopened.connection)?,
+            &generation_before,
+            "post-lock root repair generation",
+        )?;
+        require_eq(
+            &reopened.index_publication()?,
+            &publication_before,
+            "post-lock root repair publication",
+        )?;
+        require_eq(
+            &reopened.usage_events(Some("identity-test"))?,
+            &usage_before,
+            "post-lock root repair usage",
+        )?;
+        require_eq(
+            &reopened.token_overview(Some("identity-test"))?,
+            &overview_before,
+            "post-lock root repair overview",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, true)?;
+        assert_runtime_scope(&reopened, project, 1, 0, 1)?;
+        assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_no_repair_open_rechecks_schema_after_preflight() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-race-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("schema-race.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        let expected = CanonicalProjectRoot::from_path(&root)?;
+
+        let stale = Connection::open(&database)?;
+        let (preflight, _) = schema::preflight_for_project(&database, &expected)?;
+        require_eq(
+            &preflight.state,
+            &SchemaState::Current,
+            "schema-race preflight",
+        )?;
+        let updater = Connection::open(&database)?;
+        let future_schema = schema::SCHEMA_VERSION + 1;
+        updater.execute(
+            "UPDATE metadata SET value = ?2 WHERE key = ?1",
+            rusqlite::params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+        )?;
+        drop(updater);
+        let before = fs::read(&database)?;
+
+        let repair_error = ensure_project_root_identity(&stale, &expected)
+            .err()
+            .ok_or_else(|| io::Error::other("stale no-repair open unexpectedly succeeded"))?;
+        require(
+            matches!(
+                repair_error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == schema::SCHEMA_VERSION
+            ),
+            "stale no-repair open returned the wrong error",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &before,
+            "stale no-repair repair mutation",
+        )?;
+
+        let revalidation_error = schema::revalidate_current_native_binding(&stale, &expected, true)
+            .err()
+            .ok_or_else(|| io::Error::other("stale revalidation unexpectedly succeeded"))?;
+        require(
+            matches!(
+                revalidation_error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == schema::SCHEMA_VERSION
+            ),
+            "stale revalidation returned the wrong error",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &before,
+            "stale revalidation mutation",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_root_repair_and_transitions_recheck_schema_before_mutation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let snapshot = |database: &Path| {
+            let database_name = database
+                .file_name()
+                .ok_or_else(|| io::Error::other("schema snapshot database name is missing"))?
+                .to_string_lossy()
+                .into_owned();
+            let sidecars =
+                ["-wal", "-shm", "-journal"].map(|suffix| format!("{database_name}{suffix}"));
+            let mut inventory = fs::read_dir(temp.path())?
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .filter(|entry| match entry {
+                    Ok(name) => !sidecars.iter().any(|sidecar| sidecar == name),
+                    Err(_) => true,
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            inventory.sort();
+            Ok::<_, Box<dyn Error>>((fs::read(database)?, inventory))
+        };
+
+        let repair_root = temp.path().join("repair-root");
+        fs::create_dir(&repair_root)?;
+        let repair_database = temp.path().join("repair-schema.db");
+        let repair_store = AtlasStore::open_for_project(&repair_database, &repair_root)?;
+        let repair_project = repair_store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("repair schema fixture identity is missing"))?;
+        drop(repair_store);
+        let repair_connection = Connection::open(&repair_database)?;
+        repair_connection.execute("DELETE FROM project_root_identity", [])?;
+        drop(repair_connection);
+        let repair_expected = CanonicalProjectRoot::from_path(&repair_root)?;
+        let repair_stale = Connection::open(&repair_database)?;
+        let (repair_preflight, _) = schema::preflight(&repair_database, None)?;
+        require_eq(
+            &repair_preflight.state,
+            &SchemaState::Current,
+            "repair schema preflight",
+        )?;
+        let repair_updater = Connection::open(&repair_database)?;
+        let future_schema = schema::SCHEMA_VERSION + 1;
+        repair_updater.execute(
+            "UPDATE metadata SET value = ?2 WHERE key = ?1",
+            rusqlite::params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+        )?;
+        drop(repair_updater);
+        let repair_before = snapshot(&repair_database)?;
+        let repair_error = ensure_project_root_identity(&repair_stale, &repair_expected)
+            .err()
+            .ok_or_else(|| io::Error::other("stale root repair unexpectedly succeeded"))?;
+        require(
+            matches!(
+                repair_error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == schema::SCHEMA_VERSION
+            ),
+            "stale root repair returned the wrong error",
+        )?;
+        require_eq(
+            &snapshot(&repair_database)?,
+            &repair_before,
+            "stale root repair mutation",
+        )?;
+        drop(repair_stale);
+        let repair_restore = Connection::open(&repair_database)?;
+        repair_restore.execute(
+            "UPDATE metadata SET value = ?2 WHERE key = ?1",
+            rusqlite::params![
+                schema::SCHEMA_VERSION_KEY,
+                schema::SCHEMA_VERSION.to_string()
+            ],
+        )?;
+        drop(repair_restore);
+        let repair_reopened = AtlasStore::open_read_only(&repair_database)?;
+        require_eq(
+            &repair_reopened.project_root_identity()?,
+            &None,
+            "stale root repair native identity",
+        )?;
+        require_eq(
+            &repair_reopened.project_instance_id()?,
+            &Some(repair_project),
+            "stale root repair project identity",
+        )?;
+
+        for (name, transition) in [
+            ("detach", ProjectRootTransition::Detach),
+            ("move", ProjectRootTransition::Move),
+        ] {
+            let source = temp.path().join(format!("{name}-source"));
+            let destination = temp.path().join(format!("{name}-destination"));
+            fs::create_dir(&source)?;
+            fs::create_dir(&destination)?;
+            let database = temp.path().join(format!("{name}-schema.db"));
+            let mut seeded = AtlasStore::open_for_project(&database, &source)?;
+            let project = seeded
+                .project_instance_id()?
+                .ok_or_else(|| io::Error::other("transition schema fixture identity is missing"))?;
+            seed_authored_and_graph_state(&mut seeded, project)?;
+            let source_identity = seeded
+                .project_root_identity()?
+                .ok_or_else(|| io::Error::other("transition schema fixture root is missing"))?;
+            drop(seeded);
+            let mut stale = AtlasStore::open_for_project(&database, &source)?;
+            if transition == ProjectRootTransition::Move {
+                fs::remove_dir(&source)?;
+            }
+            let updater = Connection::open(&database)?;
+            updater.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                rusqlite::params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+            )?;
+            drop(updater);
+            let before = snapshot(&database)?;
+            let error = apply_root_transition(
+                &mut stale,
+                transition,
+                Some(&source_identity),
+                Some(project),
+                &CanonicalProjectRoot::from_path(&destination)?,
+            )
+            .err()
+            .ok_or_else(|| io::Error::other("stale transition unexpectedly succeeded"))?;
+            require(
+                matches!(
+                    error,
+                    DbError::SchemaVersion { found, expected }
+                        if found == future_schema && expected == schema::SCHEMA_VERSION
+                ),
+                "stale transition returned the wrong error",
+            )?;
+            require_eq(&snapshot(&database)?, &before, "stale transition mutation")?;
+            drop(stale);
+            let restore = Connection::open(&database)?;
+            restore.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                rusqlite::params![
+                    schema::SCHEMA_VERSION_KEY,
+                    schema::SCHEMA_VERSION.to_string()
+                ],
+            )?;
+            drop(restore);
+            let reopened = AtlasStore::open_read_only(&database)?;
+            require_eq(
+                &reopened.project_root_identity()?,
+                &Some(source_identity),
+                "stale transition native identity",
+            )?;
+            require_eq(
+                &reopened.project_instance_id()?,
+                &Some(project),
+                "stale transition project identity",
+            )?;
+            assert_authored_state(&reopened)?;
+            assert_usage_report(&reopened, true)?;
+            assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::panic_in_result_fn)]
+    fn root_bind_accepts_equivalent_native_alias() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("private-var");
+        let alias = temp.path().join("var");
+        fs::create_dir(&target)?;
+        symlink(&target, &alias)?;
+        let database = temp.path().join("projectatlas.db");
+        let initial = AtlasStore::open_for_project(&database, &target)?;
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("project identity missing"))?;
+        drop(initial);
+        let connection = Connection::open(&database)?;
+        connection.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = ?2",
+            rusqlite::params![normalize_metadata_path(&alias), PROJECT_ROOT_KEY],
+        )?;
+        drop(connection);
+
+        let rebound =
+            AtlasStore::transition_project_root(&database, &alias, ProjectRootTransition::Bind)?;
+        assert_eq!(rebound.project_instance_id, project);
+        assert!(!rebound.identity_changed);
+        Ok(())
+    }
 
     #[test]
     fn root_transitions_preserve_authored_state_and_isolate_copies() -> Result<(), Box<dyn Error>> {
@@ -644,8 +1424,8 @@ mod tests {
             "non-absolute stored root was treated as a verified move",
         )?;
         require(
-            matches!(relative_error, DbError::ProjectRootAbsenceUncertain { .. }),
-            "non-absolute stored root returned the wrong error",
+            matches!(relative_error, DbError::ProjectRootStillPresent { .. }),
+            "native stored root returned the wrong error",
         )?;
         assert_database_unchanged(&relative_db, &relative_bytes, "relative-root move database")?;
 
@@ -677,19 +1457,20 @@ mod tests {
                 &normalize_metadata_path(&legacy_old_root),
             )?;
         }
-        let migrated_move = AtlasStore::transition_project_root(
-            &legacy_db,
-            &legacy_destination,
-            ProjectRootTransition::Move,
+        let legacy_bytes = fs::read(&legacy_db)?;
+        let legacy_error = require_error(
+            AtlasStore::transition_project_root(
+                &legacy_db,
+                &legacy_destination,
+                ProjectRootTransition::Move,
+            ),
+            "legacy move repaired a missing root without native identity proof",
         )?;
         require(
-            migrated_move.identity_changed,
-            "pre-graph-schema move did not report its initialized identity",
+            matches!(legacy_error, DbError::ProjectRootIdentityMissing),
+            "legacy missing-root move returned the wrong error",
         )?;
-        require(
-            migrated_move.project_instance_id.as_bytes() != [0_u8; 16],
-            "pre-graph-schema move initialized a zero identity",
-        )?;
+        assert_database_unchanged(&legacy_db, &legacy_bytes, "legacy missing-root move")?;
 
         let current_missing_identity_db = temp.path().join("current-missing-identity.db");
         let current_missing_identity_root = temp.path().join("current-missing-identity-root");
@@ -770,6 +1551,8 @@ mod tests {
         drop(source_store);
 
         let mut rollback_store = AtlasStore::open(&rollback_db)?;
+        let rollback_source_root = CanonicalProjectRoot::from_path(&root_a)?;
+        let rollback_destination_root = CanonicalProjectRoot::from_path(&root_b)?;
         rollback_store.connection.execute_batch(
             "CREATE TEMP TRIGGER fail_detach_graph
              BEFORE DELETE ON graph_entities
@@ -779,9 +1562,9 @@ mod tests {
             apply_root_transition(
                 &mut rollback_store,
                 ProjectRootTransition::Detach,
-                &normalize_metadata_path(&root_a),
+                Some(&rollback_source_root),
                 Some(source_identity),
-                &normalize_metadata_path(&root_b),
+                &rollback_destination_root,
             ),
             "late detach failure committed partial identity state",
         )?;
@@ -842,6 +1625,1030 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )?;
         require_eq(&active_generation, &0, "moved graph generation")?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn schema_nineteen_detach_migrates_legacy_identity_before_transition()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let source_root = temp.path().join("schema-19-detach-source");
+        let destination_root = temp.path().join("schema-19-detach-destination");
+        fs::create_dir(&source_root)?;
+        fs::create_dir(&destination_root)?;
+        let database = temp.path().join("schema-19-detach.db");
+
+        let mut store = AtlasStore::open_for_project(&database, &source_root)?;
+        let previous_project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-19 detach fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, previous_project)?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(store);
+
+        let detached = AtlasStore::transition_project_root(
+            &database,
+            &destination_root,
+            ProjectRootTransition::Detach,
+        )?;
+        require(
+            detached.identity_changed && detached.project_instance_id != previous_project,
+            "schema-19 detach did not rotate the project identity",
+        )?;
+        require_eq(
+            &detached.project_root,
+            &Some(normalize_metadata_path(&destination_root)),
+            "schema-19 detach destination",
+        )?;
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &destination_root)?;
+        let schema_version = reopened.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &schema_version,
+            &"20".to_string(),
+            "schema-19 detach schema",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(CanonicalProjectRoot::from_path(&destination_root)?),
+            "schema-19 detach native destination identity",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(detached.project_instance_id),
+            "schema-19 detach project identity",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, false)?;
+        assert_runtime_scope(&reopened, previous_project, 0, 1, 0)?;
+        assert_graph_counts(&reopened, [0, 0, 0, 0, 0, 0, 0])?;
+        require(
+            reopened.index_publication()?.is_none(),
+            "schema-19 detach retained derived publication",
+        )?;
+        drop(reopened);
+
+        let missing_database = temp.path().join("schema-19-detach-missing.db");
+        let missing_store = AtlasStore::open_for_project(&missing_database, &source_root)?;
+        missing_store
+            .connection
+            .execute_batch("DROP TABLE project_root_identity; UPDATE metadata SET value = '19' WHERE key = 'schema_version';")?;
+        drop(missing_store);
+        let missing_before = fs::read(&missing_database)?;
+        fs::remove_dir(&source_root)?;
+        let missing_error = require_error(
+            AtlasStore::transition_project_root(
+                &missing_database,
+                &destination_root,
+                ProjectRootTransition::Detach,
+            ),
+            "schema-19 detach repaired a missing legacy root",
+        )?;
+        require(
+            !matches!(missing_error, DbError::ProjectRootTransitionChanged { .. }),
+            "schema-19 missing-root detach reached mutable transition validation",
+        )?;
+        assert_database_unchanged(
+            &missing_database,
+            &missing_before,
+            "schema-19 missing-root detach",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn schema_nineteen_detach_rolls_back_migration_when_transition_fails()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let source_root = temp.path().join("schema-19-atomic-source");
+        let destination_root = temp.path().join("schema-19-atomic-destination");
+        fs::create_dir(&source_root)?;
+        fs::create_dir(&destination_root)?;
+        let database = temp.path().join("schema-19-atomic.db");
+
+        let mut store = AtlasStore::open_for_project(&database, &source_root)?;
+        let previous_project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-19 atomic fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, previous_project)?;
+        let publication_before = store.index_publication()?;
+        let usage_before = store.usage_events(Some("identity-test"))?;
+        let overview_before = store.token_overview(Some("identity-test"))?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+
+        drop(store);
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-atomic.db{suffix}"))).ok()
+        });
+        let mut inventory_before = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_before.sort();
+
+        let source_identity = CanonicalProjectRoot::from_path(&source_root)?;
+        let destination_identity = CanonicalProjectRoot::from_path(&destination_root)?;
+        let mut store = AtlasStore::open_for_root_transition(&database)?;
+        require(
+            !store.connection.is_autocommit(),
+            "schema-19 transition opener committed migration before transition",
+        )?;
+        store.connection.execute_batch(
+            "CREATE TRIGGER fail_destination_root_metadata_update
+             BEFORE UPDATE OF value ON metadata
+             WHEN OLD.key = 'project_root' AND NEW.value <> OLD.value
+             BEGIN SELECT RAISE(ABORT, 'injected destination metadata failure'); END;",
+        )?;
+        let transition_error = require_error(
+            apply_root_transition_in_transaction(
+                &mut store,
+                ProjectRootTransition::Detach,
+                Some(&source_identity),
+                Some(previous_project),
+                &destination_identity,
+            ),
+            "schema-19 detach committed migration before its transition failure",
+        )?;
+        require(
+            matches!(transition_error, DbError::Sqlite(_)),
+            "schema-19 detach failure returned the wrong error",
+        )?;
+        let rollback_error = schema::rollback_after_error(&store.connection, transition_error);
+        require(
+            matches!(rollback_error, DbError::Sqlite(_)),
+            "schema-19 detach rollback changed the initiating error",
+        )?;
+        let schema_version = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(
+            &schema_version,
+            &"19".to_string(),
+            "schema-19 detach failed schema marker",
+        )?;
+        let native_identity_table = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'project_root_identity'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &native_identity_table,
+            &0,
+            "schema-19 detach failed native identity table",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_metadata_path(&source_root)),
+            "schema-19 detach failed source metadata",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &Some(previous_project),
+            "schema-19 detach failed project identity",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication_before,
+            "schema-19 detach failed publication",
+        )?;
+        require_eq(
+            &store.usage_events(Some("identity-test"))?,
+            &usage_before,
+            "schema-19 detach failed usage",
+        )?;
+        require_eq(
+            &store.token_overview(Some("identity-test"))?,
+            &overview_before,
+            "schema-19 detach failed telemetry overview",
+        )?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_runtime_scope(&store, previous_project, 1, 0, 1)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        let trigger_count = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'fail_destination_root_metadata_update'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&trigger_count, &0, "schema-19 detach rollback trigger")?;
+        drop(store);
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "schema-19 detach failed database bytes",
+        )?;
+        let sidecars_after = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-atomic.db{suffix}"))).ok()
+        });
+        require_eq(
+            &sidecars_after,
+            &sidecars_before,
+            "schema-19 detach failed sidecars",
+        )?;
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        require_eq(
+            &inventory_after,
+            &inventory_before,
+            "schema-19 detach failed inventory",
+        )?;
+
+        let detached = AtlasStore::transition_project_root(
+            &database,
+            &destination_root,
+            ProjectRootTransition::Detach,
+        )?;
+        require(
+            detached.identity_changed && detached.project_instance_id != previous_project,
+            "schema-19 detach retry did not rotate the project identity",
+        )?;
+        let reopened = AtlasStore::open_read_only_for_project(&database, &destination_root)?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(CanonicalProjectRoot::from_path(&destination_root)?),
+            "schema-19 detach retry native destination",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn schema_nineteen_same_root_bind_reports_preserved_identity_and_state()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-19-bind-root");
+        let database = temp.path().join("schema-19-bind.db");
+        fs::create_dir(&root)?;
+
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-19 bind fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, project)?;
+        let publication = store.index_publication()?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_runtime_scope(&store, project, 1, 0, 1)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        drop(store);
+
+        let bound =
+            AtlasStore::transition_project_root(&database, &root, ProjectRootTransition::Bind)?;
+        let expected_display = normalize_metadata_path(&root);
+        require_eq(
+            &bound.previous_root,
+            &Some(expected_display.clone()),
+            "schema-19 bind previous root",
+        )?;
+        require_eq(
+            &bound.project_root,
+            &Some(expected_display),
+            "schema-19 bind destination root",
+        )?;
+        require_eq(
+            &bound.project_instance_id,
+            &project,
+            "schema-19 bind identity",
+        )?;
+        require(!bound.identity_changed, "schema-19 bind changed identity")?;
+        require(
+            !bound.publication_invalidated,
+            "schema-19 bind invalidated publication",
+        )?;
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(CanonicalProjectRoot::from_path(&root)?),
+            "schema-19 bind native root",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project),
+            "schema-19 bind reopened identity",
+        )?;
+        require_eq(
+            &reopened.index_publication()?,
+            &publication,
+            "schema-19 bind publication",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, true)?;
+        assert_runtime_scope(&reopened, project, 1, 0, 1)?;
+        assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_only_root_rename_reopens_same_persisted_identity() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original_path = temp.path().join("CaseOnlyRoot");
+        let staging_path = temp.path().join("CaseOnlyRootStaging");
+        let renamed_path = temp.path().join("caseonlyroot");
+        fs::create_dir(&original_path)?;
+        let database = temp.path().join("case-only-root.db");
+
+        let initial = AtlasStore::open_for_project(&database, &original_path)?;
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("case-only root fixture identity is missing"))?;
+        let initial_root = initial
+            .project_root_identity()?
+            .ok_or_else(|| io::Error::other("case-only root fixture native identity is missing"))?;
+        drop(initial);
+
+        fs::rename(&original_path, &staging_path)?;
+        fs::rename(&staging_path, &renamed_path)?;
+        let renamed_root = CanonicalProjectRoot::from_path(&renamed_path)?;
+        if initial_root.encode()? == renamed_root.encode()? {
+            return Err("case-only root rename did not retain distinct native spelling".into());
+        }
+        // A case-sensitive Windows directory intentionally cannot resolve the
+        // old spelling; the dedicated refusal test covers that namespace.
+        let Ok(recanonicalized_root) = CanonicalProjectRoot::from_path(&original_path) else {
+            return Ok(());
+        };
+        require_eq(
+            &recanonicalized_root,
+            &renamed_root,
+            "re-canonicalized case-only root",
+        )?;
+
+        let reopened = AtlasStore::open_for_project(&database, &renamed_path)?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project),
+            "case-only root project identity",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(renamed_root),
+            "case-only root native identity",
+        )?;
+        require_eq(
+            &reopened.project_root()?,
+            &Some(normalize_metadata_path(&renamed_path)),
+            "case-only root display metadata",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_root_reopens_file_backed_store_without_identity_drift() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp
+            .path()
+            .to_str()
+            .ok_or("temporary directory was not UTF-8")?;
+        let long_component = "a".repeat(220);
+        let root = std::path::PathBuf::from(format!(r"\\?\{base}\{long_component}"));
+        fs::create_dir(&root)?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or("verbatim root database has no parent")?,
+        )?;
+
+        let initial = AtlasStore::open_for_project(&database, &root)?;
+        let project = initial
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("verbatim root project identity is missing"))?;
+        let native_root = initial
+            .project_root_identity()?
+            .ok_or_else(|| io::Error::other("verbatim root native identity is missing"))?;
+        let display = native_root.display_string()?;
+        if !display.starts_with(r"\\?\") {
+            return Err("verbatim root display lost its extended prefix".into());
+        }
+        drop(initial);
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project),
+            "verbatim root project identity",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(native_root),
+            "verbatim root native identity",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_sensitive_root_namespace_rejects_distinct_binding_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir()?;
+        let case_sensitive_parent = temp.path().join("case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            // Case-sensitive directory support is filesystem/host-policy
+            // dependent; skip this negative proof when it cannot be enabled.
+            return Ok(());
+        }
+
+        let upper_path = case_sensitive_parent.join("Repo");
+        let lower_path = case_sensitive_parent.join("repo");
+        if fs::create_dir(&upper_path).is_err() || fs::create_dir(&lower_path).is_err() {
+            return Ok(());
+        }
+        let upper_identity = CanonicalProjectRoot::from_path(&upper_path)?;
+        let lower_identity = CanonicalProjectRoot::from_path(&lower_path)?;
+        if upper_identity == lower_identity {
+            return Ok(());
+        }
+
+        let database = temp.path().join("case-sensitive.db");
+        let mut store = AtlasStore::open_for_project(&database, &upper_path)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("case-sensitive root identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, project)?;
+        drop(store);
+
+        // Keep one validated read snapshot open so SQLite's WAL shared-memory
+        // sidecar already exists before the rejected admission is attempted.
+        // The refusal itself must not create or remove any sidecar.
+        let read_guard = AtlasStore::open_read_only_for_project(&database, &upper_path)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("case-sensitive.db{suffix}"))).ok()
+        });
+        let mut inventory_before = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_before.sort();
+
+        let Some(error) = AtlasStore::open_for_project(&database, &lower_path).err() else {
+            return Err(io::Error::other(
+                "case-sensitive sibling root was admitted as the persisted binding",
+            )
+            .into());
+        };
+        if !matches!(error, DbError::ProjectRootMismatch { .. }) {
+            return Err(io::Error::other(format!(
+                "case-sensitive sibling returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        let database_unchanged = fs::read(&database)? == database_before;
+        let sidecars_unchanged = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("case-sensitive.db{suffix}"))).ok()
+        }) == sidecars_before;
+        if !database_unchanged || !sidecars_unchanged {
+            return Err(io::Error::other(format!(
+                "case-sensitive sibling refusal changed database or sidecar bytes (database_unchanged={database_unchanged}, sidecars_unchanged={sidecars_unchanged})"
+            ))
+            .into());
+        }
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        if inventory_after != inventory_before {
+            return Err(io::Error::other(
+                "case-sensitive sibling refusal changed sidecar inventory",
+            )
+            .into());
+        }
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &upper_path)?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project),
+            "case-sensitive root project identity",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(upper_identity),
+            "case-sensitive root native identity",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, true)?;
+        assert_runtime_scope(&reopened, project, 1, 0, 1)?;
+        assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        require(
+            reopened.index_publication()?.is_some(),
+            "case-sensitive sibling refusal changed publication",
+        )?;
+        drop(read_guard);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn schema_nineteen_case_sensitive_sibling_refuses_before_migration_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        use rusqlite::OpenFlags;
+        use std::process::Command;
+
+        let temp = tempfile::tempdir()?;
+        let case_sensitive_parent = temp.path().join("schema-19-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            // Case-sensitive directory support is filesystem/host-policy
+            // dependent; skip this negative proof when it cannot be enabled.
+            return Ok(());
+        }
+
+        let upper_path = case_sensitive_parent.join("Repo");
+        let lower_path = case_sensitive_parent.join("repo");
+        if fs::create_dir(&upper_path).is_err() || fs::create_dir(&lower_path).is_err() {
+            return Ok(());
+        }
+        let upper_identity = CanonicalProjectRoot::from_path(&upper_path)?;
+        let lower_identity = CanonicalProjectRoot::from_path(&lower_path)?;
+        if upper_identity == lower_identity {
+            return Ok(());
+        }
+
+        let database = temp.path().join("schema-19-case-sensitive.db");
+        let mut store = AtlasStore::open_for_project(&database, &upper_path)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-19 root fixture identity is missing"))?;
+        seed_authored_and_graph_state(&mut store, project)?;
+        let publication_before = store.index_publication()?;
+        let usage_before = store.usage_events(Some("identity-test"))?;
+        let overview_before = store.token_overview(Some("identity-test"))?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_runtime_scope(&store, project, 1, 0, 1)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+
+        let schema_before = store.connection.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let legacy_root_before = store
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'project_root'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let (project_bytes_before, generation_before) = store.connection.query_row(
+            "SELECT project_instance_id, active_generation
+             FROM project_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let identity_table_before = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'project_root_identity'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &schema_before,
+            &"19".to_string(),
+            "schema-19 fixture marker",
+        )?;
+        require_eq(
+            &identity_table_before,
+            &0,
+            "schema-19 fixture identity table absence",
+        )?;
+
+        // Keep a read-only connection open while taking the byte and inventory
+        // snapshots. The rejected legacy admission must not create or remove
+        // SQLite sidecars while it is still in read-only preflight.
+        let read_guard = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-case-sensitive.db{suffix}"))).ok()
+        });
+        let mut inventory_before = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_before.sort();
+
+        let Some(error) = AtlasStore::open_for_project(&database, &lower_path).err() else {
+            return Err(io::Error::other(
+                "schema-19 case-sensitive sibling reached migration or was admitted",
+            )
+            .into());
+        };
+        if !matches!(error, DbError::ProjectRootMismatch { .. }) {
+            return Err(io::Error::other(format!(
+                "schema-19 case-sensitive sibling returned the wrong error: {error}"
+            ))
+            .into());
+        }
+
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "schema-19 case-sensitive refusal database bytes",
+        )?;
+        let sidecars_after = ["-wal", "-shm", "-journal"].map(|suffix| {
+            fs::read(database.with_file_name(format!("schema-19-case-sensitive.db{suffix}"))).ok()
+        });
+        require_eq(
+            &sidecars_after,
+            &sidecars_before,
+            "schema-19 case-sensitive refusal sidecar bytes",
+        )?;
+        let mut inventory_after = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        inventory_after.sort();
+        require_eq(
+            &inventory_after,
+            &inventory_before,
+            "schema-19 case-sensitive refusal inventory",
+        )?;
+
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            &schema_before,
+            "schema-19 refusal schema marker",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = 'project_root'",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )?,
+            &legacy_root_before,
+            "schema-19 refusal legacy root metadata",
+        )?;
+        let (project_bytes_after, generation_after) = store.connection.query_row(
+            "SELECT project_instance_id, active_generation
+             FROM project_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        require_eq(
+            &project_bytes_after,
+            &project_bytes_before,
+            "schema-19 refusal project instance",
+        )?;
+        require_eq(
+            &generation_after,
+            &generation_before,
+            "schema-19 refusal generation",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication_before,
+            "schema-19 refusal publication",
+        )?;
+        require_eq(
+            &store.usage_events(Some("identity-test"))?,
+            &usage_before,
+            "schema-19 refusal usage events",
+        )?;
+        require_eq(
+            &store.token_overview(Some("identity-test"))?,
+            &overview_before,
+            "schema-19 refusal usage overview",
+        )?;
+        let identity_table_after = store.connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'project_root_identity'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &identity_table_after,
+            &identity_table_before,
+            "schema-19 refusal identity table",
+        )?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_runtime_scope(&store, project, 1, 0, 1)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        drop(read_guard);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_root_transitions_use_native_identity_not_display_projection()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let native_name = std::ffi::OsString::from_vec(vec![b'r', b'o', b'o', b't', 0x80]);
+        let root = temp.path().join(&native_name);
+        let display_collision = temp.path().join("root-�");
+        let destination_collision = temp.path().join("dest-�");
+        let destination_native_name =
+            std::ffi::OsString::from_vec(vec![b'd', b'e', b's', b't', 0x81]);
+        let destination_native = temp.path().join(&destination_native_name);
+        fs::create_dir(&root)?;
+        fs::create_dir(&display_collision)?;
+        fs::create_dir(&destination_collision)?;
+        fs::create_dir(&destination_native)?;
+
+        let database = temp.path().join("non-utf8-root.db");
+        let bound =
+            AtlasStore::transition_project_root(&database, &root, ProjectRootTransition::Bind)?;
+        require(
+            bound.project_root.is_none(),
+            "raw root exposed a lossy transition display",
+        )?;
+        let native_identity = CanonicalProjectRoot::from_path(&root)?;
+        let opened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        require_eq(
+            &opened.project_root_identity()?,
+            &Some(native_identity),
+            "non-UTF-8 bound native identity",
+        )?;
+        require_eq(
+            &opened.captured_project_binding()?.project_root,
+            &None,
+            "non-UTF-8 typed display availability",
+        )?;
+        require_eq(
+            &opened.project_root()?,
+            &None,
+            "non-UTF-8 compatibility metadata",
+        )?;
+        drop(opened);
+        let before_collision = fs::read(&database)?;
+        let collision_error = require_error(
+            AtlasStore::transition_project_root(
+                &database,
+                &display_collision,
+                ProjectRootTransition::Bind,
+            ),
+            "replacement-character root collision was accepted",
+        )?;
+        require(
+            matches!(collision_error, DbError::ProjectRootMismatch { .. }),
+            "non-UTF-8 root collision returned the wrong error",
+        )?;
+        assert_database_unchanged(&database, &before_collision, "non-UTF-8 root collision")?;
+        crate::verify_project_database(&database, &root)?;
+
+        let mut stale = AtlasStore::open_for_project(&database, &root)?;
+        seed_authored_and_graph_state(&mut stale, bound.project_instance_id)?;
+        stale
+            .begin_index_publication("non-utf8-before-move")?
+            .complete()?;
+        fs::remove_dir(&root)?;
+        let moved = AtlasStore::transition_project_root(
+            &database,
+            &display_collision,
+            ProjectRootTransition::Move,
+        )?;
+        require_eq(
+            &moved.project_instance_id,
+            &bound.project_instance_id,
+            "non-UTF-8 move identity",
+        )?;
+        require_eq(
+            &moved.previous_root,
+            &None,
+            "non-UTF-8 move previous display availability",
+        )?;
+        let destination_identity = CanonicalProjectRoot::from_path(&display_collision)?;
+        let moved_store = AtlasStore::open_read_only_for_project(&database, &display_collision)?;
+        require_eq(
+            &moved_store.project_root_identity()?,
+            &Some(destination_identity),
+            "non-UTF-8 moved native identity",
+        )?;
+        assert_authored_state(&moved_store)?;
+        assert_usage_report(&moved_store, true)?;
+        drop(moved_store);
+        crate::verify_project_database(&database, &display_collision)?;
+
+        let before_stale_publication = fs::read(&database)?;
+        let publication_error = require_error(
+            stale.begin_index_publication("stale-non-utf8-after-move"),
+            "stale non-UTF-8 store entered publication after native root move",
+        )?;
+        require(
+            matches!(
+                publication_error,
+                DbError::ProjectRootTransitionChanged { .. }
+            ),
+            "stale non-UTF-8 publication returned the wrong error",
+        )?;
+        assert_database_unchanged(
+            &database,
+            &before_stale_publication,
+            "stale non-UTF-8 publication",
+        )?;
+        let destination_state =
+            AtlasStore::open_read_only_for_project(&database, &display_collision)?;
+        require(
+            destination_state.index_publication()?.is_none(),
+            "stale non-UTF-8 publication mutated derived state",
+        )?;
+        drop(destination_state);
+        drop(stale);
+
+        let before_destination_collision = fs::read(&database)?;
+        let destination_collision_error = require_error(
+            AtlasStore::transition_project_root(
+                &database,
+                &destination_collision,
+                ProjectRootTransition::Bind,
+            ),
+            "replacement-character destination collision was accepted",
+        )?;
+        require(
+            matches!(
+                destination_collision_error,
+                DbError::ProjectRootMismatch { .. }
+            ),
+            "non-UTF-8 destination collision returned the wrong error",
+        )?;
+        assert_database_unchanged(
+            &database,
+            &before_destination_collision,
+            "non-UTF-8 destination collision",
+        )?;
+
+        let detached = AtlasStore::transition_project_root(
+            &database,
+            &destination_native,
+            ProjectRootTransition::Detach,
+        )?;
+        require(
+            detached.project_instance_id != bound.project_instance_id,
+            "non-UTF-8 detach did not rotate project identity",
+        )?;
+        require_eq(
+            &detached.previous_root,
+            &Some(normalize_metadata_path(&display_collision)),
+            "non-UTF-8 detach previous display",
+        )?;
+        require(
+            detached.project_root.is_none(),
+            "non-UTF-8 detach exposed a lossy destination display",
+        )?;
+        let detached_store =
+            AtlasStore::open_read_only_for_project(&database, &destination_native)?;
+        require_eq(
+            &detached_store.project_root_identity()?,
+            &Some(CanonicalProjectRoot::from_path(&destination_native)?),
+            "non-UTF-8 detached native identity",
+        )?;
+        require_eq(
+            &detached_store.captured_project_binding()?.project_root,
+            &None,
+            "non-UTF-8 detached display availability",
+        )?;
+        assert_authored_state(&detached_store)?;
+        assert_usage_report(&detached_store, false)?;
+        assert_graph_counts(&detached_store, [0, 0, 0, 0, 0, 0, 0])?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_project_root_preserves_non_utf8_binding_against_replacement_sibling()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(std::ffi::OsString::from_vec(vec![
+            b'r', b'e', b'p', b'o', 0x80,
+        ]));
+        let replacement_root = temp.path().join("repo-�");
+        fs::create_dir(&raw_root)?;
+        fs::create_dir(&replacement_root)?;
+        let database = temp.path().join("set-project-root-non-utf8.db");
+        let bound =
+            AtlasStore::transition_project_root(&database, &raw_root, ProjectRootTransition::Bind)?;
+        let native_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let mut store = AtlasStore::open_for_project(&database, &raw_root)?;
+        require_eq(
+            &store.project_root_identity()?,
+            &Some(native_identity.clone()),
+            "non-UTF-8 set_project_root native identity",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &None,
+            "non-UTF-8 set_project_root compatibility metadata",
+        )?;
+        seed_authored_and_graph_state(&mut store, bound.project_instance_id)?;
+        let before_database = fs::read(&database)?;
+        let same_store_error = require_error(
+            store.set_project_root(&replacement_root),
+            "set_project_root rebound a non-UTF-8 root to its replacement sibling",
+        )?;
+        require(
+            matches!(same_store_error, DbError::ProjectRootMismatch { .. }),
+            "same-store non-UTF-8 set_project_root returned the wrong error",
+        )?;
+        require_eq(
+            &store.project_root_identity()?,
+            &Some(native_identity.clone()),
+            "same-store native identity after rejected set_project_root",
+        )?;
+        require_eq(
+            &store.project_root()?,
+            &None,
+            "same-store metadata after rejected set_project_root",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &Some(bound.project_instance_id),
+            "same-store project identity after rejected set_project_root",
+        )?;
+        assert_authored_state(&store)?;
+        assert_usage_report(&store, true)?;
+        assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        assert_database_unchanged(
+            &database,
+            &before_database,
+            "same-store rejected non-UTF-8 set_project_root",
+        )?;
+        drop(store);
+
+        let mut reopened = AtlasStore::open_for_project(&database, &raw_root)?;
+        let before_reopened_attempt = fs::read(&database)?;
+        let reopened_error = require_error(
+            reopened.set_project_root(&replacement_root),
+            "reopened store rebound a non-UTF-8 root to its replacement sibling",
+        )?;
+        require(
+            matches!(reopened_error, DbError::ProjectRootMismatch { .. }),
+            "reopened non-UTF-8 set_project_root returned the wrong error",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(native_identity),
+            "reopened native identity after rejected set_project_root",
+        )?;
+        require_eq(
+            &reopened.project_root()?,
+            &None,
+            "reopened metadata after rejected set_project_root",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(bound.project_instance_id),
+            "reopened project identity after rejected set_project_root",
+        )?;
+        assert_authored_state(&reopened)?;
+        assert_usage_report(&reopened, true)?;
+        assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        assert_database_unchanged(
+            &database,
+            &before_reopened_attempt,
+            "reopened rejected non-UTF-8 set_project_root",
+        )?;
         Ok(())
     }
 
@@ -969,7 +2776,10 @@ mod tests {
             "stale store began publication after root move",
         )?;
         require(
-            matches!(move_error, DbError::ProjectRootMismatch { .. }),
+            matches!(
+                move_error,
+                DbError::ProjectRootMismatch { .. } | DbError::ProjectRootTransitionChanged { .. }
+            ),
             "moved stale publication returned the wrong error",
         )?;
         drop(AtlasStore::open_read_only_for_project(

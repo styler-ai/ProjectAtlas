@@ -70,10 +70,11 @@ use runtime::{
     config_root_mismatch_error, default_cli_project_root, default_mcp_project_root,
     defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, index_work_control, init_config_path, init_path_status,
-    lint_project, load_synchronized_repository_token_report, next_step_report_payload,
-    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
-    open_fresh_atlas_store_for_project, purpose_curation_page, ranked_folder_nodes_with_reasons,
+    lint_project, load_synchronized_repository_token_report, lossless_native_path_display,
+    lossless_project_root_display, next_step_report_payload, next_step_report_with_selection,
+    normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
+    preflight_existing_project_binding, purpose_curation_page, ranked_folder_nodes_with_reasons,
     read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
     record_usage_text, render_classified_ranked_file_rows, render_classified_symbol_rows,
     render_coverage_report, render_health_page, render_purpose_curation_page,
@@ -258,14 +259,14 @@ enum CliError {
     #[error("{0}")]
     ProjectMismatch(Box<runtime::IndexProjectMismatch>),
     /// A durable root transition committed before generated configuration failed.
-    #[error(
-        "root transition {transition:?} committed for {root:?}, but generated project configuration is incomplete; rerun `projectatlas root set {root:?}` with the default bind transition to repair it without repeating the transition: {source}"
-    )]
+    #[error("{message}: {source}")]
     RootTransitionFollowup {
-        /// Canonical root already committed to the database.
-        root: String,
+        /// Lossless root display when the host can represent the committed native identity.
+        root: Option<String>,
         /// Durable transition that already completed.
         transition: RootTransition,
+        /// Recovery guidance that never substitutes a lossy root display.
+        message: String,
         /// Follow-up configuration failure.
         #[source]
         source: Box<CliError>,
@@ -347,7 +348,7 @@ enum AgentErrorKind {
 #[derive(Clone, Debug, Serialize)]
 struct DatabaseFilesystemErrorPayload {
     /// Database path rejected before mutation.
-    path: String,
+    path: Option<String>,
     /// Resolved owning mount when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     mount_point: Option<String>,
@@ -454,7 +455,8 @@ struct CliNextCall<'a> {
     /// Command family accepted by the current runtime.
     command: &'static str,
     /// Selected project root to refresh.
-    project_path: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_path: Option<&'a str>,
     /// Run exactly one refresh cycle.
     #[serde(skip_serializing_if = "Option::is_none")]
     once: Option<bool>,
@@ -2539,7 +2541,8 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
                 let verified = report.verified;
                 if verified {
-                    verify_project_database(&cli.db, Path::new(&report.root))?;
+                    let root = cli.project_root()?;
+                    verify_project_database(&cli.db, &root)?;
                 }
                 print_output(cli.format, &render_root_report(&report), &report)?;
                 if !verified {
@@ -3160,7 +3163,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             search_capability: None,
             next: Some(CliNextCall {
                 command: CLI_INIT_COMMAND,
-                project_path: &report.project_root,
+                project_path: report.project_root.as_deref(),
                 once: None,
             }),
         }),
@@ -3188,7 +3191,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             search_capability: None,
             next: Some(CliNextCall {
                 command: CLI_REFRESH_COMMAND,
-                project_path: &report.project_root,
+                project_path: report.project_root.as_deref(),
                 once: Some(true),
             }),
         }),
@@ -3298,10 +3301,10 @@ fn database_filesystem_error_payload(
     Some((
         kind,
         DatabaseFilesystemErrorPayload {
-            path: path.display().to_string(),
+            path: lossless_native_path_display(path),
             mount_point: mount_point
                 .as_deref()
-                .map(|mount| mount.display().to_string()),
+                .and_then(lossless_native_path_display),
             filesystem_type: filesystem_type.clone(),
             reason,
             recovery: DATABASE_FILESYSTEM_RECOVERY,
@@ -3479,12 +3482,12 @@ fn build_mcp_config_report(
         "--require-version".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
         "--db".to_string(),
-        mcp_launch_path(&absolute_db),
+        mcp_launch_path(&absolute_db)?,
     ];
     let resolved_config = resolved_mcp_config_path(&absolute_db, config)?;
     if let Some(config_path) = resolved_config.as_ref() {
         args.push("--config".to_string());
-        args.push(mcp_launch_path(config_path));
+        args.push(mcp_launch_path(config_path)?);
     }
     args.push("mcp".to_string());
     if nearest_project {
@@ -3495,9 +3498,9 @@ fn build_mcp_config_report(
     mcp_servers.insert(
         server_name.to_string(),
         McpServerConfig {
-            command: mcp_launch_path(&executable),
+            command: mcp_launch_path(&executable)?,
             args,
-            cwd: mcp_launch_path(&project_root),
+            cwd: mcp_launch_path(&project_root)?,
         },
     );
     Ok(McpConfigDocument { mcp_servers })
@@ -3516,12 +3519,19 @@ fn validate_required_runtime_version(required_version: &str) -> Result<(), CliEr
     }
 }
 
-/// Render a native path for MCP launch config without Windows extended prefixes.
-fn mcp_launch_path(path: &Path) -> String {
-    native_launch_path(&normalize_native_path_display(path))
+/// Render a lossless native path for an MCP launch config.
+fn mcp_launch_path(path: &Path) -> Result<String, CliError> {
+    let value = projectatlas_core::lossless_native_path_display(path)
+        .ok()
+        .ok_or_else(|| {
+            CliError::InvalidInput(
+                "native MCP configuration path has no lossless UTF-8 representation".to_string(),
+            )
+        })?;
+    Ok(native_launch_path(&value))
 }
 
-/// Render a normalized diagnostic path as a Windows-native launcher path.
+/// Convert a lossless projected path to a Windows-native launcher path.
 #[cfg(windows)]
 fn native_launch_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("//") {
@@ -3550,7 +3560,7 @@ fn build_runtime_info() -> RuntimeInfoReport {
         version: env!("CARGO_PKG_VERSION").to_string(),
         executable: std::env::current_exe()
             .ok()
-            .map(|path| normalize_native_path_display(&path)),
+            .and_then(|path| lossless_native_path_display(&path)),
         repository: env!("CARGO_PKG_REPOSITORY").to_string(),
         capabilities: vec![
             "cli".to_string(),
@@ -3611,6 +3621,7 @@ fn bind_project_root(
         ));
     }
     if !database_exists {
+        preflight_existing_project_binding(&db_path, &root)?;
         init_project_with_config(&root, Some(&config_path))?;
     }
     let transition_result = AtlasStore::transition_project_root(&db_path, &root, transition.into())
@@ -3643,10 +3654,26 @@ fn bind_project_root(
         )?;
         Ok(())
     })();
-    configuration_result.map_err(|source| CliError::RootTransitionFollowup {
-        root: normalize_native_path_display(root),
-        transition,
-        source: Box::new(source),
+    configuration_result.map_err(|source| {
+        let root_display = lossless_project_root_display(&root);
+        let message = root_display.as_deref().map_or_else(
+            || {
+                format!(
+                    "root transition {transition:?} committed, but generated project configuration is incomplete: the native project root has no lossless UTF-8 representation; rerun from the actual selected directory or provide an explicit native project selection"
+                )
+            },
+            |root| {
+                format!(
+                    "root transition {transition:?} committed for {root:?}, but generated project configuration is incomplete; rerun `projectatlas root set {root:?}` with the default bind transition to repair it without repeating the transition"
+                )
+            },
+        );
+        CliError::RootTransitionFollowup {
+            root: root_display,
+            transition,
+            message,
+            source: Box::new(source),
+        }
     })?;
     build_root_report_with_transition(&db_path, Some(&config_path), Some(&transition_result))
 }
@@ -3685,7 +3712,7 @@ fn write_init_mcp_config_files(
         report.host_configs.push(InitHostConfigStatus {
             harness: harness_name,
             status,
-            path: normalize_native_path_display(path),
+            path: lossless_native_path_display(&path),
             error,
         });
     }
@@ -3778,7 +3805,8 @@ fn build_root_report_with_transition(
         .index
         .as_ref()
         .and_then(|index| index.project_root.clone());
-    let atlas_dir = Path::new(&settings.db.path)
+    let absolute_db = absolute_path(db)?;
+    let atlas_dir = absolute_db
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let runtime = build_runtime_info();
@@ -3797,14 +3825,14 @@ fn build_root_report_with_transition(
         config_project_root: settings
             .config_path
             .as_ref()
-            .map(|_| settings.repo_root.clone()),
+            .and(settings.repo_root.clone()),
         db_project_root,
         mcp_config_path: settings.mcp_config.path.clone(),
-        claude_mcp_config_path: normalize_native_path_display(
-            atlas_dir.join("projectatlas.claude.mcp.json"),
+        claude_mcp_config_path: lossless_native_path_display(
+            &atlas_dir.join("projectatlas.claude.mcp.json"),
         ),
-        opencode_config_path: normalize_native_path_display(
-            atlas_dir.join("projectatlas.opencode.json"),
+        opencode_config_path: lossless_native_path_display(
+            &atlas_dir.join("projectatlas.opencode.json"),
         ),
         runtime_executable: runtime.executable,
         runtime_version: runtime.version,
@@ -4743,7 +4771,7 @@ struct RuntimeInfoReport {
 #[derive(Debug, Serialize)]
 pub(crate) struct RepositoryControlReport {
     /// Canonical checkout or Git common directory that owns the inventory.
-    control_root: String,
+    control_root: Option<String>,
     /// How the supplied path selected source.
     source_selection: &'static str,
     /// Exact source root selected without guessing, when available.
@@ -4787,14 +4815,14 @@ pub(crate) fn build_repository_control_report(
     let structure = discover_repository_structure(path)?;
     match structure {
         RepositoryStructure::NonGit { selected_root } => Ok(RepositoryControlReport {
-            control_root: normalize_native_path_display(&selected_root),
+            control_root: lossless_project_root_display(&selected_root),
             source_selection: "exact_non_git",
-            selected_root: Some(normalize_native_path_display(&selected_root)),
+            selected_root: lossless_project_root_display(&selected_root),
             worktree_required: false,
             worktrees: vec![RepositoryWorktreeReport {
                 role: "non_git",
                 state: "active",
-                root: Some(normalize_native_path_display(&selected_root)),
+                root: lossless_project_root_display(&selected_root),
                 administrative_directory: None,
                 blocker: None,
             }],
@@ -4805,7 +4833,7 @@ pub(crate) fn build_repository_control_report(
             selected_root,
             issue,
         } => Ok(RepositoryControlReport {
-            control_root: normalize_native_path_display(&selected_root),
+            control_root: lossless_project_root_display(&selected_root),
             source_selection: "invalid_git",
             selected_root: None,
             worktree_required: true,
@@ -4822,7 +4850,7 @@ pub(crate) fn build_repository_control_report(
                 match repository.selection {
                     GitRepositorySelection::Worktree { root, .. } => (
                         "exact_worktree",
-                        Some(normalize_native_path_display(root)),
+                        lossless_project_root_display(&root),
                         false,
                         Vec::new(),
                     ),
@@ -4830,7 +4858,7 @@ pub(crate) fn build_repository_control_report(
                         source_selection: GitManagerSourceSelection::Unambiguous { root },
                     } => (
                         "single_worktree",
-                        Some(normalize_native_path_display(root)),
+                        lossless_project_root_display(&root),
                         false,
                         Vec::new(),
                     ),
@@ -4861,14 +4889,13 @@ pub(crate) fn build_repository_control_report(
                         GitWorktreeRole::Primary => "primary",
                         GitWorktreeRole::Linked => "linked",
                     };
-                    let administrative_directory = Some(normalize_native_path_display(
-                        entry.administrative_directory,
-                    ));
+                    let administrative_directory =
+                        lossless_native_path_display(&entry.administrative_directory);
                     match entry.state {
                         GitWorktreeState::Active { root, .. } => RepositoryWorktreeReport {
                             role,
                             state: "active",
-                            root: Some(normalize_native_path_display(root)),
+                            root: lossless_project_root_display(&root),
                             administrative_directory,
                             blocker: None,
                         },
@@ -4876,7 +4903,9 @@ pub(crate) fn build_repository_control_report(
                             RepositoryWorktreeReport {
                                 role,
                                 state: "missing",
-                                root: git_control_path.parent().map(normalize_native_path_display),
+                                root: git_control_path
+                                    .parent()
+                                    .and_then(lossless_project_root_display),
                                 administrative_directory,
                                 blocker: None,
                             }
@@ -4898,7 +4927,7 @@ pub(crate) fn build_repository_control_report(
             blockers.sort();
             blockers.dedup();
             Ok(RepositoryControlReport {
-                control_root: normalize_native_path_display(repository.common_directory),
+                control_root: lossless_project_root_display(&repository.common_directory),
                 source_selection,
                 selected_root,
                 worktree_required,
@@ -4919,11 +4948,11 @@ pub(crate) fn render_repository_control_report(report: &RepositoryControlReport)
 #[derive(Debug, Serialize)]
 struct RootReport {
     /// Canonical project root `ProjectAtlas` will use.
-    root: String,
+    root: Option<String>,
     /// Detection source for the selected root.
     detection_source: String,
     /// Durable `SQLite` database path.
-    db_path: String,
+    db_path: Option<String>,
     /// Config path used for project policy.
     config_path: Option<String>,
     /// Root stored in config, when config exists.
@@ -4931,11 +4960,11 @@ struct RootReport {
     /// Root stored in the DB metadata, when the DB exists.
     db_project_root: Option<String>,
     /// Generated generic MCP config path.
-    mcp_config_path: String,
+    mcp_config_path: Option<String>,
     /// Generated Claude Code MCP config path.
-    claude_mcp_config_path: String,
+    claude_mcp_config_path: Option<String>,
     /// Generated `OpenCode` MCP config path.
-    opencode_config_path: String,
+    opencode_config_path: Option<String>,
     /// Current runtime executable path, when available.
     runtime_executable: Option<String>,
     /// Current runtime version.
@@ -5170,8 +5199,8 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
     push_check(
         &mut checks,
         "project-root",
-        store.project_root()?.is_some(),
-        "scan metadata records the canonical project root",
+        store.project_root_identity()?.is_some(),
+        "database records the authoritative native project root",
     );
     push_check(
         &mut checks,
@@ -5380,6 +5409,11 @@ mod tests {
         ProjectAtlasMcpServer, REQUIRED_MCP_TOOL_NAMES, mcp_tool_route_present,
         required_mcp_surface_present,
     };
+    #[cfg(unix)]
+    use super::runtime::{
+        IndexProjectMismatch, IndexReadStatus, IndexRefreshReason, IndexRefreshRequired,
+        IndexRefreshScope, lossless_project_root_display,
+    };
     use super::runtime::{
         TextIndexOptions, byte_count_to_tokens, estimated_source_tokens_for_file_node,
         event_kind_affects_index, is_symbol_candidate, primary_symbol_names,
@@ -5399,8 +5433,12 @@ mod tests {
     };
     #[cfg(feature = "optional-parser-supervisor")]
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
+    #[cfg(unix)]
+    use super::{RootTransition, bind_project_root, build_repository_control_report};
     use clap::Parser as _;
     use notify::EventKind;
+    #[cfg(unix)]
+    use projectatlas_core::CanonicalProjectRoot;
     use projectatlas_core::graph::{
         Completeness, ConfidenceClass, EntitySelector, GraphEntity, GraphIdentityText,
         LogicalRelation, RelationResolution, RepositoryFilePath,
@@ -5420,8 +5458,12 @@ mod tests {
     use serde_json::{Map, Value, json};
     use std::collections::BTreeMap;
     use std::error::Error;
+    #[cfg(unix)]
+    use std::ffi::OsString;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
@@ -5481,6 +5523,38 @@ mod tests {
             "{context} missing selected project audit root/db: {text}"
         ))
         .into())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parity_uses_native_identity_for_non_utf8_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp
+            .path()
+            .join(OsString::from_vec(b"parity-root-\x80".to_vec()));
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("native parity database has no parent"))?,
+        )?;
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        require_condition(
+            store.project_root()?.is_none() && store.project_root_identity()?.is_some(),
+            "parity fixture did not create a native-only root binding",
+        )?;
+
+        let report = super::build_parity_report(&store, super::REPOSITORY_INTELLIGENCE_PROFILE)?;
+        let root_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "project-root")
+            .ok_or_else(|| io::Error::other("parity report omitted project-root check"))?;
+        require_condition(
+            root_check.status == super::ParityCheckStatus::Pass,
+            "parity report rejected a valid native-only root binding",
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -5799,6 +5873,385 @@ mod tests {
                 && toon.contains("unknown-local")
                 && toon.contains("supported local filesystem"),
             "CLI TOON lost typed filesystem details",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_project_mismatch_preserves_lossless_store_roots() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-root");
+        let indexed_root = temp.path().join("indexed-root");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&indexed_root)?;
+        let database = indexed_root.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("indexed database path has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &indexed_root)?);
+
+        let Err(error) = super::runtime::open_atlas_store_for_project(&database, &selected_root)
+        else {
+            return Err(io::Error::other("wrong-root store open unexpectedly succeeded").into());
+        };
+        let selected_display =
+            projectatlas_core::CanonicalProjectRoot::from_path(&selected_root)?.display_string()?;
+        let indexed_display =
+            projectatlas_core::CanonicalProjectRoot::from_path(&indexed_root)?.display_string()?;
+
+        let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+        require_condition(
+            json.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::String(selected_display.clone()))
+                && json.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::String(indexed_display.clone())),
+            "CLI JSON omitted lossless roots from a store mismatch",
+        )?;
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_condition(
+            toon_value.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::String(selected_display))
+                && toon_value.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::String(indexed_display)),
+            "CLI TOON omitted lossless roots from a store mismatch",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_project_mismatch_keeps_native_display_unavailable_typed() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"raw-root-\x80".to_vec()));
+        let replacement_root = temp.path().join("raw-root-�");
+        fs::create_dir(&raw_root)?;
+        fs::create_dir(&replacement_root)?;
+        let raw_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let replacement_identity = CanonicalProjectRoot::from_path(&replacement_root)?;
+        let replacement_display = replacement_identity.display_string()?;
+        let error = CliError::ProjectMismatch(Box::new(IndexProjectMismatch::from_native_roots(
+            &raw_identity,
+            &replacement_identity,
+        )));
+
+        let json_text = render_cli_error(OutputFormat::Json, &error)?;
+        let json: Value = serde_json::from_str(&json_text)?;
+        require_condition(
+            json.pointer("/error/project_mismatch/selected_project_root") == Some(&Value::Null)
+                && json
+                    .pointer("/error/project_mismatch/indexed_project_root")
+                    .and_then(Value::as_str)
+                    == Some(replacement_display.as_str()),
+            "CLI JSON collapsed native-unavailable and replacement-character roots",
+        )?;
+
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        require_condition(
+            toon.contains("selected_project_root: null")
+                && toon.contains("indexed_project_root: ")
+                && toon.contains("raw-root-�"),
+            "CLI TOON lost the typed unavailable root projection",
+        )?;
+
+        let mapped = super::runtime::project_store_error(DbError::ProjectRootMismatch {
+            expected: raw_root.to_string_lossy().into_owned(),
+            found: replacement_root.to_string_lossy().into_owned(),
+            identities: None,
+        });
+        let mapped_json: Value =
+            serde_json::from_str(&render_cli_error(OutputFormat::Json, &mapped)?)?;
+        require_condition(
+            mapped_json.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::Null)
+                && mapped_json.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::Null)
+                && mapped_json
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("does not match")),
+            "CLI promoted lossy store mismatch text into structured roots",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_recovery_reports_omit_unavailable_native_root_selectors() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let replacement_root = temp.path().join("repo-�");
+        fs::create_dir_all(raw_root.join(".projectatlas"))?;
+        fs::create_dir_all(replacement_root.join(".projectatlas"))?;
+        let raw_db = raw_root.join(".projectatlas").join("projectatlas.db");
+        let replacement_db = replacement_root
+            .join(".projectatlas")
+            .join("projectatlas.db");
+        let replacement_display = lossless_project_root_display(&replacement_root)
+            .ok_or_else(|| io::Error::other("replacement root lost its UTF-8 display"))?;
+
+        let init_errors = [
+            (
+                super::runtime::index_init_required(&raw_root, &raw_db),
+                false,
+            ),
+            (
+                super::runtime::index_init_required(&replacement_root, &replacement_db),
+                true,
+            ),
+        ];
+        for (error, displayable) in init_errors {
+            let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+            let expected_root = if displayable {
+                Some(replacement_display.as_str())
+            } else {
+                None
+            };
+            require_condition(
+                json.pointer("/error/init_required/project_root")
+                    .and_then(Value::as_str)
+                    == expected_root,
+                "CLI init report did not preserve unavailable/displayable root state",
+            )?;
+            require_condition(
+                json.pointer("/error/next/project_path")
+                    .and_then(Value::as_str)
+                    == expected_root,
+                "CLI init recovery selector did not fail closed for a raw root",
+            )?;
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            let toon_value: Value = toon_format::decode_default(&toon)?;
+            if displayable {
+                let expected = Value::String(replacement_display.clone());
+                require_condition(
+                    toon_value.pointer("/error/init_required/project_root") == Some(&expected)
+                        && toon_value.pointer("/error/next/project_path") == Some(&expected),
+                    "CLI TOON init recovery lost a displayable root selector",
+                )?;
+            } else {
+                require_condition(
+                    toon_value
+                        .pointer("/error/init_required/project_root")
+                        .is_some_and(Value::is_null)
+                        && toon_value.pointer("/error/next/project_path").is_none()
+                        && !toon.contains("repo-�"),
+                    "CLI TOON init recovery exposed a lossy raw-root selector",
+                )?;
+            }
+        }
+
+        let refresh_errors = [
+            (
+                CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: lossless_project_root_display(&raw_root),
+                    worktree: None,
+                    status: IndexReadStatus::RefreshRequired,
+                    reason: IndexRefreshReason::SourceChanged,
+                    scope: IndexRefreshScope::Incremental,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                })),
+                false,
+            ),
+            (
+                CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: lossless_project_root_display(&replacement_root),
+                    worktree: None,
+                    status: IndexReadStatus::RefreshRequired,
+                    reason: IndexRefreshReason::SourceChanged,
+                    scope: IndexRefreshScope::Incremental,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                })),
+                true,
+            ),
+        ];
+        for (error, displayable) in refresh_errors {
+            let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+            let expected_root = if displayable {
+                Some(replacement_display.as_str())
+            } else {
+                None
+            };
+            require_condition(
+                json.pointer("/error/refresh_required/project_root")
+                    .and_then(Value::as_str)
+                    == expected_root
+                    && json
+                        .pointer("/error/next/project_path")
+                        .and_then(Value::as_str)
+                        == expected_root,
+                "CLI refresh recovery did not preserve lossless root selector state",
+            )?;
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            let toon_value: Value = toon_format::decode_default(&toon)?;
+            if displayable {
+                let expected = Value::String(replacement_display.clone());
+                require_condition(
+                    toon_value.pointer("/error/refresh_required/project_root") == Some(&expected)
+                        && toon_value.pointer("/error/next/project_path") == Some(&expected),
+                    "CLI TOON refresh recovery lost a displayable root selector",
+                )?;
+            } else {
+                require_condition(
+                    toon_value
+                        .pointer("/error/refresh_required/project_root")
+                        .is_some_and(Value::is_null)
+                        && toon_value.pointer("/error/next/project_path").is_none()
+                        && !toon.contains("repo-�"),
+                    "CLI TOON refresh recovery exposed a lossy raw-root selector",
+                )?;
+            }
+        }
+        let control_report = build_repository_control_report(&raw_root)?;
+        let control_value = serde_json::to_value(control_report)?;
+        require_condition(
+            control_value.get("control_root") == Some(&Value::Null)
+                && control_value.get("selected_root").is_none()
+                && control_value.pointer("/worktrees/0/root").is_none()
+                && !control_value.to_string().contains("repo-�"),
+            "CLI repository-control report exposed a lossy raw-root projection",
+        )?;
+        let displayable_control =
+            serde_json::to_value(build_repository_control_report(&replacement_root)?)?;
+        let expected_display = Value::String(replacement_display);
+        require_condition(
+            displayable_control.get("control_root") == Some(&expected_display)
+                && displayable_control.get("selected_root") == Some(&expected_display)
+                && displayable_control.pointer("/worktrees/0/root") == Some(&expected_display),
+            "CLI repository-control report lost a displayable root",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_root_transition_config_failure_keeps_native_state_without_lossy_recovery()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let replacement_root = temp.path().join("repo-�");
+        let atlas_dir = raw_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::create_dir(&replacement_root)?;
+        let raw_db = atlas_dir.join("projectatlas.db");
+
+        let Err(error) = bind_project_root(&raw_root, RootTransition::Bind, false) else {
+            return Err(io::Error::other(
+                "generated configuration unexpectedly succeeded for a raw native root",
+            )
+            .into());
+        };
+        let message = error.to_string();
+        require_condition(
+            !message.contains("repo-�")
+                && !message.contains("projectatlas root set")
+                && message.contains("native project root has no lossless UTF-8 representation"),
+            "raw-root transition failure exposed a fabricated recovery selector",
+        )?;
+        for format in [OutputFormat::Json, OutputFormat::Toon] {
+            let rendered = render_cli_error(format, &error)?;
+            require_condition(
+                !rendered.contains("repo-�") && !rendered.contains("projectatlas root set"),
+                "serialized raw-root transition failure exposed a fabricated recovery selector",
+            )?;
+        }
+
+        let expected_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let store = AtlasStore::open_for_project(&raw_db, &raw_root)?;
+        require_condition(
+            store.project_root_identity()?.as_ref() == Some(&expected_identity)
+                && store.project_root()?.is_none()
+                && store.project_instance_id()?.is_some(),
+            "native transition state was not retained after host-config failure",
+        )?;
+        require_condition(
+            !replacement_root.join(".projectatlas").exists()
+                && !replacement_root.join("projectatlas.toml").exists(),
+            "lossy recovery failure mutated the replacement-character sibling",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mcp_launch_config_preserves_volume_and_verbatim_paths() -> Result<(), Box<dyn Error>> {
+        let project_root =
+            PathBuf::from(r"\\?\Volume{01234567-89AB-CDEF-0123-456789ABCDEF}\ProjectAtlas\CON.");
+        let executable = project_root.join("projectatlas.exe");
+        let database = project_root.join(".projectatlas").join("projectatlas.db");
+        let config = project_root.join(".projectatlas").join("config.toml");
+
+        let expected = |path: &Path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| io::Error::other("synthetic Windows path was not UTF-8"))
+        };
+        let command = super::mcp_launch_path(&executable)?;
+        let database = super::mcp_launch_path(&database)?;
+        let config = super::mcp_launch_path(&config)?;
+        let cwd = super::mcp_launch_path(&project_root)?;
+        let server = super::McpServerConfig {
+            command: command.clone(),
+            args: vec![
+                "--require-version".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+                "--db".to_string(),
+                database.clone(),
+                "--config".to_string(),
+                config.clone(),
+                "mcp".to_string(),
+            ],
+            cwd: cwd.clone(),
+        };
+        let config_document = serde_json::to_value(super::McpConfigDocument {
+            mcp_servers: BTreeMap::from([("projectatlas".to_string(), server)]),
+        })?;
+        let server = config_document
+            .pointer("/mcpServers/projectatlas")
+            .ok_or_else(|| io::Error::other("serialized MCP server was missing"))?;
+        require_condition(
+            server.get("command") == Some(&Value::String(command.clone()))
+                && server.pointer("/args/3") == Some(&Value::String(database.clone()))
+                && server.pointer("/args/5") == Some(&Value::String(config.clone()))
+                && server.get("cwd") == Some(&Value::String(cwd.clone())),
+            "serialized MCP launch fields changed a verbatim path",
+        )?;
+        for (label, path) in [
+            ("command", command.as_str()),
+            ("database", database.as_str()),
+            ("config", config.as_str()),
+            ("cwd", cwd.as_str()),
+        ] {
+            require_condition(
+                Path::new(path).is_absolute(),
+                &format!("serialized MCP {label} path was not absolute"),
+            )?;
+        }
+        require_condition(
+            command == expected(&executable)?
+                && database
+                    == expected(&project_root.join(".projectatlas").join("projectatlas.db"))?
+                && config == expected(&project_root.join(".projectatlas").join("config.toml"))?
+                && cwd == expected(&project_root)?,
+            "MCP launch configuration lost volume-GUID/verbatim spelling",
+        )?;
+
+        let drive = super::mcp_launch_path(Path::new(r"\\?\C:\repo\projectatlas.exe"))?;
+        let unc = super::mcp_launch_path(Path::new(r"\\?\UNC\server\share\repo"))?;
+        require_condition(
+            drive == r"C:\repo\projectatlas.exe" && unc == r"\\server\share\repo",
+            "ordinary extended drive/UNC MCP launch compatibility changed",
         )?;
         Ok(())
     }

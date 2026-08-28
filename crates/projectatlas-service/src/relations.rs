@@ -1,6 +1,6 @@
 //! Bounded detailed relation navigation over normalized repository graph storage.
 
-use super::{ServiceError, ServiceResult, selected_project_binding};
+use super::{ServiceError, ServiceResult, canonical_root_digest, selected_project_binding};
 use projectatlas_core::graph::{
     ConfidenceClass, CoverageRecord, CoverageScope, DocumentTargetUnresolvedReason, EntitySelector,
     ExtendedRelationKind, GraphEntity, GraphEntityKey, GraphLimitKind, GraphLimits,
@@ -10,8 +10,8 @@ use projectatlas_core::graph::{
 use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::symbols::SymbolKind;
 use projectatlas_core::{
-    IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
-    Purpose, PurposeSource, PurposeStatus,
+    CanonicalProjectRoot, IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure,
+    IndexWorkStage, Purpose, PurposeSource, PurposeStatus,
 };
 use projectatlas_db::{
     AtlasStore, DbError, MAX_FILE_CONTENT_CLASSIFICATION_PATHS, MAX_REPOSITORY_GRAPH_FRONTIER,
@@ -1001,7 +1001,7 @@ pub fn load_detailed_relation_page(
     check_relation_control(control)?;
     let cursor_binding = DetailedRelationCursorBinding {
         project: binding.project_instance_id,
-        root_digest: detailed_relation_root_digest(&binding.project_root),
+        root_digest: detailed_relation_root_digest(&binding.project_root_identity)?,
         generation,
         authored_purpose_revision,
         capability: DetailedRelationAlgorithm::BoundedFrontierV1,
@@ -1524,12 +1524,8 @@ struct FrontierRow {
 }
 
 /// Hash one normalized selected root without exposing machine-local paths in cursors.
-fn detailed_relation_root_digest(root: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(DETAILED_RELATION_ROOT_DOMAIN.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(root.as_bytes());
-    *hasher.finalize().as_bytes()
+fn detailed_relation_root_digest(root: &CanonicalProjectRoot) -> ServiceResult<[u8; 32]> {
+    canonical_root_digest(DETAILED_RELATION_ROOT_DOMAIN, root)
 }
 
 /// Decode and classify one bounded cursor against the current request snapshot.
