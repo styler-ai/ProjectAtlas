@@ -1529,10 +1529,11 @@ pub(crate) fn preflight(
 
 /// Inspect one database against a native project root before writable access.
 ///
-/// Current databases use the typed root identity. A missing typed identity is
-/// admitted only for the narrow recovery path that proves unambiguous legacy
-/// metadata names the same existing native root on platforms where that
-/// historical projection is injective; no binding is created by this helper.
+/// Current and post-schema-19 predecessor databases use the typed root
+/// identity when its table exists. A missing typed identity is admitted only
+/// for the narrow recovery path that proves unambiguous legacy metadata names
+/// the same existing native root on platforms where that historical
+/// projection is injective; no binding is created by this helper.
 pub(crate) fn preflight_for_project(
     path: &Path,
     expected_root: &CanonicalProjectRoot,
@@ -1542,11 +1543,12 @@ pub(crate) fn preflight_for_project(
         return Ok((preflight, location));
     }
     let connection = open_read_only_connection(path, &location)?;
-    let found_identity = if preflight.state == SchemaState::Current {
-        crate::project_identity::load_project_root_identity(&connection)?
-    } else {
-        None
-    };
+    let found_identity =
+        if object_kind(&connection, "project_root_identity")?.as_deref() == Some("table") {
+            crate::project_identity::load_project_root_identity(&connection)?
+        } else {
+            None
+        };
     if let Some(found) = found_identity.as_ref() {
         crate::project_identity::prove_existing_root_equivalence(
             expected_root.as_path(),
@@ -1744,10 +1746,20 @@ pub(crate) fn initialize_with_project_root_in_transaction(
     let predecessor_native_identity = if let Some(expected_identity) = expected_identity
         && preflight.state == SchemaState::UpgradeRequired
     {
-        Some(validate_legacy_project_root_binding(
-            connection,
-            expected_identity,
-        )?)
+        if object_kind(connection, "project_root_identity")?.as_deref() == Some("table") {
+            let found = crate::project_identity::load_project_root_identity(connection)?
+                .ok_or(DbError::ProjectRootIdentityMissing)?;
+            crate::project_identity::prove_existing_root_equivalence(
+                expected_identity.as_path(),
+                found.as_path(),
+            )?;
+            Some(found)
+        } else {
+            Some(validate_legacy_project_root_binding(
+                connection,
+                expected_identity,
+            )?)
+        }
     } else {
         None
     };
