@@ -18407,24 +18407,56 @@ fn scan_overview_and_token_flow() -> Result<(), Box<dyn Error>> {
     }) {
         return Err(io::Error::other("selected-candidates navigation token bucket missing").into());
     }
-    let calibrated_token = Command::cargo_bin("projectatlas")?
-        .arg("--format")
-        .arg("json")
+    for (tokenizer, content, expected_tokens) in [
+        ("cl100k_base", "word\n\nnext", 3),
+        ("o200k_base", ".\n/", 1),
+    ] {
+        let calibration_repo = temp.path().join(format!("calibration-{tokenizer}"));
+        fs::create_dir(&calibration_repo)?;
+        fs::create_dir(calibration_repo.join(SRC_DIR_NAME))?;
+        fs::write(
+            calibration_repo.join(SRC_DIR_NAME).join("calibration.txt"),
+            content,
+        )?;
+        let calibration_db = temp.path().join(format!("{tokenizer}.db"));
+        drop(AtlasStore::open_for_project(
+            &calibration_db,
+            &calibration_repo,
+        )?);
+        Command::cargo_bin("projectatlas")?
+            .arg("--db")
+            .arg(&calibration_db)
+            .arg("scan")
+            .arg(&calibration_repo)
+            .assert()
+            .success();
+        let calibration_output = Command::cargo_bin("projectatlas")?
+            .arg("--format")
+            .arg("json")
+            .arg("--db")
+            .arg(&calibration_db)
+            .args(["token", "--tokenizer", tokenizer])
+            .output()?;
+        if !calibration_output.status.success() {
+            return Err(io::Error::other("json token calibration command failed").into());
+        }
+        let calibration_json: Value = serde_json::from_slice(&calibration_output.stdout)?;
+        require_json_string(&calibration_json, &["calibration", "tokenizer"], tokenizer)?;
+        require_json_usize(&calibration_json, &["calibration", "files"], 1)?;
+        require_json_usize(&calibration_json, &["calibration", "bytes"], content.len())?;
+        require_json_usize(
+            &calibration_json,
+            &["calibration", "calibrated_tokens"],
+            expected_tokens,
+        )?;
+    }
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
         .arg("--db")
         .arg(&db)
-        .args(["token", "--tokenizer", "o200k_base"])
-        .output()?;
-    if !calibrated_token.status.success() {
-        return Err(io::Error::other("json token calibration command failed").into());
-    }
-    let calibrated_json: Value = serde_json::from_slice(&calibrated_token.stdout)?;
-    require_json_string(
-        &calibrated_json,
-        &["calibration", "tokenizer"],
-        "o200k_base",
-    )?;
-    require_json_usize_greater_than(&calibrated_json, &["calibration", "files"], 0)?;
-    require_json_usize_greater_than(&calibrated_json, &["calibration", "calibrated_tokens"], 0)?;
+        .args(["token", "--tokenizer", "unsupported"])
+        .assert()
+        .failure();
     let calls_before = token_json["calls"]
         .as_u64()
         .ok_or_else(|| io::Error::other("token calls missing before no-telemetry check"))?;
