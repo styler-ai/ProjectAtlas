@@ -757,7 +757,7 @@ mod tests {
         )?;
         require_eq(
             &predecessor.schema.migration_steps_remaining,
-            &Some(13),
+            &Some(14),
             "predecessor migration steps",
         )?;
         require_eq(
@@ -812,7 +812,7 @@ mod tests {
         )?;
         require_eq(
             &resolution.schema.migration_steps_remaining,
-            &Some(9),
+            &Some(10),
             "schema-12 migration steps",
         )?;
         require_eq(

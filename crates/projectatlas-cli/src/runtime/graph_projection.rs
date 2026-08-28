@@ -105,6 +105,55 @@ const DOCUMENT_PARTIAL_COVERAGE_REASON: &str =
     "markdown fact extraction reached a declared limit or unsupported structure";
 /// Maximum typed identity rejection details retained for one publication.
 const MAX_GRAPH_IDENTITY_REJECTIONS: usize = GraphLimits::MAX_ROWS as usize;
+/// Stable namespace for invalid symbol/package parser facts.
+const SYMBOL_FACT_INDEX_NAMESPACE: u64 = 1_u64 << 56;
+/// Stable namespace for invalid source-relation parser facts.
+const RELATION_FACT_INDEX_NAMESPACE: u64 = 2_u64 << 56;
+/// Stable namespace for invalid derived-relation parser facts.
+const DERIVED_RELATION_FACT_INDEX_NAMESPACE: u64 = 3_u64 << 56;
+/// Stable namespace for invalid Markdown selector parser facts.
+const MARKDOWN_FACT_INDEX_NAMESPACE: u64 = 4_u64 << 56;
+
+/// Build a deterministic internal identity without retaining parser text.
+fn parser_fact_index(namespace: u64, index: usize) -> u64 {
+    match u64::try_from(index) {
+        Ok(index) => namespace.saturating_add(index),
+        Err(_) => u64::MAX,
+    }
+}
+
+/// Reuse the relation ordinal for its paired import symbol observation.
+///
+/// Tree-sitter emits an import declaration as both a symbol and an import
+/// relation. They are one parser fact even though their compact graph values
+/// differ; pairing by source line and occurrence keeps that fact from being
+/// double-counted while retaining distinct same-line imports.
+fn symbol_parser_fact_index(graph: &SymbolGraph, symbol_index: usize) -> u64 {
+    let Some(symbol) = graph.symbols.get(symbol_index) else {
+        return parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, symbol_index);
+    };
+    if symbol.kind != SymbolKind::Import {
+        return parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, symbol_index);
+    }
+    let import_ordinal = graph.symbols[..symbol_index]
+        .iter()
+        .filter(|candidate| {
+            candidate.kind == SymbolKind::Import && candidate.line_start == symbol.line_start
+        })
+        .count();
+    graph
+        .relations
+        .iter()
+        .enumerate()
+        .filter(|(_, relation)| {
+            relation.kind == RelationKind::Imports && relation.line == symbol.line_start
+        })
+        .nth(import_ordinal)
+        .map_or_else(
+            || parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, symbol_index),
+            |(relation_index, _)| parser_fact_index(RELATION_FACT_INDEX_NAMESPACE, relation_index),
+        )
+}
 
 /// Bounded source span attached to one rejected parser identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +191,7 @@ impl GraphIdentityAdmission {
         path: &str,
         span: IdentitySpan,
         parser: ParserKind,
+        fact_index: u64,
         fields: &[(GraphIdentityField, GraphIdentityRejectionReason)],
     ) -> Result<(), CliError> {
         let path = RepositoryNodePath::new(Path::new(path)).map_err(invalid_graph_contract)?;
@@ -162,41 +212,33 @@ impl GraphIdentityAdmission {
             })?,
         )
         .map_err(invalid_graph_contract)?;
-        let mut recorded_fact = false;
-        let call_detail_start = self.rejections.len();
-        for (field_index, (field, reason)) in fields.iter().enumerate() {
-            let duplicate_fact = self.rejections.iter().any(|existing| {
-                existing.path == path
-                    && existing.span == span
-                    && existing.parser == parser
-                    && existing.reason == *reason
-                    && same_parser_fact_projection(*field, existing.field)
-            });
-            if !duplicate_fact && !recorded_fact {
-                let count = self
-                    .rejected_facts_by_path
-                    .entry(path.as_str().to_owned())
-                    .or_default();
-                *count = count.saturating_add(1);
-                recorded_fact = true;
-            }
+        let fact_already_recorded = self.rejections.iter().any(|existing| {
+            existing.path == path
+                && existing.span == span
+                && existing.parser == parser
+                && existing.fact_index == fact_index
+        });
+        if !fact_already_recorded {
+            let count = self
+                .rejected_facts_by_path
+                .entry(path.as_str().to_owned())
+                .or_default();
+            *count = count.saturating_add(1);
+        }
+        for (field, reason) in fields {
             if self.rejections.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
                 continue;
             }
-            let same_call_reason = fields[..field_index]
-                .iter()
-                .any(|(_, previous_reason)| *previous_reason == *reason);
             let existing_index = self
                 .rejections
                 .iter()
                 .enumerate()
-                .find(|(position, existing)| {
+                .find(|(_, existing)| {
                     existing.path == path
                         && existing.span == span
                         && existing.parser == parser
+                        && existing.fact_index == fact_index
                         && existing.reason == *reason
-                        && ((same_call_reason && *position >= call_detail_start)
-                            || same_parser_fact_projection(*field, existing.field))
                 })
                 .map(|(position, _)| position);
             if let Some(existing) = existing_index.and_then(|index| self.rejections.get_mut(index))
@@ -218,6 +260,7 @@ impl GraphIdentityAdmission {
                 parser,
                 field: *field,
                 reason: *reason,
+                fact_index,
             });
         }
         Ok(())
@@ -325,19 +368,6 @@ impl GraphIdentityAdmission {
             .or_default();
         *count = count.saturating_add(1);
     }
-}
-
-/// Identify parser projections that describe one source relation fact.
-fn same_parser_fact_projection(field: GraphIdentityField, existing: GraphIdentityField) -> bool {
-    matches!(
-        (field, existing),
-        (
-            GraphIdentityField::RelationSource | GraphIdentityField::RelationTarget,
-            GraphIdentityField::Symbol
-                | GraphIdentityField::Package
-                | GraphIdentityField::Signature,
-        )
-    )
 }
 
 /// Merge typed details under the one-publication storage ceiling.
@@ -2683,7 +2713,10 @@ fn project_graph_rows(
     }
     let mut derived_identity_admission = GraphIdentityAdmission::default();
     let mut admitted_derived_facts = Vec::new();
-    for fact in derived_relation_facts(graph, &keys_by_relation) {
+    for (derived_index, fact) in derived_relation_facts(graph, &keys_by_relation)
+        .into_iter()
+        .enumerate()
+    {
         let mut failures = Vec::new();
         record_identity_failure(
             &mut failures,
@@ -2707,6 +2740,7 @@ fn project_graph_rows(
                     end_column: 0,
                 },
                 fact.relation.parser,
+                parser_fact_index(DERIVED_RELATION_FACT_INDEX_NAMESPACE, derived_index),
                 &failures,
             )?;
         }
@@ -4144,7 +4178,13 @@ fn admit_symbol_graph<'a>(
         record_identity_failure(&mut failures, GraphIdentityField::Signature, signature);
         if !failures.is_empty() {
             rejected_symbols[index] = true;
-            report.record(&graph.path, span, symbol.parser, &failures)?;
+            report.record(
+                &graph.path,
+                span,
+                symbol.parser,
+                symbol_parser_fact_index(&graph, index),
+                &failures,
+            )?;
         }
     }
     let mut rejected_relations = vec![false; graph.relations.len()];
@@ -4169,7 +4209,13 @@ fn admit_symbol_graph<'a>(
         );
         if !failures.is_empty() {
             rejected_relations[index] = true;
-            report.record(&graph.path, span, relation.parser, &failures)?;
+            report.record(
+                &graph.path,
+                span,
+                relation.parser,
+                parser_fact_index(RELATION_FACT_INDEX_NAMESPACE, index),
+                &failures,
+            )?;
         }
     }
     if report.rejected_facts_by_path.is_empty() {
@@ -4303,6 +4349,7 @@ fn admit_resolution_key_failures(
                         &graph.path,
                         resolution_projection_span(graph, failure.fact()),
                         graph.parser,
+                        resolution_projection_fact_index(failure.fact()),
                         &[(
                             GraphIdentityField::ResolutionKey,
                             GraphIdentityRejectionReason::from_error(failure.error()),
@@ -4337,6 +4384,19 @@ fn ensure_admitted_resolution_projections(
         ));
     }
     Ok(())
+}
+
+/// Map one resolution fact into its deterministic internal rejection identity.
+fn resolution_projection_fact_index(fact: ResolutionProjectionFact) -> u64 {
+    match fact {
+        ResolutionProjectionFact::Source => 0,
+        ResolutionProjectionFact::Symbol(index) => {
+            parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, index)
+        }
+        ResolutionProjectionFact::Relation(index) => {
+            parser_fact_index(RELATION_FACT_INDEX_NAMESPACE, index)
+        }
+    }
 }
 
 /// Select the narrowest parser span available for one rejected derived key.
@@ -4432,6 +4492,7 @@ fn admit_markdown_fact_batch(
         check_graph_work(control, candidate_index)?;
         if let Err(error) = GraphIdentityText::validate(&candidate.selector) {
             rejected.push((
+                candidate_index,
                 candidate.source.line_start,
                 candidate.source.column_start,
                 candidate.source.line_end,
@@ -4440,7 +4501,7 @@ fn admit_markdown_fact_batch(
             ));
         }
     }
-    for (start_line, start_column, end_line, end_column, reason) in rejected {
+    for (candidate_index, start_line, start_column, end_line, end_column, reason) in rejected {
         report.record(
             path,
             IdentitySpan {
@@ -4450,6 +4511,7 @@ fn admit_markdown_fact_batch(
                 end_column,
             },
             parser,
+            parser_fact_index(MARKDOWN_FACT_INDEX_NAMESPACE, candidate_index),
             &[(GraphIdentityField::RelationTarget, reason)],
         )?;
     }
@@ -5134,6 +5196,58 @@ mod tests {
     use std::path::Path;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn admission_counts_distinct_same_span_facts_but_deduplicates_replays()
+    -> Result<(), Box<dyn Error>> {
+        let mut admission = GraphIdentityAdmission::default();
+        let span = super::IdentitySpan {
+            start_line: 7,
+            start_column: 0,
+            end_line: 7,
+            end_column: 0,
+        };
+        let failure = [(
+            GraphIdentityField::RelationTarget,
+            GraphIdentityRejectionReason::Empty,
+        )];
+        admission.record(
+            "src/facts.ts",
+            span,
+            ParserKind::TreeSitter,
+            super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 1),
+            &failure,
+        )?;
+        admission.record(
+            "src/facts.ts",
+            span,
+            ParserKind::TreeSitter,
+            super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 2),
+            &failure,
+        )?;
+        admission.record(
+            "src/facts.ts",
+            span,
+            ParserKind::TreeSitter,
+            super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 1),
+            &failure,
+        )?;
+        require_eq(
+            &admission.rejected_facts_for("src/facts.ts"),
+            &2,
+            "same-span distinct rejection count",
+        )?;
+        require_eq(
+            &admission.rejections.len(),
+            &2,
+            "same-span distinct typed detail count",
+        )?;
+        require(
+            admission.rejections[0].fact_index != admission.rejections[1].fact_index,
+            "same-span distinct facts shared an internal identity",
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn sqlite_recovered_invalid_manifest_context_uses_shared_admission()

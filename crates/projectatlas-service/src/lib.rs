@@ -4420,6 +4420,7 @@ mod tests {
                 parser: ParserKind::TreeSitter,
                 field: GraphIdentityField::Symbol,
                 reason: GraphIdentityRejectionReason::Empty,
+                fact_index: 0,
             }],
         )?;
         publication.complete()?;

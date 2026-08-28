@@ -214,6 +214,13 @@ pub struct GraphIdentityRejection {
     pub field: GraphIdentityField,
     /// Stable rejection category without the rejected raw value.
     pub reason: GraphIdentityRejectionReason,
+    /// Internal parser-fact ordinal used to distinguish same-span facts.
+    ///
+    /// This identity is durable but intentionally omitted from the public wire
+    /// shape; it only prevents distinct parser observations that share a line
+    /// and zero-column fallback from collapsing in storage.
+    #[serde(skip)]
+    pub fact_index: u64,
 }
 
 /// Stable identity of one `ProjectAtlas` index across supported moves and upgrades.
@@ -3046,6 +3053,7 @@ mod tests {
             parser: ParserKind::TreeSitter,
             field: GraphIdentityField::RelationTarget,
             reason: GraphIdentityRejectionReason::ControlCharacters,
+            fact_index: 0,
         };
         require(
             serde_json::from_str::<GraphIdentityRejection>(&serde_json::to_string(&rejection)?)?

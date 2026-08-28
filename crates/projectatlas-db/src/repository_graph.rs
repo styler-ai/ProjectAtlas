@@ -3060,12 +3060,12 @@ impl AtlasStore {
         let placeholders = numbered_placeholders(4, paths.len());
         let sql = format!(
             "SELECT file_path, start_line, start_column, end_line, end_column,
-                    parser, field, reason
+             parser, field, reason, fact_index
                FROM graph_identity_rejections
               WHERE project_instance_id = ?1 AND generation = ?2
                 AND file_path IN ({placeholders})
-              ORDER BY file_path, start_line, start_column, end_line, end_column,
-                       parser, field, reason, id
+               ORDER BY file_path, start_line, start_column, end_line, end_column,
+                        parser, field, reason, fact_index, id
               LIMIT ?3"
         );
         let mut values = Vec::with_capacity(paths.len() + 3);
@@ -4071,12 +4071,13 @@ impl IndexPublicationGuard<'_> {
     ///
     /// Append the typed details prepared by the graph replacement in this
     /// publication. The replacement method clears or rebinds the existing rows
-    /// before changing graph nodes, so these inserts share its parent transaction.
+    /// before changing graph nodes, so these inserts share its parent transaction;
+    /// the complete resulting generation must remain within the same row ceiling.
     ///
     /// # Errors
     ///
-    /// Returns an error for a foreign project/path, an oversized batch, invalid
-    /// span data, or `SQLite` failure.
+    /// Returns an error for a foreign project/path, an oversized complete
+    /// generation, invalid span data, or `SQLite` failure.
     pub fn replace_graph_identity_rejections(
         &mut self,
         project: ProjectInstanceId,
@@ -4092,6 +4093,21 @@ impl IndexPublicationGuard<'_> {
         let savepoint = self.store.validated_savepoint()?;
         require_bound_project_identity(&savepoint, project)?;
         insert_graph_identity_rejections(&savepoint, project, generation, rejections)?;
+        let generation_value =
+            sqlite_count("graph_identity_rejections.generation", generation.get())?;
+        let persisted_count = savepoint.query_row(
+            "SELECT COUNT(*)
+               FROM graph_identity_rejections
+              WHERE project_instance_id = ?1 AND generation = ?2",
+            params![&project.as_bytes()[..], generation_value],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if persisted_count > i64::from(GraphLimits::MAX_ROWS) {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "complete graph identity rejection generation exceeds the graph row ceiling",
+            }
+            .into());
+        }
         savepoint.commit()?;
         Ok(())
     }
@@ -5458,11 +5474,11 @@ fn insert_graph_identity_rejections(
         "INSERT INTO graph_identity_rejections(
             project_instance_id, generation, file_path,
             start_line, start_column, end_line, end_column,
-            parser, field, reason
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             parser, field, reason, fact_index
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(
             project_instance_id, generation, file_path, start_line, start_column,
-            end_line, end_column, parser, field, reason
+             end_line, end_column, parser, field, reason, fact_index
          ) DO NOTHING",
     )?;
     let generation = sqlite_count("graph_identity_rejections.generation", generation.get())?;
@@ -5479,6 +5495,11 @@ fn insert_graph_identity_rejections(
             rejection.parser.to_string(),
             rejection.field.to_string(),
             rejection.reason.to_string(),
+            i64::try_from(rejection.fact_index).map_err(|_error| {
+                GraphContractError::InvalidLimits {
+                    reason: "graph identity rejection fact index exceeded SQLite integer range",
+                }
+            })?,
         ])?;
     }
     Ok(())
@@ -7259,6 +7280,12 @@ fn graph_identity_rejection_from_row(row: &Row<'_>) -> DbResult<GraphIdentityRej
         )?,
         field: parse_graph_identity_field(row.get(6)?)?,
         reason: parse_graph_identity_rejection_reason(row.get(7)?)?,
+        fact_index: u64::try_from(row.get::<_, i64>(8)?).map_err(|_error| {
+            DbError::GraphRowShape {
+                table: "graph_identity_rejections",
+                reason: "fact index does not fit the graph identity domain",
+            }
+        })?,
     })
 }
 
@@ -15446,8 +15473,15 @@ mod tests {
             parser: ParserKind::TreeSitter,
             field: GraphIdentityField::Symbol,
             reason: GraphIdentityRejectionReason::Empty,
+            fact_index: 0,
         };
-        let expected_first = vec![first.clone()];
+        let first_distinct = GraphIdentityRejection {
+            fact_index: 1,
+            ..first.clone()
+        };
+        let mut first_rows = vec![first, first_distinct];
+        first_rows.push(first_rows[0].clone());
+        let expected_first = first_rows[..2].to_vec();
         {
             let mut publication = writer.begin_index_publication("identity-rejections")?;
             publication.replace_repository_graph(
@@ -15457,8 +15491,7 @@ mod tests {
                 &graph_v2.occurrences,
                 &graph_v2.coverage,
             )?;
-            publication
-                .replace_graph_identity_rejections(fixture.project, std::slice::from_ref(&first))?;
+            publication.replace_graph_identity_rejections(fixture.project, &first_rows)?;
             publication.complete()?;
         }
         let first_rows = writer.repository_graph_identity_rejections(
@@ -15514,6 +15547,7 @@ mod tests {
             parser: ParserKind::TreeSitter,
             field: GraphIdentityField::Signature,
             reason: GraphIdentityRejectionReason::SurroundingWhitespace,
+            fact_index: 0,
         };
         let expected_second = vec![second.clone()];
         {
@@ -15549,6 +15583,7 @@ mod tests {
             parser: ParserKind::TreeSitter,
             field: GraphIdentityField::Package,
             reason: GraphIdentityRejectionReason::Oversized,
+            fact_index: 0,
         };
         let expected_third = vec![third.clone()];
         {
@@ -15630,6 +15665,135 @@ mod tests {
             &retained_raw_identity_count,
             &0,
             "typed rejection table retained no invalid raw identity material",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_rejection_ceiling_covers_preserved_and_incoming_rows()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("identity-rejection-ceiling");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let fixture = publish_fixture(&mut store, "identity-rejection-ceiling")?;
+        let source_path = RepositoryNodePath::new(Path::new("src/Äuth.rs"))?;
+        let preserved_count = usize::try_from(GraphLimits::MAX_ROWS)?.saturating_sub(1);
+        let preserved = (0..preserved_count)
+            .map(|index| {
+                let line = u32::try_from(index.saturating_add(1))?;
+                Ok(GraphIdentityRejection {
+                    path: source_path.clone(),
+                    span: SourceSpan::new(line, 0, line, 0)?,
+                    parser: ParserKind::TreeSitter,
+                    field: GraphIdentityField::Symbol,
+                    reason: GraphIdentityRejectionReason::Empty,
+                    fact_index: u64::try_from(index)?,
+                })
+            })
+            .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+        let graph_v2 = graph_fixture(fixture.project, IndexGeneration::new(2))?;
+        {
+            let mut publication = store.begin_index_publication("identity-rejection-ceiling")?;
+            publication.replace_repository_graph(
+                fixture.project,
+                &graph_v2.entities,
+                &graph_v2.relations,
+                &graph_v2.occurrences,
+                &graph_v2.coverage,
+            )?;
+            publication.replace_graph_identity_rejections(fixture.project, &preserved)?;
+            publication.complete()?;
+        }
+        let incoming = vec![
+            GraphIdentityRejection {
+                path: source_path.clone(),
+                span: SourceSpan::new(20_000, 0, 20_000, 0)?,
+                parser: ParserKind::TreeSitter,
+                field: GraphIdentityField::RelationTarget,
+                reason: GraphIdentityRejectionReason::ControlCharacters,
+                fact_index: 20_000,
+            },
+            GraphIdentityRejection {
+                path: source_path.clone(),
+                span: SourceSpan::new(20_001, 0, 20_001, 0)?,
+                parser: ParserKind::TreeSitter,
+                field: GraphIdentityField::RelationTarget,
+                reason: GraphIdentityRejectionReason::ControlCharacters,
+                fact_index: 20_001,
+            },
+        ];
+        {
+            let mut publication = store.begin_index_publication("identity-rejection-overflow")?;
+            publication.replace_repository_graph_for_paths(
+                fixture.project,
+                &["Cargo.toml".to_string()],
+                &[],
+                &[],
+                &[],
+                &[],
+            )?;
+            let error =
+                match publication.replace_graph_identity_rejections(fixture.project, &incoming) {
+                    Ok(()) => {
+                        return Err(io::Error::other(
+                            "preserved plus incoming rows unexpectedly exceeded silently",
+                        )
+                        .into());
+                    }
+                    Err(error) => error,
+                };
+            require(
+                matches!(
+                    error,
+                    DbError::GraphContract(GraphContractError::InvalidLimits { .. })
+                ),
+                "combined rejection ceiling returned an unrelated error",
+            )?;
+        }
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(IndexGeneration::new(2)),
+            "combined rejection ceiling retained the prior generation",
+        )?;
+        require_eq(
+            &store
+                .repository_graph_identity_rejections(
+                    fixture.project,
+                    std::slice::from_ref(&source_path),
+                    GraphLimits::MAX_ROWS,
+                    None,
+                )?
+                .len(),
+            &preserved_count,
+            "combined rejection ceiling did not preserve complete prior rows",
+        )?;
+
+        let graph_v3 = graph_fixture(fixture.project, IndexGeneration::new(3))?;
+        {
+            let mut publication = store.begin_index_publication("identity-rejection-retry")?;
+            publication.replace_repository_graph_for_paths(
+                fixture.project,
+                std::slice::from_ref(&source_path.as_str().to_string()),
+                &graph_v3.entities,
+                &graph_v3.relations,
+                &graph_v3.occurrences,
+                &graph_v3.coverage,
+            )?;
+            publication.replace_graph_identity_rejections(fixture.project, &incoming)?;
+            publication.complete()?;
+        }
+        let retried = store.repository_graph_identity_rejections(
+            fixture.project,
+            std::slice::from_ref(&source_path),
+            GraphLimits::MAX_ROWS,
+            None,
+        )?;
+        require_eq(
+            &retried,
+            &incoming,
+            "rejection ceiling retry after affected replacement",
         )?;
         Ok(())
     }
