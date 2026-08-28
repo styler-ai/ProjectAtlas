@@ -106,7 +106,7 @@ Each dependent worktree refreshes/rebases onto accepted predecessors on `main` a
 
 The authoritative direct blockers are exactly those in `openspec/issue-map.json.release_graphs.v0.5.0-00`. #492 is the hierarchy root and release-acceptance issue, not an implementation predecessor. #310/#314 remain v0.6 children of separate release owner #493.
 
-Database-first transitions apply to #481, #476 when a coverage gap is proven, #484, #480, #465 when extraction state needs a delta, and #456 only if the baseline wins. #476 owns schema 20 to 21 before #484 advances schema 21 to 22, preventing their migrations from claiming the same version slot. Other issues preserve database/schema identity and prove continuity.
+Database-first transitions apply to #481, #476, #484 only if its own storage inventory proves another migration is required, #480, #465 when extraction state needs a delta, and #456 only if the baseline wins. #476 owns the schema 20 to 21 to 22 sequence. #484 remains blocked by #476 and rebases after it; only if #484 proves another migration is required does it take the next actual schema 22 to 23 slot, otherwise it preserves schema 22 without a speculative bump. Other issues preserve database/schema identity and prove continuity.
 
 ## Open Questions
 
