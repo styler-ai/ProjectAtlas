@@ -92,14 +92,13 @@ Parallel delivery waves derived from the exact graph:
 
 Before wave 1, the planning PR publishes the shared OpenSpec and architecture sources, the exact live default branch passes the published-readiness gate, and every accepted issue link/task mirror is read back. No Luna implementation worktree starts from candidate-only specification evidence.
 
-1. Independent foundations: #482, #372, and #489.
-2. After #482: #476, #480, #481, and #483 may proceed independently.
-3. #484 follows #481; #486 follows #482/#483; #487 follows #481/#476/#480.
-4. #488 follows #487.
-5. #477 follows #476/#488; #342, #358, and #465 follow #476/#480/#488; #491 follows #487.
-6. #339 follows #477; #384 follows #358/#477; #464 follows #358; #456 follows #358/#465/#477/#484; #485 follows #481/#482/#483/#484/#486; #388 and #390 follow #491.
-7. #490 follows #339/#342/#358/#384/#464/#465/#485/#489/#491.
-8. #492 follows every child issue, runs RC remediation and stable proof, and closes last.
+1. Independent foundations: #372, #464, #482, #487, #489, and #495.
+2. After those foundations: #390, #480, #481, #483, #488, and #491 may proceed independently.
+3. #342 follows #488; #388 follows #491; #476 follows #481; #486 follows #482/#483.
+4. #358 and #465 follow #476/#480/#488; #477 follows #476; #484 follows #476/#481.
+5. #339 and #384 follow #477; #456 follows #358/#465/#477/#484; #485 follows #484/#486.
+6. #490 follows #339/#342/#358/#384/#464/#465/#489.
+7. #492 follows every child issue, runs RC remediation and stable proof, and closes last.
 
 Each dependent worktree refreshes/rebases onto accepted predecessors on `main` and reruns affected proof. Independent, disjoint lanes remain parallel.
 
@@ -107,7 +106,7 @@ Each dependent worktree refreshes/rebases onto accepted predecessors on `main` a
 
 The authoritative direct blockers are exactly those in `openspec/issue-map.json.release_graphs.v0.5.0-00`. #492 is the hierarchy root and release-acceptance issue, not an implementation predecessor. #310/#314 remain v0.6 children of separate release owner #493.
 
-Database-first transitions apply to #481, #484, #476 when a coverage gap is proven, #480, #465 when extraction state needs a delta, and #456 only if the baseline wins. Other issues preserve database/schema identity and prove continuity.
+Database-first transitions apply to #481, #476 when a coverage gap is proven, #484, #480, #465 when extraction state needs a delta, and #456 only if the baseline wins. #476 owns schema 20 to 21 before #484 advances schema 21 to 22, preventing their migrations from claiming the same version slot. Other issues preserve database/schema identity and prove continuity.
 
 ## Open Questions
 
