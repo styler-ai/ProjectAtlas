@@ -13300,7 +13300,15 @@ mod tests {
             "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
             [worktree_b.join(".").to_string_lossy().into_owned()],
         )?;
-        incomplete_current.execute_batch("DELETE FROM project_root_identity;")?;
+        // Exercise the supported predecessor migration path. A genuinely
+        // absent native-identity table may still be admitted from its legacy
+        // root metadata; a present table without its singleton is corruption
+        // and must remain fail-closed.
+        incomplete_current.execute_batch(
+            "UPDATE metadata SET value = '19' WHERE key = 'schema_version';
+             DROP TABLE project_root_identity;
+             DROP TABLE graph_identity_rejections;",
+        )?;
         drop(incomplete_current);
         let migratable_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_b,

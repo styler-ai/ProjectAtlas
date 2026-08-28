@@ -177,6 +177,10 @@ pub(super) struct GraphIdentityAdmission {
     rejections: Vec<GraphIdentityRejection>,
     /// Number of parser facts rejected per source path.
     rejected_facts_by_path: BTreeMap<String, u64>,
+    /// Original parser relation ordinal for each admitted relation after
+    /// source-identity filtering. This remains private because it is only
+    /// needed to keep derived rejection facts tied to parser observations.
+    relation_fact_indices: BTreeMap<String, Vec<usize>>,
     /// Resolution keys derived once at admission and carried into projection.
     resolution_projections: BTreeMap<String, ResolutionKeyProjection>,
     /// Test-only proof of one derivation per source path and generation.
@@ -299,6 +303,17 @@ impl GraphIdentityAdmission {
             let entry = self.rejected_facts_by_path.entry(path).or_default();
             *entry = entry.saturating_add(count);
         }
+        for (path, indices) in other.relation_fact_indices {
+            if let Some(existing) = self.relation_fact_indices.get(&path) {
+                if existing != &indices {
+                    return Err(CliError::InvalidInput(
+                        "conflicting relation fact admission".to_string(),
+                    ));
+                }
+            } else {
+                self.relation_fact_indices.insert(path, indices);
+            }
+        }
         let remaining = MAX_GRAPH_IDENTITY_REJECTIONS.saturating_sub(self.rejections.len());
         self.rejections
             .extend(other.rejections.into_iter().take(remaining));
@@ -333,6 +348,12 @@ impl GraphIdentityAdmission {
                 .filter(|(path, _count)| paths.contains(path.as_str()))
                 .map(|(path, count)| (path.clone(), *count))
                 .collect(),
+            relation_fact_indices: self
+                .relation_fact_indices
+                .iter()
+                .filter(|(path, _indices)| paths.contains(path.as_str()))
+                .map(|(path, indices)| (path.clone(), indices.clone()))
+                .collect(),
             resolution_projections: BTreeMap::new(),
             #[cfg(test)]
             resolution_derivations: BTreeMap::new(),
@@ -357,6 +378,15 @@ impl GraphIdentityAdmission {
     /// Return the already-admitted resolution projection for one graph path.
     fn resolution_projection(&self, path: &str) -> Option<&ResolutionKeyProjection> {
         self.resolution_projections.get(path)
+    }
+
+    /// Translate an admitted relation index back to its parser ordinal.
+    fn relation_parser_index(&self, path: &str, admitted_index: usize) -> usize {
+        self.relation_fact_indices
+            .get(path)
+            .and_then(|indices| indices.get(admitted_index))
+            .copied()
+            .unwrap_or(admitted_index)
     }
 
     /// Count one resolution-key derivation for the test-visible ownership proof.
@@ -4228,12 +4258,23 @@ fn admit_symbol_graph<'a>(
         .enumerate()
         .filter_map(|(index, symbol)| (!rejected_symbols[index]).then_some(symbol))
         .collect();
+    let mut relation_fact_indices = Vec::with_capacity(graph.relations.len());
     graph.relations = graph
         .relations
         .into_iter()
         .enumerate()
-        .filter_map(|(index, relation)| (!rejected_relations[index]).then_some(relation))
+        .filter_map(|(index, relation)| {
+            (!rejected_relations[index]).then(|| {
+                relation_fact_indices.push(index);
+                relation
+            })
+        })
         .collect();
+    if rejected_relations.iter().any(|rejected| *rejected) && !relation_fact_indices.is_empty() {
+        report
+            .relation_fact_indices
+            .insert(graph.path.clone(), relation_fact_indices);
+    }
     Ok((Cow::Owned(graph), report))
 }
 
@@ -4349,7 +4390,7 @@ fn admit_resolution_key_failures(
                         &graph.path,
                         resolution_projection_span(graph, failure.fact()),
                         graph.parser,
-                        resolution_projection_fact_index(failure.fact()),
+                        resolution_projection_fact_index(report, &graph.path, failure.fact()),
                         &[(
                             GraphIdentityField::ResolutionKey,
                             GraphIdentityRejectionReason::from_error(failure.error()),
@@ -4387,15 +4428,20 @@ fn ensure_admitted_resolution_projections(
 }
 
 /// Map one resolution fact into its deterministic internal rejection identity.
-fn resolution_projection_fact_index(fact: ResolutionProjectionFact) -> u64 {
+fn resolution_projection_fact_index(
+    report: &GraphIdentityAdmission,
+    path: &str,
+    fact: ResolutionProjectionFact,
+) -> u64 {
     match fact {
         ResolutionProjectionFact::Source => 0,
         ResolutionProjectionFact::Symbol(index) => {
             parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, index)
         }
-        ResolutionProjectionFact::Relation(index) => {
-            parser_fact_index(RELATION_FACT_INDEX_NAMESPACE, index)
-        }
+        ResolutionProjectionFact::Relation(index) => parser_fact_index(
+            RELATION_FACT_INDEX_NAMESPACE,
+            report.relation_parser_index(path, index),
+        ),
     }
 }
 
@@ -5245,6 +5291,291 @@ mod tests {
         require(
             admission.rejections[0].fact_index != admission.rejections[1].fact_index,
             "same-span distinct facts shared an internal identity",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn relation_rejections_keep_original_parser_ordinals_through_reopen_and_retry()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let components = (0..20)
+            .map(|_| "d".repeat(200))
+            .collect::<Vec<_>>()
+            .join("/");
+        let path = format!("src/{components}/page.ts");
+        let invalid_target = "x".repeat(MAX_GRAPH_IDENTITY_BYTES + 1);
+        let oversized_resolved_module = "m".repeat(100);
+        let graph = SymbolGraph {
+            path: path.clone(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![CodeSymbol {
+                path: path.clone(),
+                language: Some("typescript".to_string()),
+                name: "caller".to_string(),
+                kind: SymbolKind::Function,
+                signature: "function caller()".to_string(),
+                exported: true,
+                documentation: None,
+                line_start: 1,
+                line_end: 1,
+                source_selector: None,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: None,
+            }],
+            relations: vec![
+                SymbolRelation {
+                    path: path.clone(),
+                    source_name: "caller".to_string(),
+                    target_name: invalid_target,
+                    kind: RelationKind::Calls,
+                    line: 1,
+                    context: "caller()".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+                SymbolRelation {
+                    path: path.clone(),
+                    source_name: "<module>".to_string(),
+                    target_name: format!("import {{ run }} from './{oversized_resolved_module}';"),
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "relation ordinal fixture".to_string(),
+                    parser: ParserKind::TreeSitter,
+                },
+            ],
+        };
+        let nodes = vec![test_file_node(&path, "typescript")];
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let symbols = symbol_build_stage_for_graphs(vec![graph.clone()]);
+        let staged = stage_full_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &scan_policy,
+            &symbols,
+            &control,
+        )?;
+        let relation_rejections = staged
+            .identity_rejections
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.field,
+                    GraphIdentityField::RelationTarget | GraphIdentityField::ResolutionKey
+                )
+            })
+            .collect::<Vec<_>>();
+        require_eq(
+            &relation_rejections.len(),
+            &2,
+            "same-line relation rejection detail count",
+        )?;
+        require(
+            relation_rejections.iter().all(|row| {
+                row.path.as_str() == path
+                    && row.span.start_line() == 1
+                    && row.span.end_line() == 1
+                    && row.parser == ParserKind::TreeSitter
+                    && row.reason == GraphIdentityRejectionReason::Oversized
+            }),
+            "same-line relation rejection provenance was not exact",
+        )?;
+        let mut fact_indices = relation_rejections
+            .iter()
+            .map(|row| row.fact_index)
+            .collect::<Vec<_>>();
+        fact_indices.sort_unstable();
+        require_eq(
+            &fact_indices,
+            &vec![
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 0),
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 1),
+            ],
+            "same-line relation parser ordinals",
+        )?;
+        require_eq(
+            &staged.relations.len(),
+            &1,
+            "valid relation retained after source admission",
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &staged,
+            &control,
+            "relation-ordinal-full",
+        )?;
+        let first_generation = store
+            .index_publication()?
+            .ok_or("relation ordinal full publication is missing")?
+            .generation;
+        let path_key = RepositoryNodePath::new(Path::new(&path))?;
+        let persisted = store.repository_graph_identity_rejections(
+            store
+                .project_instance_id()?
+                .ok_or("relation ordinal project identity is missing")?,
+            std::slice::from_ref(&path_key),
+            16,
+            None,
+        )?;
+        let persisted_fact_indices = persisted
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.field,
+                    GraphIdentityField::RelationTarget | GraphIdentityField::ResolutionKey
+                )
+            })
+            .map(|row| row.fact_index)
+            .collect::<Vec<_>>();
+        require_eq(
+            &persisted_fact_indices,
+            &fact_indices,
+            "persisted same-line relation parser ordinals",
+        )?;
+        let persisted_wire = serde_json::to_string(&persisted)?;
+        require(
+            !persisted_wire.contains(&"x".repeat(32)),
+            "persisted relation rejection retained invalid identity text",
+        )?;
+        drop(store);
+
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let reopened = store.repository_graph_identity_rejections(
+            store
+                .project_instance_id()?
+                .ok_or("reopened relation ordinal project identity is missing")?,
+            std::slice::from_ref(&path_key),
+            16,
+            None,
+        )?;
+        require_eq(
+            &reopened
+                .iter()
+                .filter(|row| {
+                    matches!(
+                        row.field,
+                        GraphIdentityField::RelationTarget | GraphIdentityField::ResolutionKey
+                    )
+                })
+                .map(|row| row.fact_index)
+                .collect::<Vec<_>>(),
+            &fact_indices,
+            "reopened same-line relation parser ordinals",
+        )?;
+
+        let incremental_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let incremental_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &incremental_control)?;
+        let fault_graph = graph.clone();
+        let incremental_symbols = symbol_build_stage_for_graphs(vec![graph]);
+        let incremental = stage_incremental_repository_graph(
+            &store,
+            &root,
+            first_generation,
+            &nodes,
+            std::slice::from_ref(&path),
+            &incremental_policy,
+            &incremental_symbols,
+            &incremental_control,
+        )?;
+        let incremental_rejections = incremental
+            .identity_rejections
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.field,
+                    GraphIdentityField::RelationTarget | GraphIdentityField::ResolutionKey
+                )
+            })
+            .map(|row| row.fact_index)
+            .collect::<Vec<_>>();
+        require_eq(
+            &incremental_rejections,
+            &fact_indices,
+            "incremental same-line relation parser ordinals",
+        )?;
+        let canceled = IndexWorkControl::new(IndexCancellation::new(), None);
+        canceled.cancel();
+        {
+            let mut publication = store.begin_index_publication("relation-ordinal-cancel")?;
+            require(
+                incremental.apply(&mut publication, &canceled).is_err(),
+                "relation ordinal cancellation did not fail publication",
+            )?;
+        }
+        require_eq(
+            &store
+                .index_publication()?
+                .map(|publication| publication.generation),
+            &Some(first_generation),
+            "generation after canceled relation ordinal publication",
+        )?;
+        {
+            let mut publication = store.begin_index_publication("relation-ordinal-incremental")?;
+            incremental.apply(&mut publication, &incremental_control)?;
+            publication.complete()?;
+        }
+        let second_generation = store
+            .index_publication()?
+            .ok_or("relation ordinal incremental publication is missing")?
+            .generation;
+        drop(store);
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let reopened_incremental = store.repository_graph_identity_rejections(
+            store
+                .project_instance_id()?
+                .ok_or("reopened incremental project identity is missing")?,
+            std::slice::from_ref(&path_key),
+            16,
+            None,
+        )?;
+        require(
+            reopened_incremental.iter().any(|row| {
+                matches!(
+                    row.field,
+                    GraphIdentityField::RelationTarget | GraphIdentityField::ResolutionKey
+                )
+            }),
+            "reopened incremental relation rejection is missing",
+        )?;
+        let mut fault = stage_incremental_repository_graph(
+            &store,
+            &root,
+            second_generation,
+            &nodes,
+            std::slice::from_ref(&path),
+            &incremental_policy,
+            &symbol_build_stage_for_graphs(vec![fault_graph]),
+            &incremental_control,
+        )?;
+        fault.identity_rejections.resize(
+            usize::try_from(GraphLimits::MAX_ROWS)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+            fault.identity_rejections[0].clone(),
+        );
+        {
+            let mut publication = store.begin_index_publication("relation-ordinal-fault")?;
+            require(
+                fault.apply(&mut publication, &incremental_control).is_err(),
+                "relation ordinal late fault did not fail publication",
+            )?;
+        }
+        require_eq(
+            &store
+                .index_publication()?
+                .map(|publication| publication.generation),
+            &Some(second_generation),
+            "generation after relation ordinal late fault",
         )?;
         Ok(())
     }

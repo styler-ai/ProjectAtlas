@@ -1530,10 +1530,9 @@ pub(crate) fn preflight(
 /// Inspect one database against a native project root before writable access.
 ///
 /// Current and post-schema-19 predecessor databases use the typed root
-/// identity when its table exists. A missing typed identity is admitted only
-/// for the narrow recovery path that proves unambiguous legacy metadata names
-/// the same existing native root on platforms where that historical
-/// projection is injective; no binding is created by this helper.
+/// identity when its table exists. A missing typed row is a corruption or
+/// incomplete-binding error, even when legacy metadata is present. Legacy
+/// validation is available only when the typed table is genuinely absent.
 pub(crate) fn preflight_for_project(
     path: &Path,
     expected_root: &CanonicalProjectRoot,
@@ -1543,13 +1542,11 @@ pub(crate) fn preflight_for_project(
         return Ok((preflight, location));
     }
     let connection = open_read_only_connection(path, &location)?;
-    let found_identity =
-        if object_kind(&connection, "project_root_identity")?.as_deref() == Some("table") {
-            crate::project_identity::load_project_root_identity(&connection)?
-        } else {
-            None
-        };
-    if let Some(found) = found_identity.as_ref() {
+    let has_native_identity_table =
+        object_kind(&connection, "project_root_identity")?.as_deref() == Some("table");
+    if has_native_identity_table {
+        let found = crate::project_identity::load_project_root_identity(&connection)?
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         crate::project_identity::prove_existing_root_equivalence(
             expected_root.as_path(),
             found.as_path(),
@@ -1763,6 +1760,18 @@ pub(crate) fn initialize_with_project_root_in_transaction(
     } else {
         None
     };
+    let predecessor_legacy_identity = if expected_identity.is_none()
+        && expected_root.is_some()
+        && preflight.state == SchemaState::UpgradeRequired
+        && object_kind(connection, "project_root_identity")?.as_deref() != Some("table")
+    {
+        let expected = CanonicalProjectRoot::from_path(Path::new(
+            expected_root.ok_or(DbError::ProjectRootMissing)?,
+        ))?;
+        Some(validate_legacy_project_root_binding(connection, &expected)?)
+    } else {
+        None
+    };
     match preflight.state {
         SchemaState::Fresh => create_fresh(connection, expected_root, expected_identity)?,
         SchemaState::Current => {}
@@ -1788,9 +1797,16 @@ pub(crate) fn initialize_with_project_root_in_transaction(
     } else if let Some(expected_root) = expected_root {
         let expected = CanonicalProjectRoot::from_path(Path::new(expected_root))?;
         crate::project_identity::ensure_project_identity(connection)?;
-        crate::project_identity::ensure_project_root_identity_in_transaction(
-            connection, &expected,
-        )?;
+        if let Some(predecessor_identity) = predecessor_legacy_identity {
+            // The writer-connection legacy binding recheck above proved the
+            // predecessor metadata before migration created the native table.
+            crate::project_identity::set_project_root_identity(connection, &predecessor_identity)?;
+            crate::project_identity::set_project_root_metadata(connection, &predecessor_identity)?;
+        } else {
+            crate::project_identity::ensure_project_root_identity_in_transaction(
+                connection, &expected,
+            )?;
+        }
     }
     let current = if expected_identity.is_some() {
         inspect_connection_native(connection, expected_identity, false)?
@@ -4309,7 +4325,7 @@ mod tests {
                 ))
                 .into());
             };
-            if !matches!(error, DbError::ProjectInstanceIdentityMissing) {
+            if !matches!(error, DbError::ProjectRootIdentityMissing) {
                 return Err(io::Error::other(format!(
                     "incomplete current binding returned the wrong error on attempt {attempt}: {error}"
                 ))
@@ -4410,7 +4426,7 @@ mod tests {
             )
             .into());
         };
-        if !matches!(error, DbError::ProjectRootMismatch { .. }) {
+        if !matches!(error, DbError::ProjectRootIdentityMissing) {
             return Err(io::Error::other(format!(
                 "distinct root returned the wrong error: {error}"
             ))
@@ -5826,6 +5842,188 @@ mod tests {
             return Err(io::Error::other(format!(
                 "schema-21 migration lost rejection rows on reopen: {reopened_count}"
             ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_twentyone_missing_native_identity_refuses_without_mutation_and_retries()
+    -> Result<(), Box<dyn Error>> {
+        fn snapshot(
+            database: &Path,
+        ) -> Result<
+            (
+                Vec<u8>,
+                [Option<Vec<u8>>; 3],
+                Vec<String>,
+                CurrentSchemaSnapshot,
+            ),
+            Box<dyn Error>,
+        > {
+            let parent = database
+                .parent()
+                .ok_or_else(|| io::Error::other("schema-21 identity fixture has no parent"))?;
+            let connection =
+                Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let schema = current_schema_snapshot(&connection)?;
+            drop(connection);
+            Ok((
+                fs::read(database)?,
+                ["-wal", "-shm", "-journal"]
+                    .map(|suffix| fs::read(sqlite_sidecar_path(database, suffix)).ok()),
+                directory_entry_names(parent)?,
+                schema,
+            ))
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-21-missing-identity-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("schema-21-missing-identity.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-21 missing-identity fixture lacks project"))?;
+        let native_row = store.connection.query_row(
+            "SELECT codec_version, root
+               FROM project_root_identity
+              WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        store.connection.execute_batch(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
+             INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'Schema 21 authored purpose', 'agent', 'approved', 'schema-test'
+               FROM nodes WHERE path = 'src/lib.rs';
+             UPDATE project_identity SET active_generation = 7 WHERE singleton = 1;
+             DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '21' WHERE key = 'schema_version';",
+        )?;
+        store
+            .connection
+            .execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL)?;
+        store.connection.execute(
+            "INSERT INTO graph_identity_rejections(
+                 project_instance_id, generation, file_path,
+                 start_line, start_column, end_line, end_column,
+                 parser, field, reason
+             ) VALUES(?1, 7, 'src/lib.rs', 2, 0, 2, 0,
+                       'tree-sitter', 'symbol', 'empty')",
+            [&project.as_bytes()[..]],
+        )?;
+        store
+            .connection
+            .execute("DELETE FROM project_root_identity", [])?;
+        drop(store);
+
+        let before = snapshot(&database)?;
+        let preflight = preflight_for_project(&database, &expected_identity);
+        if !matches!(preflight, Err(DbError::ProjectRootIdentityMissing)) {
+            return Err(io::Error::other(format!(
+                "schema-21 missing native identity preflight returned {preflight:?}"
+            ))
+            .into());
+        }
+        if snapshot(&database)? != before {
+            return Err(io::Error::other(
+                "schema-21 missing native identity preflight mutated durable state",
+            )
+            .into());
+        }
+
+        let opened = AtlasStore::open_for_project(&database, &root);
+        let Some(open_error) = opened.err() else {
+            return Err(io::Error::other(
+                "schema-21 missing native identity open unexpectedly succeeded",
+            )
+            .into());
+        };
+        if !matches!(open_error, DbError::ProjectRootIdentityMissing) {
+            return Err(io::Error::other(format!(
+                "schema-21 missing native identity open returned {open_error:?}"
+            ))
+            .into());
+        }
+        if snapshot(&database)? != before {
+            return Err(io::Error::other(
+                "schema-21 missing native identity open mutated durable state",
+            )
+            .into());
+        }
+
+        let expected_root = expected_identity.display_string()?;
+        let writer = Connection::open(&database)?;
+        configure_writable(&writer)?;
+        let writer_result =
+            initialize_with_project_root(&writer, Some(&expected_root), Some(&expected_identity));
+        if !matches!(writer_result, Err(DbError::ProjectRootIdentityMissing)) {
+            return Err(io::Error::other(format!(
+                "schema-21 missing native identity writer returned {writer_result:?}"
+            ))
+            .into());
+        }
+        drop(writer);
+        if snapshot(&database)? != before {
+            return Err(io::Error::other(
+                "schema-21 missing native identity writer mutated durable state",
+            )
+            .into());
+        }
+
+        let repair = Connection::open(&database)?;
+        configure_writable(&repair)?;
+        repair.execute(
+            "INSERT INTO project_root_identity(singleton, codec_version, root)
+             VALUES(1, ?1, ?2)",
+            params![native_row.0, native_row.1],
+        )?;
+        drop(repair);
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        let migrated_state = migrated.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT COUNT(*) FROM nodes WHERE path = 'src/lib.rs'),
+                (SELECT COUNT(*) FROM purposes
+                  WHERE purpose = 'Schema 21 authored purpose'),
+                (SELECT COUNT(*) FROM graph_identity_rejections
+                  WHERE generation = 7),
+                (SELECT COUNT(*) FROM project_root_identity WHERE singleton = 1)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        if migrated_state != ("22".to_string(), 7, 1, 1, 1, 1)
+            || migrated.project_root_identity()? != Some(expected_identity.clone())
+        {
+            return Err(io::Error::other(format!(
+                "schema-21 identity repair changed durable state: {migrated_state:?}"
+            ))
+            .into());
+        }
+        drop(migrated);
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        let reopened_generation = reopened.connection.query_row(
+            "SELECT active_generation FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if reopened.project_root_identity()? != Some(expected_identity) || reopened_generation != 7
+        {
+            return Err(io::Error::other(
+                "schema-21 identity repair did not survive SQLite reopen",
+            )
             .into());
         }
         Ok(())
@@ -7349,7 +7547,7 @@ mod tests {
         let Err(unbound_error) = AtlasStore::open_for_project(&unbound_path, &root) else {
             return Err(io::Error::other("unbound existing database unexpectedly opened").into());
         };
-        if !matches!(unbound_error, DbError::ProjectRootMissing) {
+        if !matches!(unbound_error, DbError::ProjectRootIdentityMissing) {
             return Err(io::Error::other("unbound database returned the wrong error").into());
         }
         require_unchanged(

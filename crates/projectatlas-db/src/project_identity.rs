@@ -499,6 +499,18 @@ pub(crate) fn ensure_project_root_identity_in_transaction(
     let selected = if let Some(found) = found_identity.as_ref() {
         prove_existing_root_equivalence(expected.as_path(), found.as_path())?
     } else {
+        let native_identity_table_exists = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'project_root_identity'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if native_identity_table_exists {
+            return Err(DbError::ProjectRootIdentityMissing);
+        }
         let Some(legacy) = found_metadata.as_deref() else {
             return Err(DbError::ProjectRootMissing);
         };
@@ -689,7 +701,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[allow(clippy::panic_in_result_fn)]
-    fn canonical_root_repairs_equivalent_alias_without_changing_project_identity()
+    fn canonical_root_missing_identity_refuses_even_for_equivalent_alias()
     -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::symlink;
 
@@ -699,11 +711,7 @@ mod tests {
         fs::create_dir(&target)?;
         symlink(&target, &alias)?;
         let database = temp.path().join("projectatlas.db");
-        let initial = AtlasStore::open_for_project(&database, &target)?;
-        let project = initial
-            .project_instance_id()?
-            .ok_or_else(|| io::Error::other("fresh identity is missing"))?;
-        drop(initial);
+        drop(AtlasStore::open_for_project(&database, &target)?);
 
         let connection = Connection::open(&database)?;
         connection.execute(
@@ -713,32 +721,38 @@ mod tests {
         connection.execute("DELETE FROM project_root_identity", [])?;
         drop(connection);
 
-        let repaired = AtlasStore::open_for_project(&database, &alias)?;
-        require_eq(
-            &repaired.project_instance_id()?,
-            &Some(project),
-            "alias repair project identity",
+        let database_before = fs::read(&database)?;
+        let error = AtlasStore::open_for_project(&database, &alias)
+            .err()
+            .ok_or_else(|| io::Error::other("missing native identity unexpectedly repaired"))?;
+        require(
+            matches!(error, DbError::ProjectRootIdentityMissing),
+            "missing native identity returned the wrong error",
         )?;
         require_eq(
-            &repaired.project_root()?,
-            &Some(normalize_metadata_path(&target)),
-            "alias repair display metadata",
+            &fs::read(&database)?,
+            &database_before,
+            "missing native identity database bytes",
+        )?;
+        let connection = Connection::open(&database)?;
+        require_eq(
+            &connection.query_row(
+                "SELECT COUNT(*) FROM project_root_identity WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &0,
+            "missing native identity row",
         )?;
         require_eq(
-            &repaired.project_root_identity()?,
-            &Some(CanonicalProjectRoot::from_path(&target)?),
-            "alias repair native identity",
+            &connection.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [PROJECT_ROOT_KEY],
+                |row| row.get::<_, String>(0),
+            )?,
+            &normalize_metadata_path(&alias),
+            "missing native identity legacy metadata",
         )?;
-        let plan = repaired.connection.query_row(
-            "EXPLAIN QUERY PLAN
-             SELECT root FROM project_root_identity WHERE singleton = 1",
-            [],
-            |row| row.get::<_, String>(3),
-        )?;
-        assert!(
-            plan.contains("INTEGER PRIMARY KEY"),
-            "unexpected root identity plan: {plan}"
-        );
         Ok(())
     }
 
@@ -760,10 +774,9 @@ mod tests {
             "UPDATE metadata SET value = ?1 WHERE key = ?2",
             rusqlite::params![normalize_metadata_path(&alias), PROJECT_ROOT_KEY],
         )?;
-        connection.execute("DELETE FROM project_root_identity", [])?;
         connection.execute_batch(
-            "CREATE TEMP TRIGGER fail_project_root_identity_insert
-             BEFORE INSERT ON project_root_identity
+            "CREATE TEMP TRIGGER fail_project_root_identity_update
+             BEFORE UPDATE OF root ON project_root_identity
              BEGIN SELECT RAISE(ABORT, 'injected root identity failure'); END;",
         )?;
         let expected = CanonicalProjectRoot::from_path(&alias)?;
@@ -776,12 +789,13 @@ mod tests {
             [PROJECT_ROOT_KEY],
             |row| row.get::<_, String>(0),
         )?;
-        let identity_rows =
-            connection.query_row("SELECT COUNT(*) FROM project_root_identity", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+        let identity_rows = connection.query_row(
+            "SELECT COUNT(*) FROM project_root_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
         assert_eq!(metadata, normalize_metadata_path(&alias));
-        assert_eq!(identity_rows, 0);
+        assert_eq!(identity_rows, 1);
         drop(connection);
 
         let connection = Connection::open(&database)?;
@@ -790,12 +804,13 @@ mod tests {
             [PROJECT_ROOT_KEY],
             |row| row.get::<_, String>(0),
         )?;
-        let reopened_identity_rows =
-            connection.query_row("SELECT COUNT(*) FROM project_root_identity", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+        let reopened_identity_rows = connection.query_row(
+            "SELECT COUNT(*) FROM project_root_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
         assert_eq!(reopened_metadata, normalize_metadata_path(&alias));
-        assert_eq!(reopened_identity_rows, 0);
+        assert_eq!(reopened_identity_rows, 1);
         Ok(())
     }
 
