@@ -8,6 +8,7 @@ use tree_sitter_language_pack::LanguageRegistry;
 /// Release-tool probe that validates the worker without opening a parser pack.
 pub(super) const VERIFY_BUILD_CONTRACT_ARGUMENT: &str = "--verify-build-contract";
 /// Only production worker invocation accepted from either platform adapter.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub(super) const SERVE_ARGUMENT: &str = "--serve";
 /// Required offline build flag for the optional grammar dependency.
 const OFFLINE_BUILD_VARIABLE: &str = "TSLP_OFFLINE";
@@ -162,6 +163,7 @@ fn require_absent_build_value(
 /// Consume the first target-neutral operation without interpreting platform authority.
 pub(super) fn parse_worker_operation(
     arguments: &mut impl Iterator<Item = OsString>,
+    serve_argument: &str,
 ) -> Result<WorkerOperation, WorkerContractError> {
     match arguments
         .next()
@@ -171,7 +173,7 @@ pub(super) fn parse_worker_operation(
         argument if argument == OsStr::new(VERIFY_BUILD_CONTRACT_ARGUMENT) => {
             Ok(WorkerOperation::VerifyBuildContract)
         }
-        argument if argument == OsStr::new(SERVE_ARGUMENT) => Ok(WorkerOperation::Serve),
+        argument if argument == OsStr::new(serve_argument) => Ok(WorkerOperation::Serve),
         _ => Err(WorkerContractError::UnexpectedArguments),
     }
 }
@@ -186,7 +188,7 @@ pub(super) fn unsupported_host_startup(
 ) -> Result<(), WorkerContractError> {
     validate_worker_build_contract()?;
     let mut arguments = arguments;
-    match parse_worker_operation(&mut arguments)? {
+    match parse_worker_operation(&mut arguments, SERVE_ARGUMENT)? {
         WorkerOperation::VerifyBuildContract => {
             if arguments.next().is_some() {
                 return Err(WorkerContractError::UnexpectedArguments);

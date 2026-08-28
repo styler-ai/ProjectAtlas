@@ -16,9 +16,7 @@ use std::process::ExitCode;
 
 use super::parser_worker_contract::{self, WorkerContractError, WorkerOperation};
 #[cfg(test)]
-use super::parser_worker_contract::{
-    ParserPackBuildEnvironment, SERVE_ARGUMENT, VERIFY_BUILD_CONTRACT_ARGUMENT,
-};
+use super::parser_worker_contract::{ParserPackBuildEnvironment, VERIFY_BUILD_CONTRACT_ARGUMENT};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use libloading::Library;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -31,11 +29,15 @@ use tree_sitter::Language;
 use tree_sitter::{Parser, Tree};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use tree_sitter_language::LanguageFn;
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 use tree_sitter_language_pack::LanguageRegistry;
 
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+use super::parser_worker_contract::SERVE_ARGUMENT;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use parser_linux_authority::{
     ACCEPTED_FD_ARGUMENT, ARTIFACT_FD_ARGUMENT, GRAMMAR_FD_ARGUMENT, POLICY_FD_ARGUMENT,
+    SERVE_ARGUMENT,
 };
 use projectatlas_core::optional_parser_pack::{
     AcceptedGrammar, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES, OptionalParserPackManifest,
@@ -498,7 +500,7 @@ fn validated_pack_root(pack_root: &Path) -> Result<PathBuf, WorkerStartupError> 
 fn parse_worker_invocation(
     mut arguments: impl Iterator<Item = OsString>,
 ) -> Result<WorkerInvocation, WorkerStartupError> {
-    let operation = parser_worker_contract::parse_worker_operation(&mut arguments)
+    let operation = parser_worker_contract::parse_worker_operation(&mut arguments, SERVE_ARGUMENT)
         .map_err(map_contract_error)?;
     if operation == WorkerOperation::VerifyBuildContract {
         return if arguments.next().is_none() {
