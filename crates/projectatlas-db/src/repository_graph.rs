@@ -3331,9 +3331,11 @@ impl AtlasStore {
                         .is_ok()
                 })
             }
-            schema::CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION => {
-                schema::validate_legacy_project_root_binding(&connection, &expected_root).is_ok()
-            }
+            // Predecessor stages intentionally lack native identity. The
+            // staging marker and project identity checked below are their
+            // staging-specific ownership proof; general predecessor admission
+            // remains strict about legacy root authority.
+            schema::CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION => true,
             _ => false,
         };
         Ok(roots_match

@@ -4815,22 +4815,25 @@ mod tests {
         let project = store
             .project_instance_id()?
             .ok_or("bound project identity is missing")?;
-        let prepare_schema_nineteen = |stage: &Path, stage_root: &Path| {
-            fs::create_dir(stage)?;
-            let database = stage.join(GRAPH_STAGE_DATABASE_FILE_NAME);
-            drop(AtlasStore::create_repository_graph_staging(
-                &database, stage_root, project,
-            )?);
-            let connection = Connection::open(database)?;
-            connection.execute_batch(
-                "DROP TABLE project_root_identity;
+        let prepare_schema_nineteen =
+            |stage: &Path, stage_root: &Path, stage_project: ProjectInstanceId| {
+                fs::create_dir(stage)?;
+                let database = stage.join(GRAPH_STAGE_DATABASE_FILE_NAME);
+                drop(AtlasStore::create_repository_graph_staging(
+                    &database,
+                    stage_root,
+                    stage_project,
+                )?);
+                let connection = Connection::open(database)?;
+                connection.execute_batch(
+                    "DROP TABLE project_root_identity;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
-            )?;
-            Ok::<(), Box<dyn Error>>(())
-        };
+                )?;
+                Ok::<(), Box<dyn Error>>(())
+            };
 
         let owned = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}schema19-owned"));
-        prepare_schema_nineteen(&owned, &root)?;
+        prepare_schema_nineteen(&owned, &root, project)?;
         let owned_database = owned.join(GRAPH_STAGE_DATABASE_FILE_NAME);
         let owned_matches =
             AtlasStore::repository_graph_staging_belongs_to(&owned_database, &root, project)?;
@@ -4841,15 +4844,16 @@ mod tests {
         )?;
         #[cfg(unix)]
         require(
-            !owned_matches,
-            "schema-19 legacy staging database was admitted without native authority",
+            owned_matches,
+            "schema-19 staging database was not admitted by its durable staging ownership",
         )?;
         fs::write(owned.join("large-graph-payload"), b"stale graph payload")?;
 
         let foreign_root = temp.path().join("schema-19-foreign-root");
         fs::create_dir(&foreign_root)?;
         let foreign = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}schema19-foreign"));
-        prepare_schema_nineteen(&foreign, &foreign_root)?;
+        let foreign_root_project = ProjectInstanceId::from_bytes([9; 16])?;
+        prepare_schema_nineteen(&foreign, &foreign_root, foreign_root_project)?;
         let foreign_database = foreign.join(GRAPH_STAGE_DATABASE_FILE_NAME);
         require(
             !AtlasStore::repository_graph_staging_belongs_to(&foreign_database, &root, project)?,
@@ -4857,7 +4861,7 @@ mod tests {
         )?;
 
         let schema_eighteen = atlas_dir.join(format!("{GRAPH_STAGE_DIRECTORY_PREFIX}schema18"));
-        prepare_schema_nineteen(&schema_eighteen, &root)?;
+        prepare_schema_nineteen(&schema_eighteen, &root, project)?;
         let schema_eighteen_database = schema_eighteen.join(GRAPH_STAGE_DATABASE_FILE_NAME);
         let connection = Connection::open(&schema_eighteen_database)?;
         connection.execute(
@@ -4903,8 +4907,8 @@ mod tests {
         )?;
         #[cfg(unix)]
         require(
-            owned.exists(),
-            "restart cleanup removed an unproven schema-19 staging database",
+            !owned.exists(),
+            "restart cleanup retained an owned schema-19 staging database",
         )?;
         require(
             foreign.exists(),
