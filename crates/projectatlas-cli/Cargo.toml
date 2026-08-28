@@ -14,7 +14,7 @@ required-features = ["cli-core"]
 
 [[bin]]
 name = "projectatlas-parser-worker"
-path = "src/parser_worker.rs"
+path = "src/parser_worker_entry.rs"
 required-features = ["optional-parser-worker"]
 
 [[bin]]
@@ -27,6 +27,11 @@ name = "parser_supervisor_adversarial"
 path = "tests/parser_supervisor_adversarial.rs"
 harness = false
 required-features = ["optional-parser-supervisor"]
+
+[[test]]
+name = "optional_parser_worker_platform"
+path = "tests/optional_parser_worker_platform.rs"
+required-features = ["optional-parser-worker"]
 
 [features]
 default = ["cli"]

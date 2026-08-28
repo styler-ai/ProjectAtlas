@@ -54,7 +54,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-#[cfg(feature = "optional-parser-supervisor")]
+#[cfg(any(windows, feature = "optional-parser-supervisor"))]
 use std::ffi::OsStr;
 #[cfg(all(target_os = "macos", feature = "optional-parser-supervisor"))]
 use std::ffi::OsString;
@@ -98,6 +98,7 @@ const ATLAS_DIR_NAME: &str = ".projectatlas";
 const MISSING_INDEX_DIR_NAME: &str = "missing-index";
 const GITHOOKS_DIR_NAME: &str = ".githooks";
 const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
+#[cfg(feature = "optional-parser-supervisor")]
 const VERSIONS_DIR_NAME: &str = "versions";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const TS_CONFIG_FILE_NAME: &str = "tsconfig.json";
@@ -9641,6 +9642,88 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let ci = fs::read_to_string(workspace_root.join(".github/workflows/ci.yml"))?;
+    let e2e_smoke = workflow_job_block(&ci, "e2e-smoke")?;
+    for required in [
+        "label: macos-x64\n            os: macos-15-intel",
+        "label: macos-arm64\n            os: macos-14",
+    ] {
+        if !e2e_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "e2e-smoke macOS matrix omitted required runner row {required:?}"
+            ))
+            .into());
+        }
+    }
+
+    let step = workflow_job_step(&ci, "e2e-smoke", "macOS all-features warning gate")?;
+    for (field, actual, expected) in [
+        ("if", step["if"].as_str(), Some("runner.os == 'macOS'")),
+        ("shell", step["shell"].as_str(), Some("bash")),
+    ] {
+        if actual != expected {
+            return Err(io::Error::other(format!(
+                "macOS warning gate field {field:?} must be {expected:?}, found {actual:?}"
+            ))
+            .into());
+        }
+    }
+    if step["timeout-minutes"].as_i64() != Some(15) {
+        return Err(io::Error::other(format!(
+            "macOS warning gate timeout must be 15 minutes, found {:?}",
+            step["timeout-minutes"]
+        ))
+        .into());
+    }
+    let expected_run = "RUSTFLAGS=\"-D warnings\" cargo check --workspace --all-targets --all-features --locked\ncargo clippy --workspace --all-targets --all-features --locked -- -D warnings";
+    if step["run"].as_str().map(str::trim) != Some(expected_run) {
+        return Err(io::Error::other(format!(
+            "macOS warning gate commands drifted: found {:?}",
+            step["run"].as_str()
+        ))
+        .into());
+    }
+
+    let platform_regression = workflow_job_step(
+        &ci,
+        "e2e-smoke",
+        "macOS optional parser worker platform regression",
+    )?;
+    for (field, actual, expected) in [
+        (
+            "if",
+            platform_regression["if"].as_str(),
+            Some("runner.os == 'macOS'"),
+        ),
+        ("shell", platform_regression["shell"].as_str(), Some("bash")),
+        (
+            "run",
+            platform_regression["run"].as_str().map(str::trim),
+            Some(
+                "cargo test --locked -p projectatlas-cli --all-features --test optional_parser_worker_platform",
+            ),
+        ),
+    ] {
+        if actual != expected {
+            return Err(io::Error::other(format!(
+                "macOS platform regression field {field:?} must be {expected:?}, found {actual:?}"
+            ))
+            .into());
+        }
+    }
+    if platform_regression["timeout-minutes"].as_i64() != Some(15) {
+        return Err(io::Error::other(format!(
+            "macOS platform regression timeout must be 15 minutes, found {:?}",
+            platform_regression["timeout-minutes"]
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -35031,6 +35114,33 @@ fn workflow_job_runs(workflow: &str, job: &str) -> Result<Vec<String>, Box<dyn E
         .filter_map(|step| step["run"].as_str())
         .map(str::to_owned)
         .collect())
+}
+
+/// Return one uniquely named step from a GitHub Actions job.
+fn workflow_job_step(workflow: &str, job: &str, step_name: &str) -> Result<Yaml, Box<dyn Error>> {
+    let documents = YamlLoader::load_from_str(workflow)?;
+    let document = documents
+        .first()
+        .ok_or_else(|| io::Error::other("workflow document is empty"))?;
+    let steps = document["jobs"][job]["steps"]
+        .as_vec()
+        .ok_or_else(|| io::Error::other(format!("workflow job {job:?} has no steps")))?;
+    let mut found = None;
+    for step in steps {
+        if step["name"].as_str() != Some(step_name) {
+            continue;
+        }
+        if found.is_some() {
+            return Err(io::Error::other(format!(
+                "workflow job {job:?} has duplicate step {step_name:?}"
+            ))
+            .into());
+        }
+        found = Some(step.clone());
+    }
+    found.ok_or_else(|| {
+        io::Error::other(format!("workflow job {job:?} omitted step {step_name:?}")).into()
+    })
 }
 
 /// Detect `ProjectAtlas` maintenance commands that belong only in local agent workflows.
