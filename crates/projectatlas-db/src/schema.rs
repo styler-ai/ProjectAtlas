@@ -1814,13 +1814,7 @@ pub(crate) fn validate_active_native_binding(
     expected_root: Option<&CanonicalProjectRoot>,
     expected_identity: Option<ProjectInstanceId>,
 ) -> DbResult<()> {
-    let found_version = stored_schema_version(connection)?;
-    if found_version != SCHEMA_VERSION {
-        return Err(DbError::SchemaVersion {
-            found: found_version,
-            expected: SCHEMA_VERSION,
-        });
-    }
+    validate_current_schema_version(connection)?;
     let found_root = crate::project_identity::load_project_root_identity(connection)?;
     if let (Some(expected), Some(found)) = (expected_root, found_root.as_ref()) {
         if crate::project_identity::prove_existing_root_equivalence(
@@ -1853,6 +1847,18 @@ pub(crate) fn validate_active_native_binding(
             found_root: found_root.map(|root| root.display_string_lossy()),
             expected_identity: expected_identity.map(|identity| identity.to_string()),
             found_identity: found_identity.map(|identity| identity.to_string()),
+        });
+    }
+    Ok(())
+}
+
+/// Require the durable schema marker to remain at this runtime's current version.
+pub(crate) fn validate_current_schema_version(connection: &Connection) -> DbResult<()> {
+    let found_version = stored_schema_version(connection)?;
+    if found_version != SCHEMA_VERSION {
+        return Err(DbError::SchemaVersion {
+            found: found_version,
+            expected: SCHEMA_VERSION,
         });
     }
     Ok(())

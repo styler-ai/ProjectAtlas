@@ -266,6 +266,7 @@ fn apply_root_transition_in_transaction(
     expected_identity: Option<ProjectInstanceId>,
     destination: &CanonicalProjectRoot,
 ) -> DbResult<ProjectRootTransitionResult> {
+    schema::validate_current_schema_version(&store.connection)?;
     let found_root = store.project_root()?;
     let found_root_identity = load_project_root_identity(&store.connection)?;
     let found_identity = load_project_identity(&store.connection)?;
@@ -471,6 +472,7 @@ fn ensure_project_root_identity_after_lock(
     connection: &Connection,
     expected: &CanonicalProjectRoot,
 ) -> DbResult<()> {
+    schema::validate_current_schema_version(connection)?;
     if load_project_identity(connection)?.is_none() {
         return Err(DbError::ProjectInstanceIdentityMissing);
     }
@@ -974,6 +976,169 @@ mod tests {
         assert_usage_report(&reopened, true)?;
         assert_runtime_scope(&reopened, project, 1, 0, 1)?;
         assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_root_repair_and_transitions_recheck_schema_before_mutation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let snapshot = |database: &Path| {
+            let database_name = database
+                .file_name()
+                .ok_or_else(|| io::Error::other("schema snapshot database name is missing"))?
+                .to_string_lossy()
+                .into_owned();
+            let sidecars =
+                ["-wal", "-shm", "-journal"].map(|suffix| format!("{database_name}{suffix}"));
+            let mut inventory = fs::read_dir(temp.path())?
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .filter(|entry| match entry {
+                    Ok(name) => !sidecars.iter().any(|sidecar| sidecar == name),
+                    Err(_) => true,
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            inventory.sort();
+            Ok::<_, Box<dyn Error>>((fs::read(database)?, inventory))
+        };
+
+        let repair_root = temp.path().join("repair-root");
+        fs::create_dir(&repair_root)?;
+        let repair_database = temp.path().join("repair-schema.db");
+        let repair_store = AtlasStore::open_for_project(&repair_database, &repair_root)?;
+        let repair_project = repair_store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("repair schema fixture identity is missing"))?;
+        drop(repair_store);
+        let repair_connection = Connection::open(&repair_database)?;
+        repair_connection.execute("DELETE FROM project_root_identity", [])?;
+        drop(repair_connection);
+        let repair_expected = CanonicalProjectRoot::from_path(&repair_root)?;
+        let repair_stale = Connection::open(&repair_database)?;
+        let (repair_preflight, _) = schema::preflight(&repair_database, None)?;
+        require_eq(
+            &repair_preflight.state,
+            &SchemaState::Current,
+            "repair schema preflight",
+        )?;
+        let repair_updater = Connection::open(&repair_database)?;
+        let future_schema = schema::SCHEMA_VERSION + 1;
+        repair_updater.execute(
+            "UPDATE metadata SET value = ?2 WHERE key = ?1",
+            rusqlite::params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+        )?;
+        drop(repair_updater);
+        let repair_before = snapshot(&repair_database)?;
+        let repair_error = ensure_project_root_identity(&repair_stale, &repair_expected)
+            .err()
+            .ok_or_else(|| io::Error::other("stale root repair unexpectedly succeeded"))?;
+        require(
+            matches!(
+                repair_error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == schema::SCHEMA_VERSION
+            ),
+            "stale root repair returned the wrong error",
+        )?;
+        require_eq(
+            &snapshot(&repair_database)?,
+            &repair_before,
+            "stale root repair mutation",
+        )?;
+        drop(repair_stale);
+        let repair_restore = Connection::open(&repair_database)?;
+        repair_restore.execute(
+            "UPDATE metadata SET value = ?2 WHERE key = ?1",
+            rusqlite::params![
+                schema::SCHEMA_VERSION_KEY,
+                schema::SCHEMA_VERSION.to_string()
+            ],
+        )?;
+        drop(repair_restore);
+        let repair_reopened = AtlasStore::open_read_only(&repair_database)?;
+        require_eq(
+            &repair_reopened.project_root_identity()?,
+            &None,
+            "stale root repair native identity",
+        )?;
+        require_eq(
+            &repair_reopened.project_instance_id()?,
+            &Some(repair_project),
+            "stale root repair project identity",
+        )?;
+
+        for (name, transition) in [
+            ("detach", ProjectRootTransition::Detach),
+            ("move", ProjectRootTransition::Move),
+        ] {
+            let source = temp.path().join(format!("{name}-source"));
+            let destination = temp.path().join(format!("{name}-destination"));
+            fs::create_dir(&source)?;
+            fs::create_dir(&destination)?;
+            let database = temp.path().join(format!("{name}-schema.db"));
+            let mut seeded = AtlasStore::open_for_project(&database, &source)?;
+            let project = seeded
+                .project_instance_id()?
+                .ok_or_else(|| io::Error::other("transition schema fixture identity is missing"))?;
+            seed_authored_and_graph_state(&mut seeded, project)?;
+            let source_identity = seeded
+                .project_root_identity()?
+                .ok_or_else(|| io::Error::other("transition schema fixture root is missing"))?;
+            drop(seeded);
+            let mut stale = AtlasStore::open_for_project(&database, &source)?;
+            if transition == ProjectRootTransition::Move {
+                fs::remove_dir(&source)?;
+            }
+            let updater = Connection::open(&database)?;
+            updater.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                rusqlite::params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+            )?;
+            drop(updater);
+            let before = snapshot(&database)?;
+            let error = apply_root_transition(
+                &mut stale,
+                transition,
+                Some(&source_identity),
+                Some(project),
+                &CanonicalProjectRoot::from_path(&destination)?,
+            )
+            .err()
+            .ok_or_else(|| io::Error::other("stale transition unexpectedly succeeded"))?;
+            require(
+                matches!(
+                    error,
+                    DbError::SchemaVersion { found, expected }
+                        if found == future_schema && expected == schema::SCHEMA_VERSION
+                ),
+                "stale transition returned the wrong error",
+            )?;
+            require_eq(&snapshot(&database)?, &before, "stale transition mutation")?;
+            drop(stale);
+            let restore = Connection::open(&database)?;
+            restore.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                rusqlite::params![
+                    schema::SCHEMA_VERSION_KEY,
+                    schema::SCHEMA_VERSION.to_string()
+                ],
+            )?;
+            drop(restore);
+            let reopened = AtlasStore::open_read_only(&database)?;
+            require_eq(
+                &reopened.project_root_identity()?,
+                &Some(source_identity),
+                "stale transition native identity",
+            )?;
+            require_eq(
+                &reopened.project_instance_id()?,
+                &Some(project),
+                "stale transition project identity",
+            )?;
+            assert_authored_state(&reopened)?;
+            assert_usage_report(&reopened, true)?;
+            assert_graph_counts(&reopened, [2, 1, 1, 1, 1, 1, 1])?;
+        }
         Ok(())
     }
 
