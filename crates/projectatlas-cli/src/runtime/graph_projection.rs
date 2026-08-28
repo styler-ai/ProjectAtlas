@@ -557,7 +557,13 @@ pub(super) fn stage_full_repository_graph(
     let loaded_graphs = complete_symbol_graphs(store, &paths, symbols, control)?;
     let (graphs, mut identity_admission) = admit_symbol_graphs(loaded_graphs, control)?;
     identity_admission.merge(symbols.identity_admission.for_paths(&paths))?;
-    let document_facts = complete_markdown_facts(root, nodes, &graphs, symbols, control)?;
+    let mut document_facts = complete_markdown_facts(root, nodes, &graphs, symbols, control)?;
+    admit_markdown_facts(
+        &mut document_facts,
+        &graphs,
+        &mut identity_admission,
+        control,
+    )?;
     control.check(IndexWorkStage::SymbolParsing)?;
     let configured_modules =
         super::module_resolution::load_configured_module_resolution(root, nodes, control)?;
@@ -855,8 +861,14 @@ fn stage_incremental_repository_graph_with_limit(
         &affected_graphs,
         &direct_identity_admission.resolution_projections,
     )?;
-    let document_facts =
+    let mut document_facts =
         complete_markdown_facts(root, expected_nodes, &affected_graphs, symbols, control)?;
+    admit_markdown_facts(
+        &mut document_facts,
+        &affected_graphs,
+        &mut direct_identity_admission,
+        control,
+    )?;
     let affected_nodes = expected_nodes
         .iter()
         .filter(|node| affected_paths.contains(&node.path))
@@ -4184,6 +4196,15 @@ pub(super) fn admit_symbol_build_stage(
         let graph = std::mem::replace(&mut parsed.graph, placeholder);
         let (admitted, graph_report) = admit_symbol_graph(Cow::Owned(graph), control)?;
         parsed.graph = admitted.into_owned();
+        if let Some(markdown) = parsed.markdown_facts.as_deref_mut() {
+            admit_markdown_fact_batch(
+                &parsed.path,
+                parsed.source_parser,
+                markdown,
+                &mut report,
+                control,
+            )?;
+        }
         if graph_report.has_rejections() {
             // Parser summaries and generated suggestions are sinks too. Rebuild both
             // from the admitted graph so rejected identity text cannot survive there.
@@ -4343,6 +4364,73 @@ fn graph_identity_span(graph: &SymbolGraph) -> IdentitySpan {
         },
         end_line,
     }
+}
+
+/// Admit parser-owned Markdown selectors before document-key derivation.
+fn admit_markdown_facts(
+    facts: &mut BTreeMap<String, Cow<'_, MarkdownFacts>>,
+    graphs: &[impl Borrow<SymbolGraph>],
+    report: &mut GraphIdentityAdmission,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    for (graph_index, graph) in graphs.iter().enumerate() {
+        check_graph_work(control, graph_index)?;
+        let graph = graph.borrow();
+        let Some(markdown) = facts.get_mut(&graph.path) else {
+            continue;
+        };
+        if !markdown
+            .link_candidates
+            .iter()
+            .any(|candidate| GraphIdentityText::validate(&candidate.selector).is_err())
+        {
+            continue;
+        }
+        admit_markdown_fact_batch(
+            &graph.path,
+            graph.parser,
+            markdown.to_mut(),
+            report,
+            control,
+        )?;
+    }
+    Ok(())
+}
+
+/// Admit one parser-owned Markdown fact batch before document-key derivation.
+fn admit_markdown_fact_batch(
+    path: &str,
+    parser: ParserKind,
+    markdown: &mut MarkdownFacts,
+    report: &mut GraphIdentityAdmission,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    let mut rejected = Vec::new();
+    for (candidate_index, candidate) in markdown.link_candidates.iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        if let Err(error) = GraphIdentityText::validate(&candidate.selector) {
+            rejected.push((
+                candidate.source.line_start,
+                candidate.source.line_end,
+                GraphIdentityRejectionReason::from_error(&error),
+            ));
+        }
+    }
+    for (start_line, end_line, reason) in rejected {
+        report.record(
+            path,
+            IdentitySpan {
+                start_line,
+                end_line,
+            },
+            parser,
+            &[(GraphIdentityField::RelationTarget, reason)],
+        )?;
+    }
+    markdown
+        .link_candidates
+        .retain(|candidate| GraphIdentityText::validate(&candidate.selector).is_ok());
+    Ok(())
 }
 
 /// Overlay staged Markdown facts and parse only persisted graphs not parsed in this operation.
@@ -8345,6 +8433,191 @@ mod tests {
                 )
             }),
             "heading fragment did not resolve to its heading entity",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn markdown_identity_admission_keeps_valid_document_siblings() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(
+            root.join("docs/guide.md"),
+            "# Guide\n\n[valid](target.md#target)\n",
+        )?;
+        fs::write(root.join("docs/target.md"), "# Target\n")?;
+        let mut source_facts =
+            projectatlas_symbols::extract_markdown_facts("# Guide\n\n[valid](target.md#target)\n");
+        let mut invalid = source_facts.link_candidates[0].clone();
+        invalid.selector = "target.md\u{1}".to_string();
+        invalid.source.line_start = 3;
+        invalid.source.line_end = 3;
+        source_facts.link_candidates.insert(0, invalid);
+        let source_graph = source_facts.symbol_graph("docs/guide.md", Some("markdown"));
+        let target_facts = projectatlas_symbols::extract_markdown_facts("# Target\n");
+        let target_graph = target_facts.symbol_graph("docs/target.md", Some("markdown"));
+        let nodes = vec![
+            test_file_node("docs/guide.md", "markdown"),
+            test_file_node("docs/target.md", "markdown"),
+        ];
+        let control = super::super::standalone_index_work_control();
+        let mut symbols = empty_symbol_build_stage();
+        symbols.report.candidates = 2;
+        symbols.report.parsed = 2;
+        symbols.report.summaries = 2;
+        symbols.changes = vec![
+            SymbolProjectionChange::Parsed(SymbolParseSuccess {
+                path: "docs/guide.md".to_string(),
+                graph: source_graph,
+                markdown_facts: Some(Box::new(source_facts)),
+                source_parser: ParserKind::Structural,
+                summary: "Guide".to_string(),
+                summary_is_structural: true,
+                purpose_suggestion: None,
+            }),
+            SymbolProjectionChange::Parsed(SymbolParseSuccess {
+                path: "docs/target.md".to_string(),
+                graph: target_graph,
+                markdown_facts: Some(Box::new(target_facts)),
+                source_parser: ParserKind::Structural,
+                summary: "Target".to_string(),
+                summary_is_structural: true,
+                purpose_suggestion: None,
+            }),
+        ];
+        symbols.identity_admission = super::admit_symbol_build_stage(&mut symbols, &control)?;
+        require_eq(
+            &symbols.identity_admission.rejections.len(),
+            &1,
+            "Markdown rejection detail count",
+        )?;
+        let rejection = symbols
+            .identity_admission
+            .rejections
+            .first()
+            .ok_or_else(|| io::Error::other("Markdown rejection detail is missing"))?;
+        require_eq(
+            &rejection.path.as_str(),
+            &"docs/guide.md",
+            "Markdown rejection path",
+        )?;
+        require_eq(
+            &rejection.parser,
+            &ParserKind::Structural,
+            "Markdown rejection parser",
+        )?;
+        require_eq(
+            &rejection.field,
+            &GraphIdentityField::RelationTarget,
+            "Markdown rejection field",
+        )?;
+        require_eq(
+            &rejection.reason,
+            &GraphIdentityRejectionReason::ControlCharacters,
+            "Markdown rejection reason",
+        )?;
+        require_eq(
+            &rejection.span.start_line(),
+            &3,
+            "Markdown rejection start line",
+        )?;
+        let database = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let staged = stage_full_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &scan_policy,
+            &symbols,
+            &control,
+        )?;
+        require_eq(
+            &staged.identity_rejections.len(),
+            &1,
+            "staged Markdown rejection detail count",
+        )?;
+        require_eq(
+            &staged.relations.len(),
+            &1,
+            "staged valid Markdown relation count",
+        )?;
+        require(
+            staged.coverage.iter().any(|coverage| {
+                matches!(
+                    coverage.scope(),
+                    CoverageScope::Path { path } if path.as_str() == "docs/guide.md"
+                ) && coverage.state() == CoverageState::Complete
+                    && coverage.covered() == 1
+                    && coverage.omitted() == 0
+            }),
+            "invalid Markdown selector changed valid-sibling coverage semantics",
+        )?;
+        require(
+            staged.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Resolved {
+                        selector: projectatlas_core::graph::ReusableTargetSelector::Symbol {
+                            symbol
+                        },
+                        ..
+                    } if symbol.file.as_str() == "docs/target.md"
+                        && symbol.signature.as_str() == "target"
+                )
+            }),
+            "staged valid Markdown sibling was not resolved",
+        )?;
+        publish_full_staged_graph(&mut store, &nodes, &staged, &control, "markdown-admission")?;
+        drop(store);
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("Markdown admission project identity is missing")?;
+        let paths = nodes
+            .iter()
+            .map(|node| RepositoryNodePath::new(Path::new(&node.path)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let persisted_rejections =
+            store.repository_graph_identity_rejections(project, &paths, 16, None)?;
+        require_eq(
+            &persisted_rejections.len(),
+            &1,
+            "persisted Markdown rejection detail count",
+        )?;
+        let persisted_wire = serde_json::to_string(&persisted_rejections)?;
+        require(
+            !persisted_wire.contains("\\u0001") && !persisted_wire.contains("target.md"),
+            "persisted Markdown rejection retained the invalid selector",
+        )?;
+        let persisted_relations = store.repository_graph_relation_rows(
+            RepositoryGraphRelationQuery::Family {
+                relation: GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+            },
+            GraphLimits::MAX_ROWS,
+            None,
+        )?;
+        require_eq(
+            &persisted_relations.rows.len(),
+            &1,
+            "reopened valid Markdown relation count",
+        )?;
+        require(
+            persisted_relations.rows.iter().any(|relation| {
+                matches!(
+                    relation.relation.resolution(),
+                    RelationResolution::Resolved {
+                        selector: projectatlas_core::graph::ReusableTargetSelector::Symbol {
+                            symbol
+                        },
+                        ..
+                    } if symbol.file.as_str() == "docs/target.md"
+                        && symbol.signature.as_str() == "target"
+                )
+            }),
+            "reopened valid Markdown sibling was not resolved",
         )?;
         Ok(())
     }
