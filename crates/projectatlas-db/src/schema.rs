@@ -3315,6 +3315,7 @@ pub(crate) fn recreate_pre_selector_symbol_storage_for_test(
 mod tests {
     use super::*;
     use crate::{AtlasStore, DbError};
+    #[cfg(windows)]
     use projectatlas_core::IndexGeneration;
     #[cfg(windows)]
     use projectatlas_core::graph::{CoverageScope, RepositoryNodePath};
