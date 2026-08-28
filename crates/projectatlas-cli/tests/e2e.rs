@@ -4284,14 +4284,10 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     let linked_atlas_dir = linked.join(ATLAS_DIR_NAME);
     fs::create_dir(&linked_atlas_dir)?;
     let linked_db = linked_atlas_dir.join("projectatlas.db");
+    let linked_store = AtlasStore::open_for_project(&linked_db, &linked)?;
+    drop(linked_store);
     let connection = Connection::open(&linked_db)?;
-    connection.execute_batch(include_str!(
-        "../../projectatlas-db/tests/fixtures/released-schema-16.sql"
-    ))?;
-    connection.execute(
-        "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
-        [&linked_root_text],
-    )?;
+    connection.execute_batch("DELETE FROM project_root_identity;")?;
     connection.execute_batch(
         "INSERT INTO nodes(id, path, kind, extension, language, exists_now)
              VALUES(1, 'src/lib.rs', 'file', 'rs', 'rust', 1);
@@ -4377,7 +4373,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         worktree_session.call_tool("atlas_init", &serde_json::json!({"worktree": "feature"}))?;
     if !feature_init.contains("status: existing") {
         return Err(io::Error::other(format!(
-            "released feature atlas was not migrated and preserved through targeted init: {feature_init}"
+            "feature atlas was not repaired and preserved through targeted init: {feature_init}"
         ))
         .into());
     }
@@ -4407,7 +4403,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         .into());
     }
 
-    let migrated: String = Connection::open(&linked_db)?.query_row(
+    let repaired: String = Connection::open(&linked_db)?.query_row(
         "SELECT value FROM metadata WHERE key = 'schema_version'",
         [],
         |row| row.get(0),
@@ -4417,9 +4413,9 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         [],
         |row| row.get(0),
     )?;
-    if migrated != current_schema {
+    if repaired != current_schema {
         return Err(io::Error::other(format!(
-            "linked first-write scan did not migrate its released schema: expected {current_schema}, found {migrated}"
+            "linked first-write scan did not repair its current schema: expected {current_schema}, found {repaired}"
         ))
         .into());
     }
@@ -4477,10 +4473,10 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     drop(hydration_source);
     let main_before_linked_operations = mcp_database_snapshot(&main_db)?;
     let linked_after_first_write = AtlasStore::open_for_project(&linked_db, &linked)?;
-    let migrated_library = linked_after_first_write
+    let repaired_library = linked_after_first_write
         .load_node_by_path("src/lib.rs")?
-        .ok_or_else(|| io::Error::other("linked migration omitted its authored source"))?;
-    if migrated_library.purpose.purpose.as_deref() != Some("Preserved v0.4.4 worktree purpose.")
+        .ok_or_else(|| io::Error::other("linked repair omitted its authored source"))?;
+    if repaired_library.purpose.purpose.as_deref() != Some("Preserved v0.4.4 worktree purpose.")
         || linked_after_first_write
             .load_node_by_path("src/feature_only.rs")?
             .is_none()
@@ -4490,7 +4486,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
             .any(|node| node.node.path.contains("main-checkout"))
     {
         return Err(io::Error::other(
-            "linked v0.4.4 migration lost authored state or crossed its source boundary",
+            "linked repair lost authored state or crossed its source boundary",
         )
         .into());
     }
