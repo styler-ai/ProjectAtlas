@@ -132,6 +132,7 @@ pub(super) fn impact_findings(
                 nodes: Vec::new(),
                 metric: Some(0),
                 evidence: None,
+                community: None,
             });
         }
         for (key, hops) in distance {
@@ -148,6 +149,7 @@ pub(super) fn impact_findings(
                 nodes: analysis_nodes_for(nodes, std::slice::from_ref(&key)),
                 metric: Some(u64::from(hops)),
                 evidence: None,
+                community: None,
             });
         }
     } else if let VcsImpact::Unavailable { reason, .. } = vcs {
@@ -158,6 +160,7 @@ pub(super) fn impact_findings(
             nodes: Vec::new(),
             metric: None,
             evidence: None,
+            community: None,
         });
     }
     check_control(control)?;
@@ -185,6 +188,7 @@ fn dead_code_findings(
             nodes: Vec::new(),
             metric: None,
             evidence: None,
+            community: None,
         }]);
     }
     #[cfg(test)]
@@ -215,6 +219,7 @@ fn dead_code_findings(
             nodes: Vec::new(),
             metric: None,
             evidence: None,
+            community: None,
         }]);
     }
     let indegree = usage_indegrees(nodes, edges, control)?;
@@ -256,6 +261,7 @@ fn dead_code_findings(
             nodes: analysis_nodes_for(nodes, std::slice::from_ref(&key)),
             metric: Some(0),
             evidence: None,
+            community: None,
         }]
     }))
 }

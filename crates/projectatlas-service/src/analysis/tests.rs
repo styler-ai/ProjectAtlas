@@ -653,6 +653,26 @@ fn analysis_modes_are_closed_and_partial_evidence_stays_inconclusive() -> Result
         }),
         "relationship community did not cross folder ownership",
     )?;
+    require(
+        full_report
+            .findings
+            .iter()
+            .filter_map(|finding| {
+                (finding.kind == AnalysisFindingKind::Community)
+                    .then_some(finding.community.as_ref())
+                    .flatten()
+            })
+            .any(|community| {
+                community.members.iter().any(|member| {
+                    entity_path(&member.node.entity) == Some("src/a.rs")
+                        && !member.node.coverage.is_empty()
+                }) && community.members.iter().any(|member| {
+                    entity_path(&member.node.entity) == Some("tools/c.rs")
+                        && !member.node.coverage.is_empty()
+                }) && community.evidence.iter().all(|edge| edge.weight > 0)
+            }),
+        "community metadata omitted exact member coverage or weighted evidence",
+    )?;
 
     let mut acyclic = analysis_query(RelationAnalysisMode::Architecture)?;
     acyclic.relations.relation = Some(GraphRelationKind::Legacy(RelationKind::DependsOn));
@@ -781,6 +801,291 @@ fn analysis_modes_are_closed_and_partial_evidence_stays_inconclusive() -> Result
     require(
         load_relation_analysis(&store, &invalid, None).is_err(),
         "architecture accepted impact-only dead-code controls",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn communities_are_deterministic_and_partition_a_planted_weak_component()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let paths = [
+        "group-a/0.rs",
+        "group-a/1.rs",
+        "group-a/2.rs",
+        "group-b/0.rs",
+        "group-b/1.rs",
+        "group-b/2.rs",
+    ];
+    let mut nodes = BTreeMap::new();
+    for path in paths {
+        let entity = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new(path))?,
+            },
+            generation,
+        )?;
+        nodes.insert(
+            entity.key().canonical_identity().to_string(),
+            DetailedRelationNode {
+                entity,
+                classification: None,
+                content_selection: None,
+                purpose: RelationPurpose::Unavailable {
+                    path: Some(path.to_string()),
+                },
+                coverage: Vec::new(),
+            },
+        );
+    }
+    let key = |path: &str| {
+        nodes
+            .values()
+            .find(|node| entity_path(&node.entity) == Some(path))
+            .map(|node| node.entity.key().canonical_identity().to_string())
+            .expect("planted node key")
+    };
+    let edge = |source: &str, target: &str, kind: GraphRelationKind| LocalEdge {
+        source: key(source),
+        target: key(target),
+        kind,
+        complete: true,
+    };
+    let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+    let references = GraphRelationKind::Extended(ExtendedRelationKind::References);
+    let edges = vec![
+        edge("group-a/0.rs", "group-a/1.rs", calls),
+        edge("group-a/1.rs", "group-a/2.rs", calls),
+        edge("group-a/2.rs", "group-a/0.rs", calls),
+        edge("group-b/0.rs", "group-b/1.rs", calls),
+        edge("group-b/1.rs", "group-b/2.rs", calls),
+        edge("group-b/2.rs", "group-b/0.rs", calls),
+        edge("group-a/2.rs", "group-b/0.rs", references),
+        edge(
+            "group-a/0.rs",
+            "group-a/2.rs",
+            GraphRelationKind::Legacy(RelationKind::Contains),
+        ),
+    ];
+    let query = analysis_query(RelationAnalysisMode::Architecture)?;
+    let first = community_findings(&nodes, &edges, true, &query, None)?;
+    let second = community_findings(&nodes, &edges, true, &query, None)?;
+    let first_bytes = serde_json::to_vec(&first)?;
+    require(
+        first_bytes == serde_json::to_vec(&second)?,
+        "repeated community analysis was not byte stable",
+    )?;
+    let communities = first
+        .iter()
+        .filter_map(|finding| finding.community.as_ref())
+        .collect::<Vec<_>>();
+    require(
+        communities.len() == 2
+            && communities
+                .iter()
+                .all(|community| community.convergence == CommunityConvergence::Converged)
+            && communities
+                .iter()
+                .all(|community| community.coverage == CommunityCoverage::Complete)
+            && communities.iter().all(|community| !community.truncated)
+            && communities.iter().all(|community| {
+                community
+                    .members
+                    .iter()
+                    .all(|member| member.node.entity.generation() == generation)
+            }),
+        "planted community did not return two complete converged groups",
+    )?;
+    let group_members = communities
+        .iter()
+        .map(|community| {
+            community
+                .members
+                .iter()
+                .filter_map(|member| entity_path(&member.node.entity))
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    require(
+        group_members.contains(&BTreeSet::from([
+            "group-a/0.rs",
+            "group-a/1.rs",
+            "group-a/2.rs",
+        ])) && group_members.contains(&BTreeSet::from([
+            "group-b/0.rs",
+            "group-b/1.rs",
+            "group-b/2.rs",
+        ])),
+        "weighted propagation did not preserve the planted cohesive groups",
+    )?;
+    require(
+        weak_components(&nodes, &edges, true).len() == 1
+            && communities
+                .iter()
+                .map(|community| community.members.len())
+                .sum::<usize>()
+                == nodes.len(),
+        "community projection did not improve the giant weak-component baseline",
+    )?;
+    require(
+        communities.iter().all(|community| {
+            community
+                .weights
+                .iter()
+                .any(|weight| weight.relation == calls && weight.weight == 8)
+                && community
+                    .evidence
+                    .iter()
+                    .all(|evidence| evidence.weight > 0)
+        }) && !communities.iter().any(|community| {
+            community.evidence.iter().any(|evidence| {
+                evidence.relation == GraphRelationKind::Legacy(RelationKind::Contains)
+            })
+        }),
+        "community evidence omitted fixed weights or admitted containment",
+    )?;
+    require(
+        communities
+            .iter()
+            .map(|community| community.id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            == communities.len(),
+        "distinct planted communities did not receive distinct stable IDs",
+    )?;
+    let partial = community_findings(&nodes, &edges, false, &query, None)?;
+    require(
+        partial.len() == 1
+            && partial[0].status == AnalysisStatus::Inconclusive
+            && partial[0].community.as_ref().is_some_and(|community| {
+                community.coverage == CommunityCoverage::Partial
+                    && community.convergence == CommunityConvergence::Inconclusive
+                    && !community.truncated
+                    && community.members.len() == nodes.len()
+            }),
+        "partial community coverage did not remain typed and bounded",
+    )?;
+    let cancellation = IndexCancellation::new();
+    cancellation.cancel();
+    let control = IndexWorkControl::new(cancellation, None);
+    require(
+        community_findings(&nodes, &edges, true, &query, Some(&control)).is_err(),
+        "cancelled community analysis continued past its control",
+    )?;
+    let parameters = CommunityParameters {
+        algorithm_version: COMMUNITY_ALGORITHM_VERSION,
+        ordering_version: COMMUNITY_ORDERING_VERSION,
+        max_iterations: COMMUNITY_MAX_ITERATIONS,
+        node_limit: 3,
+        edge_limit: 1,
+        output_bytes: 65_536,
+        relation: None,
+    };
+    let (_, bounded_edges, resource_truncated) =
+        admitted_community_scope(&nodes, &edges, parameters);
+    require(
+        resource_truncated && bounded_edges.len() <= parameters.edge_limit as usize,
+        "community resource ceilings did not truncate the admitted edge scope",
+    )?;
+    let (labels, iteration, convergence) = propagate_community_labels(&[], &[], 0, None)?;
+    require(
+        labels.is_empty() && iteration == 0 && convergence == CommunityConvergence::Converged,
+        "empty community graph did not converge without unnecessary rounds",
+    )?;
+    let (_, iteration, convergence) = propagate_community_labels(
+        &["a".to_string(), "b".to_string(), "c".to_string()],
+        &[],
+        0,
+        None,
+    )?;
+    require(
+        iteration == 0 && convergence == CommunityConvergence::IterationLimit,
+        "community iteration ceiling did not produce typed non-convergence",
+    )?;
+    require(
+        select_community_label(
+            "z",
+            BTreeMap::from([
+                ("z".to_string(), 1),
+                ("b".to_string(), 4),
+                ("a".to_string(), 4),
+            ]),
+        ) == "a",
+        "equal community scores did not choose the stable label key",
+    )?;
+    let singletons = community_findings(&nodes, &[], true, &query, None)?;
+    require(
+        singletons.len() == nodes.len()
+            && singletons.iter().all(|finding| {
+                finding.status == AnalysisStatus::Candidate
+                    && finding
+                        .community
+                        .as_ref()
+                        .is_some_and(|community| community.members.len() == 1)
+            }),
+        "sparse disconnected community input did not preserve singleton candidates",
+    )?;
+    let mut scale_nodes = nodes.clone();
+    for index in 0..(MAX_ANALYSIS_NODES as usize - scale_nodes.len()) {
+        let path = format!("scale/{index}.rs");
+        let entity = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new(&path))?,
+            },
+            generation,
+        )?;
+        scale_nodes.insert(
+            entity.key().canonical_identity().to_string(),
+            DetailedRelationNode {
+                entity,
+                classification: None,
+                content_selection: None,
+                purpose: RelationPurpose::Unavailable { path: Some(path) },
+                coverage: Vec::new(),
+            },
+        );
+    }
+    let scale_keys = scale_nodes.keys().cloned().collect::<Vec<_>>();
+    let hub = scale_keys.first().cloned().ok_or("scale hub missing")?;
+    let scale_kinds = [
+        calls,
+        GraphRelationKind::Legacy(RelationKind::Imports),
+        GraphRelationKind::Legacy(RelationKind::DependsOn),
+        GraphRelationKind::Extended(ExtendedRelationKind::Tests),
+    ];
+    let scale_edges = scale_keys
+        .iter()
+        .skip(1)
+        .flat_map(|source| {
+            scale_kinds.into_iter().map(|kind| LocalEdge {
+                source: source.clone(),
+                target: hub.clone(),
+                kind,
+                complete: true,
+            })
+        })
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    let scaled = community_findings(&scale_nodes, &scale_edges, true, &query, None)?;
+    let elapsed = started.elapsed();
+    let scaled_bytes = serde_json::to_vec(&scaled)?;
+    require(
+        elapsed < Duration::from_secs(5)
+            && scale_edges.len() <= MAX_ANALYSIS_EDGES as usize
+            && !scaled_bytes.is_empty()
+            && scaled.iter().all(|finding| {
+                finding
+                    .community
+                    .as_ref()
+                    .is_some_and(|community| community.members.len() <= MAX_ANALYSIS_NODES as usize)
+            }),
+        "representative high-degree community analysis crossed its bounded envelope",
     )?;
     Ok(())
 }
