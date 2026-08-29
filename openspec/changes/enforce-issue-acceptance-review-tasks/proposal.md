@@ -7,7 +7,7 @@ ProjectAtlas IssueOps currently treats the OpenSpec implementation checklist as 
 - **BREAKING for open mapped issue bodies:** rename the authoritative `OpenSpec Tasks` field to `Implementation Tasks` while continuing to mirror the mapped `tasks.md` text, order, ownership, and checked state exactly.
 - Require one separate `Acceptance and Review Tasks` field on every open mapped issue, with independently checked intent/outcome, implementation/source, specification/architecture, test/proof, and final-readiness review gates.
 - Stop requiring future implementation task lists to end with the historical architecture-review row because specification/architecture reconciliation now belongs to the acceptance checklist; preserve every such row already present in an existing issue/OpenSpec task list.
-- Require exactly one issue complexity label: `complexity:low`, `complexity:medium`, `complexity:high`, or `complexity:very-high`. IssueOps validates only the label contract; external agent routing may use the value without putting model policy into CI.
+- Require exactly one issue complexity label on every open issue: `complexity:low`, `complexity:medium`, `complexity:high`, or `complexity:very-high`. IssueOps validates only the label contract; external agent routing may use the value without putting model policy into CI.
 - Keep IssueOps model-blind: it validates task structure and completion only; reviewer-model routing remains outside the repository checker.
 - Preserve the complete existing issue packet—`Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Non-Goals`, and `Pre-Mortem`—and retain every existing diagram, mitigation, relationship, publication, and release gate.
 - Require all implementation and acceptance/review tasks to be checked before issue closure or milestone completion; ordinary in-progress pull requests may retain unchecked tasks.
@@ -28,7 +28,7 @@ None.
 
 - IssueOps parser and self-test: `.github/scripts/issue-checklists.py`.
 - Issue event and CI/release enforcement: `.github/workflows/issueops.yml`, existing CI/release callers, and behavior-focused workflow tests.
-- Open issue bodies and labels mapped by `openspec/issue-map.json`; closed issue history remains unchanged.
+- Open issue bodies mapped by `openspec/issue-map.json`, complexity labels on every open issue, and unchanged closed issue history.
 - Applicable issue and pull-request templates plus `docs/workflow.md`, `docs/agent-integration.md`, repository instructions, and the version-matched ProjectAtlas plugin guidance when it repeats the issue contract.
 - No Rust product/runtime, CLI/MCP, crate, dependency, schema, migration, query, transaction, or SQLite behavior changes.
 

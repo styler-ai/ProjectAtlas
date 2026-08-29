@@ -57,10 +57,10 @@ IssueOps SHALL enforce acceptance as a final ordered state transition. No accept
 - **AND** it does not treat pull-request existence as issue closure or final acceptance.
 
 ### Requirement: Issue complexity is explicit and singular
-IssueOps SHALL require every open mapped issue to carry exactly one label from `complexity:low`, `complexity:medium`, `complexity:high`, or `complexity:very-high`. It SHALL NOT infer complexity or encode model-routing behavior.
+IssueOps SHALL require every open issue to carry exactly one label from `complexity:low`, `complexity:medium`, `complexity:high`, or `complexity:very-high`. It SHALL NOT infer complexity, encode model-routing behavior, or require unmapped backlog issues to fabricate OpenSpec-backed task fields.
 
 #### Scenario: Valid complexity label
-- **WHEN** an open mapped issue has exactly one accepted complexity label
+- **WHEN** an open issue has exactly one accepted complexity label
 - **THEN** IssueOps accepts the label contract independently of priority, milestone, or task state.
 
 #### Scenario: Missing duplicate or unknown complexity
@@ -68,8 +68,13 @@ IssueOps SHALL require every open mapped issue to carry exactly one label from `
 - **THEN** IssueOps fails with the observed label state
 - **AND** it does not choose, invoke, or validate any agent model.
 
+#### Scenario: Unmapped backlog issue
+- **WHEN** an open issue has no OpenSpec mapping and is not implementation-ready
+- **THEN** IssueOps still requires exactly one valid complexity label
+- **AND** it does not require `Implementation Tasks` or `Acceptance and Review Tasks` until a real mapping supplies task authority.
+
 ### Requirement: Existing issue strength and historical truth are preserved
-The migration SHALL preserve every existing open issue section, substantive byte, link, task, checked state, mitigation owner ID, milestone fact, and native relationship except the specified task-heading, mitigation-terminology, acceptance-checklist, and complexity-label additions. Closed mapped issues SHALL retain historical bodies and remain readable through their legacy OpenSpec task headings.
+The migration SHALL preserve every existing open mapped issue section, substantive byte, link, task, checked state, mitigation owner ID, milestone fact, and native relationship except the specified task-heading, mitigation-terminology, acceptance-checklist, and complexity-label additions. Closed mapped issues SHALL retain historical bodies and remain readable through their legacy OpenSpec task headings.
 
 #### Scenario: Open issue migration
 - **WHEN** an open mapped issue is migrated
@@ -83,11 +88,11 @@ The migration SHALL preserve every existing open issue section, substantive byte
 - **AND** it still rejects unchecked historical implementation tasks.
 
 ### Requirement: Activation fails closed across live state
-The new contract SHALL become authoritative only after the accepted checker and every open mapped live issue converge. The migration SHALL validate exact live readback and provide restoration of prior bodies, labels, milestone/status, and native relationships before merge.
+The new contract SHALL become authoritative only after the accepted checker, every open mapped live issue body, and every open issue complexity label converge. The migration SHALL validate exact live readback and provide restoration of prior bodies, labels, milestone/status, and native relationships before merge.
 
 #### Scenario: Complete activation
 - **WHEN** the accepted implementation is ready to publish
-- **THEN** every open mapped issue is migrated and read back against the new checker
+- **THEN** every open mapped issue body and every open issue complexity label is migrated and read back against the new checker
 - **AND** the accepted checker head is merged only when the complete live set passes
 - **AND** IssueOps is rerun from accepted current `main` after merge.
 

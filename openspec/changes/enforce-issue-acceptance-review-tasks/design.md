@@ -12,7 +12,7 @@ The abandoned #500/#501 lane proposed ordinary non-checkbox acceptance bullets, 
 - Rename the exact OpenSpec mirror to `Implementation Tasks` without changing its local `tasks.md` authority.
 - Add one exact `Acceptance and Review Tasks` checklist whose five tasks cover issue intent/outcome, implementation/source, specification/architecture, test/proof, and final readiness.
 - Make acceptance state impossible to advance while implementation is incomplete, and require both lists before closure/release.
-- Require exactly one valid complexity label on every open mapped issue without encoding model routing in IssueOps.
+- Require exactly one valid complexity label on every open issue without encoding model routing in IssueOps or inventing implementation tasks for unmapped backlog issues.
 - Migrate all open mapped issues in one bounded activation and preserve closed historical bodies.
 
 **Non-Goals:**
@@ -52,19 +52,20 @@ Ordinary in-progress pull requests remain valid with unchecked implementation an
 
 ### 4. Require one explicit complexity label
 
-Every open mapped issue has exactly one of `complexity:low`, `complexity:medium`, `complexity:high`, or `complexity:very-high`. IssueOps checks cardinality and vocabulary only. It does not infer complexity and does not select models.
+Every open issue has exactly one of `complexity:low`, `complexity:medium`, `complexity:high`, or `complexity:very-high`. IssueOps checks cardinality and vocabulary only. It does not infer complexity, select models, or require an unmapped backlog issue to fabricate OpenSpec-backed implementation tasks.
 
 Sol assigns the label during specification using delivery-boundary complexity rather than priority, duration, checklist length, or changed-line count. Routing policy lives in the external model-router: low/medium normally select Luna High, high/very-high Luna XHigh, Terra High always reviews, and very-high receives an additional fresh Sol XHigh holistic acceptance after Terra.
 
 ### 5. Activate through a bounded live migration
 
-Before the new checker becomes authoritative, prepare exact edits for every open mapped issue that:
+Before the new checker becomes authoritative, prepare exact body edits for every open mapped issue and one complexity-label update for every open issue. The body migration SHALL:
 
 - preserve all existing prose, links, tasks, checked state, relationships, and milestone facts;
 - rename only the authoritative task heading;
 - add the fixed acceptance checklist unchecked unless the issue already has complete independently accepted proof that is read back live;
 - rename pre-mortem ownership text from `(OpenSpec tasks: ...)` to `(Implementation tasks: ...)` without changing IDs or state;
-- add exactly one specification-owned complexity label.
+
+Unmapped backlog issues receive only the specification-owned complexity label until they gain a real OpenSpec mapping and implementation task authority.
 
 Publish the issue edits only after the implementation has passed local independent review. The old main checker may fail closed during the short heading-transition window; no issue or release transition is authorized from that state. Push the accepted checker immediately, validate all live bodies with the new branch checker, merge only on complete readback, and rerun IssueOps on current `main`. If complete convergence cannot be achieved, restore the preserved prior bodies/labels and do not merge the checker.
 
