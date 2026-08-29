@@ -1329,7 +1329,7 @@ fn push_tree_symbol(
     let parent = symbol_parent(node, content).and_then(|parent| compact_symbol_identity(&parent));
     let exported = has_direct_export_parent(node)
         || object_literal_method_owner(node, content).is_some_and(|owner| owner.exported)
-        || is_exported_symbol(graph.language.as_deref(), &name, &signature);
+        || is_exported_symbol(graph.language.as_deref(), node, content, &name, &signature);
     let documentation = symbol_documentation(node, content);
     let admitted = push_symbol_with_metadata(
         graph,
@@ -1655,7 +1655,7 @@ fn php_static_call_part(node: Node<'_>, content: &str) -> Option<String> {
     }
     matches!(
         node.kind(),
-        "name" | "qualified_name" | "relative_name" | "identifier"
+        "name" | "qualified_name" | "relative_name" | "relative_scope" | "identifier"
     )
     .then(|| named_text(node, content))
     .flatten()
@@ -2176,18 +2176,49 @@ fn append_declaration_tokens(
 }
 
 /// Return whether a declaration is exported or publicly visible.
-fn is_exported_symbol(language: Option<&str>, name: &str, signature: &str) -> bool {
+fn is_exported_symbol(
+    language: Option<&str>,
+    node: Node<'_>,
+    content: &str,
+    name: &str,
+    signature: &str,
+) -> bool {
+    if is_php_language(language) {
+        return php_declaration_is_exported(node, content);
+    }
     let trimmed = signature.trim_start();
     trimmed.starts_with("pub ")
         || trimmed.starts_with("pub(")
         || trimmed.starts_with("export ")
         || trimmed.starts_with("public ")
         || trimmed.starts_with("open ")
-        || is_php_language(language)
-            && !trimmed.starts_with("private ")
-            && !trimmed.starts_with("protected ")
-            && !trimmed.starts_with("use ")
         || matches!(language, Some("go")) && starts_with_uppercase(name)
+}
+
+/// Return whether a PHP declaration has no private or protected visibility modifier.
+fn php_declaration_is_exported(node: Node<'_>, content: &str) -> bool {
+    if is_import_node(node.kind()) {
+        return false;
+    }
+    let declaration = match node.kind() {
+        "property_element" | "const_element" => node.parent(),
+        _ => Some(node),
+    };
+    let Some(declaration) = declaration else {
+        return true;
+    };
+    let mut cursor = declaration.walk();
+    declaration
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "visibility_modifier")
+        .find_map(|modifier| node_text(modifier, content))
+        .is_none_or(|modifier| {
+            let keyword = modifier
+                .split_once('(')
+                .map_or(modifier.as_str(), |(keyword, _)| keyword)
+                .trim();
+            !keyword.eq_ignore_ascii_case("private") && !keyword.eq_ignore_ascii_case("protected")
+        })
 }
 
 /// Return whether a symbol name starts with an uppercase Unicode scalar.
@@ -4572,6 +4603,102 @@ function helper(string $value): void {}
             2,
             "duplicate PHP declarations must remain visible rather than being merged"
         );
+    }
+
+    #[test]
+    fn php_visibility_modifiers_control_exported_symbol_queries() {
+        let source = r"<?php
+class Service {
+    final protected function guarded(): void {}
+    static private string $cache;
+    public static function exposed(): void {}
+    function defaulted(): void {}
+}
+";
+        let graph = extract_symbol_graph("src/Service.php", Some("php"), source);
+
+        for (name, exported) in [
+            ("Service", true),
+            ("guarded", false),
+            ("cache", false),
+            ("exposed", true),
+            ("defaulted", true),
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == name),
+                "missing PHP symbol {name}: {:?}",
+                graph.symbols
+            );
+            let Some(symbol) = graph.symbols.iter().find(|symbol| symbol.name == name) else {
+                continue;
+            };
+            assert_eq!(
+                symbol.exported, exported,
+                "unexpected exported state for {name}: {symbol:?}"
+            );
+            assert_eq!(symbol.parser, ParserKind::TreeSitter);
+            assert!(
+                symbol.source_selector.is_some(),
+                "missing selector for {name}"
+            );
+        }
+
+        let exported_names = graph
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.exported)
+            .map(|symbol| symbol.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(exported_names.contains(&"exposed"));
+        assert!(exported_names.contains(&"defaulted"));
+        assert!(!exported_names.contains(&"guarded"));
+        assert!(!exported_names.contains(&"cache"));
+    }
+
+    #[test]
+    fn php_relative_scope_calls_preserve_exact_targets_and_source_evidence() {
+        let source = r"<?php
+class Child extends Base {
+    public function run(): void {
+        self::local();
+        parent::inherited();
+        static::lateBound();
+        $scope::dynamic();
+    }
+}
+";
+        let graph = extract_symbol_graph("src/Child.php", Some("php"), source);
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+
+        assert_eq!(calls.len(), 3, "dynamic PHP scopes must remain unresolved");
+        for (target, line) in [
+            ("self::local", 4),
+            ("parent::inherited", 5),
+            ("static::lateBound", 6),
+        ] {
+            assert!(
+                calls.iter().any(|relation| {
+                    relation.target_name == target && relation.source_name == "run"
+                }),
+                "missing PHP call relation {target}: {calls:?}"
+            );
+            let Some(relation) = calls
+                .iter()
+                .find(|relation| relation.target_name == target && relation.source_name == "run")
+            else {
+                continue;
+            };
+            assert_eq!(relation.path, "src/Child.php");
+            assert_eq!(relation.line, line);
+            assert!(relation.context.contains(target));
+        }
+        assert!(calls.iter().all(|relation| {
+            !relation.target_name.contains("dynamic") && !relation.target_name.contains("scope")
+        }));
     }
 
     #[test]
