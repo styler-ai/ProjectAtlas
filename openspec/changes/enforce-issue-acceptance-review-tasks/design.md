@@ -104,4 +104,4 @@ Rollback before merge restores the prior live issue bodies, #517 milestone/statu
 
 ## Open Questions
 
-None. The task names, state machine, complexity vocabulary, historical boundary, and model-policy separation are settled by the user.
+None.

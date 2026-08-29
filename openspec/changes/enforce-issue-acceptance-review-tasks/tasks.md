@@ -1,7 +1,7 @@
 ## 1. Specification and Issue Boundary
 
-- [ ] 1.1 Create and map one sanitized v0.5 IssueOps owner, assign its accepted complexity, declare its queued direct #492 child and blocker activation, synchronize the complete issue packet with this OpenSpec task list, and pass strict OpenSpec plus current IssueOps validation.
-- [ ] 1.2 Add focused issue-task authority and acceptance-state architecture views to the existing v0.5 release architecture document; render every changed Mermaid block and inspect both visual communication and semantic truth.
+- [x] 1.1 Create and map one sanitized v0.5 IssueOps owner, assign its accepted complexity, declare its queued direct #492 child and blocker activation, synchronize the complete issue packet with this OpenSpec task list, and pass strict OpenSpec plus current IssueOps validation.
+- [x] 1.2 Add focused issue-task authority and acceptance-state architecture views to the existing v0.5 release architecture document; render every changed Mermaid block and inspect both visual communication and semantic truth.
 
 ## 2. IssueOps Contract
 
