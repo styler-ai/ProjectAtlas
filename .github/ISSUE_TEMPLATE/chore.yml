@@ -97,7 +97,7 @@ body:
     id: openspec
     attributes:
       label: OpenSpec plan and task checklist
-      description: Maintainers or agents should fill this before planned implementation. Mirror the linked `openspec/changes/<id>/tasks.md` checklist exactly under an `Implementation Tasks` heading before closing or releasing.
+      description: Maintainers or agents should fill this before planned implementation. Mirror the linked `openspec/changes/<id>/tasks.md` checklist exactly under an `Implementation Tasks` heading; check each implementation row immediately after its behavior and required task-level proof pass, and reopen it with acceptance rows reset when review finds partial work before closing or releasing.
       value: |
         OpenSpec change: _to be assigned_
 
@@ -108,7 +108,7 @@ body:
     id: acceptance_review_tasks
     attributes:
       label: Acceptance and Review Tasks
-      description: Keep these five canonical review gates in order; they remain unchecked until implementation is complete and then advance as a checked prefix.
+      description: Keep these five canonical review gates in order; they remain unchecked until implementation is complete and then advance as a checked prefix. Reset every row if implementation reopens after partial review.
       options:
         - label: "Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary."
           required: false

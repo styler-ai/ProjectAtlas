@@ -1873,6 +1873,29 @@ Mitigations:
         {"state": "OPEN", "body": prefix_contract},
         [(True, "1.1 Anchored task"), (True, "2.1 Finish ordinary implementation.")],
     ) == []
+    partial_acceptance_contract = issue_contract.replace(
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[0]}",
+        f"- [x] {ACCEPTANCE_REVIEW_TASKS[0]}",
+    )
+    assert any(
+        "acceptance and review tasks must be unchecked while implementation tasks are incomplete"
+        in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": partial_acceptance_contract}, expected
+        )
+    )
+    reopened_prefix_contract = prefix_contract.replace(
+        "- [x] 2.1 Finish ordinary implementation.",
+        "- [ ] 2.1 Finish ordinary implementation.",
+    )
+    assert any(
+        "acceptance and review tasks must be unchecked while implementation tasks are incomplete"
+        in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": reopened_prefix_contract},
+            [(True, "1.1 Anchored task"), (False, "2.1 Finish ordinary implementation.")],
+        )
+    )
     non_prefix_contract = prefix_contract.replace(
         f"- [ ] {ACCEPTANCE_REVIEW_TASKS[1]}",
         f"- [x] {ACCEPTANCE_REVIEW_TASKS[1]}",
