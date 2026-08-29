@@ -875,6 +875,11 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
             GraphRelationKind::Legacy(RelationKind::Contains),
         )?,
     ];
+    let mut edges = edges;
+    edges
+        .last_mut()
+        .ok_or("containment regression edge missing")?
+        .complete = false;
     let query = analysis_query(RelationAnalysisMode::Architecture)?;
     let first = community_findings(&nodes, &edges, true, &query, None)?;
     let second = community_findings(&nodes, &edges, true, &query, None)?;
@@ -979,6 +984,26 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
     require(
         community_findings(&nodes, &edges, true, &query, Some(&control)).is_err(),
         "cancelled community analysis continued past its control",
+    )?;
+    let mut bounded_query = query.clone();
+    bounded_query.relations.budget = bounded_query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(3),
+        None,
+        None,
+        None,
+        None,
+    )?;
+    let bounded = community_findings(&nodes, &edges, true, &bounded_query, None)?;
+    let bounded_community = bounded
+        .first()
+        .and_then(|finding| finding.community.as_ref())
+        .ok_or("bounded community metadata missing")?;
+    require(
+        bounded_community.parameters.node_limit == 3
+            && bounded_community.parameters.edge_limit == 1
+            && bounded_community.id != communities[0].id,
+        "community metadata did not use effective caller resource limits",
     )?;
     let parameters = CommunityParameters {
         algorithm_version: COMMUNITY_ALGORITHM_VERSION,
@@ -1089,6 +1114,22 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
                     .is_some_and(|community| community.members.len() <= MAX_ANALYSIS_NODES as usize)
             }),
         "representative high-degree community analysis crossed its bounded envelope",
+    )?;
+    let mut sparse_budget_query = query;
+    sparse_budget_query.relations.budget = sparse_budget_query
+        .relations
+        .budget
+        .with_aggregate_limits(None, None, None, None, Some(64 * 1024), None)?;
+    let sparse_budgeted = community_findings(&scale_nodes, &[], true, &sparse_budget_query, None)?;
+    require(
+        sparse_budgeted.iter().any(|finding| {
+            finding.status == AnalysisStatus::Inconclusive
+                && finding
+                    .community
+                    .as_ref()
+                    .is_some_and(|community| community.truncated)
+        }),
+        "sparse singleton construction exceeded its intermediate budget without a typed outcome",
     )?;
     Ok(())
 }

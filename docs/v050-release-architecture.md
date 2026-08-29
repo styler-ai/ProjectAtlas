@@ -130,7 +130,7 @@ flowchart LR
     normalized_graph[(Current normalized graph)] --> admit[Resolved local non-containment edges]
     admit --> bound[Node, edge, time, memory, iteration bounds]
     bound -->|complete and within bounds| labels[Stable-order weighted label propagation]
-    bound -->|partial coverage or node/edge overflow| uncertain[Typed inconclusive or truncated result]
+    bound -->|partial coverage or node/edge/intermediate-memory overflow| uncertain[Typed inconclusive or truncated result]
     labels --> ids[Stable parameter-and-member community IDs]
     ids --> result[Bounded returned output: members, evidence, coverage, convergence, truncation]
     uncertain --> result

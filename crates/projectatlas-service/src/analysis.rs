@@ -834,7 +834,10 @@ fn load_relation_analysis_with_closure_deadline(
         control,
     )?;
     check_control(control)?;
-    let evidence_complete = relation_evidence_complete(&relations, &nodes, &edges, query, &closure);
+    let evidence_complete =
+        relation_evidence_complete(&relations, &nodes, &edges, query, &closure, false);
+    let community_evidence_complete =
+        relation_evidence_complete(&relations, &nodes, &edges, query, &closure, true);
     let dead_code_scope_complete = dead_code_scope_complete(&relations, query);
     check_control(control)?;
     let vcs_load = if query.mode == RelationAnalysisMode::Impact {
@@ -925,6 +928,7 @@ fn load_relation_analysis_with_closure_deadline(
                 &nodes,
                 &edges,
                 evidence_complete,
+                community_evidence_complete,
                 query,
                 symbol_byte_budget,
                 &mut supplemental_work,
@@ -952,6 +956,10 @@ fn load_relation_analysis_with_closure_deadline(
         ServiceError::InvalidInput("analysis finding count overflowed".to_string())
     })?;
     let mut finding_bytes = serialized_bytes_controlled(&findings, control)?;
+    let generated_composition_bytes = vcs_load
+        .retained_bytes
+        .saturating_add(topology_bytes)
+        .saturating_add(finding_bytes);
     supplemental_work.retained_composition_bytes = vcs_load
         .retained_bytes
         .saturating_add(topology_bytes)
@@ -992,13 +1000,32 @@ fn load_relation_analysis_with_closure_deadline(
         .saturating_add(initial_finding_bytes)
         .saturating_add(external_relation_identity_bytes)
         .saturating_add(supplemental_work.hydrated_symbol_peak_bytes);
+    let generation_peak = relations
+        .work
+        .intermediate_bytes
+        .saturating_add(closure.decoded_bytes)
+        .saturating_add(external_relation_identity_bytes)
+        .saturating_add(generated_composition_bytes);
     let final_peak = relations
         .work
         .intermediate_bytes
         .saturating_add(closure.decoded_bytes)
         .saturating_add(supplemental_work.retained_composition_bytes)
         .saturating_add(external_relation_identity_bytes);
-    let peak_intermediate_bytes = hydration_peak.max(final_peak);
+    let peak_intermediate_bytes = hydration_peak.max(generation_peak).max(final_peak);
+    let community_projection_truncated = findings.iter().any(|finding| {
+        finding
+            .community
+            .as_ref()
+            .is_some_and(|community| community.truncated)
+    });
+    if community_projection_truncated {
+        supplemental_work.composition_truncated = true;
+        push_limit(
+            &mut supplemental_work.reached_limits,
+            GraphLimitKind::IntermediateBytes,
+        );
+    }
     let full_finding_count = u32::try_from(findings.len()).map_err(|_overflow| {
         ServiceError::InvalidInput("analysis finding count overflowed".to_string())
     })?;
@@ -1040,7 +1067,8 @@ fn load_relation_analysis_with_closure_deadline(
     let analysis_truncated = (!evidence_complete && relations.truncated)
         || !closure.complete
         || supplemental_work.symbol_hydration_truncated
-        || supplemental_work.composition_truncated;
+        || supplemental_work.composition_truncated
+        || community_projection_truncated;
     let returned = u32::try_from(findings.len()).unwrap_or(u32::MAX);
     let total = if analysis_truncated {
         RelationTotalState::AtLeast(u64::from(generated_finding_count))
@@ -1582,12 +1610,16 @@ fn relation_evidence_complete(
     edges: &[LocalEdge],
     query: &RelationAnalysisQuery,
     closure: &ClosureWork,
+    community_only: bool,
 ) -> bool {
     closure.complete
         && closure.induced_scope_closed
         && report.reached_limits.is_empty()
         && query.relations.direction == RelationDirection::Outbound
-        && edges.iter().all(|edge| edge.complete)
+        && edges
+            .iter()
+            .filter(|edge| !community_only || community_relation_weight(edge.kind).is_some())
+            .all(|edge| edge.complete)
         && nodes.values().all(|node| match node.entity.selector() {
             EntitySelector::Project => true,
             EntitySelector::Folder { .. }
@@ -1657,6 +1689,7 @@ fn architecture_findings(
     nodes: &BTreeMap<String, DetailedRelationNode>,
     edges: &[LocalEdge],
     complete: bool,
+    community_complete: bool,
     query: &RelationAnalysisQuery,
     symbol_byte_budget: u64,
     supplemental_work: &mut SupplementalWork,
@@ -1698,7 +1731,34 @@ fn architecture_findings(
         findings.push(purpose_finding(nodes, component, complete));
     }
     if query.include_communities {
-        findings.extend(community_findings(nodes, edges, complete, query, control)?);
+        let mut existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+        if existing_finding_bytes > symbol_byte_budget {
+            supplemental_work.composition_truncated = true;
+            push_limit(
+                &mut supplemental_work.reached_limits,
+                GraphLimitKind::IntermediateBytes,
+            );
+            while existing_finding_bytes > symbol_byte_budget && findings.len() > 1 {
+                check_control(control)?;
+                findings.pop();
+                existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+            }
+            if existing_finding_bytes > symbol_byte_budget {
+                findings.clear();
+                existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+            }
+        }
+        let community_budget = symbol_byte_budget.saturating_sub(existing_finding_bytes);
+        if community_budget > 0 {
+            findings.extend(community_findings_with_budget(
+                nodes,
+                edges,
+                community_complete,
+                query,
+                community_budget,
+                control,
+            )?);
+        }
     }
     if query.include_cycles {
         let dependency_edges = edges
@@ -2266,11 +2326,31 @@ fn community_relation_weight(kind: GraphRelationKind) -> Option<u32> {
 }
 
 /// Compute deterministic bounded weighted label-propagation communities.
+#[cfg(test)]
 fn community_findings(
     nodes: &BTreeMap<String, DetailedRelationNode>,
     edges: &[LocalEdge],
     complete: bool,
     query: &RelationAnalysisQuery,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Vec<AnalysisFinding>> {
+    community_findings_with_budget(
+        nodes,
+        edges,
+        complete,
+        query,
+        query.relations.budget.intermediate_bytes(),
+        control,
+    )
+}
+
+/// Compute communities with an explicit remaining intermediate-byte allowance.
+fn community_findings_with_budget(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    edges: &[LocalEdge],
+    complete: bool,
+    query: &RelationAnalysisQuery,
+    intermediate_bytes: u64,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<Vec<AnalysisFinding>> {
     check_control(control)?;
@@ -2279,12 +2359,16 @@ fn community_findings(
         algorithm_version: COMMUNITY_ALGORITHM_VERSION,
         ordering_version: COMMUNITY_ORDERING_VERSION,
         max_iterations: COMMUNITY_MAX_ITERATIONS,
-        node_limit: MAX_ANALYSIS_NODES,
-        edge_limit: MAX_ANALYSIS_EDGES,
+        node_limit: query.relations.budget.nodes().min(MAX_ANALYSIS_NODES),
+        edge_limit: query.relations.budget.edges().min(MAX_ANALYSIS_EDGES),
         output_bytes: query.relations.budget.output_bytes(),
         relation: query.relations.relation,
     };
-    let complete = complete && edges.iter().all(|edge| edge.complete);
+    let complete = complete
+        && edges
+            .iter()
+            .filter(|edge| community_relation_weight(edge.kind).is_some())
+            .all(|edge| edge.complete);
     let (keys, admitted_edges, resource_truncated) =
         admitted_community_scope(nodes, edges, parameters);
     if !complete || resource_truncated {
@@ -2292,9 +2376,19 @@ fn community_findings(
         if resource_truncated {
             evidence.truncate(parameters.edge_limit as usize);
         }
+        let metadata_fits =
+            community_finding_upper_bound(nodes, &keys, &evidence, &weights, parameters, control)?
+                <= intermediate_bytes;
+        let metadata_keys = if metadata_fits { keys.as_slice() } else { &[] };
+        let metadata_evidence = if metadata_fits {
+            evidence.as_slice()
+        } else {
+            &[]
+        };
+        let metadata_truncated = resource_truncated || !metadata_fits;
         let metadata = community_metadata(
-            &keys,
-            &evidence,
+            metadata_keys,
+            metadata_evidence,
             weights,
             parameters,
             0,
@@ -2304,7 +2398,7 @@ fn community_findings(
             } else {
                 CommunityCoverage::Partial
             },
-            resource_truncated,
+            metadata_truncated,
             nodes,
         );
         return Ok(vec![AnalysisFinding {
@@ -2316,8 +2410,8 @@ fn community_findings(
                 "community projection is inconclusive because relation coverage is partial"
             }
             .to_string(),
-            nodes: analysis_nodes_for(nodes, &keys),
-            metric: Some(keys.len() as u64),
+            nodes: analysis_nodes_for(nodes, metadata_keys),
+            metric: Some(metadata_keys.len() as u64),
             evidence: None,
             community: Some(metadata),
         }]);
@@ -2326,23 +2420,38 @@ fn community_findings(
     let (labels, iteration, convergence) =
         propagate_community_labels(&keys, &admitted_edges, parameters.max_iterations, control)?;
     if convergence != CommunityConvergence::Converged {
-        let metadata = community_metadata(
+        let metadata_fits = community_finding_upper_bound(
+            nodes,
             &keys,
             &admitted_edges,
+            &weights,
+            parameters,
+            control,
+        )? <= intermediate_bytes;
+        let metadata_keys = if metadata_fits { keys.as_slice() } else { &[] };
+        let metadata_evidence = if metadata_fits {
+            admitted_edges.as_slice()
+        } else {
+            &[]
+        };
+        let metadata_truncated = !metadata_fits;
+        let metadata = community_metadata(
+            metadata_keys,
+            metadata_evidence,
             weights,
             parameters,
             iteration,
             convergence,
             CommunityCoverage::Complete,
-            false,
+            metadata_truncated,
             nodes,
         );
         return Ok(vec![AnalysisFinding {
             kind: AnalysisFindingKind::Community,
             status: AnalysisStatus::Inconclusive,
             summary: "community label propagation reached its fixed iteration ceiling".to_string(),
-            nodes: analysis_nodes_for(nodes, &keys),
-            metric: Some(keys.len() as u64),
+            nodes: analysis_nodes_for(nodes, metadata_keys),
+            metric: Some(metadata_keys.len() as u64),
             evidence: None,
             community: Some(metadata),
         }]);
@@ -2358,6 +2467,7 @@ fn community_findings(
         iteration,
         convergence,
         control,
+        intermediate_bytes,
     )
 }
 
@@ -2513,6 +2623,7 @@ fn community_candidate_findings(
     iteration: u32,
     convergence: CommunityConvergence,
     control: Option<&IndexWorkControl>,
+    intermediate_bytes: u64,
 ) -> ServiceResult<Vec<AnalysisFinding>> {
     let mut groups = BTreeMap::<String, Vec<String>>::new();
     for key in keys {
@@ -2520,13 +2631,29 @@ fn community_candidate_findings(
         let label = labels.get(key).cloned().unwrap_or_else(|| key.clone());
         groups.entry(label).or_default().push(key.clone());
     }
-    let mut findings = Vec::with_capacity(groups.len());
+    let mut findings = Vec::new();
+    let mut retained_bytes = 0_u64;
+    let mut truncated = false;
     for members in groups.values() {
         check_control(control)?;
-        let member_keys = members.iter().cloned().collect::<BTreeSet<_>>();
+        let candidate_bound = community_candidate_upper_bound(
+            nodes,
+            members,
+            admitted_edges,
+            weights,
+            parameters,
+            control,
+        )?;
+        if retained_bytes.saturating_add(candidate_bound) > intermediate_bytes {
+            truncated = true;
+            break;
+        }
         let evidence = admitted_edges
             .iter()
-            .filter(|edge| member_keys.contains(&edge.source) && member_keys.contains(&edge.target))
+            .filter(|edge| {
+                members.binary_search(&edge.source).is_ok()
+                    && members.binary_search(&edge.target).is_ok()
+            })
             .cloned()
             .collect::<Vec<_>>();
         let metadata = community_metadata(
@@ -2540,7 +2667,7 @@ fn community_candidate_findings(
             false,
             nodes,
         );
-        findings.push(AnalysisFinding {
+        let finding = AnalysisFinding {
             kind: AnalysisFindingKind::Community,
             status: AnalysisStatus::Candidate,
             summary: if members.len() == 1 {
@@ -2553,9 +2680,115 @@ fn community_candidate_findings(
             metric: Some(members.len() as u64),
             evidence: None,
             community: Some(metadata),
-        });
+        };
+        let finding_bytes = serialized_bytes_controlled(&finding, control)?;
+        if retained_bytes.saturating_add(finding_bytes) > intermediate_bytes {
+            truncated = true;
+            break;
+        }
+        retained_bytes = retained_bytes.saturating_add(finding_bytes);
+        findings.push(finding);
+    }
+    if truncated {
+        check_control(control)?;
+        let marker = AnalysisFinding {
+            kind: AnalysisFindingKind::Community,
+            status: AnalysisStatus::Inconclusive,
+            summary: "community projection crossed the intermediate-byte budget before all communities were constructed"
+                .to_string(),
+            nodes: Vec::new(),
+            metric: None,
+            evidence: None,
+            community: Some(CommunityAnalysis {
+                id: community_id(&[], weights, parameters),
+                members: Vec::new(),
+                evidence: Vec::new(),
+                weights: weights.to_vec(),
+                parameters,
+                iteration,
+                convergence: CommunityConvergence::Inconclusive,
+                coverage: CommunityCoverage::Complete,
+                truncated: true,
+            }),
+        };
+        let marker_bytes = serialized_bytes_controlled(&marker, control)?;
+        if retained_bytes.saturating_add(marker_bytes) > intermediate_bytes {
+            findings.clear();
+        }
+        findings.push(marker);
     }
     Ok(findings)
+}
+
+/// Conservatively charge one candidate before allocating its owned vectors.
+fn community_finding_upper_bound(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    members: &[String],
+    evidence: &[CommunityEdgeEvidence],
+    weights: &[CommunityRelationWeight],
+    parameters: CommunityParameters,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let member_bytes = community_member_bytes(nodes, members, control)?;
+    let evidence_bytes = serialized_bytes_controlled(evidence, control)?;
+    let weights_bytes = serialized_bytes_controlled(weights, control)?;
+    let parameter_bytes = serialized_bytes_controlled(&parameters, control)?;
+    Ok(member_bytes
+        .saturating_mul(2)
+        .saturating_add(evidence_bytes)
+        .saturating_add(weights_bytes)
+        .saturating_add(parameter_bytes)
+        .saturating_add((members.len() as u64).saturating_mul(2))
+        .saturating_add(2_048))
+}
+
+/// Conservatively charge admitted evidence without allocating a group copy.
+fn community_candidate_upper_bound(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    members: &[String],
+    admitted_edges: &[CommunityEdgeEvidence],
+    weights: &[CommunityRelationWeight],
+    parameters: CommunityParameters,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let member_bytes = community_member_bytes(nodes, members, control)?;
+    let mut evidence_bytes = 0_u64;
+    for edge in admitted_edges {
+        check_control(control)?;
+        if members.binary_search(&edge.source).is_ok()
+            && members.binary_search(&edge.target).is_ok()
+        {
+            evidence_bytes = evidence_bytes
+                .saturating_add(serialized_bytes_controlled(edge, control)?)
+                .saturating_add(1);
+        }
+    }
+    let weights_bytes = serialized_bytes_controlled(weights, control)?;
+    let parameter_bytes = serialized_bytes_controlled(&parameters, control)?;
+    Ok(member_bytes
+        .saturating_mul(2)
+        .saturating_add(evidence_bytes)
+        .saturating_add(weights_bytes)
+        .saturating_add(parameter_bytes)
+        .saturating_add((members.len() as u64).saturating_mul(2))
+        .saturating_add(2_048))
+}
+
+/// Measure projected members one at a time before retaining a finding.
+fn community_member_bytes(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    members: &[String],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let mut bytes = 0_u64;
+    for key in members {
+        check_control(control)?;
+        if let Some(node) = nodes.get(key) {
+            bytes =
+                bytes.saturating_add(serialized_bytes_controlled(&analysis_node(node), control)?);
+        }
+    }
+    Ok(bytes)
 }
 
 /// Build stable metadata for one community or typed inconclusive result.
