@@ -183,6 +183,9 @@ const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 // The failure path gives the owner this bounded window to observe the stop marker and exit.
 const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(windows)]
+// The exact child-stop helper allows its owned process up to this wait budget to exit.
+const CODEX_OWNER_CHILD_STOP_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
 // Allow normal scheduling variance without allowing a late readiness retry to hide.
 const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
 #[cfg(windows)]
@@ -36574,6 +36577,7 @@ public static class Program
     let timeout_elapsed = timeout_started.elapsed();
     let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
         + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     let text = error.to_string();
     let timeout_readiness_elapsed = text
@@ -36605,7 +36609,7 @@ public static class Program
         || windows_process_is_alive(&timeout_child_identity)?
     {
         return Err(io::Error::other(format!(
-            "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
+            "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} owner_observation_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} child_stop_budget={CODEX_OWNER_CHILD_STOP_BUDGET:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
         ))
         .into());
     }
