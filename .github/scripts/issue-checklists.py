@@ -1752,6 +1752,9 @@ Mitigations:
     assert pull_request_owner_issue(
         "owner/repo", {"title": "Work for owner/repo#517", "body": ""}
     ) == 517
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Work for OWNER/rePO#517", "body": ""}
+    ) == 517
     assert complexity_label_failures(
         {"state": "OPEN", "labels": [{"name": "complexity:medium"}]}
     ) == []
