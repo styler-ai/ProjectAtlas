@@ -810,6 +810,120 @@ fn analysis_modes_are_closed_and_partial_evidence_stays_inconclusive() -> Result
 }
 
 #[test]
+fn community_closure_scopes_scope_gaps_to_admitted_relations() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut all_relations = analysis_query(RelationAnalysisMode::Architecture)?;
+    all_relations.relations.anchor = RelationAnchor::File {
+        file: RepositoryFilePath::new(Path::new("tools/c.rs"))?,
+    };
+    all_relations.relations.budget = DetailedRelationBudget::from_graph_limits(
+        projectatlas_core::graph::GraphLimits::new(100, 100, 8, 64 * 1024)?,
+    );
+    let relations = load_detailed_relations(&store, &all_relations.relations, None)?;
+    let mut nodes = collect_nodes(&relations, None)?;
+    for anchor in ["src/b.rs", "src/a.rs"] {
+        let mut query = all_relations.relations.clone();
+        query.anchor = RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new(anchor))?,
+        };
+        for (key, node) in collect_nodes(&load_detailed_relations(&store, &query, None)?, None)? {
+            nodes.entry(key).or_insert(node);
+        }
+    }
+    let containment_target = nodes
+        .iter()
+        .find_map(|(key, node)| {
+            matches!(
+                node.entity.selector(),
+                EntitySelector::Symbol { symbol } if symbol.name.as_str() == "c_aux"
+            )
+            .then_some(key.clone())
+        })
+        .ok_or("containment target missing from all-family fixture")?;
+    let weighted_target = nodes
+        .iter()
+        .find_map(|(key, node)| {
+            matches!(
+                node.entity.selector(),
+                EntitySelector::Symbol { symbol } if symbol.name.as_str() == "b_hub"
+            )
+            .then_some(key.clone())
+        })
+        .ok_or("weighted target missing from all-family fixture")?;
+    nodes.remove(&containment_target);
+    let mut contains_edges = Vec::new();
+    let contains_closure = close_induced_edges(
+        &store,
+        &all_relations,
+        &relations.work,
+        Instant::now() + Duration::from_secs(5),
+        &nodes,
+        &mut contains_edges,
+        None,
+    )?;
+    require(
+        !contains_closure.induced_scope_closed
+            && contains_closure.community_scope == CommunityClosureScope::Closed,
+        "containment-only closure gap changed community scope completeness",
+    )?;
+    require(
+        relation_evidence_complete(
+            &relations,
+            &nodes,
+            &contains_edges,
+            &all_relations,
+            &contains_closure,
+            true,
+        ),
+        "containment-only closure gap made community evidence inconclusive",
+    )?;
+    let containment_findings =
+        community_findings(&nodes, &contains_edges, true, &all_relations, None)?;
+    require(
+        containment_findings
+            .iter()
+            .all(|finding| finding.status == AnalysisStatus::Candidate),
+        "containment-only closure gap did not preserve community candidates",
+    )?;
+
+    nodes.remove(&weighted_target);
+    let mut weighted_edges = Vec::new();
+    let weighted_closure = close_induced_edges(
+        &store,
+        &all_relations,
+        &relations.work,
+        Instant::now() + Duration::from_secs(5),
+        &nodes,
+        &mut weighted_edges,
+        None,
+    )?;
+    require(
+        weighted_closure.community_scope == CommunityClosureScope::Open,
+        "out-of-scope weighted closure gap was ignored by community scope",
+    )?;
+    require(
+        !relation_evidence_complete(
+            &relations,
+            &nodes,
+            &weighted_edges,
+            &all_relations,
+            &weighted_closure,
+            true,
+        ),
+        "out-of-scope weighted closure gap was reported as complete community evidence",
+    )?;
+    let weighted_findings =
+        community_findings(&nodes, &weighted_edges, false, &all_relations, None)?;
+    require(
+        weighted_findings
+            .iter()
+            .any(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "out-of-scope weighted closure gap did not produce inconclusive communities",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn communities_are_deterministic_and_partition_a_planted_weak_component()
 -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store()?;

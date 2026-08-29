@@ -1436,6 +1436,16 @@ fn local_edge(
     })
 }
 
+/// Completeness state for admitted community relations during closure.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum CommunityClosureScope {
+    /// Every admitted community relation stayed within the induced nodes.
+    #[default]
+    Closed,
+    /// At least one admitted community relation escaped the induced nodes.
+    Open,
+}
+
 /// Work and evidence retained while closing edges among admitted nodes.
 #[derive(Default)]
 struct ClosureWork {
@@ -1445,6 +1455,8 @@ struct ClosureWork {
     deadline_reached: bool,
     /// Whether the induced node scope was closed in the requested direction.
     induced_scope_closed: bool,
+    /// Scope status for admitted community relations.
+    community_scope: CommunityClosureScope,
     /// Database adjacency rows inspected by closure.
     inspected_edges: u32,
     /// Database-decoded bytes retained during closure.
@@ -1466,6 +1478,11 @@ fn close_induced_edges(
     let mut work = ClosureWork {
         complete: true,
         induced_scope_closed: query.relations.direction == RelationDirection::Outbound,
+        community_scope: if query.relations.direction == RelationDirection::Outbound {
+            CommunityClosureScope::Closed
+        } else {
+            CommunityClosureScope::Open
+        },
         ..ClosureWork::default()
     };
     let mut keys = Vec::with_capacity(nodes.len());
@@ -1546,12 +1563,17 @@ fn close_induced_edges(
                 if !analysis_relation_matches(&row.detail.relation, &query.relations) {
                     continue;
                 }
+                let community_relation =
+                    community_relation_weight(row.detail.relation.kind()).is_some();
                 let source_key = row.detail.source.key().canonical_identity().to_string();
                 if matches!(
                     row.detail.relation.resolution(),
                     RelationResolution::Ambiguous { .. } | RelationResolution::Unresolved { .. }
                 ) {
                     work.induced_scope_closed = false;
+                    if community_relation {
+                        work.community_scope = CommunityClosureScope::Open;
+                    }
                     if let Some(source) = nodes.get(&source_key) {
                         work.resolution_gaps
                             .push(resolution_gap_finding(&row.detail.relation, source));
@@ -1560,6 +1582,9 @@ fn close_induced_edges(
                 }
                 let Some(target) = row.detail.target else {
                     work.induced_scope_closed = false;
+                    if community_relation {
+                        work.community_scope = CommunityClosureScope::Open;
+                    }
                     continue;
                 };
                 let target_key = target.key().canonical_identity().to_string();
@@ -1572,6 +1597,9 @@ fn close_induced_edges(
                     });
                 } else {
                     work.induced_scope_closed = false;
+                    if community_relation {
+                        work.community_scope = CommunityClosureScope::Open;
+                    }
                 }
             }
             if read.page.truncated {
@@ -1616,7 +1644,11 @@ fn relation_evidence_complete(
     community_only: bool,
 ) -> bool {
     closure.complete
-        && closure.induced_scope_closed
+        && if community_only {
+            closure.community_scope == CommunityClosureScope::Closed
+        } else {
+            closure.induced_scope_closed
+        }
         && report.reached_limits.is_empty()
         && query.relations.direction == RelationDirection::Outbound
         && edges
