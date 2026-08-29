@@ -388,6 +388,19 @@ jobs:
           exit $LASTEXITCODE
           '@ | Set-Content -LiteralPath "contract-artifacts\projectatlas-packaged-contract.ps1" -Encoding utf8
 
+      - name: Run Windows release-mode lifecycle contracts
+        shell: pwsh
+        run: |
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
+          & pwsh -NoProfile -File $contractRunner implicit_bare_root --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bare-root database preflight release regression failed with exit code $LASTEXITCODE."
+          }
+          & pwsh -NoProfile -File $contractRunner generated_mcp_config_preserves_explicit_conventional_database_authority --exact --include-ignored --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Generated MCP database authority release regression failed with exit code $LASTEXITCODE."
+          }
+
       - name: Package
         shell: pwsh
         run: |

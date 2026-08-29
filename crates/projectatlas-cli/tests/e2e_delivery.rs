@@ -2678,6 +2678,47 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("  parser-pack-assets:").next())
         .ok_or_else(|| io::Error::other("release omitted the Windows prepublish job"))?;
+    let windows_package = release
+        .split("  package-windows:")
+        .nth(1)
+        .and_then(|tail| tail.split("  prepublish-installer-smoke-unix:").next())
+        .ok_or_else(|| io::Error::other("release omitted the Windows package job"))?;
+    let windows_lifecycle_contracts = windows_package
+        .split("      - name: Run Windows release-mode lifecycle contracts")
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| {
+            io::Error::other(
+                "Windows package job omitted release-mode lifecycle contract execution",
+            )
+        })?;
+    for required in [
+        "shell: pwsh",
+        "$contractRunner = Join-Path \"contract-artifacts\" \"projectatlas-packaged-contract.ps1\"",
+        "& pwsh -NoProfile -File $contractRunner implicit_bare_root --nocapture",
+        "Bare-root database preflight release regression failed with exit code $LASTEXITCODE.",
+        "& pwsh -NoProfile -File $contractRunner generated_mcp_config_preserves_explicit_conventional_database_authority --exact --include-ignored --nocapture",
+        "Generated MCP database authority release regression failed with exit code $LASTEXITCODE.",
+    ] {
+        if !windows_lifecycle_contracts.contains(required) {
+            return Err(io::Error::other(format!(
+                "Windows package omitted release-mode lifecycle contract boundary {required:?}"
+            ))
+            .into());
+        }
+    }
+    let bare_root_invocation = windows_lifecycle_contracts
+        .find("& pwsh -NoProfile -File $contractRunner implicit_bare_root --nocapture")
+        .ok_or_else(|| io::Error::other("Windows package omitted bare-root invocation"))?;
+    let generated_config_invocation = windows_lifecycle_contracts
+        .find("& pwsh -NoProfile -File $contractRunner generated_mcp_config_preserves_explicit_conventional_database_authority --exact --include-ignored --nocapture")
+        .ok_or_else(|| io::Error::other("Windows package omitted generated-MCP invocation"))?;
+    if bare_root_invocation >= generated_config_invocation {
+        return Err(io::Error::other(
+            "Windows package must preserve bare-root before generated-MCP release contract ordering",
+        )
+        .into());
+    }
     let unix_permission_restore = unix_prepublish
         .split("      - name: Restore packaged contract execute permissions")
         .nth(1)
