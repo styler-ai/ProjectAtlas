@@ -14,6 +14,12 @@ IssueOps SHALL require every open mapped GitHub issue to contain exactly one vis
 - **THEN** IssueOps fails with a bounded structural diagnostic
 - **AND** it does not infer task state from unrelated checkboxes or comments.
 
+#### Scenario: Architecture reconciliation moves to acceptance
+- **WHEN** a new implementation task list does not end with the historical architecture-review task
+- **THEN** IssueOps does not reject the implementation mirror for that reason
+- **AND** the canonical specification and architecture acceptance task remains mandatory
+- **AND** migration preserves any existing architecture-review implementation row unchanged.
+
 ### Requirement: Acceptance and review tasks are strong and fixed
 The `Acceptance and Review Tasks` section SHALL contain exactly five ordered outcome-oriented checkboxes covering intent/outcome, implementation/source, specification/architecture, test/proof, and final readiness. Their canonical text SHALL require holistic review of the complete issue and applicable behavior boundary without naming an agent model.
 

@@ -30,6 +30,8 @@ The abandoned #500/#501 lane proposed ordinary non-checkbox acceptance bullets, 
 
 This avoids renaming every local OpenSpec file or introducing another task store. Treating the GitHub issue as a second free-form implementation plan was rejected because it would lose exact synchronization.
 
+The migration preserves any existing review-oriented OpenSpec row, including the historical final architecture-reconciliation task, because deleting it would weaken an accepted issue packet. The new checker no longer requires every future implementation list to end with that review-only row: the canonical specification/architecture acceptance task now owns the holistic reconciliation gate.
+
 ### 2. Use one fixed, model-blind acceptance checklist
 
 Every open mapped issue contains exactly one `Acceptance and Review Tasks` section with these ordered tasks:
@@ -70,7 +72,7 @@ A compatibility mode that accepts both task headings indefinitely was rejected b
 
 ### 6. Extend existing tests and guidance without new machinery
 
-The standard-library self-test owns parser/state-transition coverage. Existing Rust workflow-policy E2E assertions confirm that CI, release, issue templates, PR guidance, repository guidance, and the checker carry the same contract. No dependency, service, schema, generated manifest, or new workflow is needed. Parsing remains linear in bounded issue-body size and reuses the issue payload and labels already fetched.
+The standard-library self-test owns parser/state-transition coverage. Existing Rust workflow-policy E2E assertions confirm that CI, release, issue templates, PR guidance, repository guidance, and the checker carry the same contract, including removal of the legacy mandatory-final-review-row rule for new implementation lists. No dependency, service, schema, generated manifest, or new workflow is needed. Parsing remains linear in bounded issue-body size and reuses the issue payload and labels already fetched.
 
 ## Risks / Trade-offs
 

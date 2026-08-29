@@ -5,7 +5,7 @@
 
 ## 2. IssueOps Contract
 
-- [ ] 2.1 Replace the open mapped-issue `OpenSpec Tasks` authority with exactly one `Implementation Tasks` field that retains exact local `tasks.md` text/order/ownership/state mirroring, isolates unrelated or hidden checkboxes, and keeps legacy task-heading support only for closed historical issues.
+- [ ] 2.1 Replace the open mapped-issue `OpenSpec Tasks` authority with exactly one `Implementation Tasks` field that retains exact local `tasks.md` text/order/ownership/state mirroring, isolates unrelated or hidden checkboxes, keeps legacy task-heading support only for closed historical issues, and retires the mandatory final architecture-review implementation row without deleting any existing task.
 - [ ] 2.2 Require exactly one canonical five-row `Acceptance and Review Tasks` field, reject weakened/reordered/extra acceptance checkboxes, enforce all-unchecked acceptance until implementation completes and prefix-only review progress afterward, and require both task lists complete before closure or release.
 - [ ] 2.3 Require exactly one accepted complexity label on every open mapped issue, report missing/duplicate/unknown values, and keep the checker free of model names, model routing, semantic scoring, and inferred complexity.
 - [ ] 2.4 Extend the standard-library IssueOps self-test for positive, negative, hidden, duplicate, state-transition, complexity, closure/release, migration, and closed-history compatibility cases without adding a dependency or evidence ledger.

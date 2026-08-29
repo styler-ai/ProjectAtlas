@@ -6,6 +6,7 @@ ProjectAtlas IssueOps currently treats the OpenSpec implementation checklist as 
 
 - **BREAKING for open mapped issue bodies:** rename the authoritative `OpenSpec Tasks` field to `Implementation Tasks` while continuing to mirror the mapped `tasks.md` text, order, ownership, and checked state exactly.
 - Require one separate `Acceptance and Review Tasks` field on every open mapped issue, with independently checked intent/outcome, implementation/source, specification/architecture, test/proof, and final-readiness review gates.
+- Stop requiring future implementation task lists to end with the historical architecture-review row because specification/architecture reconciliation now belongs to the acceptance checklist; preserve every such row already present in an existing issue/OpenSpec task list.
 - Require exactly one issue complexity label: `complexity:low`, `complexity:medium`, `complexity:high`, or `complexity:very-high`. IssueOps validates only the label contract; external agent routing may use the value without putting model policy into CI.
 - Keep IssueOps model-blind: it validates task structure and completion only; reviewer-model routing remains outside the repository checker.
 - Preserve the complete existing issue packet—`Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Non-Goals`, and `Pre-Mortem`—and retain every existing diagram, mitigation, relationship, publication, and release gate.
