@@ -183,7 +183,10 @@ const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 // The failure path gives the owner this bounded window to observe the stop marker and exit.
 const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(windows)]
-const CODEX_OWNER_EARLY_EXIT_MAX_ELAPSED: Duration = Duration::from_secs(5);
+// Allow normal scheduling variance without allowing a late readiness retry to hide.
+const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+const CODEX_OWNER_EARLY_EXIT_MAX_ELAPSED: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const CODEX_OWNER_DELAYED_PUBLICATION: Duration = Duration::from_secs(6);
 #[cfg(windows)]
@@ -36258,7 +36261,8 @@ fn spawn_codex_owned_obsolete_mcp(
                 child_pid_file,
                 stable_runtime,
                 format!(
-                    "Codex MCP owner fixture did not publish its child PID within {CODEX_OWNER_READINESS_TIMEOUT:?} (elapsed={elapsed:?})"
+                    "Codex MCP owner fixture did not publish its child PID within {CODEX_OWNER_READINESS_TIMEOUT:?} (elapsed={elapsed:?} readiness_elapsed_ms={})",
+                    elapsed.as_millis()
                 ),
             ));
         }
@@ -36380,8 +36384,23 @@ public static class Program
     let timeout_elapsed = timeout_started.elapsed();
     let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
     let text = error.to_string();
+    let timeout_readiness_elapsed = text
+        .split("readiness_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "true owner fixture timeout omitted its pre-cleanup readiness elapsed diagnostic:\n{text}"
+            ))
+        })?;
+    let timeout_readiness_upper_bound =
+        CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     if timeout_elapsed < CODEX_OWNER_READINESS_TIMEOUT
         || timeout_elapsed > timeout_upper_bound
+        || timeout_readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || timeout_readiness_elapsed > timeout_readiness_upper_bound
         || !text.contains("did not publish its child PID within 30s")
         || !text.contains("elapsed=")
         || !text.contains(&format!("owner={}", codex_fixture.display()))
@@ -36390,7 +36409,7 @@ public static class Program
         || text.contains("fixture cleanup also failed")
     {
         return Err(io::Error::other(format!(
-            "true owner fixture timeout was not bounded and diagnostic: elapsed={timeout_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} cleanup_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} upper_bound={timeout_upper_bound:?}\n{text}"
+            "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
         ))
         .into());
     }
