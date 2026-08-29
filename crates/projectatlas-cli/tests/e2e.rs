@@ -36107,6 +36107,54 @@ fn stop_codex_owner_after_spawn_failure(
 }
 
 #[cfg(windows)]
+/// Retire the exact published child, then kill and reap its owned parent.
+fn cleanup_codex_owner_processes(
+    mut parent: Child,
+    child_identity: &WindowsProcessIdentity,
+) -> Result<(), Box<dyn Error>> {
+    let child_cleanup_result = stop_windows_fixture_process(child_identity);
+    let kill_result = parent.kill();
+    let wait_result = parent.wait();
+    let mut failures = Vec::new();
+    if let Err(error) = child_cleanup_result {
+        failures.push(format!(
+            "could not retire the published child safely: {error}"
+        ));
+    }
+    if let Err(error) = kill_result
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        failures.push(format!(
+            "could not terminate the held owner process: {error}"
+        ));
+    }
+    if let Err(error) = wait_result {
+        failures.push(format!("could not reap the held owner process: {error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(failures.join("; ")).into())
+    }
+}
+
+#[cfg(windows)]
+/// Preserve a negative assertion while cleaning up an unexpectedly accepted owner.
+fn codex_owner_unexpected_acceptance_error(
+    mode: &str,
+    parent: Child,
+    child_identity: &WindowsProcessIdentity,
+) -> Box<dyn Error> {
+    let cleanup_result = cleanup_codex_owner_processes(parent, child_identity);
+    let mut message = format!("{mode} owner fixture publication was accepted");
+    if let Err(error) = cleanup_result {
+        message.push_str("; fixture cleanup also failed: ");
+        message.push_str(&error.to_string());
+    }
+    io::Error::other(message).into()
+}
+
+#[cfg(windows)]
 fn read_codex_owner_child_identity(
     child_identity_file: &Path,
     stable_runtime: &Path,
@@ -36346,10 +36394,15 @@ public static class Program
             None,
             Some(mode),
         );
-        let Err(error) = result else {
-            return Err(
-                io::Error::other(format!("{mode} owner fixture publication was accepted")).into(),
-            );
+        let error = match result {
+            Ok((parent, child_identity)) => {
+                return Err(codex_owner_unexpected_acceptance_error(
+                    mode,
+                    parent,
+                    &child_identity,
+                ));
+            }
+            Err(error) => error,
         };
         let elapsed = started.elapsed();
         let text = error.to_string();
@@ -36367,6 +36420,31 @@ public static class Program
         }
     }
 
+    // Exercise the same branch a negative fixture would take if validation regressed.
+    let accepted_identity_file = temp.path().join("unexpected-acceptance.pid");
+    let accepted = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &accepted_identity_file,
+        None,
+        None,
+    )?;
+    let accepted_identity = accepted.1.clone();
+    let unexpected_error =
+        codex_owner_unexpected_acceptance_error("mismatched", accepted.0, &accepted_identity);
+    let unexpected_error_text = unexpected_error.to_string();
+    if windows_process_is_alive(&accepted_identity)?
+        || !unexpected_error_text.contains("mismatched owner fixture publication was accepted")
+        || unexpected_error_text.contains("fixture cleanup also failed")
+    {
+        return Err(io::Error::other(format!(
+            "unexpectedly accepted negative owner fixture did not clean up its owned processes: {unexpected_error}"
+        ))
+        .into());
+    }
+
     let identity_file = temp.path().join("timeout.pid");
     let timeout_started = Instant::now();
     let result = spawn_codex_owned_obsolete_mcp(
@@ -36378,8 +36456,15 @@ public static class Program
         None,
         Some("timeout"),
     );
-    let Err(error) = result else {
-        return Err(io::Error::other("owner fixture without publication was accepted").into());
+    let error = match result {
+        Ok((parent, child_identity)) => {
+            return Err(codex_owner_unexpected_acceptance_error(
+                "timeout",
+                parent,
+                &child_identity,
+            ));
+        }
+        Err(error) => error,
     };
     let timeout_elapsed = timeout_started.elapsed();
     let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
