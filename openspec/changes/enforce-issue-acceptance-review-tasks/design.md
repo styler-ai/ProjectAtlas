@@ -93,6 +93,12 @@ The standard-library self-test owns parser/state-transition coverage. Existing R
 
 Rollback before merge restores the prior live issue bodies, labels, milestone/status, and native relationships and abandons the unmerged checker head. After merge, any defect is fixed forward under the same owner; closed historical bodies remain untouched throughout.
 
+## Dependencies / Cross-Issue Impact
+
+- #517 has no product-code prerequisite and can be implemented on the accepted release baseline while #464 completes its independent product lane.
+- The live #517 milestone, readiness state, direct-child relationship to #492, and #492 blocker edge activate only with the accepted body/label migration; before that bounded window, the current release graph remains authoritative.
+- The accepted #517 contract becomes a release-wide workflow gate for every remaining open mapped issue, while preserving each issue's existing product scope and real dependency edges.
+
 ## Open Questions
 
 None. The task names, state machine, complexity vocabulary, historical boundary, and model-policy separation are settled by the user.
