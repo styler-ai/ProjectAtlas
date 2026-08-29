@@ -102,10 +102,39 @@ The new contract SHALL become authoritative only after the accepted checker, eve
 - **AND** the prior live bodies, #517 milestone/status, and native relationships are restored when the checker has not merged
 - **AND** the independently authorized complexity labels remain intact.
 
+### Requirement: Pull-request validation isolates mutable issue progress
+Pull-request IssueOps SHALL validate the owning issue's candidate-local implementation task slice against live issue state while requiring every unrelated mapped issue task slice to remain identical to the accepted pull-request base. Missing or ambiguous owning-issue identity, unreadable base authority, or an unrelated task-slice edit SHALL fail closed. Pushes to `main`, milestone completion, and release validation SHALL retain complete global live-state validation, while ordinary issue events SHALL retain their existing affected-issue `--planned-issue` scope.
+
+#### Scenario: Unrelated issue advances while a pull request is open
+- **WHEN** issue A's implementation tasks advance immediately in live GitHub state while an independent pull request for issue B retains issue A's accepted base task slice
+- **THEN** pull-request validation compares issue B's candidate slice with issue B's live state
+- **AND** it compares issue A's candidate slice with the pull-request base rather than mutable live state
+- **AND** issue A's truthful progress does not fail issue B's unchanged branch.
+
+#### Scenario: Pull request changes an unrelated task slice
+- **WHEN** a pull request for issue B changes issue A's local implementation tasks relative to the accepted base
+- **THEN** IssueOps rejects the candidate even if issue A's live state happens to match
+- **AND** no unrelated local task authority can ride through the owner-only live comparison.
+
+#### Scenario: Ownership or base authority is unavailable
+- **WHEN** pull-request CI cannot resolve exactly one owning issue or cannot read the accepted base task authority
+- **THEN** IssueOps fails with a bounded ownership or base diagnostic
+- **AND** it does not fall back to accepting an owner-only or candidate-only comparison.
+
+#### Scenario: Accepted branch reaches a global boundary
+- **WHEN** IssueOps runs for a push to `main`, milestone completion, or release validation
+- **THEN** it validates every mapped local task slice against complete live issue state
+- **AND** branch isolation cannot hide repository-wide drift at the convergence boundary.
+
+#### Scenario: An issue event targets one planned issue
+- **WHEN** IssueOps runs for an ordinary issue event
+- **THEN** it retains the existing `--planned-issue` validation scope for that affected issue
+- **AND** it does not broaden an issue edit into an unrelated repository-wide task comparison.
+
 ### Requirement: Repository guidance and tests share the contract
 The IssueOps self-test, behavior-focused repository E2E, issue templates, pull-request template, repository workflow guidance, repository agent guidance, and applicable version-matched ProjectAtlas plugin guidance SHALL describe and verify the same two-list, completion, complexity, and historical-compatibility rules without adding a dependency or model policy to IssueOps.
 
 #### Scenario: Contract implementation changes
 - **WHEN** the checker or issue contract changes
-- **THEN** focused positive and negative tests cover heading isolation, exact task mirroring, canonical acceptance text, state ordering, complexity cardinality, migration compatibility, closed history, and closure/release completion
+- **THEN** focused positive and negative tests cover heading isolation, exact task mirroring, canonical acceptance text, state ordering, complexity cardinality, pull-request ownership and base isolation, concurrent progress, migration compatibility, closed history, and closure/release completion
 - **AND** guidance and templates use the same exact field names and lifecycle.

@@ -92,6 +92,8 @@ Assign an open issue to a canonical `vMAJOR.MINOR.PATCH-00` release milestone on
 
 Ordinary pull requests require exact local/GitHub checklist synchronization but do not require the whole release milestone to be complete. Full milestone checklist completion is a release-only gate. SHA-pinned Actions, locked Cargo commands, least privilege, parser/package/signature/digest validation, release checksums, and other executable integrity controls remain independent of task bookkeeping.
 
+Pull-request IssueOps resolves exactly one owning issue from the existing PR reference syntax. It compares that issue's candidate implementation-task slice with mutable live state, while requiring every unrelated mapped task slice to remain identical to the accepted PR base; missing or ambiguous ownership and unreadable base authority fail closed. Pushes to `main` and milestone/release validation retain the complete global live-state comparison, while ordinary issue events retain their affected-issue `--planned-issue` scope.
+
 Commit identity is provenance, not a general test invalidation key. After a commit-only or metadata-only change, rerun cheap OpenSpec, IssueOps, review, topology, and release-policy checks, then reuse passed expensive proof whose behavior-relevant source, dependency, lockfile, toolchain, workflow, packaging, configuration, platform, and immutable artifact identities are unchanged. Unknown changes fail closed and every affected test or construction reruns.
 
 ## Issue hygiene

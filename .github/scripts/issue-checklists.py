@@ -120,6 +120,9 @@ REQUIRED_DESIGN_HEADINGS = {
     "dependencies / cross-issue impact",
     "open questions",
 }
+ISSUE_REFERENCE_RE = re.compile(
+    r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)"
+)
 
 
 @dataclass(frozen=True)
@@ -572,6 +575,51 @@ def issue_payload(repo: str, number: int) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise SystemExit(f"GitHub issue #{number} did not return an object")
     return payload
+
+
+def pull_request_payload(repo: str, number: int) -> dict[str, object]:
+    """Return the title and body used to resolve a pull request owner."""
+
+    payload = gh_json(
+        [
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            repo,
+            "--json",
+            "title,body",
+        ]
+    )
+    if not isinstance(payload, dict):
+        raise SystemExit(f"GitHub pull request #{number} did not return an object")
+    return payload
+
+
+def referenced_issue_numbers(title: object, body: object) -> list[int]:
+    """Return distinct issue numbers from the existing PR reference syntax."""
+
+    if not isinstance(title, str) or not isinstance(body, str):
+        raise SystemExit("GitHub pull request title and body must be text")
+    numbers: set[int] = set()
+    for reference in ISSUE_REFERENCE_RE.findall(f"{title}\n{body}"):
+        number_text = reference.rsplit("#", 1)[-1]
+        if reference.startswith("GH-"):
+            number_text = reference[3:]
+        numbers.add(int(number_text))
+    return sorted(numbers)
+
+
+def pull_request_owner_issue(payload: dict[str, object]) -> int:
+    """Resolve exactly one owner from the established PR issue-reference contract."""
+
+    candidates = referenced_issue_numbers(payload.get("title"), payload.get("body"))
+    if len(candidates) != 1:
+        raise SystemExit(
+            "pull request must reference exactly one owning issue; "
+            f"found {len(candidates)} candidates"
+        )
+    return candidates[0]
 
 
 def open_issue_payloads(repo: str) -> list[dict[str, object]]:
@@ -1260,6 +1308,107 @@ def first_task_difference(
         if left != right:
             return f"task {index} differs: expected {left!r}, found {right!r}"
     return f"task count differs: expected {len(expected)}, found {len(actual)}"
+
+
+def base_local_tasks(root: Path, path: Path, base_ref: str) -> list[tuple[bool, str]]:
+    """Read one mapped task file from the accepted pull-request base."""
+
+    if not base_ref.strip():
+        raise SystemExit("pull request accepted base is missing")
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise SystemExit(
+            f"mapped OpenSpec task path {path} is outside repository root {root}"
+        ) from error
+    git_path = f"{base_ref}:{relative.as_posix()}"
+    try:
+        text = run(["git", "show", git_path])
+    except SystemExit as error:
+        raise SystemExit(
+            f"accepted pull-request base {base_ref!r} is unreadable for {relative}"
+        ) from error
+    tasks = parse_tasks(text)
+    if not tasks:
+        raise SystemExit(
+            f"accepted pull-request base {base_ref!r} has no checkbox tasks in {relative}"
+        )
+    ids = [task_id(task) for task in tasks]
+    if len(ids) != len(set(ids)):
+        raise SystemExit(
+            f"accepted pull-request base {base_ref!r} has duplicate task identifiers in {relative}"
+        )
+    return tasks
+
+
+def check_pull_request_tasks(
+    repo: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    pull_request: int,
+    base_ref: str,
+) -> list[str]:
+    """Check one PR owner against live state and unrelated slices against its base."""
+
+    try:
+        owner_issue = pull_request_owner_issue(
+            pull_request_payload(repo, pull_request)
+        )
+    except SystemExit as error:
+        return [f"pull request ownership {error}"]
+    mapped = [
+        (change, owner)
+        for change, owners in issue_map.items()
+        for owner in owners
+        if owner.issue == owner_issue
+    ]
+    if len(mapped) != 1:
+        return [
+            f"pull request owner #{owner_issue} must have exactly one local OpenSpec mapping; "
+            f"found {len(mapped)}"
+        ]
+
+    failures: list[str] = []
+    for change, owners in sorted(issue_map.items()):
+        path, candidate_tasks = local_tasks(root, change)
+        try:
+            base_tasks = base_local_tasks(root, path, base_ref)
+            candidate_slices = owner_slices(path, candidate_tasks, owners)
+            base_slices = dict(
+                (owner.issue, expected)
+                for owner, expected in owner_slices(path, base_tasks, owners)
+            )
+        except SystemExit as error:
+            failures.append(str(error))
+            continue
+        for owner, expected in candidate_slices:
+            if owner.issue != owner_issue:
+                if expected != base_slices[owner.issue]:
+                    failures.append(
+                        f"#{owner.issue} {change} changes an unrelated task slice from "
+                        f"accepted pull-request base {base_ref}: "
+                        f"{first_task_difference(base_slices[owner.issue], expected)}"
+                    )
+                continue
+            try:
+                payload = issue_payload(repo, owner.issue)
+                remote = issue_checklist_tasks(payload)
+            except SystemExit as error:
+                failures.append(f"#{owner.issue} issue contract {error}")
+                continue
+            print(
+                f"#{owner.issue} {change}: candidate {len(expected)} / "
+                f"live {len(remote)} / checked "
+                f"{sum(1 for checked, _ in remote if checked)}"
+            )
+            if remote != expected:
+                failures.append(
+                    f"#{owner.issue} candidate does not mirror live issue state: "
+                    f"{first_task_difference(expected, remote)}"
+                )
+            for failure in issue_contract_failures(payload, expected, repo, root):
+                failures.append(f"#{owner.issue} issue contract {failure}")
+    return failures
 
 
 def check_openspec_tasks(
@@ -2108,6 +2257,128 @@ Mitigations:
     else:
         raise AssertionError("overlapping owner ranges were accepted")
     assert first_task_difference(expected, expected[:-1]) == "task count differs: expected 2, found 1"
+    with tempfile.TemporaryDirectory() as temporary:
+        branch_root = Path(temporary)
+        branch_tasks = "- [x] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n"
+        issue_map = {
+            "change-a": (Owner(1),),
+            "change-b": (Owner(2),),
+        }
+        base_texts: dict[str, str] = {}
+        for change in issue_map:
+            path = branch_root / "openspec" / "changes" / change / "tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(branch_tasks, encoding="utf-8")
+            base_texts[path.relative_to(branch_root).as_posix()] = branch_tasks
+        saved_branch_helpers = {
+            name: globals()[name]
+            for name in (
+                "run",
+                "pull_request_payload",
+                "issue_payload",
+                "issue_contract_failures",
+                "issue_checklist_tasks",
+            )
+        }
+        pull_request = {"title": "Incremental work for #2", "body": ""}
+        live_payloads = {
+            1: {
+                "state": "OPEN",
+                "body": issue_contract.replace("- [x] 1.1", "- [ ] 1.1"),
+            },
+            2: {"state": "OPEN", "body": issue_contract},
+        }
+        live_checked: list[int] = []
+        try:
+            def fake_run(args: list[str]) -> str:
+                if len(args) == 3 and args[:2] == ["git", "show"]:
+                    path = args[2].split(":", 1)[1]
+                    if args[2].startswith("unreadable-base:"):
+                        raise SystemExit("git show could not read accepted base")
+                    return base_texts[path]
+                raise AssertionError(f"unexpected branch test command: {args!r}")
+
+            globals()["run"] = fake_run
+            globals()["pull_request_payload"] = lambda _repo, _number: pull_request
+            globals()["issue_payload"] = lambda _repo, number: (
+                live_checked.append(number) or live_payloads[number]
+            )
+            globals()["issue_contract_failures"] = lambda *_args: []
+            assert check_pull_request_tasks(
+                "owner/repo", branch_root, issue_map, 7, "accepted-base"
+            ) == []
+            assert live_checked == [2], "unrelated live progress must not be fetched"
+
+            (branch_root / "openspec" / "changes" / "change-a" / "tasks.md").write_text(
+                "- [ ] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n",
+                encoding="utf-8",
+            )
+            assert any(
+                "unrelated task slice" in failure
+                for failure in check_pull_request_tasks(
+                    "owner/repo", branch_root, issue_map, 7, "accepted-base"
+                )
+            )
+            (branch_root / "openspec" / "changes" / "change-a" / "tasks.md").write_text(
+                branch_tasks, encoding="utf-8"
+            )
+
+            (branch_root / "openspec" / "changes" / "change-b" / "tasks.md").write_text(
+                "- [ ] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n",
+                encoding="utf-8",
+            )
+            assert any(
+                "candidate does not mirror live issue state" in failure
+                for failure in check_pull_request_tasks(
+                    "owner/repo", branch_root, issue_map, 7, "accepted-base"
+                )
+            )
+            (branch_root / "openspec" / "changes" / "change-b" / "tasks.md").write_text(
+                branch_tasks, encoding="utf-8"
+            )
+
+            pull_request["title"] = "Work for #1 and #2"
+            assert any(
+                "exactly one owning issue" in failure
+                for failure in check_pull_request_tasks(
+                    "owner/repo", branch_root, issue_map, 7, "accepted-base"
+                )
+            )
+            pull_request["title"] = "Work without an issue"
+            assert any(
+                "exactly one owning issue" in failure
+                for failure in check_pull_request_tasks(
+                    "owner/repo", branch_root, issue_map, 7, "accepted-base"
+                )
+            )
+            pull_request["title"] = "Incremental work for #2"
+            missing_base_failures = check_pull_request_tasks(
+                "owner/repo", branch_root, issue_map, 7, ""
+            )
+            assert missing_base_failures == [
+                "pull request accepted base is missing",
+                "pull request accepted base is missing",
+            ]
+            unreadable_base_failures = check_pull_request_tasks(
+                "owner/repo", branch_root, issue_map, 7, "unreadable-base"
+            )
+            assert len(unreadable_base_failures) == 2
+            assert all(
+                "accepted pull-request base 'unreadable-base' is unreadable" in failure
+                for failure in unreadable_base_failures
+            )
+
+            checked_numbers: list[int] = []
+            globals()["issue_payload"] = lambda _repo, number: (
+                checked_numbers.append(number)
+                or {"state": "OPEN", "body": issue_contract}
+            )
+            globals()["issue_checklist_tasks"] = lambda _payload: expected
+            assert check_openspec_tasks("owner/repo", branch_root, issue_map) == []
+            assert checked_numbers == [1, 2]
+        finally:
+            for name, helper in saved_branch_helpers.items():
+                globals()[name] = helper
     assert repo_parts("owner/repo") == ("owner", "repo")
     assert flatten_paginated_response([[{"number": 1}], [{"number": 2}]]) == [
         {"number": 1},
@@ -2294,6 +2565,8 @@ def main() -> None:
     parser.add_argument("--issue-map", default="openspec/issue-map.json")
     parser.add_argument("--milestone", action="append", default=[])
     parser.add_argument("--planned-issue", type=int)
+    parser.add_argument("--pull-request", type=int)
+    parser.add_argument("--base", default="")
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -2307,8 +2580,22 @@ def main() -> None:
     root = Path(args.root)
     failures: list[str] = []
     issue_map = load_issue_map(args.issue_map)
+    if args.pull_request is not None and args.planned_issue is not None:
+        raise SystemExit("--pull-request cannot be combined with --planned-issue")
+    if args.pull_request is not None and args.skip_openspec:
+        raise SystemExit("--pull-request cannot be combined with --skip-openspec")
+    if args.pull_request is not None and not args.base:
+        raise SystemExit("--base is required with --pull-request")
+    if args.pull_request is None and args.base:
+        raise SystemExit("--base requires --pull-request")
     failures.extend(check_open_issue_complexity(args.repo))
-    if not args.skip_openspec:
+    if args.pull_request is not None:
+        failures.extend(
+            check_pull_request_tasks(
+                args.repo, root, issue_map, args.pull_request, args.base
+            )
+        )
+    elif not args.skip_openspec:
         failures.extend(
             check_openspec_tasks(
                 args.repo, root, issue_map, planned_issue=args.planned_issue

@@ -4,6 +4,8 @@ The current checker extracts one exact `OpenSpec Tasks` or `OpenSpec Task Checkl
 
 The abandoned #500/#501 lane proposed ordinary non-checkbox acceptance bullets, Sol-owned semantic review, body manifests, and a staged future release graph. This change does not revive that design. The user has selected two visible task fields, model-blind structural enforcement, one required complexity label, Terra code/intent review for every issue, and an additional fresh Sol holistic acceptance only for externally routed `complexity:very-high` work.
 
+Hosted validation of two independent v0.5 branches exposed one concurrency defect in the existing global mirror: checking completed implementation tasks on issue A immediately made issue B's older branch fail because CI compared every candidate-local task slice with mutable live issue state. Immediate truthful task progress and independent delivery lanes therefore require pull-request validation to distinguish the owning issue from unrelated task authority.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -14,6 +16,7 @@ The abandoned #500/#501 lane proposed ordinary non-checkbox acceptance bullets, 
 - Make acceptance state impossible to advance while implementation is incomplete, and require both lists before closure/release.
 - Require exactly one valid complexity label on every open issue without encoding model routing in IssueOps or inventing implementation tasks for unmapped backlog issues.
 - Migrate all open mapped issues in one bounded activation and preserve closed historical bodies.
+- Preserve immediate task progress and parallel pull requests without allowing a candidate branch to alter another issue's task slice.
 
 **Non-Goals:**
 
@@ -71,7 +74,15 @@ Publish the issue edits only after the implementation has passed local independe
 
 A compatibility mode that accepts both task headings indefinitely was rejected because it would not enforce the rename. Rewriting closed issue bodies was rejected because it adds no safety and damages historical provenance.
 
-### 6. Extend existing tests and guidance without new machinery
+### 6. Compare pull requests at the correct authority boundaries
+
+Pull-request CI resolves exactly one owning issue from the repository's existing pull-request issue relationship. The checker compares that issue's candidate-local implementation task slice with mutable live issue state, because those checkboxes are the owning lane's immediate progress. Every other mapped issue is compared with the pull-request base instead of live state. A candidate that changes an unrelated task slice, has missing or ambiguous ownership, or cannot read the accepted base fails closed.
+
+Pushes to `main`, milestone completion, and release validation retain the complete global live-state check, while ordinary issue events retain their existing affected-issue `--planned-issue` scope. This is not eventual consistency and does not permit stale owner progress: it separates candidate ownership from unrelated mutable state while preserving the existing global convergence boundary after merge.
+
+Selecting only one live issue without checking unrelated candidate task files was rejected because it would let a pull request silently modify another issue's local authority. Serializing task updates until every concurrent branch rebases was rejected because it contradicts immediate task progress and independent delivery.
+
+### 7. Extend existing tests and guidance without new machinery
 
 The standard-library self-test owns parser/state-transition coverage. Existing Rust workflow-policy E2E assertions confirm that CI, release, issue templates, PR guidance, repository guidance, and the checker carry the same contract, including removal of the legacy mandatory-final-review-row rule for new implementation lists. No dependency, service, schema, generated manifest, or new workflow is needed. Parsing remains linear in bounded issue-body size and reuses the issue payload and labels already fetched.
 
@@ -83,12 +94,13 @@ The standard-library self-test owns parser/state-transition coverage. Existing R
 - **Complexity labels become disguised priority or model logic leaks into IssueOps.** → Validate only one vocabulary value; document semantic classification and model routing separately.
 - **Closed history fails after the parser changes.** → Select the new contract only for open mapped issues and retain legacy extraction for closed bodies.
 - **A checked implementation task later reopens after acceptance.** → Fail closed unless the entire acceptance list is reset.
+- **Immediate progress on one issue makes an unrelated pull request stale, or a pull request edits another issue's tasks.** → Validate the owner against live state, compare unrelated slices with the accepted base, reject missing or ambiguous ownership, and keep global checks on `main` and release.
 - **Checklist growth becomes a receipt ledger.** → Fix the acceptance section to five tasks and reject additional acceptance checkboxes.
 
 ## Migration Plan
 
 1. Create and map one sanitized v0.5 IssueOps owner with `complexity:high`, and declare its queued direct-child/blocker relationship to #492. Keep the live relationship, milestone, and readiness activation for the bounded publication step so accepted `main` and its existing release graph remain coherent during implementation.
-2. Implement and locally validate the checker, workflow trigger, templates, guidance, and contract tests without changing live issue bodies.
+2. Implement and locally validate the checker, branch-aware pull-request workflow call, templates, guidance, and contract tests without changing live issue bodies.
 3. Obtain Terra High acceptance of the immutable implementation head; this issue does not require the additional Sol gate unless its final specification is reclassified `complexity:very-high`.
 4. Prepare, diff, and validate every open mapped issue body, read back every open issue complexity label, and prepare the queued #517/#492 relationship activation against the accepted checker while preserving the mutable activation state for rollback.
 5. Publish the live body/relationship migration, validate the exact body/label/relationship state, push the Terra-accepted implementation head, run hosted checks, and reach exact merge-ready convergence only when the new checker sees the complete live set.

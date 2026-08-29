@@ -67,15 +67,27 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           npm ci --ignore-scripts --prefix .github/mermaid-parser
           npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
           python3 .github/scripts/issue-checklists.py --self-test
           python3 .github/scripts/test-optional-parser-proof-inputs.py
-          python3 .github/scripts/issue-checklists.py \
-            --repo "$GITHUB_REPOSITORY" \
-            --root . \
-            --issue-map openspec/issue-map.json
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
+            python3 .github/scripts/issue-checklists.py \
+              --repo "$GITHUB_REPOSITORY" \
+              --root . \
+              --issue-map openspec/issue-map.json \
+              --pull-request "$PR_NUMBER" \
+              --base "$PR_BASE_SHA"
+          else
+            python3 .github/scripts/issue-checklists.py \
+              --repo "$GITHUB_REPOSITORY" \
+              --root . \
+              --issue-map openspec/issue-map.json
+          fi
 
       - name: Manual-only full benchmark policy
         run: python3 .github/scripts/verify-manual-benchmark-policy.py

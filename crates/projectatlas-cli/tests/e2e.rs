@@ -9025,6 +9025,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "acceptance_state_failures",
         "complexity_label_failures",
         "check_open_issue_complexity",
+        "ISSUE_REFERENCE_RE",
+        "pull_request_owner_issue",
+        "base_local_tasks",
+        "check_pull_request_tasks",
     ] {
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
@@ -9218,6 +9222,21 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             "ordinary pull requests must not require full milestone completion",
         )
         .into());
+    }
+    for required in [
+        "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+        "if [ \"$GITHUB_EVENT_NAME\" = \"pull_request\" ]; then",
+        "git fetch --no-tags --depth=1 origin \"$PR_BASE_SHA\"",
+        "--pull-request \"$PR_NUMBER\"",
+        "--base \"$PR_BASE_SHA\"",
+        "else",
+    ] {
+        if !checklist_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "pull-request IssueOps step is missing branch-aware gate {required:?}"
+            ))
+            .into());
+        }
     }
     if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
