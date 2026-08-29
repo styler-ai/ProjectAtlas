@@ -147,10 +147,10 @@
 
 ## 22. Production module responsibility decision (#488)
 
-- [x] 22.1 Produce and accept a call/state/data/transaction/concurrency/error/test/hot-path move map for `mcp.rs`, `runtime.rs`, database `lib.rs`, and `repository_graph.rs`, including existing submodules, public re-exports, schema/SQL authority, cancellation, lock/transaction scope, dependency direction, and a no-change disposition for every rejected split.
-- [x] 22.2 Apply only accepted cohesive moves into the fewest durable domain modules, one behavior boundary at a time, preserving seven crates, public API/wire/CLI behavior, SQL ownership, generation/transaction atomicity, cancellation, error chains, and platform behavior; retain current layout where no independent owner is proven.
-- [x] 22.3 After each move run owning unit/integration tests and final API/serde compatibility, real SQLite plan/transaction/rollback/corruption checks, MCP/CLI smoke, concurrency/cancellation/fault tests, E2E/platform gates, and intended-scale compile/startup/CPU/RSS/I/O/database/output comparisons.
-- [x] 22.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [ ] 22.1 Produce and accept a call/state/data/transaction/concurrency/error/test/hot-path move map for `mcp.rs`, `runtime.rs`, database `lib.rs`, and `repository_graph.rs`, including existing submodules, public re-exports, schema/SQL authority, cancellation, lock/transaction scope, dependency direction, and a no-change disposition for every rejected split.
+- [ ] 22.2 Apply only accepted cohesive moves into the fewest durable domain modules, one behavior boundary at a time, preserving seven crates, public API/wire/CLI behavior, SQL ownership, generation/transaction atomicity, cancellation, error chains, and platform behavior; retain current layout where no independent owner is proven.
+- [ ] 22.3 After each move run owning unit/integration tests and final API/serde compatibility, real SQLite plan/transaction/rollback/corruption checks, MCP/CLI smoke, concurrency/cancellation/fault tests, E2E/platform gates, and intended-scale compile/startup/CPU/RSS/I/O/database/output comparisons.
+- [ ] 22.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 23. Oversized benchmark artifact retention (#489)
 
