@@ -2,6 +2,37 @@
 
 Each mapped v0.5.0 issue owns one focused view below. The release graph in `openspec/issue-map.json` owns hierarchy and implementation order; #492 owns acceptance only and closes after every child issue.
 
+## Issue task authority and owner slices
+
+```mermaid
+flowchart LR
+    LocalTasks[(Mapped local tasks.md)] --> OwnerSlice{Issue-map owner slice}
+    OwnerSlice --> Implementation[Exactly one visible Implementation Tasks section]
+    IssuePacket[Complete issue packet] --> Acceptance[Exactly one canonical Acceptance and Review Tasks section]
+    Implementation --> Sync[Exact text, order, ownership, and state mirror]
+    Acceptance --> Gates[Five ordered review gates]
+    Sync --> Contract[IssueOps structural contract]
+    Gates --> Contract
+    Hidden[Hidden, duplicate, or legacy open fields] --> Reject[Fail closed]
+    Contract --> Ready[Truthful incremental or closure-ready state]
+```
+
+## Acceptance-state transition
+
+```mermaid
+stateDiagram-v2
+    [*] --> ImplementationIncomplete
+    ImplementationIncomplete --> ImplementationIncomplete: remains incomplete
+    ImplementationIncomplete --> ReviewReady: all implementation checked
+    ReviewReady --> ReviewInProgress: first acceptance checked
+    ReviewInProgress --> Complete: all five acceptance complete
+    ReviewInProgress --> ImplementationIncomplete: implementation reopens and resets acceptance
+    note right of ReviewInProgress
+        Acceptance checks advance as a checked prefix only
+    end note
+    Complete --> [*]: closure or release allowed
+```
+
 ## PHP language-guidance evidence flow
 
 ```mermaid

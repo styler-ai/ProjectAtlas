@@ -26,9 +26,17 @@ HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?(?:-->|$)")
 FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
 ARCHITECTURE_NA_RE = re.compile(r"(?is)^N/A:\s*(\S(?:.*\S)?)$")
 GITHUB_RENDERED_HEADING_PREFIX = "user-content-"
-ARCHITECTURE_ACCEPTANCE_TASK = (
-    "Review the final implementation against the architecture diagrams, update the "
-    "diagrams or implementation until they agree, or reconfirm the reasoned N/A."
+IMPLEMENTATION_TASK_HEADING = "implementation tasks"
+ACCEPTANCE_TASK_HEADING = "acceptance and review tasks"
+ACCEPTANCE_REVIEW_TASKS = (
+    "Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary.",
+    "Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding.",
+    "Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed.",
+    "Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes.",
+    "Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.",
+)
+COMPLEXITY_LABELS = frozenset(
+    {"complexity:low", "complexity:medium", "complexity:high", "complexity:very-high"}
 )
 MARKDOWN_LINK_RE = re.compile(
     r"\[(?:[^\[\]\n]|\[[^\[\]\n]*\])+\]"
@@ -37,7 +45,7 @@ MARKDOWN_LINK_RE = re.compile(
 )
 MITIGATION_RE = re.compile(
     rf"(?mi)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\[([ xX])\]\s+(.+?)\s+"
-    r"\(OpenSpec tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
+    r"\((OpenSpec|Implementation) tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
 )
 EXACT_HEAD_PROOF_RE = re.compile(r"(?i)\bexact[- ]head\b")
 EXACT_HEAD_REQUIREMENT_RE = re.compile(
@@ -407,6 +415,14 @@ def heading_matches_openspec_tasks(heading: str) -> bool:
     return clean(heading).lower() in {"openspec tasks", "openspec task checklist"}
 
 
+def heading_matches_implementation_tasks(heading: str) -> bool:
+    return clean(heading).casefold() == IMPLEMENTATION_TASK_HEADING
+
+
+def heading_matches_acceptance_tasks(heading: str) -> bool:
+    return clean(heading).casefold() == ACCEPTANCE_TASK_HEADING
+
+
 def heading_is_task_subsection(heading: str) -> bool:
     return TASK_SECTION_HEADING_RE.match(clean(heading)) is not None
 
@@ -558,21 +574,106 @@ def issue_payload(repo: str, number: int) -> dict[str, object]:
     return payload
 
 
-def issue_checklist_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
+def open_issue_payloads(repo: str) -> list[dict[str, object]]:
+    """Fetch the bounded open-issue set used by the vocabulary gate."""
+
+    payload = gh_json(
+        [
+            "issue",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            "1000",
+            "--json",
+            "body,state,number,labels,milestone",
+        ]
+    )
+    if not isinstance(payload, list) or not all(
+        isinstance(issue, dict) for issue in payload
+    ):
+        raise SystemExit("GitHub open issue list did not return issue objects")
+    return payload
+
+
+def check_open_issue_complexity(repo: str) -> list[str]:
+    failures: list[str] = []
+    for issue in open_issue_payloads(repo):
+        number = positive_issue(issue.get("number"), "issue number")
+        failures.extend(
+            f"#{number} issue contract {failure}"
+            for failure in complexity_label_failures(issue)
+        )
+    return failures
+
+
+def issue_task_headings(
+    issue: dict[str, object],
+) -> tuple[str, list[re.Match[str]], list[re.Match[str]], list[re.Match[str]]]:
     body = issue.get("body", "")
     if not isinstance(body, str):
         raise SystemExit("GitHub issue body must be text")
     visible_body = visible_markdown(body)
-    authoritative_headings = [
+    headings = list(HEADING_RE.finditer(visible_body))
+    implementation = [
         heading
-        for heading in HEADING_RE.finditer(visible_body)
+        for heading in headings
+        if heading_matches_implementation_tasks(heading.group(2))
+    ]
+    acceptance = [
+        heading
+        for heading in headings
+        if heading_matches_acceptance_tasks(heading.group(2))
+    ]
+    legacy = [
+        heading
+        for heading in headings
         if heading_matches_openspec_tasks(heading.group(2))
     ]
-    if len(authoritative_headings) != 1:
+    return visible_body, implementation, acceptance, legacy
+
+
+def issue_uses_new_contract(issue: dict[str, object]) -> bool:
+    _, implementation, acceptance, _ = issue_task_headings(issue)
+    return bool(implementation or acceptance)
+
+
+def issue_checklist_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
+    visible_body, implementation, acceptance, legacy = issue_task_headings(issue)
+    state = str(issue.get("state", "")).upper()
+    if state == "OPEN":
+        if len(implementation) != 1:
+            raise SystemExit(
+                "GitHub open issue must contain exactly one visible Implementation Tasks heading"
+            )
+        if legacy:
+            raise SystemExit(
+                "GitHub open issue must not retain a legacy OpenSpec task heading"
+            )
+        return parse_section_tasks(visible_body, heading_matches_implementation_tasks)
+    if implementation or acceptance:
+        if len(implementation) != 1 or len(acceptance) != 1 or legacy:
+            raise SystemExit(
+                "GitHub new-contract issue must contain exactly one visible Implementation Tasks "
+                "and Acceptance and Review Tasks heading"
+            )
+        return parse_section_tasks(visible_body, heading_matches_implementation_tasks)
+    if len(legacy) != 1:
         raise SystemExit(
-            "GitHub issue must contain exactly one visible OpenSpec task heading"
+            "GitHub closed historical issue must contain exactly one visible legacy OpenSpec task heading"
         )
     return parse_section_tasks(visible_body, heading_matches_openspec_tasks)
+
+
+def acceptance_review_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
+    visible_body, _, acceptance, _ = issue_task_headings(issue)
+    if len(acceptance) != 1:
+        raise SystemExit(
+            "GitHub issue must contain exactly one visible Acceptance and Review Tasks heading"
+        )
+    return parse_section_tasks(visible_body, heading_matches_acceptance_tasks)
 
 
 def heading_section(
@@ -849,36 +950,120 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
     return failures
 
 
+def complexity_label_failures(issue: dict[str, object]) -> list[str]:
+    """Validate the singular vocabulary-only complexity label on open issues."""
+
+    if str(issue.get("state", "")).upper() != "OPEN":
+        return []
+    labels = issue.get("labels")
+    complexity = [
+        label.get("name")
+        for label in (labels if isinstance(labels, list) else [])
+        if isinstance(label, dict)
+        and isinstance(label.get("name"), str)
+        and str(label["name"]).startswith("complexity:")
+    ]
+    invalid = sorted(set(complexity) - COMPLEXITY_LABELS)
+    if invalid:
+        return [
+            "open issue complexity labels must use exactly one of "
+            f"{', '.join(sorted(COMPLEXITY_LABELS))}; found unknown "
+            f"{', '.join(invalid)}"
+        ]
+    if len(complexity) != 1:
+        found = ", ".join(complexity) if complexity else "none"
+        return [
+            "open issue must carry exactly one complexity label from "
+            f"{', '.join(sorted(COMPLEXITY_LABELS))}; found {found}"
+        ]
+    return []
+
+
+def acceptance_state_failures(
+    expected_tasks: list[tuple[bool, str]],
+    acceptance_tasks: list[tuple[bool, str]],
+    *,
+    require_complete: bool,
+) -> list[str]:
+    failures: list[str] = []
+    if any(not checked for checked, _ in expected_tasks):
+        if any(checked for checked, _ in acceptance_tasks):
+            failures.append(
+                "acceptance and review tasks must be unchecked while implementation tasks are incomplete"
+            )
+        if require_complete:
+            failures.append(
+                "closed or release-complete issue must have both implementation and acceptance tasks checked"
+            )
+        return failures
+    saw_unchecked = False
+    for index, (checked, _) in enumerate(acceptance_tasks, start=1):
+        if not checked:
+            saw_unchecked = True
+        elif saw_unchecked:
+            failures.append(
+                f"acceptance and review task {index} is checked after an unchecked task"
+            )
+    if require_complete and (
+        any(not checked for checked, _ in expected_tasks)
+        or any(not checked for checked, _ in acceptance_tasks)
+    ):
+        failures.append(
+            "closed or release-complete issue must have both implementation and acceptance tasks checked"
+        )
+    return failures
+
+
 def issue_contract_failures(
     issue: dict[str, object],
     expected_tasks: list[tuple[bool, str]],
     repo: str,
     root: Path,
 ) -> list[str]:
-    """Validate the concise #305 issue shape for open mapped work."""
+    """Validate the two-list #305 issue shape and its state transition."""
 
-    if issue.get("state") != "OPEN":
-        return []
+    state = str(issue.get("state", "")).upper()
+    if state != "OPEN":
+        if not issue_uses_new_contract(issue):
+            return []
+        try:
+            implementation = issue_checklist_tasks(issue)
+            acceptance = acceptance_review_tasks(issue)
+        except SystemExit as error:
+            return [str(error)]
+        failures = []
+        if implementation != expected_tasks:
+            failures.append(
+                f"implementation section does not mirror expected tasks: "
+                f"{first_task_difference(expected_tasks, implementation)}"
+            )
+        failures.extend(
+            acceptance_task_failures(acceptance, require_complete=True)
+        )
+        failures.extend(
+            acceptance_state_failures(
+                expected_tasks, acceptance, require_complete=True
+            )
+        )
+        return failures
     body = issue.get("body", "")
     if not isinstance(body, str):
         return ["body is not text"]
-    visible_body = visible_markdown(body)
-    if requires_exact_head_proof(visible_body):
-        return [
-            "must bind proof to behavior-relevant inputs instead of exact-head commit identity"
-        ]
-    headings = list(HEADING_RE.finditer(visible_body))
-    normalized = [clean(heading.group(2)).lower() for heading in headings]
-    failures: list[str] = []
-    final_task = (
-        TASK_ID_RE.sub("", expected_tasks[-1][1], count=1) if expected_tasks else ""
+    visible_body, implementation_headings, acceptance_headings, legacy_headings = (
+        issue_task_headings(issue)
     )
-    if clean(final_task).casefold() != ARCHITECTURE_ACCEPTANCE_TASK.casefold():
+    failures: list[str] = []
+    if requires_exact_head_proof(visible_body):
         failures.append(
-            "final OpenSpec task must be the architecture acceptance task: "
-            f"{ARCHITECTURE_ACCEPTANCE_TASK}"
+            "must bind proof to behavior-relevant inputs instead of exact-head commit identity"
+        )
+    if legacy_headings:
+        failures.append(
+            "open mapped issues must use Implementation Tasks, not a legacy OpenSpec task heading"
         )
     positions: list[int] = []
+    headings = list(HEADING_RE.finditer(visible_body))
+    normalized = [clean(heading.group(2)).casefold() for heading in headings]
     for required in REQUIRED_OPEN_ISSUE_HEADINGS:
         matches = [index for index, value in enumerate(normalized) if value == required]
         if len(matches) != 1:
@@ -890,14 +1075,31 @@ def issue_contract_failures(
         positions.append(index)
         if not heading_section(visible_body, headings, index):
             failures.append(f"{required!r} section must not be empty")
-    task_positions = [
-        index
-        for index, heading in enumerate(headings)
-        if heading_matches_openspec_tasks(heading.group(2))
-    ]
-    if len(task_positions) == 1:
-        positions.append(task_positions[0])
-    if len(positions) == len(REQUIRED_OPEN_ISSUE_HEADINGS) + 1 and positions != sorted(
+    if len(implementation_headings) != 1:
+        failures.append(
+            "must contain exactly one visible non-empty 'implementation tasks' section"
+        )
+    else:
+        positions.append(
+            next(
+                index
+                for index, heading in enumerate(headings)
+                if heading.start() == implementation_headings[0].start()
+            )
+        )
+    if len(acceptance_headings) != 1:
+        failures.append(
+            "must contain exactly one visible non-empty 'acceptance and review tasks' section"
+        )
+    else:
+        positions.append(
+            next(
+                index
+                for index, heading in enumerate(headings)
+                if heading.start() == acceptance_headings[0].start()
+            )
+        )
+    if len(positions) == len(REQUIRED_OPEN_ISSUE_HEADINGS) + 2 and positions != sorted(
         positions
     ):
         failures.append("required issue sections must follow the #305 order")
@@ -912,6 +1114,18 @@ def issue_contract_failures(
         failures.extend(
             architecture_diagram_link_failures(architecture_section, repo, root)
         )
+
+    try:
+        acceptance = acceptance_review_tasks(issue)
+    except SystemExit as error:
+        acceptance = []
+        failures.append(str(error))
+    failures.extend(acceptance_task_failures(acceptance, require_complete=False))
+    failures.extend(
+        acceptance_state_failures(
+            expected_tasks, acceptance, require_complete=False
+        )
+    )
 
     premortem_indexes = [
         index for index, value in enumerate(normalized) if value == "pre-mortem"
@@ -944,22 +1158,28 @@ def issue_contract_failures(
     if len(mitigation_matches) != len(mitigation_tasks):
         failures.append(
             "every pre-mortem mitigation checkbox must end with "
-            "'(OpenSpec tasks: <task ids>)'"
+            "'(Implementation tasks: <task ids>)'"
         )
     expected_by_id = {task_id(task): task[0] for task in expected_tasks}
     for match in mitigation_matches:
         checked = match.group(1).lower() == "x"
-        references = [value.strip() for value in match.group(3).split(",")]
+        kind = match.group(3)
+        references = [value.strip() for value in match.group(4).split(",")]
+        if kind != "Implementation":
+            failures.append(
+                f"mitigation {clean(match.group(2))!r} must use "
+                "'(Implementation tasks: ...)' for open mapped issues"
+            )
         if len(references) != len(set(references)):
             failures.append(
-                f"mitigation {clean(match.group(2))!r} repeats an OpenSpec task ID"
+                f"mitigation {clean(match.group(2))!r} repeats an implementation task ID"
             )
             continue
         unknown = [value for value in references if value not in expected_by_id]
         if unknown:
             failures.append(
                 f"mitigation {clean(match.group(2))!r} references unknown or foreign "
-                f"OpenSpec tasks: {', '.join(unknown)}"
+                f"implementation tasks: {', '.join(unknown)}"
             )
             continue
         should_be_checked = all(expected_by_id[value] for value in references)
@@ -967,8 +1187,29 @@ def issue_contract_failures(
             state = "checked" if should_be_checked else "unchecked"
             failures.append(
                 f"mitigation {clean(match.group(2))!r} must be {state} because of "
-                f"OpenSpec tasks {', '.join(references)}"
+                f"implementation tasks {', '.join(references)}"
             )
+    return failures
+
+
+def acceptance_task_failures(
+    acceptance: list[tuple[bool, str]], *, require_complete: bool
+) -> list[str]:
+    failures: list[str] = []
+    if len(acceptance) != len(ACCEPTANCE_REVIEW_TASKS):
+        failures.append(
+            "Acceptance and Review Tasks must contain exactly five checkboxes"
+        )
+        return failures
+    for index, ((_, actual), expected) in enumerate(
+        zip(acceptance, ACCEPTANCE_REVIEW_TASKS, strict=True), start=1
+    ):
+        if actual != expected:
+            failures.append(
+                f"acceptance and review task {index} must use the canonical text"
+            )
+    if require_complete and any(not checked for checked, _ in acceptance):
+        failures.append("closed or release-complete issue must have all acceptance tasks checked")
     return failures
 
 
@@ -1038,7 +1279,11 @@ def check_openspec_tasks(
             if planned_issue is not None and owner.issue != planned_issue:
                 continue
             payload = issue_payload(repo, owner.issue)
-            remote = issue_checklist_tasks(payload)
+            try:
+                remote = issue_checklist_tasks(payload)
+            except SystemExit as error:
+                failures.append(f"#{owner.issue} issue contract {error}")
+                continue
             print(
                 f"#{owner.issue} {change}: local {len(expected)} / "
                 f"remote {len(remote)} / checked "
@@ -1157,7 +1402,11 @@ def check_milestone_complete(
         if number not in mapped_issues:
             continue
         issue = issue_payload(repo, number)
-        tasks = issue_checklist_tasks(issue)
+        try:
+            tasks = issue_checklist_tasks(issue)
+        except SystemExit as error:
+            failures.append(f"#{number} in milestone {milestone}: {error}")
+            continue
         checked = sum(1 for is_checked, _ in tasks if is_checked)
         unchecked = len(tasks) - checked
         print(
@@ -1168,6 +1417,22 @@ def check_milestone_complete(
             failures.append(f"#{number} in milestone {milestone} has no visible checklist tasks")
         if unchecked:
             failures.append(f"#{number} in milestone {milestone} has {unchecked} unchecked tasks")
+        if issue_uses_new_contract(issue):
+            try:
+                acceptance = acceptance_review_tasks(issue)
+            except SystemExit as error:
+                failures.append(f"#{number} in milestone {milestone}: {error}")
+                continue
+            failures.extend(
+                f"#{number} in milestone {milestone} {failure}"
+                for failure in acceptance_task_failures(acceptance, require_complete=True)
+            )
+            failures.extend(
+                f"#{number} in milestone {milestone} {failure}"
+                for failure in acceptance_state_failures(
+                    tasks, acceptance, require_complete=True
+                )
+            )
     return failures
 
 
@@ -1220,6 +1485,10 @@ def self_test() -> None:
         ),
     ]
     assert parse_section_tasks(issue_body, heading_matches_openspec_tasks) == expected
+    expected = [
+        (True, "1.1 Anchored task"),
+        (False, "2.1 Finish ordinary implementation."),
+    ]
     issue_contract = """
 ## Why
 Explain the need.
@@ -1237,12 +1506,18 @@ State exclusions.
 Likely failure modes:
 - The issue contract drifts.
 Mitigations:
-- [ ] Keep the contract synchronized. (OpenSpec tasks: 2.1)
-## OpenSpec Tasks
+- [ ] Keep the contract synchronized. (Implementation tasks: 2.1)
+## Implementation Tasks
 ## 1. Review
 - [x] 1.1 Anchored task
 ## 2. Implementation
-- [ ] 2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [ ] 2.1 Finish ordinary implementation.
+## Acceptance and Review Tasks
+- [ ] Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary.
+- [ ] Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding.
+- [ ] Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed.
+- [ ] Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes.
+- [ ] Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.
 """
     self_test_root = Path(__file__).resolve().parents[2]
 
@@ -1252,6 +1527,130 @@ Mitigations:
         return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
+    assert complexity_label_failures(
+        {"state": "OPEN", "labels": [{"name": "complexity:medium"}]}
+    ) == []
+    assert any(
+        "exactly one complexity label" in failure
+        for failure in complexity_label_failures({"state": "OPEN", "labels": []})
+    )
+    assert any(
+        "exactly one complexity label" in failure
+        for failure in complexity_label_failures(
+            {
+                "state": "OPEN",
+                "labels": [
+                    {"name": "complexity:low"},
+                    {"name": "complexity:high"},
+                ],
+            }
+        )
+    )
+    assert any(
+        "unknown" in failure
+        for failure in complexity_label_failures(
+            {"state": "OPEN", "labels": [{"name": "complexity:unknown"}]}
+        )
+    )
+    assert complexity_label_failures(
+        {"state": "OPEN", "labels": [{"name": "type:chore"}]}
+    )
+    assert complexity_label_failures(
+        {
+            "state": "OPEN",
+            "number": 466,
+            "body": "Unmapped backlog issue without task fields.",
+            "labels": [{"name": "complexity:high"}],
+        }
+    ) == []
+    assert complexity_label_failures(
+        {"state": "CLOSED", "labels": [{"name": "complexity:unknown"}]}
+    ) == []
+    assert acceptance_review_tasks({"state": "OPEN", "body": issue_contract}) == [
+        (False, task) for task in ACCEPTANCE_REVIEW_TASKS
+    ]
+    missing_acceptance = issue_contract.replace(
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[2]}\n", ""
+    )
+    assert any(
+        "exactly five checkboxes" in failure
+        for failure in contract_failures({"state": "OPEN", "body": missing_acceptance}, expected)
+    )
+    weakened_acceptance = issue_contract.replace(
+        "Intent and outcome review:", "Outcome review:"
+    )
+    assert any(
+        "canonical text" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": weakened_acceptance}, expected
+        )
+    )
+    extra_acceptance = issue_contract.replace(
+        "## Acceptance and Review Tasks\n",
+        "## Acceptance and Review Tasks\n- [ ] Extra review checkbox.\n",
+    )
+    assert any(
+        "exactly five checkboxes" in failure
+        for failure in contract_failures({"state": "OPEN", "body": extra_acceptance}, expected)
+    )
+    duplicate_implementation = issue_contract.replace(
+        "## Acceptance and Review Tasks",
+        "## Implementation Tasks\n- [ ] 9.9 Duplicate field.\n## Acceptance and Review Tasks",
+    )
+    assert any(
+        "exactly one visible non-empty 'implementation tasks'" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": duplicate_implementation}, expected
+        )
+    )
+    legacy_open = issue_contract.replace(
+        "(Implementation tasks: 2.1)", "(OpenSpec tasks: 2.1)"
+    ).replace("## Implementation Tasks", "## OpenSpec Tasks")
+    assert any(
+        "must use Implementation Tasks" in failure
+        for failure in contract_failures({"state": "OPEN", "body": legacy_open}, expected)
+    )
+    hidden_duplicate_fields = issue_contract.replace(
+        "## Implementation Tasks",
+        "<!--\n## Implementation Tasks\n- [ ] 9.9 Hidden implementation field.\n-->\n"
+        "## Implementation Tasks",
+    ).replace(
+        "## Acceptance and Review Tasks",
+        "<!--\n## Acceptance and Review Tasks\n- [ ] Hidden acceptance field.\n-->\n"
+        "## Acceptance and Review Tasks",
+    )
+    assert contract_failures(
+        {"state": "OPEN", "body": hidden_duplicate_fields}, expected
+    ) == []
+    hidden_implementation = issue_contract.replace(
+        "## Implementation Tasks\n", "<!--\n## Implementation Tasks\n", 1
+    ).replace(
+        "## Acceptance and Review Tasks\n",
+        "-->\n## Acceptance and Review Tasks\n",
+        1,
+    )
+    assert any(
+        "exactly one visible non-empty 'implementation tasks'" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": hidden_implementation}, expected
+        )
+    )
+    historical_closed = (
+        "## OpenSpec Tasks\n- [x] 1.1 Anchored task\n"
+        "- [x] 2.1 Historical task.\n"
+    )
+    assert issue_checklist_tasks({"state": "CLOSED", "body": historical_closed}) == [
+        (True, "1.1 Anchored task"),
+        (True, "2.1 Historical task."),
+    ]
+    assert contract_failures(
+        {"state": "CLOSED", "body": historical_closed},
+        [(True, "1.1 Anchored task"), (True, "2.1 Historical task.")],
+    ) == []
+    assert any(
+        "both implementation and acceptance tasks checked" in failure
+        for failure in contract_failures({"state": "CLOSED", "body": issue_contract}, expected)
+    )
     na_contract = issue_contract.replace(
         "- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)",
         "N/A: This change has no architecture impact.",
@@ -1442,8 +1841,8 @@ Mitigations:
     )
     assert contract_failures({"state": "OPEN", "body": plus_marker_contract}, expected) == []
     unbound_plus_mitigation = issue_contract.replace(
-        "## OpenSpec Tasks",
-        "+ [ ] Unbound mitigation\n## OpenSpec Tasks",
+        "## Implementation Tasks",
+        "+ [ ] Unbound mitigation\n## Implementation Tasks",
     )
     assert any(
         "every pre-mortem mitigation checkbox" in failure
@@ -1459,21 +1858,52 @@ Mitigations:
         "must be unchecked" in failure
         for failure in contract_failures({"state": "OPEN", "body": premature}, expected)
     )
+    implemented_contract = issue_contract.replace(
+        "- [ ] 2.1 Finish ordinary implementation.",
+        "- [x] 2.1 Finish ordinary implementation.",
+    ).replace(
+        "- [ ] Keep the contract synchronized. (Implementation tasks: 2.1)",
+        "- [x] Keep the contract synchronized. (Implementation tasks: 2.1)",
+    )
+    prefix_contract = implemented_contract.replace(
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[0]}",
+        f"- [x] {ACCEPTANCE_REVIEW_TASKS[0]}",
+    )
+    assert contract_failures(
+        {"state": "OPEN", "body": prefix_contract},
+        [(True, "1.1 Anchored task"), (True, "2.1 Finish ordinary implementation.")],
+    ) == []
+    non_prefix_contract = prefix_contract.replace(
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[1]}",
+        f"- [x] {ACCEPTANCE_REVIEW_TASKS[1]}",
+    ).replace(
+        f"- [x] {ACCEPTANCE_REVIEW_TASKS[0]}",
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[0]}",
+    )
+    assert any(
+        "after an unchecked task" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": non_prefix_contract},
+            [(True, "1.1 Anchored task"), (True, "2.1 Finish ordinary implementation.")],
+        )
+    )
     completed_contract = issue_contract.replace(
         "- [ ] Keep the contract synchronized.",
         "- [x] Keep the contract synchronized.",
-    ).replace(
-        "- [ ] 2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.",
-        "- [x] 2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.",
     )
+    completed_contract = completed_contract.replace(
+        "- [ ] 2.1 Finish ordinary implementation.",
+        "- [x] 2.1 Finish ordinary implementation.",
+    )
+    for acceptance_task in ACCEPTANCE_REVIEW_TASKS:
+        completed_contract = completed_contract.replace(
+            f"- [ ] {acceptance_task}", f"- [x] {acceptance_task}"
+        )
     assert contract_failures(
         {"state": "OPEN", "body": completed_contract},
         [
             (True, "1.1 Anchored task"),
-            (
-                True,
-                "2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.",
-            ),
+            (True, "2.1 Finish ordinary implementation."),
         ],
     ) == []
     missing_scope = issue_contract.replace("## Release Scope", "## Delivery")
@@ -1482,7 +1912,7 @@ Mitigations:
         for failure in contract_failures({"state": "OPEN", "body": missing_scope}, expected)
     )
     unknown_task = issue_contract.replace(
-        "(OpenSpec tasks: 2.1)", "(OpenSpec tasks: 9.9)"
+        "(Implementation tasks: 2.1)", "(Implementation tasks: 9.9)"
     )
     assert any(
         "unknown or foreign" in failure
@@ -1490,11 +1920,9 @@ Mitigations:
     )
     assert contract_failures({"state": "CLOSED", "body": ""}, expected) == []
     wrong_final = [expected[0], (False, "2.1 Finish ordinary tests.")]
-    assert any(
+    assert not any(
         "final OpenSpec task must be the architecture acceptance task" in failure
-        for failure in contract_failures(
-            {"state": "OPEN", "body": issue_contract}, wrong_final
-        )
+        for failure in contract_failures({"state": "OPEN", "body": issue_contract}, wrong_final)
     )
     missing_architecture_link = issue_contract.replace(
         "- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)",
@@ -1674,6 +2102,32 @@ Mitigations:
         "#3 in milestone v1.0.0-00 has no local OpenSpec mapping",
         "#3 in milestone v1.0.0-00 is OPEN, not CLOSED",
     ]
+    saved_milestone_issues = globals()["milestone_issues"]
+    saved_issue_payload = globals()["issue_payload"]
+    try:
+        globals()["milestone_issues"] = lambda _repo, _milestone: [
+            {"number": 448, "state": "closed"}
+        ]
+        globals()["issue_payload"] = lambda _repo, _number: {
+            "number": 448,
+            "state": "CLOSED",
+            "body": completed_contract,
+        }
+        assert check_milestone_complete("owner/repo", "v1.0.0-00", {448}) == []
+        globals()["issue_payload"] = lambda _repo, _number: {
+            "number": 448,
+            "state": "CLOSED",
+            "body": issue_contract,
+        }
+        assert any(
+            "unchecked tasks" in failure
+            for failure in check_milestone_complete(
+                "owner/repo", "v1.0.0-00", {448}
+            )
+        )
+    finally:
+        globals()["milestone_issues"] = saved_milestone_issues
+        globals()["issue_payload"] = saved_issue_payload
     try:
         validate_unique_issue_ownership(
             Path("issue-map.json"),
@@ -1830,6 +2284,7 @@ def main() -> None:
     root = Path(args.root)
     failures: list[str] = []
     issue_map = load_issue_map(args.issue_map)
+    failures.extend(check_open_issue_complexity(args.repo))
     if not args.skip_openspec:
         failures.extend(
             check_openspec_tasks(

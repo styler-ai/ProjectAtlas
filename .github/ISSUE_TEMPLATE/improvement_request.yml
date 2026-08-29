@@ -5,6 +5,7 @@ labels:
   - type:feature
   - priority:medium
   - status:backlog
+  - complexity:medium
 body:
   - type: markdown
     attributes:
@@ -97,20 +98,36 @@ body:
         - The new workflow increases agent calls.
 
         Mitigations:
-        - [ ] Compare representative agent workflows. (OpenSpec tasks: 5.3, 7.2)
+        - [ ] Compare representative agent workflows. (Implementation tasks: 5.3, 7.2)
     validations:
       required: true
   - type: textarea
     id: openspec
     attributes:
       label: OpenSpec plan and task checklist
-      description: Maintainers or agents should fill this before planned implementation. Mirror the linked `openspec/changes/<id>/tasks.md` checklist under an `OpenSpec Tasks` heading before closing or releasing.
+      description: Maintainers or agents should fill this before planned implementation. Mirror the linked `openspec/changes/<id>/tasks.md` checklist exactly under an `Implementation Tasks` heading before closing or releasing.
       value: |
         OpenSpec change: _to be assigned_
 
-        ## OpenSpec Tasks
+        ## Implementation Tasks
 
         <!-- Mirror tasks from `openspec/changes/<id>/tasks.md` here before implementation. -->
+  - type: checkboxes
+    id: acceptance_review_tasks
+    attributes:
+      label: Acceptance and Review Tasks
+      description: Keep these five canonical review gates in order; they remain unchecked until implementation is complete and then advance as a checked prefix.
+      options:
+        - label: "Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary."
+          required: false
+        - label: "Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding."
+          required: false
+        - label: "Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed."
+          required: false
+        - label: "Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes."
+          required: false
+        - label: "Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial."
+          required: false
   - type: checkboxes
     id: privacy
     attributes:

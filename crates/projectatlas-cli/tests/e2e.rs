@@ -9013,13 +9013,18 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "mermaid_syntax_is_valid",
         "mermaid-parser",
         "len(meaningful) > 1",
-        "ARCHITECTURE_ACCEPTANCE_TASK",
+        "ACCEPTANCE_REVIEW_TASKS",
         "planned_issue_failures",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
         "planned_issue=args.planned_issue",
         "MITIGATION_RE",
         "issue_contract_failures",
+        "IMPLEMENTATION_TASK_HEADING",
+        "acceptance_task_failures",
+        "acceptance_state_failures",
+        "complexity_label_failures",
+        "check_open_issue_complexity",
     ] {
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
@@ -9103,7 +9108,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "label: Acceptance criteria",
         "label: Non-Goals",
         "label: Pre-Mortem",
-        "OpenSpec tasks:",
+        "label: Acceptance and Review Tasks",
+        "Implementation tasks:",
+        "required: false",
     ] {
         for (name, content) in [
             ("bug", bug_issue_template.as_str()),
@@ -9122,7 +9129,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "Pre-Mortem",
         "Architecture Diagrams",
         "docs/*.md#user-content-heading` view on `main",
-        "OpenSpec tasks:",
+        "Implementation tasks:",
+        "Acceptance and Review Tasks",
         "commit/SHA permalink evidence",
     ] {
         if !workflow_docs.contains(required) {
@@ -9241,7 +9249,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "types: [opened, edited, reopened, labeled, unlabeled, milestoned]",
+        "types: [opened, edited, reopened, labeled, unlabeled, milestoned, closed]",
         "--planned-issue \"$ISSUE_NUMBER\"",
         "timeout-minutes: 5",
         "contents: read",
