@@ -199,6 +199,10 @@ const CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT: Duration = Duration::from_secs(
 #[cfg(windows)]
 const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(4);
 #[cfg(windows)]
+// Delay the readiness poll past the deadline after the fixture has published, without
+// changing process-global state, proving the admission guard through the real helper.
+const CODEX_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(31);
+#[cfg(windows)]
 const CODEX_OWNER_COMPOSED_STOP_DELAY: Duration = Duration::from_secs(3);
 #[cfg(windows)]
 const CODEX_OWNER_STOP_HELPER_TEST_DELAY: Duration = Duration::from_secs(6);
@@ -36502,7 +36506,7 @@ fn spawn_codex_owned_obsolete_mcp(
     publication_delay: Option<Duration>,
     publication_mode: Option<&str>,
 ) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
-    spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
+    spawn_codex_owned_obsolete_mcp_with_test_delays(
         codex_fixture,
         stable_runtime,
         db,
@@ -36511,11 +36515,12 @@ fn spawn_codex_owned_obsolete_mcp(
         publication_delay,
         publication_mode,
         None,
+        None,
     )
 }
 
 #[cfg(windows)]
-fn spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
+fn spawn_codex_owned_obsolete_mcp_with_test_delays(
     codex_fixture: &Path,
     stable_runtime: &Path,
     db: &Path,
@@ -36524,6 +36529,7 @@ fn spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
     publication_delay: Option<Duration>,
     publication_mode: Option<&str>,
     identity_capture_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
 ) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
     let mut command = StdCommand::new(codex_fixture);
     command
@@ -36548,6 +36554,9 @@ fn spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
     let mut parent = command.spawn()?;
     let started = Instant::now();
     let deadline = started + CODEX_OWNER_READINESS_TIMEOUT;
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
     loop {
         match parent.try_wait() {
             Ok(Some(status)) => {
@@ -36575,10 +36584,22 @@ fn spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
             }
         }
         if child_pid_file.is_file() {
-            // Once publication is observed, give exact identity validation its own bounded
-            // allowance.  The file may have been published before this poll crossed the
-            // readiness deadline, so classifying it as missing before validation would reject
-            // a valid owner under ordinary scheduler contention.
+            let observed_at = Instant::now();
+            if observed_at >= deadline {
+                let elapsed = started.elapsed();
+                return Err(codex_owner_spawn_error(
+                    &mut parent,
+                    codex_fixture,
+                    child_pid_file,
+                    stable_runtime,
+                    format!(
+                        "Codex MCP owner fixture published its child PID after the readiness deadline (readiness_elapsed_ms={})",
+                        elapsed.as_millis()
+                    ),
+                ));
+            }
+            // Publication must be observed inside readiness. Once observed, give exact
+            // identity validation its own bounded allowance.
             match read_codex_owner_child_identity_with_test_delay(
                 child_pid_file,
                 stable_runtime,
@@ -36644,7 +36665,7 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         + Duration::from_secs(1);
     let deadline_validation_started = Instant::now();
     let (deadline_validation_parent, deadline_validation_identity) =
-        spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
+        spawn_codex_owned_obsolete_mcp_with_test_delays(
             &codex_fixture,
             &runtime,
             &db,
@@ -36653,6 +36674,7 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
             Some(deadline_validation_publication_delay),
             None,
             Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+            None,
         )?;
     let deadline_validation_elapsed = deadline_validation_started.elapsed();
     if deadline_validation_elapsed < CODEX_OWNER_READINESS_TIMEOUT
@@ -37276,7 +37298,7 @@ fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn
 
 #[test]
 #[cfg(windows)]
-fn windows_fixture_late_publication_is_atomic_but_past_readiness() -> Result<(), Box<dyn Error>> {
+fn windows_fixture_identity_observed_after_readiness_is_rejected() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let runtime = temp
         .path()
@@ -37288,14 +37310,16 @@ fn windows_fixture_late_publication_is_atomic_but_past_readiness() -> Result<(),
     compile_codex_mcp_owner_fixture(&codex_fixture)?;
 
     let started = Instant::now();
-    let result = spawn_codex_owned_obsolete_mcp(
+    let result = spawn_codex_owned_obsolete_mcp_with_test_delays(
         &codex_fixture,
         &runtime,
         &db,
         None,
         &identity_file,
-        Some(CODEX_OWNER_READINESS_TIMEOUT + Duration::from_secs(1)),
+        Some(CODEX_OWNER_DELAYED_PUBLICATION),
         Some("late-publication"),
+        None,
+        Some(CODEX_OWNER_OBSERVATION_TEST_DELAY),
     );
     let elapsed = started.elapsed();
     let error = match result {
@@ -37325,23 +37349,22 @@ fn windows_fixture_late_publication_is_atomic_but_past_readiness() -> Result<(),
         .map(Duration::from_millis)
         .ok_or_else(|| {
             io::Error::other(format!(
-                "late publication timeout omitted its readiness elapsed diagnostic: {text}"
+                "late-observed identity timeout omitted its readiness elapsed diagnostic: {text}"
             ))
         })?;
     if elapsed < CODEX_OWNER_READINESS_TIMEOUT
         || elapsed > total_upper_bound
-        || readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || readiness_elapsed <= CODEX_OWNER_READINESS_TIMEOUT
         || readiness_elapsed
             > CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
-        || (!text.contains("did not publish its child PID within 30s")
-            && !text.contains("readiness deadline"))
+        || !text.contains("published its child PID after the readiness deadline")
         || !text.contains(&format!("owner={}", codex_fixture.display()))
         || !text.contains(&format!("identity_file={}", identity_file.display()))
         || !text.contains(&format!("expected_runtime={}", runtime.display()))
         || windows_process_is_alive(&retained_identity)?
     {
         return Err(io::Error::other(format!(
-            "late publication was accepted or not bounded: elapsed={elapsed:?} readiness_elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} readiness_scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_deadline={total_upper_bound:?}\n{text}"
+            "late-observed identity was accepted or not bounded: elapsed={elapsed:?} readiness_elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} readiness_scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_deadline={total_upper_bound:?}\n{text}"
         ))
         .into());
     }
