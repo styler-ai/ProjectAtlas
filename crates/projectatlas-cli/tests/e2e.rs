@@ -183,8 +183,14 @@ const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 // The failure path gives the owner this bounded window to observe the stop marker and exit.
 const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(windows)]
+// Retained identity capture runs after owner observation and before exact child stop.
+const CODEX_OWNER_IDENTITY_CAPTURE_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
 // The exact child-stop helper allows its owned process up to this wait budget to exit.
 const CODEX_OWNER_CHILD_STOP_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+// Keep the complete cleanup envelope truthful when one bounded phase is delayed by suite load.
+const CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 // Allow normal scheduling variance without allowing a late readiness retry to hide.
 const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
@@ -192,6 +198,8 @@ const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(
 const CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
 const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(4);
+#[cfg(windows)]
+const CODEX_OWNER_COMPOSED_STOP_DELAY: Duration = Duration::from_secs(3);
 #[cfg(windows)]
 const CODEX_OWNER_STOP_HELPER_TEST_DELAY: Duration = Duration::from_secs(6);
 #[cfg(windows)]
@@ -36128,7 +36136,21 @@ fn codex_owner_retained_identity_path(child_identity_file: &Path) -> PathBuf {
 
 #[cfg(windows)]
 fn codex_owner_cleanup_deadline(started: Instant) -> Instant {
-    started + CODEX_OWNER_FAILURE_CLEANUP_BUDGET + CODEX_OWNER_CHILD_STOP_BUDGET
+    started
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+}
+
+#[cfg(windows)]
+fn codex_owner_identity_capture_deadline(cleanup_deadline: Instant) -> Instant {
+    let now = Instant::now();
+    let capture_budget = cleanup_deadline
+        .saturating_duration_since(now)
+        .saturating_sub(CODEX_OWNER_CHILD_STOP_BUDGET)
+        .min(CODEX_OWNER_IDENTITY_CAPTURE_BUDGET);
+    now + capture_budget
 }
 
 #[cfg(windows)]
@@ -36138,21 +36160,51 @@ fn cleanup_codex_owner_processes_after_spawn_failure(
     stable_runtime: &Path,
     mut failures: Vec<String>,
     cleanup_deadline: Instant,
+    identity_capture_delay: Option<Duration>,
+    child_stop_delay: Option<Duration>,
 ) -> Result<(), Box<dyn Error>> {
     let retained_identity_file = codex_owner_retained_identity_path(child_identity_file);
-    let child_cleanup_result = read_codex_owner_child_identity(
+    let capture_deadline = codex_owner_identity_capture_deadline(cleanup_deadline);
+    let mut capture_failures = Vec::new();
+    let child_identity = match read_codex_owner_child_identity_with_test_delay(
         child_identity_file,
         stable_runtime,
-        cleanup_deadline.saturating_duration_since(Instant::now()),
-    )
-    .or_else(|_| {
-        read_codex_owner_child_identity(
-            &retained_identity_file,
-            stable_runtime,
-            cleanup_deadline.saturating_duration_since(Instant::now()),
-        )
-    })
-    .and_then(|identity| stop_windows_fixture_process_until(&identity, cleanup_deadline, None));
+        capture_deadline.saturating_duration_since(Instant::now()),
+        identity_capture_delay,
+    ) {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            capture_failures.push(format!("normal child identity capture failed: {error}"));
+            match read_codex_owner_child_identity_with_test_delay(
+                &retained_identity_file,
+                stable_runtime,
+                capture_deadline.saturating_duration_since(Instant::now()),
+                identity_capture_delay,
+            ) {
+                Ok(identity) => Some(identity),
+                Err(error) => {
+                    capture_failures
+                        .push(format!("retained child identity capture failed: {error}"));
+                    None
+                }
+            }
+        }
+    };
+    let child_cleanup_result = match child_identity {
+        Some(identity) => {
+            stop_windows_fixture_process_until(&identity, cleanup_deadline, child_stop_delay)
+        }
+        None => match read_codex_owner_identity_record(&retained_identity_file) {
+            Ok(identity) => {
+                stop_windows_fixture_process_until(&identity, cleanup_deadline, child_stop_delay)
+            }
+            Err(error) => Err(io::Error::other(format!(
+                "no retained child identity was available after capture failure ({}): {error}",
+                capture_failures.join("; ")
+            ))
+            .into()),
+        },
+    };
     if let Err(error) = child_cleanup_result {
         failures.push(format!("could not retire its owned child safely: {error}"));
     }
@@ -36193,6 +36245,8 @@ fn codex_owner_observation_failure(
         stable_runtime,
         Vec::new(),
         cleanup_deadline,
+        None,
+        None,
     ) {
         Ok(()) => Ok(()),
         Err(cleanup_error) => Err(io::Error::other(format!(
@@ -36207,6 +36261,23 @@ fn stop_codex_owner_after_spawn_failure(
     parent: &mut Child,
     child_identity_file: &Path,
     stable_runtime: &Path,
+) -> Result<(), Box<dyn Error>> {
+    stop_codex_owner_after_spawn_failure_with_test_delays(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        None,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn stop_codex_owner_after_spawn_failure_with_test_delays(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    identity_capture_delay: Option<Duration>,
+    child_stop_delay: Option<Duration>,
 ) -> Result<(), Box<dyn Error>> {
     let mut stop_file = child_identity_file.as_os_str().to_os_string();
     stop_file.push(".stop");
@@ -36256,6 +36327,8 @@ fn stop_codex_owner_after_spawn_failure(
         stable_runtime,
         failures,
         cleanup_deadline,
+        identity_capture_delay,
+        child_stop_delay,
     )
 }
 
@@ -36315,9 +36388,27 @@ fn read_codex_owner_child_identity(
     stable_runtime: &Path,
     capture_timeout: Duration,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    read_codex_owner_child_identity_with_test_delay(
+        child_identity_file,
+        stable_runtime,
+        capture_timeout,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn read_codex_owner_child_identity_with_test_delay(
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    capture_timeout: Duration,
+    test_delay: Option<Duration>,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
     let published = read_codex_owner_identity_record(child_identity_file)?;
-    let captured =
-        capture_windows_process_identity_with_timeout(published.process_id, capture_timeout, None)?;
+    let captured = capture_windows_process_identity_with_timeout(
+        published.process_id,
+        capture_timeout,
+        test_delay,
+    )?;
     if captured.process_id != published.process_id
         || captured.creation_file_time_utc != published.creation_file_time_utc
     {
@@ -36474,8 +36565,34 @@ fn spawn_codex_owned_obsolete_mcp(
                 ),
             ));
         }
+        if Instant::now() >= deadline {
+            let elapsed = started.elapsed();
+            return Err(codex_owner_spawn_error(
+                &mut parent,
+                codex_fixture,
+                child_pid_file,
+                stable_runtime,
+                format!(
+                    "Codex MCP owner fixture readiness deadline expired before identity validation (readiness_elapsed_ms={})",
+                    elapsed.as_millis()
+                ),
+            ));
+        }
         if child_pid_file.is_file() {
             let capture_timeout = deadline.saturating_duration_since(Instant::now());
+            if capture_timeout.is_zero() {
+                let elapsed = started.elapsed();
+                return Err(codex_owner_spawn_error(
+                    &mut parent,
+                    codex_fixture,
+                    child_pid_file,
+                    stable_runtime,
+                    format!(
+                        "Codex MCP owner fixture published its child PID after the readiness deadline (readiness_elapsed_ms={})",
+                        elapsed.as_millis()
+                    ),
+                ));
+            }
             match read_codex_owner_child_identity(child_pid_file, stable_runtime, capture_timeout) {
                 Ok(captured) if Instant::now() < deadline => return Ok((parent, captured)),
                 Ok(_) => {
@@ -36643,6 +36760,64 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         .into());
     }
 
+    // Exercise the complete bounded cleanup sequence: owner observation, retained identity
+    // capture, and exact child stop each consume real scheduler-visible time.
+    let composed_identity_file = temp.path().join("composed-timeout.pid");
+    let mut composed_command = StdCommand::new(&codex_fixture);
+    composed_command
+        .arg(&composed_identity_file)
+        .arg(&runtime)
+        .arg(&db)
+        .env(CODEX_OWNER_PUBLICATION_MODE_ENV, "timeout-ignore-stop")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut composed_parent = composed_command.spawn()?;
+    let composed_retained_identity_file =
+        codex_owner_retained_identity_path(&composed_identity_file);
+    let retained_deadline = Instant::now() + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
+    while !composed_retained_identity_file.is_file() && Instant::now() < retained_deadline {
+        if let Some(status) = composed_parent.try_wait()? {
+            return Err(io::Error::other(format!(
+                "composed timeout owner exited before retaining child identity: {status}"
+            ))
+            .into());
+        }
+        let remaining = retained_deadline.saturating_duration_since(Instant::now());
+        thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+    if !composed_retained_identity_file.is_file() {
+        drop(composed_parent.kill());
+        drop(composed_parent.wait());
+        return Err(io::Error::other(
+            "composed timeout owner did not publish retained child identity",
+        )
+        .into());
+    }
+    let composed_result = stop_codex_owner_after_spawn_failure_with_test_delays(
+        &mut composed_parent,
+        &composed_identity_file,
+        &runtime,
+        Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+        Some(CODEX_OWNER_COMPOSED_STOP_DELAY),
+    );
+    let composed_text = composed_result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let composed_identity = read_codex_owner_identity_record(&composed_retained_identity_file)?;
+    if composed_result.is_ok()
+        || composed_text.contains("could not retire its owned child safely")
+        || composed_parent.try_wait()?.is_none()
+        || windows_process_is_alive(&composed_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "composed owner cleanup did not reserve bounded capture and exact child-stop time: {composed_text}"
+        ))
+        .into());
+    }
+
     let identity_file = temp.path().join("timeout.pid");
     let timeout_started = Instant::now();
     let result = spawn_codex_owned_obsolete_mcp(
@@ -36667,7 +36842,9 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
     let timeout_elapsed = timeout_started.elapsed();
     let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
         + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
         + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     let text = error.to_string();
     let timeout_readiness_elapsed = text
@@ -36699,7 +36876,7 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         || windows_process_is_alive(&timeout_child_identity)?
     {
         return Err(io::Error::other(format!(
-            "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} owner_observation_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} child_stop_budget={CODEX_OWNER_CHILD_STOP_BUDGET:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
+            "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} owner_observation_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} identity_capture_budget={CODEX_OWNER_IDENTITY_CAPTURE_BUDGET:?} child_stop_budget={CODEX_OWNER_CHILD_STOP_BUDGET:?} cleanup_scheduler_tolerance={CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
         ))
         .into());
     }
@@ -37043,102 +37220,66 @@ fn windows_fixture_late_publication_is_atomic_but_past_readiness() -> Result<(),
     compile_obsolete_projectatlas_fixture(&runtime)?;
     compile_codex_mcp_owner_fixture(&codex_fixture)?;
 
-    let mut command = StdCommand::new(&codex_fixture);
-    command
-        .arg(&identity_file)
-        .arg(&runtime)
-        .arg(&db)
-        .env(
-            CODEX_OWNER_PUBLICATION_DELAY_ENV,
-            (CODEX_OWNER_READINESS_TIMEOUT + Duration::from_secs(1))
-                .as_millis()
-                .to_string(),
-        )
-        .env(CODEX_OWNER_PUBLICATION_MODE_ENV, "late-publication")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut parent = command.spawn()?;
     let started = Instant::now();
-    let result = (|| -> Result<(Duration, WindowsProcessIdentity), Box<dyn Error>> {
-        let readiness_deadline = started + CODEX_OWNER_READINESS_TIMEOUT;
-        while Instant::now() < readiness_deadline {
-            if identity_file.is_file() {
-                return Err(io::Error::other(
-                    "late owner fixture published its identity before the readiness deadline",
-                )
-                .into());
-            }
-            if let Some(status) = parent.try_wait()? {
-                return Err(io::Error::other(format!(
-                    "late owner fixture exited before its delayed publication: {status}"
-                ))
-                .into());
-            }
-            thread::sleep(Duration::from_millis(25));
+    let result = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        None,
+        &identity_file,
+        Some(CODEX_OWNER_READINESS_TIMEOUT + Duration::from_secs(1)),
+        Some("late-publication"),
+    );
+    let elapsed = started.elapsed();
+    let error = match result {
+        Ok((parent, child_identity)) => {
+            return Err(codex_owner_unexpected_acceptance_error(
+                "late-publication",
+                parent,
+                &child_identity,
+            ));
         }
-        if identity_file.is_file() {
-            return Err(io::Error::other(
-                "late owner fixture publication raced into the readiness deadline",
-            )
-            .into());
-        }
-
-        let publication_deadline = readiness_deadline + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
-        while !identity_file.is_file() && Instant::now() < publication_deadline {
-            if let Some(status) = parent.try_wait()? {
-                return Err(io::Error::other(format!(
-                    "late owner fixture exited before its delayed publication: {status}"
-                ))
-                .into());
-            }
-            let remaining = publication_deadline.saturating_duration_since(Instant::now());
-            thread::sleep(remaining.min(Duration::from_millis(25)));
-        }
-        if !identity_file.is_file() {
-            return Err(io::Error::other(format!(
-                "late owner fixture did not publish atomically after the readiness deadline: elapsed={:?}",
-                started.elapsed()
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    let retained_identity =
+        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
+    let total_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let readiness_elapsed = text
+        .split("readiness_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "late publication timeout omitted its readiness elapsed diagnostic: {text}"
             ))
-            .into());
-        }
-        let publication_elapsed = started.elapsed();
-        let captured = read_codex_owner_child_identity(
-            &identity_file,
-            &runtime,
-            CODEX_OWNER_FAILURE_CLEANUP_BUDGET,
-        )?;
-        Ok((publication_elapsed, captured))
-    })();
-
-    match result {
-        Ok((publication_elapsed, identity)) => {
-            cleanup_codex_owner_processes(parent, &identity)?;
-            if publication_elapsed <= CODEX_OWNER_READINESS_TIMEOUT {
-                return Err(io::Error::other(format!(
-                    "late owner fixture publication was not past readiness: elapsed={publication_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?}"
-                ))
-                .into());
-            }
-            Ok(())
-        }
-        Err(error) => {
-            let cleanup_result = cleanup_codex_owner_processes_after_spawn_failure(
-                &mut parent,
-                &identity_file,
-                &runtime,
-                Vec::new(),
-                codex_owner_cleanup_deadline(Instant::now()),
-            );
-            if let Err(cleanup_error) = cleanup_result {
-                return Err(io::Error::other(format!(
-                    "late publication regression failed and fixture cleanup also failed: {error}; {cleanup_error}"
-                ))
-                .into());
-            }
-            Err(error)
-        }
+        })?;
+    if !identity_file.is_file()
+        || elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || elapsed > total_upper_bound
+        || readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || readiness_elapsed
+            > CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+        || (!text.contains("did not publish its child PID within 30s")
+            && !text.contains("readiness deadline"))
+        || !text.contains(&format!("owner={}", codex_fixture.display()))
+        || !text.contains(&format!("identity_file={}", identity_file.display()))
+        || !text.contains(&format!("expected_runtime={}", runtime.display()))
+        || windows_process_is_alive(&retained_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "late publication was accepted or not bounded: elapsed={elapsed:?} readiness_elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} readiness_scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_deadline={total_upper_bound:?}\n{text}"
+        ))
+        .into());
     }
+    Ok(())
 }
 
 #[test]
