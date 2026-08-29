@@ -84,14 +84,14 @@ The standard-library self-test owns parser/state-transition coverage. Existing R
 
 ## Migration Plan
 
-1. Create and map one v0.5 IssueOps owner under #492 with `complexity:high`; #492 is blocked by it because the release gate depends on the new contract.
+1. Create and map one sanitized v0.5 IssueOps owner with `complexity:high`, and declare its queued direct-child/blocker relationship to #492. Keep the live relationship, milestone, and readiness activation for the bounded publication step so accepted `main` and its existing release graph remain coherent during implementation.
 2. Implement and locally validate the checker, workflow trigger, templates, guidance, and contract tests without changing live issue bodies.
 3. Obtain Terra High acceptance of the immutable implementation head; this issue does not require the additional Sol gate unless its final specification is reclassified `complexity:very-high`.
-4. Prepare, diff, and validate every open mapped issue body and complexity label against the accepted checker while preserving prior bodies for rollback.
-5. Publish the live migration, read back exact bodies/labels, push the Terra-accepted implementation head, run hosted checks, and merge only when the new checker sees the complete live set.
-6. Rerun IssueOps from accepted `main`, synchronize this issue and #492 relationships/tasks, and then allow ordinary release work to continue.
+4. Prepare, diff, and validate every open mapped issue body, complexity label, and the queued #517/#492 relationship activation against the accepted checker while preserving prior state for rollback.
+5. Publish the live body/label/relationship migration, read back the exact state, push the Terra-accepted implementation head, run hosted checks, and merge only when the new checker sees the complete live set.
+6. Rerun IssueOps from accepted `main`, verify this issue and #492 relationships/tasks, and then allow ordinary release work to continue.
 
-Rollback before merge restores the prior live issue bodies/labels and abandons the unmerged checker head. After merge, any defect is fixed forward under the same owner; closed historical bodies remain untouched throughout.
+Rollback before merge restores the prior live issue bodies, labels, milestone/status, and native relationships and abandons the unmerged checker head. After merge, any defect is fixed forward under the same owner; closed historical bodies remain untouched throughout.
 
 ## Open Questions
 

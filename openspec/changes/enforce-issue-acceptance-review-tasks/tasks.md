@@ -1,6 +1,6 @@
 ## 1. Specification and Issue Boundary
 
-- [ ] 1.1 Create and map one sanitized v0.5 IssueOps owner, assign its accepted complexity, make it one direct #492 child and blocker, synchronize the complete issue packet with this OpenSpec task list, and pass strict OpenSpec plus current IssueOps validation.
+- [ ] 1.1 Create and map one sanitized v0.5 IssueOps owner, assign its accepted complexity, declare its queued direct #492 child and blocker activation, synchronize the complete issue packet with this OpenSpec task list, and pass strict OpenSpec plus current IssueOps validation.
 - [ ] 1.2 Add focused issue-task authority and acceptance-state architecture views to the existing v0.5 release architecture document; render every changed Mermaid block and inspect both visual communication and semantic truth.
 
 ## 2. IssueOps Contract
@@ -17,7 +17,7 @@
 
 ## 4. Live Migration and Acceptance
 
-- [ ] 4.1 Prepare and independently diff every open mapped issue body and label update; preserve all prior prose, links, task text/state, milestone facts, and relationships; validate the complete candidate set with the new checker; and retain exact rollback inputs without committing a body manifest or receipt ledger.
+- [ ] 4.1 Prepare and independently diff every open mapped issue body and label update plus the queued #517 milestone/status/relationship activation; preserve all prior prose, links, task text/state, milestone facts, and relationships; validate the complete candidate set with the new checker; and retain exact rollback inputs without committing a body manifest or receipt ledger.
 - [ ] 4.2 Obtain Terra High review of the immutable implementation and migration boundary, return every finding to the implementation owner, and keep all acceptance tasks and publication blocked until Terra accepts the complete issue intent, source, specifications, architecture, and tests.
-- [ ] 4.3 Publish the bounded live issue/label migration, read back the complete set, push only the Terra-accepted implementation head, pass hosted checks and live IssueOps, merge and read back accepted `main`, and restore prior bodies/labels if pre-merge convergence fails.
+- [ ] 4.3 Publish the bounded live issue/label/relationship migration, read back the complete set, push only the Terra-accepted implementation head, pass hosted checks and live IssueOps, merge and read back accepted `main`, and restore prior bodies/labels/relationships if pre-merge convergence fails.
 - [ ] 4.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
