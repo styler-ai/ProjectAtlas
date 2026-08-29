@@ -36396,20 +36396,6 @@ fn codex_owner_unexpected_acceptance_error(
 }
 
 #[cfg(windows)]
-fn read_codex_owner_child_identity(
-    child_identity_file: &Path,
-    stable_runtime: &Path,
-    capture_timeout: Duration,
-) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
-    read_codex_owner_child_identity_with_test_delay(
-        child_identity_file,
-        stable_runtime,
-        capture_timeout,
-        None,
-    )
-}
-
-#[cfg(windows)]
 fn read_codex_owner_child_identity_with_test_delay(
     child_identity_file: &Path,
     stable_runtime: &Path,
@@ -36516,6 +36502,29 @@ fn spawn_codex_owned_obsolete_mcp(
     publication_delay: Option<Duration>,
     publication_mode: Option<&str>,
 ) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
+    spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
+        codex_fixture,
+        stable_runtime,
+        db,
+        config,
+        child_pid_file,
+        publication_delay,
+        publication_mode,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
+    codex_fixture: &Path,
+    stable_runtime: &Path,
+    db: &Path,
+    config: Option<&Path>,
+    child_pid_file: &Path,
+    publication_delay: Option<Duration>,
+    publication_mode: Option<&str>,
+    identity_capture_delay: Option<Duration>,
+) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
     let mut command = StdCommand::new(codex_fixture);
     command
         .arg(child_pid_file)
@@ -36566,31 +36575,17 @@ fn spawn_codex_owned_obsolete_mcp(
             }
         }
         if child_pid_file.is_file() {
-            let capture_timeout = deadline.saturating_duration_since(Instant::now());
-            if capture_timeout.is_zero() {
-                let elapsed = started.elapsed();
-                return Err(codex_owner_spawn_error(
-                    &mut parent,
-                    codex_fixture,
-                    child_pid_file,
-                    stable_runtime,
-                    format!(
-                        "Codex MCP owner fixture published its child PID after the readiness deadline (readiness_elapsed_ms={})",
-                        elapsed.as_millis()
-                    ),
-                ));
-            }
-            match read_codex_owner_child_identity(child_pid_file, stable_runtime, capture_timeout) {
-                Ok(captured) if Instant::now() < deadline => return Ok((parent, captured)),
-                Ok(_) => {
-                    return Err(codex_owner_spawn_error(
-                        &mut parent,
-                        codex_fixture,
-                        child_pid_file,
-                        stable_runtime,
-                        "published child identity validation completed after the readiness deadline",
-                    ));
-                }
+            // Once publication is observed, give exact identity validation its own bounded
+            // allowance.  The file may have been published before this poll crossed the
+            // readiness deadline, so classifying it as missing before validation would reject
+            // a valid owner under ordinary scheduler contention.
+            match read_codex_owner_child_identity_with_test_delay(
+                child_pid_file,
+                stable_runtime,
+                CODEX_OWNER_IDENTITY_CAPTURE_BUDGET,
+                identity_capture_delay,
+            ) {
+                Ok(captured) => return Ok((parent, captured)),
                 Err(error) => {
                     return Err(codex_owner_spawn_error(
                         &mut parent,
@@ -36638,6 +36633,53 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
     compile_obsolete_projectatlas_fixture(&runtime)?;
     let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
     compile_codex_mcp_owner_fixture(&codex_fixture)?;
+
+    // Exercise the production readiness helper when publication is observed before the
+    // deadline but bounded identity validation finishes just after it.  The dedicated
+    // capture allowance must accept the valid identity; using the old remaining-time
+    // allowance rejects this same causal path.
+    let deadline_validation_identity_file = temp.path().join("deadline-validation.pid");
+    let deadline_validation_publication_delay = CODEX_OWNER_READINESS_TIMEOUT
+        .saturating_sub(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY)
+        + Duration::from_secs(1);
+    let deadline_validation_started = Instant::now();
+    let (deadline_validation_parent, deadline_validation_identity) =
+        spawn_codex_owned_obsolete_mcp_with_identity_capture_delay(
+            &codex_fixture,
+            &runtime,
+            &db,
+            None,
+            &deadline_validation_identity_file,
+            Some(deadline_validation_publication_delay),
+            None,
+            Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+        )?;
+    let deadline_validation_elapsed = deadline_validation_started.elapsed();
+    if deadline_validation_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || deadline_validation_elapsed
+            > CODEX_OWNER_READINESS_TIMEOUT
+                + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+    {
+        let cleanup_result = cleanup_codex_owner_processes(
+            deadline_validation_parent,
+            &deadline_validation_identity,
+        );
+        return Err(io::Error::other(format!(
+            "deadline-observed publication did not use its bounded identity allowance: elapsed={deadline_validation_elapsed:?} publication_delay={deadline_validation_publication_delay:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} identity_capture_budget={CODEX_OWNER_IDENTITY_CAPTURE_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup={cleanup_result:?}"
+        ))
+        .into());
+    }
+    let deadline_validation_cleanup =
+        cleanup_codex_owner_processes(deadline_validation_parent, &deadline_validation_identity);
+    if deadline_validation_cleanup.is_err()
+        || windows_process_is_alive(&deadline_validation_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "deadline-observed publication did not clean up its accepted child: {deadline_validation_cleanup:?}"
+        ))
+        .into());
+    }
 
     for (index, (mode, expected)) in [
         ("early-exit", "exited before publishing"),
@@ -36702,54 +36744,6 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
             ))
             .into());
         }
-    }
-
-    // Keep a valid atomic publication close to the readiness edge.  The helper must
-    // inspect that publication before classifying a missing-file timeout, then give
-    // identity capture only the remaining readiness budget.
-    let deadline_edge_identity_file = temp.path().join("deadline-edge.pid");
-    let deadline_edge_started = Instant::now();
-    let deadline_edge_delay =
-        CODEX_OWNER_READINESS_TIMEOUT.saturating_sub(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE);
-    let deadline_edge_result = spawn_codex_owned_obsolete_mcp(
-        &codex_fixture,
-        &runtime,
-        &db,
-        Some(&atlas_dir.join("config.toml")),
-        &deadline_edge_identity_file,
-        Some(deadline_edge_delay),
-        None,
-    );
-    let deadline_edge_elapsed = deadline_edge_started.elapsed();
-    let (deadline_edge_parent, deadline_edge_identity) = match deadline_edge_result {
-        Ok((parent, identity)) => {
-            if deadline_edge_elapsed < deadline_edge_delay
-                || deadline_edge_elapsed >= CODEX_OWNER_READINESS_TIMEOUT
-            {
-                let cleanup_result = cleanup_codex_owner_processes(parent, &identity);
-                return Err(io::Error::other(format!(
-                    "deadline-edge publication was not accepted inside the readiness budget: elapsed={deadline_edge_elapsed:?} publication_delay={deadline_edge_delay:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} cleanup={cleanup_result:?}"
-                ))
-                .into());
-            }
-            (parent, identity)
-        }
-        Err(error) => {
-            return Err(io::Error::other(format!(
-                "deadline-edge publication was rejected before identity validation: elapsed={deadline_edge_elapsed:?} publication_delay={deadline_edge_delay:?} error={error}"
-            ))
-            .into());
-        }
-    };
-    let deadline_edge_cleanup =
-        cleanup_codex_owner_processes(deadline_edge_parent, &deadline_edge_identity);
-    if deadline_edge_cleanup.is_err() || windows_process_is_alive(&deadline_edge_identity)? {
-        return Err(io::Error::other(
-            format!(
-                "deadline-edge publication did not clean up its accepted child: {deadline_edge_cleanup:?}"
-            ),
-        )
-        .into());
     }
 
     // Exercise the same branch a negative fixture would take if validation regressed.
