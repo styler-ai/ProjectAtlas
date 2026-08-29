@@ -1583,39 +1583,92 @@ fn is_php_language(language: Option<&str>) -> bool {
 /// Return a static PHP include target, omitting dynamic or ambiguous expressions.
 fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
     let expression = first_named_child(node)?;
-    let target = if expression.kind() == "encapsed_string" {
-        let mut cursor = expression.walk();
-        let mut children = expression.named_children(&mut cursor);
-        let content_node = children.next()?;
-        (content_node.kind() == "string_content" && children.next().is_none())
-            .then(|| named_text(content_node, content))
-            .flatten()
-    } else {
-        matches!(
-            expression.kind(),
-            "string" | "qualified_name" | "relative_name" | "name"
-        )
-        .then(|| compact_text(node_text(expression, content).as_deref().unwrap_or("")))
-    }?;
+    let target = match expression.kind() {
+        "string" | "encapsed_string" => php_static_string_target(expression, content)?,
+        "qualified_name" | "relative_name" | "name" => {
+            compact_text(node_text(expression, content).as_deref().unwrap_or(""))
+        }
+        _ => return None,
+    };
     Some(target).filter(|target| !target.is_empty() && target.chars().count() <= MAX_SNIPPET_CHARS)
+}
+
+/// Return the plain content of a PHP string literal when it has no interpolation.
+fn php_static_string_target(node: Node<'_>, content: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut children = node.named_children(&mut cursor);
+    let content_node = children.next()?;
+    (content_node.kind() == "string_content" && children.next().is_none())
+        .then(|| named_text(content_node, content))
+        .flatten()
+}
+
+/// Return every static namespace path from a PHP `use` declaration.
+fn php_namespace_use_targets(node: Node<'_>, content: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut prefix = None;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if targets.len() >= MAX_RELATIONS_PER_FILE {
+            break;
+        }
+        match child.kind() {
+            "namespace_use_clause" => {
+                if let Some(target) = php_namespace_use_clause_target(child, content, None) {
+                    targets.push(target);
+                }
+            }
+            "namespace_name" => prefix = named_text(child, content),
+            "namespace_use_group" => {
+                php_namespace_use_group_targets(child, content, prefix.as_deref(), &mut targets);
+            }
+            _ => {}
+        }
+    }
+    targets
+}
+
+/// Collect the clauses in a grouped PHP `use` declaration.
+fn php_namespace_use_group_targets(
+    node: Node<'_>,
+    content: &str,
+    prefix: Option<&str>,
+    targets: &mut Vec<String>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if targets.len() >= MAX_RELATIONS_PER_FILE {
+            break;
+        }
+        if child.kind() == "namespace_use_clause"
+            && let Some(target) = php_namespace_use_clause_target(child, content, prefix)
+        {
+            targets.push(target);
+        }
+    }
+}
+
+/// Compose one PHP namespace-use clause with an optional grouped prefix.
+fn php_namespace_use_clause_target(
+    node: Node<'_>,
+    content: &str,
+    prefix: Option<&str>,
+) -> Option<String> {
+    let target = first_named_child(node).and_then(|child| {
+        matches!(child.kind(), "name" | "qualified_name" | "relative_name")
+            .then(|| named_text(child, content))
+            .flatten()
+    })?;
+    let target = match prefix {
+        Some(prefix) if !prefix.is_empty() => format!("{prefix}\\{target}"),
+        _ => target,
+    };
+    (target.chars().count() <= MAX_SNIPPET_CHARS).then_some(target)
 }
 
 /// Return the first static namespace path from a PHP `use` declaration.
 fn php_namespace_use_target(node: Node<'_>, content: &str) -> Option<String> {
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if matches!(
-            child.kind(),
-            "namespace_name" | "qualified_name" | "relative_name"
-        ) && let Some(target) = named_text(child, content)
-        {
-            return Some(target);
-        }
-        if let Some(target) = php_namespace_use_target(child, content) {
-            return Some(target);
-        }
-    }
-    None
+    php_namespace_use_targets(node, content).into_iter().next()
 }
 
 /// Return a conservative PHP call target, suppressing dynamic calls.
@@ -1672,16 +1725,44 @@ fn has_descendant_kind(node: Node<'_>, kinds: &[&str]) -> bool {
     false
 }
 
+/// Return whether a node has a direct named child of the requested kind.
+fn has_direct_child_kind(node: Node<'_>, kind: &str) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| child.kind() == kind)
+}
+
 /// Push an import relation from an import node.
 fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+    if node.kind() == "namespace_use_declaration" {
+        for import_text in php_namespace_use_targets(node, content) {
+            if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
+                break;
+            }
+            if !import_text.is_empty() && import_text.chars().count() <= MAX_SNIPPET_CHARS {
+                push_relation(
+                    graph,
+                    "<module>",
+                    &import_text,
+                    RelationKind::Imports,
+                    node.start_position().row + 1,
+                    &import_text,
+                );
+            }
+        }
+        return;
+    }
     let import_text = if is_php_include_node(node.kind()) {
-        php_static_include_target(node, content).unwrap_or_default()
-    } else if node.kind() == "namespace_use_declaration" {
-        php_namespace_use_target(node, content).unwrap_or_default()
+        php_static_include_target(node, content)
     } else {
-        compact_text(node_text(node, content).as_deref().unwrap_or(""))
+        Some(compact_text(
+            node_text(node, content).as_deref().unwrap_or(""),
+        ))
     };
-    if import_text.is_empty() {
+    let Some(import_text) = import_text else {
+        return;
+    };
+    if import_text.is_empty() || import_text.chars().count() > MAX_SNIPPET_CHARS {
         return;
     }
     push_relation(
@@ -1696,6 +1777,13 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
 
 /// Push a call relation from a call node.
 fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+    if is_php_language(graph.language.as_deref())
+        && node
+            .child_by_field_name("arguments")
+            .is_some_and(|arguments| has_direct_child_kind(arguments, "variadic_placeholder"))
+    {
+        return;
+    }
     let target_node = node
         .child_by_field_name("function")
         .or_else(|| first_named_child(node));
@@ -4698,6 +4786,110 @@ class Child extends Base {
         }
         assert!(calls.iter().all(|relation| {
             !relation.target_name.contains("dynamic") && !relation.target_name.contains("scope")
+        }));
+    }
+
+    #[test]
+    fn php_callable_acquisition_and_import_targets_stay_precise() {
+        let source = r#"<?php
+use Vendor\One, Vendor\Two as TwoAlias;
+use Vendor\Group\{First, Second as GroupAlias};
+require 'bootstrap.php';
+require "bootstrap.php";
+require "boot/$name.php";
+require $dynamic;
+require [];
+function run(): void {
+    foo(...);
+    foo();
+    foo(...$args);
+    Service::boot(...);
+    Service::boot();
+    $object->save(...);
+    $object->save();
+}
+"#;
+        let graph = extract_symbol_graph("src/Callable.php", Some("php"), source);
+
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+        for (target, lines) in [
+            ("Vendor\\One", vec![2]),
+            ("Vendor\\Two", vec![2]),
+            ("Vendor\\Group\\First", vec![3]),
+            ("Vendor\\Group\\Second", vec![3]),
+            ("bootstrap.php", vec![4, 5]),
+        ] {
+            assert_eq!(
+                imports
+                    .iter()
+                    .filter(|relation| relation.target_name == target)
+                    .count(),
+                lines.len(),
+                "missing exact PHP import target {target}: {imports:?}"
+            );
+            let mut observed_lines = imports
+                .iter()
+                .filter(|relation| relation.target_name == target)
+                .map(|relation| {
+                    assert_eq!(relation.path, "src/Callable.php");
+                    assert!(relation.context.contains(target));
+                    assert!(!relation.context.contains('\''));
+                    assert!(!relation.context.contains('"'));
+                    relation.line
+                })
+                .collect::<Vec<_>>();
+            observed_lines.sort_unstable();
+            assert_eq!(observed_lines, lines);
+        }
+        assert!(imports.iter().all(|relation| {
+            !relation.target_name.contains("boot/")
+                && !relation.target_name.contains("dynamic")
+                && relation.target_name != "[]"
+                && !relation.target_name.contains("TwoAlias")
+                && !relation.target_name.contains("GroupAlias")
+        }));
+
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+        for (target, lines) in [
+            ("foo", vec![11, 12]),
+            ("Service::boot", vec![14]),
+            ("save", vec![16]),
+        ] {
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|relation| relation.target_name == target)
+                    .count(),
+                lines.len(),
+                "callable acquisition must not be published as invocation for {target}: {calls:?}"
+            );
+            let mut observed_lines = calls
+                .iter()
+                .filter(|relation| relation.target_name == target)
+                .map(|relation| {
+                    assert_eq!(relation.source_name, "run");
+                    assert_eq!(relation.path, "src/Callable.php");
+                    assert!(relation.context.contains(target));
+                    relation.line
+                })
+                .collect::<Vec<_>>();
+            observed_lines.sort_unstable();
+            assert_eq!(observed_lines, lines);
+        }
+        assert!(calls.iter().all(|relation| {
+            !relation.context.contains("foo(...)")
+                && !relation.context.contains("Service::boot(...)")
+                && !relation.context.contains("$object->save(...)")
+                && relation.target_name != "$dynamic"
+                && relation.target_name != "$name"
         }));
     }
 
