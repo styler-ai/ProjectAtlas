@@ -180,6 +180,11 @@ static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex:
 #[cfg(windows)]
 const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(windows)]
+// The failure path gives the owner this bounded window to observe the stop marker and exit.
+const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const CODEX_OWNER_EARLY_EXIT_MAX_ELAPSED: Duration = Duration::from_secs(5);
+#[cfg(windows)]
 const CODEX_OWNER_DELAYED_PUBLICATION: Duration = Duration::from_secs(6);
 #[cfg(windows)]
 const CODEX_OWNER_PUBLICATION_DELAY_ENV: &str =
@@ -36044,7 +36049,7 @@ fn stop_codex_owner_after_spawn_failure(
     let mut stop_file = child_identity_file.as_os_str().to_os_string();
     stop_file.push(".stop");
     let stop_result = fs::write(PathBuf::from(stop_file), b"stop");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
     if stop_result.is_ok() {
         loop {
             match parent.try_wait() {
@@ -36327,6 +36332,7 @@ public static class Program
     .enumerate()
     {
         let identity_file = temp.path().join(format!("{mode}-{index}.pid"));
+        let started = Instant::now();
         let result = spawn_codex_owned_obsolete_mcp(
             &codex_fixture,
             &runtime,
@@ -36341,15 +36347,17 @@ public static class Program
                 io::Error::other(format!("{mode} owner fixture publication was accepted")).into(),
             );
         };
+        let elapsed = started.elapsed();
         let text = error.to_string();
         if !text.contains(expected)
             || !text.contains(&format!("owner={}", codex_fixture.display()))
             || !text.contains(&format!("identity_file={}", identity_file.display()))
             || !text.contains(&format!("expected_runtime={}", runtime.display()))
+            || (mode == "early-exit" && elapsed > CODEX_OWNER_EARLY_EXIT_MAX_ELAPSED)
             || text.contains("fixture cleanup also failed")
         {
             return Err(io::Error::other(format!(
-                "{mode} owner fixture failure was not bounded and diagnostic:\n{text}"
+                "{mode} owner fixture failure was not bounded and diagnostic: elapsed={elapsed:?} max_early_exit={CODEX_OWNER_EARLY_EXIT_MAX_ELAPSED:?}\n{text}"
             ))
             .into());
         }
@@ -36370,8 +36378,10 @@ public static class Program
         return Err(io::Error::other("owner fixture without publication was accepted").into());
     };
     let timeout_elapsed = timeout_started.elapsed();
+    let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
     let text = error.to_string();
     if timeout_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || timeout_elapsed > timeout_upper_bound
         || !text.contains("did not publish its child PID within 30s")
         || !text.contains("elapsed=")
         || !text.contains(&format!("owner={}", codex_fixture.display()))
@@ -36380,7 +36390,7 @@ public static class Program
         || text.contains("fixture cleanup also failed")
     {
         return Err(io::Error::other(format!(
-            "true owner fixture timeout was not bounded and diagnostic: elapsed={timeout_elapsed:?}\n{text}"
+            "true owner fixture timeout was not bounded and diagnostic: elapsed={timeout_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} cleanup_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} upper_bound={timeout_upper_bound:?}\n{text}"
         ))
         .into());
     }
