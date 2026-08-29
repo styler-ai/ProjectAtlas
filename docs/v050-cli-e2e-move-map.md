@@ -5,7 +5,7 @@ This map freezes the complete pre-move contract before e2e.rs is deleted. The ma
 - Baseline commit: b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb
 - Baseline e2e.rs SHA-256: e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c
 - Inventoried pre-deletion e2e.rs SHA-256: 942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757 (the only edits before deletion rewired contract assertions/selectors to their split owners)
-- Symbols inventoried: 427 top-level items; tests: 158
+- Symbols inventoried: 431 top-level items; tests: 158
 - Post-move union proof compares the tests.name set in the JSON with the test names listed by all five e2e_* binaries.
 
 ## Durable binary ownership
@@ -193,6 +193,8 @@ Every pre-move test is listed with source bounds, preserved attributes, and exac
 
 The JSON symbols array contains every top-level helper, constant, enum, and struct with source bounds, attributes, and owning binary set. Its fixtures array contains every top-level fixture constant. `contract_facets` records every source line that mutates environment state, sets a timeout or deadline, owns process cleanup, constructs isolated processes or fixtures, or exercises a packaged/install/release route. The normal inventory contract checks execute these claims: symbol and fixture records must retain their frozen identities and current ownership, each facet line must still exist in the split sources, and the complete normalized support module must match its accepted fixed digest.
 
+The accepted #464 community-analysis coverage remains in its original domains after the rebase: `detailed_relation_cli_bounds_the_exact_json_envelope` keeps the JSON continuation, stable-community, and bounded-inconclusive assertions in `e2e_navigation.rs`, while `mcp_stdio_serves_toon_tool_payloads` keeps the equivalent TOON/MCP assertions in `e2e_delivery.rs`. The two shared community-value helpers are owned once by `tests/support/mod.rs`; navigation-only continuation paging remains local to `e2e_navigation.rs`.
+
 ## Selector migration
 
 The JSON keeps exact baseline selectors and post-move selector lines for CI, release, and optional-parser workflows. Selector semantics, timeout blocks, shell/platform gates, ignored selection, exact selection, output capture, and process serialization flags remain attached to their original commands.
@@ -209,7 +211,7 @@ The JSON keeps exact baseline selectors and post-move selector lines for CI, rel
 
 ## Architecture relationship
 
-The existing CLI E2E contract-ownership split diagram remains semantically true: one shared support boundary feeds the five durable owners, and CI/release selectors point to the corresponding owner binary. No diagram change is required.
+The existing CLI E2E contract-ownership split diagram remains semantically true: one shared support boundary feeds the five durable owners, and CI/release selectors point to the corresponding owner binary. The rebased #464 community assertions add no new owner or selector, so no diagram change is required.
 
 ## Post-move contract proof
 

@@ -75,12 +75,12 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    MCP_CONTRACT_METADATA_CANARY, McpDatabaseSnapshot, complete_mcp_test_after_shutdown,
-    git_command_for_root, json_at, json_summary_command, mcp_contract_executable,
-    mcp_database_snapshot, mcp_tool_text, require_json_array_len, require_json_bool,
-    require_json_contains, require_json_string, require_json_usize, require_json_usize_at_least,
-    require_json_usize_greater_than, run_mcp_stdio, run_mcp_stdio_with_env, sha256_hex,
-    sqlite_table_digests, workspace_root,
+    MCP_CONTRACT_METADATA_CANARY, McpDatabaseSnapshot, assert_planted_community_values,
+    complete_mcp_test_after_shutdown, git_command_for_root, json_at, json_community_values,
+    json_summary_command, mcp_contract_executable, mcp_database_snapshot, mcp_tool_text,
+    require_json_array_len, require_json_bool, require_json_contains, require_json_string,
+    require_json_usize, require_json_usize_at_least, require_json_usize_greater_than,
+    run_mcp_stdio, run_mcp_stdio_with_env, sha256_hex, sqlite_table_digests, workspace_root,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -298,7 +298,7 @@ const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
 const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
     "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
 
-const CLI_E2E_SYMBOL_COUNT: usize = 427;
+const CLI_E2E_SYMBOL_COUNT: usize = 431;
 
 const CLI_E2E_FIXTURE_COUNT: usize = 91;
 
@@ -326,8 +326,10 @@ const CLI_E2E_SUPPORT_USIZE_AT_LEAST_OWNERS: &[&str] = &[
 
 const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
+const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
+
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "675e56e758db092d494e93f27d8550cca5ec0e9ee2ec0268d075e8d73884a18b";
+    "7d0e2a8d2577df3a96aa7ba495f676940dca104c7c06ed3272dcc3a881a896dc";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -354,7 +356,7 @@ const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
 
 const CLI_E2E_SUPPORT_SHA256: &str =
-    "2e581b2d9810f7f1adb1b09ea8296a1e5229e434d65a05453cba8fb151b6d079";
+    "6b9120ff8c0403a20712ae19e03f0cbfed306c396f2efd1f458afd1b6fc318b0";
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
     "crates/projectatlas-cli/tests/e2e_delivery.rs",
@@ -639,6 +641,9 @@ fn cli_e2e_support_owners(name: &str) -> Option<&'static [&'static str]> {
         "workspace_root" => Some(CLI_E2E_SUPPORT_WORKSPACE_ROOT_OWNERS),
         "require_json_usize_at_least" => Some(CLI_E2E_SUPPORT_USIZE_AT_LEAST_OWNERS),
         "require_json_usize_greater_than" => Some(CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS),
+        "json_community_values" | "assert_planted_community_values" => {
+            Some(CLI_E2E_SUPPORT_COMMUNITY_OWNERS)
+        }
         "McpDatabaseSnapshot"
         | "MCP_CONTRACT_EXECUTABLE_ENV"
         | "MCP_CONTRACT_METADATA_CANARY"
@@ -13161,7 +13166,18 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     fs::create_dir(repo.join(SRC_DIR_NAME))?;
     fs::write(
         repo.join(SRC_DIR_NAME).join("lib.rs"),
-        "pub fn indexed() {\n    helper();\n}\n\nfn helper() {}\n",
+        "pub fn indexed() {\n    helper();\n}\n\
+         fn group_a_root() { group_a_one(); group_a_two(); }\n\
+         fn group_a_one() { group_a_two(); }\n\
+         fn group_a_two() { group_a_root(); }\n\
+         fn group_b_root() { group_b_one(); group_b_two(); }\n\
+         fn group_b_one() { group_b_two(); }\n\
+         fn group_b_two() { group_b_root(); }\n\
+         fn architecture_root() {\n\
+             group_a_root(); group_a_one(); group_a_two();\n\
+             group_b_root(); group_b_one(); group_b_two();\n\
+         }\n\
+         fn helper() {}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
 
@@ -13209,7 +13225,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"atlas_task_status","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"atlas_task_cancel","arguments":{"task_id":"task-progress-contract"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"atlas_health","arguments":{"coverage":true,"path_prefix":"src/lib.rs","parser":"tree-sitter","provider":"tree-sitter","coverage_state":"complete","limit":1}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"atlas_slice","arguments":{"file":"src/lib.rs","symbol":"helper","symbol_kind":"function","symbol_signature":"fn helper ( )"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs","compact":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","analysis_mode":"impact","vcs":"working_tree","file":"src/lib.rs","symbol":"indexed","direction":"outbound","depth":2,"limit":50,"output_bytes":65536}}}"#.to_string(),
@@ -13221,21 +13237,30 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"detailed","compact":true,"file":"src/lib.rs","symbol":"indexed","symbol_parent":"","direction":"outbound","include_occurrences":true,"limit":10,"output_bytes":65536}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"detailed","compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","include_occurrences":true,"limit":10,"output_bytes":2048}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","limit":10}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"edge_limit":1,"output_bytes":65536,"include_communities":true}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
-    let stdout = run_mcp_stdio(
-        &executable,
-        &repo,
-        &[
-            "--db".to_string(),
-            db.display().to_string(),
-            "mcp".to_string(),
-        ],
-        &messages,
-    )?;
+    let args = [
+        "--db".to_string(),
+        db.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let run_phase = |phase: &[String]| run_mcp_stdio(&executable, &repo, &args, phase);
+    // MCP dispatches requests concurrently. Keep initialization/scan ahead of
+    // later analysis, then reopen the same database for analysis requests.
+    let mut stdout = run_phase(&messages[..4])?;
+    let mut navigation_messages = vec![messages[0].clone(), messages[1].clone()];
+    navigation_messages.extend(messages[4..21].iter().cloned());
+    stdout.push_str(&run_phase(&navigation_messages)?);
+    let mut analysis_messages = vec![messages[0].clone(), messages[1].clone()];
+    analysis_messages.extend(messages[21..].iter().cloned());
+    stdout.push_str(&run_phase(&analysis_messages)?);
     assert_frozen_mcp_surfaces_compatible(&stdout)?;
     let session_brief_text = mcp_tool_text(&stdout, 19)?;
     let analysis_text = mcp_tool_text(&stdout, 23)?;
+    let repeated_analysis_text = mcp_tool_text(&stdout, 35)?;
+    let bounded_analysis_text = mcp_tool_text(&stdout, 36)?;
     let next_call_text = mcp_tool_text(&stdout, 24)?;
     let recommended_summary_text = mcp_tool_text(&stdout, 25)?;
     let impact_text = mcp_tool_text(&stdout, 26)?;
@@ -13247,7 +13272,67 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     let compact_relations_text = mcp_tool_text(&stdout, 32)?;
     let bounded_compact_relations_text = mcp_tool_text(&stdout, 33)?;
     let rejected_legacy_compact_text = mcp_tool_text(&stdout, 34)?;
-    let session_brief_has_ready_call = session_brief_text.contains("target: atlas_file_summary")
+    let analysis_payload: Value = toon_format::decode_default(&analysis_text)?;
+    let repeated_analysis_payload: Value = toon_format::decode_default(&repeated_analysis_text)?;
+    let first_communities = json_community_values(&analysis_payload)?;
+    let repeated_communities = json_community_values(&repeated_analysis_payload)?;
+    if serde_json::to_vec(&first_communities)? != serde_json::to_vec(&repeated_communities)? {
+        return Err(io::Error::other(
+            "repeated MCP community fields were not byte stable after TOON decoding",
+        )
+        .into());
+    }
+    assert_planted_community_values(&first_communities, "MCP")?;
+    if bounded_analysis_text.len() > 65536 {
+        return Err(io::Error::other(format!(
+            "bounded community MCP TOON emitted {} bytes above its 65536-byte ceiling",
+            bounded_analysis_text.len()
+        ))
+        .into());
+    }
+    let bounded_payload: Value = toon_format::decode_default(&bounded_analysis_text)?;
+    require_json_bool(&bounded_payload, &["symbol_relations", "truncated"], true)?;
+    require_json_usize(
+        &bounded_payload,
+        &["symbol_relations", "work", "rendered_output_bytes"],
+        bounded_analysis_text.len(),
+    )?;
+    if bounded_payload
+        .pointer("/symbol_relations/continuation")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Err(
+            io::Error::other("bounded community MCP TOON omitted its continuation cursor").into(),
+        );
+    }
+    let bounded_communities = json_community_values(&bounded_payload)?;
+    if !bounded_communities.iter().any(|community| {
+        community
+            .get("coverage")
+            .and_then(Value::as_str)
+            .is_some_and(|coverage| coverage == "partial")
+            && community
+                .get("convergence")
+                .and_then(Value::as_str)
+                .is_some_and(|convergence| convergence == "inconclusive")
+    }) || !bounded_payload
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                finding.get("kind").and_then(Value::as_str) == Some("community")
+                    && finding.get("status").and_then(Value::as_str) == Some("inconclusive")
+            })
+        })
+    {
+        return Err(io::Error::other(
+            "bounded MCP TOON lost the typed inconclusive community outcome",
+        )
+        .into());
+    }
+    let session_brief_has_ready_call = (session_brief_text.contains("target: atlas_file_summary")
+        || session_brief_text.contains("target: atlas_symbol_relations"))
         && session_brief_text.contains("file: src/lib.rs");
     if !compact_session_brief_text
         .contains("recommended_subagent_reasoning: lowest_reliable_host_supported")

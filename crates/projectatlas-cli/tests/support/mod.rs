@@ -232,6 +232,138 @@ pub(super) fn mcp_tool_text(stdout: &str, id: i64) -> Result<String, Box<dyn Err
     Err(io::Error::other(format!("MCP tool response {id} is missing")).into())
 }
 
+/// Return the community metadata findings from one analysis response.
+pub(super) fn json_community_values(value: &Value) -> Result<Vec<&Value>, Box<dyn Error>> {
+    let findings = value
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("analysis response omitted findings"))?;
+    let communities = findings
+        .iter()
+        .filter(|finding| finding.get("kind").and_then(Value::as_str) == Some("community"))
+        .filter_map(|finding| finding.get("community"))
+        .collect::<Vec<_>>();
+    if communities.is_empty() {
+        return Err(io::Error::other("analysis response omitted community metadata").into());
+    }
+    Ok(communities)
+}
+
+/// Verify stable IDs/order, containment exclusion, and the planted partition.
+pub(super) fn assert_planted_community_values(
+    communities: &[&Value],
+    adapter: &str,
+) -> Result<(), Box<dyn Error>> {
+    let expected_group_a = BTreeSet::from([
+        "group_a_one".to_string(),
+        "group_a_root".to_string(),
+        "group_a_two".to_string(),
+    ]);
+    let expected_group_b = BTreeSet::from([
+        "group_b_one".to_string(),
+        "group_b_root".to_string(),
+        "group_b_two".to_string(),
+    ]);
+    let mut community_ids = BTreeSet::new();
+    let mut member_sets = Vec::new();
+    for community in communities {
+        let id = community.get("id").and_then(Value::as_str).ok_or_else(|| {
+            io::Error::other(format!("{adapter} community omitted its stable ID"))
+        })?;
+        if !id.starts_with("community-v1-") || !community_ids.insert(id.to_string()) {
+            return Err(io::Error::other(format!(
+                "{adapter} community IDs were missing or duplicated: {community_ids:?}"
+            ))
+            .into());
+        }
+        if community.get("coverage").and_then(Value::as_str) != Some("complete")
+            || community.get("convergence").and_then(Value::as_str) != Some("converged")
+            || community.get("truncated").and_then(Value::as_bool) != Some(false)
+        {
+            return Err(io::Error::other(format!(
+                "{adapter} planted community did not report complete converged coverage: {community:?}"
+            ))
+            .into());
+        }
+        let members = community
+            .get("members")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other(format!("{adapter} community omitted members")))?;
+        let member_keys = members
+            .iter()
+            .map(|member| {
+                member
+                    .pointer("/node/entity/key/stable/canonical_identity")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        io::Error::other(format!("{adapter} community member lacked a stable key"))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if member_keys.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err(io::Error::other(format!(
+                "{adapter} community members were not in stable key order: {member_keys:?}"
+            ))
+            .into());
+        }
+        if community
+            .get("evidence")
+            .and_then(Value::as_array)
+            .is_some_and(|evidence| {
+                evidence.iter().any(|edge| {
+                    edge.get("source")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                        || edge
+                            .get("target")
+                            .and_then(Value::as_str)
+                            .is_none_or(str::is_empty)
+                        || edge.get("weight").and_then(Value::as_u64) == Some(0)
+                        || edge.pointer("/relation/value").and_then(Value::as_str)
+                            == Some("contains")
+                })
+            })
+        {
+            return Err(io::Error::other(format!(
+                "{adapter} community evidence emitted a containment relation"
+            ))
+            .into());
+        }
+        let member_names = members
+            .iter()
+            .map(|member| {
+                member
+                    .pointer("/node/entity/selector/symbol/name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "{adapter} community member lacked a stable symbol name"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        member_sets.push(member_names.into_iter().collect::<BTreeSet<_>>());
+    }
+    let group_a_partition = member_sets
+        .iter()
+        .any(|members| expected_group_a.is_subset(members));
+    let group_b_partition = member_sets
+        .iter()
+        .any(|members| expected_group_b.is_subset(members));
+    let groups_are_separate = member_sets.iter().all(|members| {
+        !(members.iter().any(|name| expected_group_a.contains(name))
+            && members.iter().any(|name| expected_group_b.contains(name)))
+    });
+    if !group_a_partition || !group_b_partition || !groups_are_separate {
+        return Err(io::Error::other(format!(
+            "{adapter} community projection did not preserve planted groups: {member_sets:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Hash every bounded user-table row through one read-only `SQLite` connection.
 pub(super) fn sqlite_table_digests(
     connection: &Connection,

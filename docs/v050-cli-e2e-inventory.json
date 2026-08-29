@@ -3,10 +3,10 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "b9f6f946e8adc27412286f3dee41da2027bc425facde2b31d7fe2f1a6136be15",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "8beab06646923a2090547e90b44a17ecdb4c06a572d9f1fb2825c59f14bcd67a",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "f56144991337cb7697cdf49c602f2afb605c3679c8a0d107a0c9148b0eb04219",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "62878446bfe17180204b6ad840c7aef019f346e71a02750d81829a95ae2d8870",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "2c7adf8169a95cc44880205ee3e85142b535481085c54d07e99a689fb4931f02",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "8e79ebf6628b010a9ff7eac09276662017752f9294a562cf6a67f8f88a66167d"
     }
   },
@@ -15,7 +15,7 @@
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
   "test_count": 158,
-  "symbol_count": 427,
+  "symbol_count": 431,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
     "e2e_delivery": "installer, release, packaged, and plugin contracts",
@@ -6423,6 +6423,56 @@
       ],
       "attributes": [
         "/// Require one emitted database or config path to resolve to the expected file."
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "run_json_analysis_to_completion",
+      "line": 36790,
+      "end_line": 36827,
+      "owners": [
+        "e2e_navigation"
+      ],
+      "attributes": [
+        "/// Run bounded JSON analysis continuation pages until the response is complete."
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "json_community_values",
+      "line": 36829,
+      "end_line": 36844,
+      "owners": [
+        "e2e_delivery",
+        "e2e_navigation"
+      ],
+      "attributes": [
+        "/// Return the community metadata findings from one analysis response."
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "json_community_values_from_pages",
+      "line": 36846,
+      "end_line": 36858,
+      "owners": [
+        "e2e_navigation"
+      ],
+      "attributes": [
+        "/// Return community metadata across every bounded continuation page."
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "assert_planted_community_values",
+      "line": 36860,
+      "end_line": 36973,
+      "owners": [
+        "e2e_delivery",
+        "e2e_navigation"
+      ],
+      "attributes": [
+        "/// Verify stable IDs/order, containment exclusion, and the planted partition."
       ]
     },
     {

@@ -74,11 +74,12 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    McpDatabaseSnapshot, complete_mcp_test_after_shutdown, git_command_for_root, json_at,
-    json_summary_command, mcp_contract_executable, mcp_database_snapshot, mcp_tool_text,
-    require_json_array_len, require_json_bool, require_json_contains, require_json_string,
-    require_json_usize, require_json_usize_at_least, require_json_usize_greater_than,
-    run_mcp_stdio, run_mcp_stdio_with_env, sha256_hex, sqlite_table_digests, workspace_root,
+    McpDatabaseSnapshot, assert_planted_community_values, complete_mcp_test_after_shutdown,
+    git_command_for_root, json_at, json_community_values, json_summary_command,
+    mcp_contract_executable, mcp_database_snapshot, mcp_tool_text, require_json_array_len,
+    require_json_bool, require_json_contains, require_json_string, require_json_usize,
+    require_json_usize_at_least, require_json_usize_greater_than, run_mcp_stdio,
+    run_mcp_stdio_with_env, sha256_hex, sqlite_table_digests, workspace_root,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -107,6 +108,59 @@ const AGENT_EFFICIENCY_BENCHMARK_PATH: &str =
 
 const AGENT_EFFICIENCY_PARTIAL_FILE: &str = "partial.json";
 
+/// Run bounded JSON analysis continuation pages until the response is complete.
+fn run_json_analysis_to_completion(
+    repo: &Path,
+    base_args: &[String],
+) -> Result<Vec<Value>, Box<dyn Error>> {
+    let mut args = base_args.to_vec();
+    let mut pages = Vec::new();
+    for _ in 0..8 {
+        let output = Command::cargo_bin("projectatlas")?
+            .current_dir(repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(&args)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "JSON analysis continuation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let payload: Value = serde_json::from_slice(&output.stdout)?;
+        let cursor = payload
+            .pointer("/symbol_relations/continuation")
+            .and_then(Value::as_str)
+            .filter(|cursor| !cursor.is_empty())
+            .map(str::to_string);
+        pages.push(payload);
+        let Some(cursor) = cursor else {
+            return Ok(pages);
+        };
+        if args.len() >= 2 && args[args.len() - 2] == "--cursor" {
+            args.pop();
+            args.pop();
+        }
+        args.extend(["--cursor".to_string(), cursor]);
+    }
+    Err(io::Error::other("JSON analysis continuation exceeded its test bound").into())
+}
+
+/// Return community metadata across every bounded continuation page.
+fn json_community_values_from_pages(pages: &[Value]) -> Result<Vec<&Value>, Box<dyn Error>> {
+    let mut communities = Vec::new();
+    for page in pages {
+        if let Ok(page_communities) = json_community_values(page) {
+            communities.extend(page_communities);
+        }
+    }
+    if communities.is_empty() {
+        return Err(io::Error::other("analysis pages omitted community metadata").into());
+    }
+    Ok(communities)
+}
+
 /// Return one `SQLite` sidecar path for exact no-mutation assertions.
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
@@ -124,7 +178,17 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
         source_dir.join("lib.rs"),
         "pub fn first() { second(); third(); fourth(); fifth(); sixth(); seventh(); eighth(); ninth(); }\n\
          fn second() {}\nfn third() {}\nfn fourth() {}\nfn fifth() {}\n\
-         fn sixth() {}\nfn seventh() {}\nfn eighth() {}\nfn ninth() {}\n",
+         fn sixth() {}\nfn seventh() {}\nfn eighth() {}\nfn ninth() {}\n\
+         fn group_a_root() { group_a_one(); group_a_two(); }\n\
+         fn group_a_one() { group_a_two(); }\n\
+         fn group_a_two() { group_a_root(); }\n\
+         fn group_b_root() { group_b_one(); group_b_two(); }\n\
+         fn group_b_one() { group_b_two(); }\n\
+         fn group_b_two() { group_b_root(); }\n\
+         fn architecture_root() {\n\
+             group_a_root(); group_a_one(); group_a_two();\n\
+             group_b_root(); group_b_one(); group_b_two();\n\
+         }\n",
     )?;
 
     let scan = Command::cargo_bin("projectatlas")?
@@ -335,6 +399,121 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
     {
         return Err(io::Error::other(
             "public relation analysis CLI omitted findings or reusable next-call routing",
+        )
+        .into());
+    }
+
+    let community_args = vec![
+        "--format".to_string(),
+        "json".to_string(),
+        "symbols".to_string(),
+        "relations".to_string(),
+        "--view".to_string(),
+        "analysis".to_string(),
+        "--file".to_string(),
+        "src/lib.rs".to_string(),
+        "--symbol".to_string(),
+        "architecture_root".to_string(),
+        "--direction".to_string(),
+        "outbound".to_string(),
+        "--depth".to_string(),
+        "3".to_string(),
+        "--limit".to_string(),
+        "100".to_string(),
+        "--output-bytes".to_string(),
+        page_output_bytes.to_string(),
+        "--include-communities".to_string(),
+    ];
+    let community_first_payload = run_json_analysis_to_completion(&repo, &community_args)?;
+    let community_second_payload = run_json_analysis_to_completion(&repo, &community_args)?;
+    let first_communities = json_community_values_from_pages(&community_first_payload)?;
+    let second_communities = json_community_values_from_pages(&community_second_payload)?;
+    if serde_json::to_vec(&first_communities)? != serde_json::to_vec(&second_communities)? {
+        return Err(io::Error::other("repeated CLI community fields were not byte stable").into());
+    }
+    assert_planted_community_values(&first_communities, "CLI")?;
+
+    let bounded_output_bytes = 64 * 1024_usize;
+    let bounded_community = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--format",
+            "json",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "architecture_root",
+            "--direction",
+            "outbound",
+            "--depth",
+            "3",
+            "--limit",
+            "100",
+            "--edge-limit",
+            "1",
+            "--output-bytes",
+            &bounded_output_bytes.to_string(),
+            "--include-communities",
+        ])
+        .output()?;
+    if !bounded_community.status.success() {
+        return Err(io::Error::other(format!(
+            "bounded community CLI analysis failed: {}",
+            String::from_utf8_lossy(&bounded_community.stderr)
+        ))
+        .into());
+    }
+    if bounded_community.stdout.len() > bounded_output_bytes {
+        return Err(io::Error::other(format!(
+            "bounded community CLI emitted {} bytes above its {bounded_output_bytes}-byte ceiling",
+            bounded_community.stdout.len()
+        ))
+        .into());
+    }
+    let bounded_payload: Value = serde_json::from_slice(&bounded_community.stdout)?;
+    require_json_bool(&bounded_payload, &["symbol_relations", "truncated"], true)?;
+    if bounded_payload
+        .pointer("/symbol_relations/continuation")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Err(io::Error::other(
+            "bounded community CLI output omitted its continuation cursor",
+        )
+        .into());
+    }
+    require_json_usize(
+        &bounded_payload,
+        &["symbol_relations", "work", "rendered_output_bytes"],
+        bounded_community.stdout.len(),
+    )?;
+    let bounded_communities = json_community_values(&bounded_payload)?;
+    if !bounded_communities.iter().any(|community| {
+        community
+            .get("coverage")
+            .and_then(Value::as_str)
+            .is_some_and(|coverage| coverage == "partial")
+            && community
+                .get("convergence")
+                .and_then(Value::as_str)
+                .is_some_and(|convergence| convergence == "inconclusive")
+    }) || !bounded_payload
+        .pointer("/symbol_relations/findings")
+        .and_then(Value::as_array)
+        .is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                finding.get("kind").and_then(Value::as_str) == Some("community")
+                    && finding.get("status").and_then(Value::as_str) == Some("inconclusive")
+            })
+        })
+    {
+        return Err(io::Error::other(
+            "bounded CLI output lost the typed inconclusive community outcome",
         )
         .into());
     }
