@@ -596,13 +596,19 @@ def pull_request_payload(repo: str, number: int) -> dict[str, object]:
     return payload
 
 
-def referenced_issue_numbers(title: object, body: object) -> list[int]:
-    """Return distinct issue numbers from the existing PR reference syntax."""
+def referenced_issue_numbers(
+    repo: str, title: object, body: object
+) -> list[int]:
+    """Return distinct local issue numbers from the existing PR reference syntax."""
 
     if not isinstance(title, str) or not isinstance(body, str):
         raise SystemExit("GitHub pull request title and body must be text")
     numbers: set[int] = set()
     for reference in ISSUE_REFERENCE_RE.findall(f"{title}\n{body}"):
+        if "#" in reference and not reference.startswith(("#", "GH-")):
+            qualified_repo = reference.rsplit("#", 1)[0]
+            if qualified_repo.casefold() != repo.casefold():
+                continue
         number_text = reference.rsplit("#", 1)[-1]
         if reference.startswith("GH-"):
             number_text = reference[3:]
@@ -610,10 +616,10 @@ def referenced_issue_numbers(title: object, body: object) -> list[int]:
     return sorted(numbers)
 
 
-def pull_request_owner_issue(payload: dict[str, object]) -> int:
+def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
     """Resolve exactly one owner from the established PR issue-reference contract."""
 
-    candidates = referenced_issue_numbers(payload.get("title"), payload.get("body"))
+    candidates = referenced_issue_numbers(repo, payload.get("title"), payload.get("body"))
     if len(candidates) != 1:
         raise SystemExit(
             "pull request must reference exactly one owning issue; "
@@ -684,7 +690,7 @@ def check_complexity_for_dispatch(
             return check_issue_complexity(repo, pull_request_owner)
         try:
             owner_issue = pull_request_owner_issue(
-                pull_request_payload(repo, pull_request)
+                repo, pull_request_payload(repo, pull_request)
             )
         except SystemExit:
             # The PR checker reports the fail-closed ownership error itself.
@@ -1396,7 +1402,7 @@ def check_pull_request_tasks(
     if owner_issue is None:
         try:
             owner_issue = pull_request_owner_issue(
-                pull_request_payload(repo, pull_request)
+                repo, pull_request_payload(repo, pull_request)
             )
         except SystemExit as error:
             return [f"pull request ownership {error}"]
@@ -1416,15 +1422,26 @@ def check_pull_request_tasks(
     for change, owners in sorted(issue_map.items()):
         path, candidate_tasks = local_tasks(root, change)
         try:
-            base_tasks = base_local_tasks(root, path, base_ref)
             candidate_slices = owner_slices(path, candidate_tasks, owners)
-            base_slices = dict(
-                (owner.issue, expected)
-                for owner, expected in owner_slices(path, base_tasks, owners)
-            )
         except SystemExit as error:
             failures.append(str(error))
             continue
+        unrelated_slices = [
+            (owner, expected)
+            for owner, expected in candidate_slices
+            if owner.issue != owner_issue
+        ]
+        base_slices: dict[int, list[tuple[bool, str]]] = {}
+        if unrelated_slices:
+            try:
+                base_tasks = base_local_tasks(root, path, base_ref)
+                base_slices = dict(
+                    (owner.issue, expected)
+                    for owner, expected in owner_slices(path, base_tasks, owners)
+                )
+            except SystemExit as error:
+                failures.append(str(error))
+                continue
         for owner, expected in candidate_slices:
             if owner.issue != owner_issue:
                 if expected != base_slices[owner.issue]:
@@ -1720,6 +1737,21 @@ Mitigations:
         return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
+    assert referenced_issue_numbers("owner/repo", "Work for #517", "") == [517]
+    assert referenced_issue_numbers("owner/repo", "Work for GH-517", "") == [517]
+    assert referenced_issue_numbers("owner/repo", "Work for owner/repo#517", "") == [517]
+    assert referenced_issue_numbers("owner/repo", "Work for other/repo#517", "") == []
+    try:
+        pull_request_owner_issue(
+            "owner/repo", {"title": "Work for other/repo#517", "body": ""}
+        )
+    except SystemExit as error:
+        assert "found 0 candidates" in str(error)
+    else:
+        raise AssertionError("foreign repository issue reference was accepted")
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Work for owner/repo#517", "body": ""}
+    ) == 517
     assert complexity_label_failures(
         {"state": "OPEN", "labels": [{"name": "complexity:medium"}]}
     ) == []
@@ -2387,6 +2419,7 @@ Mitigations:
             path.parent.mkdir(parents=True)
             path.write_text(branch_tasks, encoding="utf-8")
             base_texts[path.relative_to(branch_root).as_posix()] = branch_tasks
+        base_texts.pop("openspec/changes/change-b/tasks.md")
         saved_branch_helpers = {
             name: globals()[name]
             for name in (
@@ -2406,10 +2439,12 @@ Mitigations:
             2: {"state": "OPEN", "body": issue_contract},
         }
         live_checked: list[int] = []
+        base_reads: list[str] = []
         try:
             def fake_run(args: list[str]) -> str:
                 if len(args) == 3 and args[:2] == ["git", "show"]:
                     path = args[2].split(":", 1)[1]
+                    base_reads.append(path)
                     if args[2].startswith("unreadable-base:"):
                         raise SystemExit("git show could not read accepted base")
                     return base_texts[path]
@@ -2425,6 +2460,7 @@ Mitigations:
                 "owner/repo", branch_root, issue_map, 7, "accepted-base"
             ) == []
             assert live_checked == [2], "unrelated live progress must not be fetched"
+            assert base_reads == ["openspec/changes/change-a/tasks.md"]
 
             (branch_root / "openspec" / "changes" / "change-a" / "tasks.md").write_text(
                 "- [ ] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n",
@@ -2474,12 +2510,11 @@ Mitigations:
             )
             assert missing_base_failures == [
                 "pull request accepted base is missing",
-                "pull request accepted base is missing",
             ]
             unreadable_base_failures = check_pull_request_tasks(
                 "owner/repo", branch_root, issue_map, 7, "unreadable-base"
             )
-            assert len(unreadable_base_failures) == 2
+            assert len(unreadable_base_failures) == 1
             assert all(
                 "accepted pull-request base 'unreadable-base' is unreadable" in failure
                 for failure in unreadable_base_failures
@@ -2710,6 +2745,7 @@ def main() -> None:
     if args.pull_request is not None:
         try:
             pull_request_owner = pull_request_owner_issue(
+                args.repo,
                 pull_request_payload(args.repo, args.pull_request)
             )
         except SystemExit as error:
