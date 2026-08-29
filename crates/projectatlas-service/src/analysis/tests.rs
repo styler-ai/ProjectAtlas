@@ -1382,6 +1382,138 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
             }),
         "representative high-degree community analysis crossed its bounded envelope",
     )?;
+    let marker_parameters = CommunityParameters {
+        algorithm_version: COMMUNITY_ALGORITHM_VERSION,
+        ordering_version: COMMUNITY_ORDERING_VERSION,
+        max_iterations: COMMUNITY_MAX_ITERATIONS,
+        node_limit: query.relations.budget.nodes().min(MAX_ANALYSIS_NODES),
+        edge_limit: query.relations.budget.edges().min(MAX_ANALYSIS_EDGES),
+        output_bytes: query.relations.budget.output_bytes(),
+        relation: query.relations.relation,
+    };
+    let marker_weights = community_relation_weights();
+    let marker = community_truncation_finding(
+        &marker_weights,
+        marker_parameters,
+        0,
+        CommunityCoverage::Complete,
+    );
+    let marker_bytes = serialized_bytes_controlled(&marker, None)?;
+    let working_set_bytes = community_working_set_upper_bound(&nodes, &[], None)?;
+    require(
+        marker_bytes <= working_set_bytes,
+        "community marker unexpectedly exceeded the fixed working-set charge",
+    )?;
+    let (fitted_marker, _, fitted_limits) =
+        community_findings_with_budget(&nodes, &[], true, &query, working_set_bytes, None)?;
+    let fitted_marker_bytes = serde_json::to_vec(&fitted_marker)?;
+    require(
+        fitted_limits == vec![GraphLimitKind::IntermediateBytes]
+            && fitted_marker.len() == 1
+            && fitted_marker[0].status == AnalysisStatus::Inconclusive
+            && fitted_marker[0]
+                .community
+                .as_ref()
+                .is_some_and(|community| community.truncated)
+            && fitted_marker_bytes.len() <= working_set_bytes as usize,
+        "a fitting community truncation marker lost its typed bounded outcome",
+    )?;
+    let (omitted_marker, _, omitted_limits) = community_findings_with_budget(
+        &nodes,
+        &[],
+        true,
+        &query,
+        marker_bytes.saturating_sub(1),
+        None,
+    )?;
+    let (omitted_marker_repeat, _, _) = community_findings_with_budget(
+        &nodes,
+        &[],
+        true,
+        &query,
+        marker_bytes.saturating_sub(1),
+        None,
+    )?;
+    require(
+        omitted_limits == vec![GraphLimitKind::IntermediateBytes]
+            && omitted_marker.is_empty()
+            && serde_json::to_vec(&omitted_marker)? == serde_json::to_vec(&omitted_marker_repeat)?
+            && marker_bytes > marker_bytes.saturating_sub(1),
+        "an oversized community truncation marker was retained",
+    )?;
+    let mut marker_query = query.clone();
+    marker_query.include_cycles = false;
+    let mut marker_work = SupplementalWork::default();
+    let report_findings = architecture_findings(
+        &store,
+        &BTreeMap::new(),
+        &[],
+        true,
+        true,
+        &marker_query,
+        marker_bytes.saturating_sub(1),
+        &mut marker_work,
+        None,
+    )?;
+    require(
+        report_findings.is_empty()
+            && marker_work.composition_truncated
+            && marker_work
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes),
+        "report composition lost the typed limit when a community marker did not fit",
+    )?;
+    let candidate_key = nodes
+        .keys()
+        .next()
+        .cloned()
+        .ok_or("candidate marker node missing")?;
+    let candidate_keys = vec![candidate_key.clone()];
+    let candidate_labels = BTreeMap::from([(candidate_key.clone(), candidate_key)]);
+    let candidate_bound = community_candidate_upper_bound(
+        &nodes,
+        &candidate_keys,
+        &[],
+        &marker_weights,
+        marker_parameters,
+        None,
+    )?;
+    require(
+        candidate_bound > marker_bytes,
+        "community candidate bound did not exercise marker truncation",
+    )?;
+    let (candidate_marker, candidate_limits) = community_candidate_findings(
+        &nodes,
+        &candidate_keys,
+        &[],
+        &candidate_labels,
+        &marker_weights,
+        marker_parameters,
+        0,
+        CommunityConvergence::Converged,
+        None,
+        marker_bytes,
+    )?;
+    let (candidate_omitted, candidate_omitted_limits) = community_candidate_findings(
+        &nodes,
+        &candidate_keys,
+        &[],
+        &candidate_labels,
+        &marker_weights,
+        marker_parameters,
+        0,
+        CommunityConvergence::Converged,
+        None,
+        marker_bytes.saturating_sub(1),
+    )?;
+    require(
+        candidate_limits == vec![GraphLimitKind::IntermediateBytes]
+            && candidate_marker.len() == 1
+            && candidate_marker[0].community.is_some()
+            && candidate_omitted_limits == vec![GraphLimitKind::IntermediateBytes]
+            && candidate_omitted.is_empty(),
+        "candidate truncation did not honor the remaining marker budget",
+    )?;
     let mut sparse_budget_query = query;
     sparse_budget_query.relations.budget = sparse_budget_query
         .relations

@@ -1797,15 +1797,18 @@ fn architecture_findings(
             supplemental_work.community_working_set_bytes = supplemental_work
                 .community_working_set_bytes
                 .max(community_working_set_bytes);
+            let community_truncated = !community_limits.is_empty();
             for limit in community_limits {
                 push_limit(&mut supplemental_work.reached_limits, limit);
             }
-            if community_findings.iter().any(|finding| {
-                finding
-                    .community
-                    .as_ref()
-                    .is_some_and(|community| community.truncated)
-            }) {
+            if community_truncated
+                || community_findings.iter().any(|finding| {
+                    finding
+                        .community
+                        .as_ref()
+                        .is_some_and(|community| community.truncated)
+                })
+            {
                 supplemental_work.composition_truncated = true;
             }
             findings.extend(community_findings);
@@ -2434,22 +2437,16 @@ fn community_findings_with_budget(
     } else {
         CommunityCoverage::Partial
     };
-    let truncation_marker_bytes = serialized_bytes_controlled(
-        &community_truncation_finding(&weights, parameters, 0, marker_coverage),
-        control,
-    )?;
+    let truncation_marker = community_truncation_finding(&weights, parameters, 0, marker_coverage);
+    let truncation_marker_bytes = serialized_bytes_controlled(&truncation_marker, control)?;
     let working_set_bytes = community_working_set_upper_bound(nodes, edges, control)?;
     if working_set_bytes.saturating_add(truncation_marker_bytes) > intermediate_bytes {
-        return Ok((
-            vec![community_truncation_finding(
-                &weights,
-                parameters,
-                0,
-                marker_coverage,
-            )],
-            0,
-            vec![GraphLimitKind::IntermediateBytes],
-        ));
+        let findings = if truncation_marker_bytes <= intermediate_bytes {
+            vec![truncation_marker]
+        } else {
+            Vec::new()
+        };
+        return Ok((findings, 0, vec![GraphLimitKind::IntermediateBytes]));
     }
     let construction_bytes = intermediate_bytes.saturating_sub(working_set_bytes);
     let (keys, admitted_edges, resource_limits) =
@@ -2801,8 +2798,9 @@ fn community_candidate_findings(
         let marker_bytes = serialized_bytes_controlled(&marker, control)?;
         if retained_bytes.saturating_add(marker_bytes) > intermediate_bytes {
             findings.clear();
+        } else {
+            findings.push(marker);
         }
-        findings.push(marker);
     }
     Ok((
         findings,
