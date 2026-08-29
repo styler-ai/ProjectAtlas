@@ -216,6 +216,9 @@ const CODEX_OWNER_PUBLICATION_DELAY_ENV: &str =
 #[cfg(windows)]
 const CODEX_OWNER_PUBLICATION_MODE_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE";
 #[cfg(windows)]
+const CODEX_OWNER_RETAINED_IDENTITY_DELAY_ENV: &str =
+    "PROJECTATLAS_TEST_CODEX_OWNER_RETAINED_IDENTITY_DELAY_MS";
+#[cfg(windows)]
 const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
     "PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS";
 #[cfg(windows)]
@@ -263,6 +266,16 @@ public static class Program
                 string retainedIdentityPath = identityPath + ".owner";
                 string retainedIdentityTemporaryPath = retainedIdentityPath + ".tmp";
                 // Retain exact fixture ownership even when normal publication is withheld.
+                string retainedIdentityDelay = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_RETAINED_IDENTITY_DELAY_MS"
+                );
+                int retainedIdentityDelayMilliseconds;
+                if (!String.IsNullOrWhiteSpace(retainedIdentityDelay)
+                    && Int32.TryParse(retainedIdentityDelay, out retainedIdentityDelayMilliseconds)
+                    && retainedIdentityDelayMilliseconds > 0)
+                {
+                    Thread.Sleep(retainedIdentityDelayMilliseconds);
+                }
                 string creationTime = child.StartTime.ToUniversalTime()
                     .ToFileTimeUtc()
                     .ToString();
@@ -36769,13 +36782,18 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         .arg(&runtime)
         .arg(&db)
         .env(CODEX_OWNER_PUBLICATION_MODE_ENV, "timeout-ignore-stop")
+        .env(
+            CODEX_OWNER_RETAINED_IDENTITY_DELAY_ENV,
+            CODEX_OWNER_DELAYED_PUBLICATION.as_millis().to_string(),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut composed_parent = composed_command.spawn()?;
     let composed_retained_identity_file =
         codex_owner_retained_identity_path(&composed_identity_file);
-    let retained_deadline = Instant::now() + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
+    let retained_started = Instant::now();
+    let retained_deadline = retained_started + CODEX_OWNER_READINESS_TIMEOUT;
     while !composed_retained_identity_file.is_file() && Instant::now() < retained_deadline {
         if let Some(status) = composed_parent.try_wait()? {
             return Err(io::Error::other(format!(
@@ -36787,11 +36805,31 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         thread::sleep(remaining.min(Duration::from_millis(25)));
     }
     if !composed_retained_identity_file.is_file() {
-        drop(composed_parent.kill());
-        drop(composed_parent.wait());
+        let cleanup_result = stop_codex_owner_after_spawn_failure(
+            &mut composed_parent,
+            &composed_identity_file,
+            &runtime,
+        );
         return Err(io::Error::other(
-            "composed timeout owner did not publish retained child identity",
+            format!(
+                "composed timeout owner did not publish retained child identity within {CODEX_OWNER_READINESS_TIMEOUT:?}; cleanup={cleanup_result:?}"
+            ),
         )
+        .into());
+    }
+    let retained_elapsed = retained_started.elapsed();
+    if retained_elapsed < CODEX_OWNER_DELAYED_PUBLICATION
+        || retained_elapsed
+            > CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+    {
+        let cleanup_result = stop_codex_owner_after_spawn_failure(
+            &mut composed_parent,
+            &composed_identity_file,
+            &runtime,
+        );
+        return Err(io::Error::other(format!(
+            "composed timeout owner retained identity did not exercise delayed startup: elapsed={retained_elapsed:?} delay={CODEX_OWNER_DELAYED_PUBLICATION:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup={cleanup_result:?}"
+        ))
         .into());
     }
     let composed_result = stop_codex_owner_after_spawn_failure_with_test_delays(
