@@ -1,6 +1,12 @@
 //! Purpose: Serve `ProjectAtlas` repository intelligence over MCP.
 //! Native MCP adapter for `ProjectAtlas` agent integrations.
 
+mod task_registry;
+
+use task_registry::{
+    McpTaskOperation, McpTaskProgress, McpTaskRecord, McpTaskRegistry, McpTaskState,
+};
+
 use crate::atlas_map::{
     AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
     init_gitignore, init_project_with_config, list_ignore_entries, load_atlas_config,
@@ -3396,163 +3402,6 @@ struct McpCompactBriefLimits {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_compact_brief_default_limit(value: &usize) -> bool {
     *value == COMPACT_SESSION_BRIEF_DEFAULT_LIMIT
-}
-
-/// Bounded in-memory registry for MCP task-progress records.
-#[derive(Debug, Clone)]
-struct McpTaskRegistry {
-    /// Session-local task records.
-    records: VecDeque<McpTaskRecord>,
-}
-
-impl McpTaskRegistry {
-    /// Create a registry with the built-in task-progress contract record.
-    fn new() -> Self {
-        let now = mcp_unix_time_ms();
-        let mut registry = Self {
-            records: VecDeque::new(),
-        };
-        registry.insert(McpTaskRecord {
-            task_id: MCP_TASK_CONTRACT_ID.to_string(),
-            operation: McpTaskOperation::Contract,
-            state: McpTaskState::Complete,
-            created_at_ms: now,
-            updated_at_ms: now,
-            progress: Some(McpTaskProgress {
-                current: Some(1),
-                total: Some(1),
-                message: Some(MCP_TASK_PROGRESS_CONTRACT_MESSAGE.to_string()),
-            }),
-            error: None,
-            result_ref: Some(MCP_TOOL_ATLAS_TASK_STATUS.to_string()),
-            cancelable: false,
-            control: None,
-        });
-        registry
-    }
-
-    /// Insert or replace one task record while preserving the fixed registry capacity.
-    fn insert(&mut self, record: McpTaskRecord) {
-        if let Some(existing_index) = self
-            .records
-            .iter()
-            .position(|current| current.task_id == record.task_id)
-        {
-            let _removed = self.records.remove(existing_index);
-        }
-        while self.records.len() >= MCP_TASK_REGISTRY_CAPACITY {
-            if let Some(finished_index) = self
-                .records
-                .iter()
-                .position(McpTaskRecord::is_terminal_state)
-            {
-                let _evicted = self.records.remove(finished_index);
-            } else {
-                let _evicted = self.records.pop_front();
-            }
-        }
-        self.records.push_back(record);
-    }
-
-    /// Return a task record by id.
-    fn get(&self, task_id: &str) -> Option<McpTaskRecord> {
-        self.records
-            .iter()
-            .find(|record| record.task_id == task_id)
-            .cloned()
-    }
-
-    /// Update a matching task through a bounded mutable pass.
-    fn update<F>(&mut self, task_id: &str, update: F) -> Option<McpTaskRecord>
-    where
-        F: FnOnce(&mut McpTaskRecord),
-    {
-        let record = self
-            .records
-            .iter_mut()
-            .find(|record| record.task_id == task_id)?;
-        update(record);
-        Some(record.clone())
-    }
-}
-
-/// One MCP task-progress record.
-#[derive(Debug, Clone, Serialize)]
-struct McpTaskRecord {
-    /// Opaque session-local task id.
-    task_id: String,
-    /// Operation family.
-    operation: McpTaskOperation,
-    /// Current task state.
-    state: McpTaskState,
-    /// Creation timestamp in Unix milliseconds.
-    created_at_ms: u128,
-    /// Last update timestamp in Unix milliseconds.
-    updated_at_ms: u128,
-    /// Optional progress counters/message.
-    progress: Option<McpTaskProgress>,
-    /// Concise failure diagnostic when present.
-    error: Option<String>,
-    /// Result reference or follow-up tool when present.
-    result_ref: Option<String>,
-    /// Whether this task can be canceled by the current server.
-    cancelable: bool,
-    /// Shared cooperative cancellation boundary for active indexing work.
-    #[serde(skip)]
-    control: Option<IndexWorkControl>,
-}
-
-impl McpTaskRecord {
-    /// Return whether this record is in a terminal state and can be evicted first.
-    fn is_terminal_state(&self) -> bool {
-        matches!(
-            self.state,
-            McpTaskState::Complete | McpTaskState::Failed | McpTaskState::Canceled
-        )
-    }
-}
-
-/// MCP task operation kind.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum McpTaskOperation {
-    /// Contract/schema marker task.
-    Contract,
-    /// Repository scan and index operation.
-    Scan,
-    /// One-shot watch refresh operation.
-    WatchOnce,
-    /// Symbol projection rebuild operation.
-    SymbolsBuild,
-    /// Future search operation.
-    Search,
-}
-
-/// MCP task lifecycle state.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum McpTaskState {
-    /// Task has not started.
-    Pending,
-    /// Task is running.
-    Running,
-    /// Task completed successfully.
-    Complete,
-    /// Task failed.
-    Failed,
-    /// Task was canceled.
-    Canceled,
-}
-
-/// Optional task progress fields.
-#[derive(Debug, Clone, Serialize)]
-struct McpTaskProgress {
-    /// Completed unit count when known.
-    current: Option<u64>,
-    /// Total unit count when known.
-    total: Option<u64>,
-    /// Concise progress message.
-    message: Option<String>,
 }
 
 /// Task status lookup response.
