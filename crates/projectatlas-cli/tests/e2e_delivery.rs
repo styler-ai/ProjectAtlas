@@ -938,6 +938,14 @@ fn cli_e2e_inventory_contract_rejects_source_and_selector_drift() -> Result<(), 
     )?;
     fs::write(&ci_path, &ci_source)?;
 
+    let legacy_spaced_selector_source = format!("{ci_source}\n    cargo test --test e2e\n");
+    fs::write(&ci_path, legacy_spaced_selector_source)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "workflow selector drift",
+    )?;
+    fs::write(&ci_path, &ci_source)?;
+
     let legacy_selector_source = format!("{ci_source}\n    cargo test --test=e2e\n");
     fs::write(&ci_path, legacy_selector_source)?;
     require_cli_e2e_contract_rejection(
