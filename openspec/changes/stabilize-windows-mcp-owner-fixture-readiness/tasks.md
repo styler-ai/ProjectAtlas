@@ -5,8 +5,8 @@
 
 ## 2. Bounded Fixture Readiness
 
-- [ ] 2.1 Replace the hard-coded five-second child-PID publication assumption at the smallest owning Windows delivery-test helper with one named bounded readiness contract; preserve 25 ms polling or an equally bounded existing mechanism, parent early-exit detection, atomic identity publication, exact PID/start-time/executable-path validation, actionable timeout diagnostics, and complete owned-process cleanup.
-- [ ] 2.2 Add deterministic regression proof whose valid publication exceeds the former five-second ceiling plus negative coverage for true timeout, early parent exit, malformed or mismatched identity, and cleanup; do not weaken or duplicate the existing production-installer behavior assertions.
+- [x] 2.1 Replace the hard-coded five-second child-PID publication assumption at the smallest owning Windows delivery-test helper with one named bounded readiness contract; preserve 25 ms polling or an equally bounded existing mechanism, parent early-exit detection, atomic identity publication, exact PID/start-time/executable-path validation, actionable timeout diagnostics, and complete owned-process cleanup.
+- [x] 2.2 Add deterministic regression proof whose valid publication exceeds the former five-second ceiling plus negative coverage for true timeout, early parent exit, malformed or mismatched identity, and cleanup; do not weaken or duplicate the existing production-installer behavior assertions.
 
 ## 3. Integration and Acceptance
 
