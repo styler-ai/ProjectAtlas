@@ -232,6 +232,19 @@ public static class Program
             {
                 string identityPath = arguments[0];
                 string temporaryIdentityPath = identityPath + ".tmp";
+                string retainedIdentityPath = identityPath + ".owner";
+                string retainedIdentityTemporaryPath = retainedIdentityPath + ".tmp";
+                // Retain exact fixture ownership even when normal publication is withheld.
+                string creationTime = child.StartTime.ToUniversalTime()
+                    .ToFileTimeUtc()
+                    .ToString();
+                File.WriteAllLines(retainedIdentityTemporaryPath, new[]
+                {
+                    child.Id.ToString(),
+                    creationTime,
+                    childPath
+                });
+                File.Move(retainedIdentityTemporaryPath, retainedIdentityPath);
                 string publicationMode = Environment.GetEnvironmentVariable(
                     "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE"
                 );
@@ -247,11 +260,9 @@ public static class Program
                 {
                     Thread.Sleep(delayMilliseconds);
                 }
-                if (publicationMode != "timeout")
+                if (publicationMode != "timeout"
+                    && publicationMode != "timeout-ignore-stop")
                 {
-                    string creationTime = child.StartTime.ToUniversalTime()
-                        .ToFileTimeUtc()
-                        .ToString();
                     if (publicationMode == "malformed")
                     {
                         File.WriteAllText(temporaryIdentityPath, "not-an-identity");
@@ -271,7 +282,8 @@ public static class Program
                 }
                 while (!child.WaitForExit(25))
                 {
-                    if (File.Exists(identityPath + ".stop"))
+                    if (publicationMode != "timeout-ignore-stop"
+                        && File.Exists(identityPath + ".stop"))
                     {
                         child.Kill();
                         child.WaitForExit();
@@ -36044,6 +36056,14 @@ fn windows_test_process_id_allowlist(process_ids: &[u32]) -> io::Result<String> 
 }
 
 #[cfg(windows)]
+/// Derive the fixture-private identity record used when normal publication is absent.
+fn codex_owner_retained_identity_path(child_identity_file: &Path) -> PathBuf {
+    let mut retained_identity = child_identity_file.as_os_str().to_os_string();
+    retained_identity.push(".owner");
+    PathBuf::from(retained_identity)
+}
+
+#[cfg(windows)]
 fn stop_codex_owner_after_spawn_failure(
     parent: &mut Child,
     child_identity_file: &Path,
@@ -36074,7 +36094,9 @@ fn stop_codex_owner_after_spawn_failure(
         }
     }
 
+    let retained_identity_file = codex_owner_retained_identity_path(child_identity_file);
     let child_cleanup_result = read_codex_owner_child_identity(child_identity_file, stable_runtime)
+        .or_else(|_| read_codex_owner_child_identity(&retained_identity_file, stable_runtime))
         .and_then(|identity| stop_windows_fixture_process(&identity));
     let kill_result = parent.kill();
     let wait_result = parent.wait();
@@ -36085,9 +36107,7 @@ fn stop_codex_owner_after_spawn_failure(
         failures.push("owner fixture did not stop within five seconds".to_string());
     }
     if let Err(error) = child_cleanup_result {
-        failures.push(format!(
-            "could not retire its published child safely: {error}"
-        ));
+        failures.push(format!("could not retire its owned child safely: {error}"));
     }
     if let Err(error) = kill_result
         && error.kind() != io::ErrorKind::InvalidInput
@@ -36159,6 +36179,43 @@ fn read_codex_owner_child_identity(
     child_identity_file: &Path,
     stable_runtime: &Path,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    let published = read_codex_owner_identity_record(child_identity_file)?;
+    let captured = capture_windows_process_identity(published.process_id)?;
+    if captured.process_id != published.process_id
+        || captured.creation_file_time_utc != published.creation_file_time_utc
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child identity differed: published_pid={} captured_pid={} published_creation={} captured_creation={}",
+            published.process_id,
+            captured.process_id,
+            published.creation_file_time_utc,
+            captured.creation_file_time_utc
+        ))
+        .into());
+    }
+    let owner_canonical =
+        normalize_native_path_display(fs::canonicalize(&published.executable_path)?);
+    let captured_canonical =
+        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
+    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
+    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
+        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
+            published.executable_path.display(),
+            captured.executable_path.display(),
+            stable_runtime.display()
+        ))
+        .into());
+    }
+    Ok(captured)
+}
+
+#[cfg(windows)]
+fn read_codex_owner_identity_record(
+    child_identity_file: &Path,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
     let identity_text = fs::read_to_string(child_identity_file)?;
     let mut identity_lines = identity_text.lines();
     let process_id = identity_lines
@@ -36175,33 +36232,11 @@ fn read_codex_owner_child_identity(
             .filter(|path| !path.is_empty())
             .ok_or_else(|| io::Error::other("owner fixture omitted child executable path"))?,
     );
-    let captured = capture_windows_process_identity(process_id)?;
-    if captured.process_id != process_id
-        || captured.creation_file_time_utc != owner_creation_file_time_utc
-    {
-        return Err(io::Error::other(format!(
-            "owner-published child identity differed: published_pid={process_id} captured_pid={} published_creation={owner_creation_file_time_utc} captured_creation={}",
-            captured.process_id,
-            captured.creation_file_time_utc
-        ))
-        .into());
-    }
-    let owner_canonical = normalize_native_path_display(fs::canonicalize(&owner_executable_path)?);
-    let captured_canonical =
-        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
-    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
-    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
-        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
-    {
-        return Err(io::Error::other(format!(
-            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
-            owner_executable_path.display(),
-            captured.executable_path.display(),
-            stable_runtime.display()
-        ))
-        .into());
-    }
-    Ok(captured)
+    Ok(WindowsProcessIdentity {
+        process_id,
+        creation_file_time_utc: owner_creation_file_time_utc,
+        executable_path: owner_executable_path,
+    })
 }
 
 #[cfg(windows)]
@@ -36454,7 +36489,7 @@ public static class Program
         Some(&atlas_dir.join("config.toml")),
         &identity_file,
         None,
-        Some("timeout"),
+        Some("timeout-ignore-stop"),
     );
     let error = match result {
         Ok((parent, child_identity)) => {
@@ -36467,7 +36502,9 @@ public static class Program
         Err(error) => error,
     };
     let timeout_elapsed = timeout_started.elapsed();
-    let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
+    let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     let text = error.to_string();
     let timeout_readiness_elapsed = text
         .split("readiness_elapsed_ms=")
@@ -36482,6 +36519,8 @@ public static class Program
         })?;
     let timeout_readiness_upper_bound =
         CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let timeout_child_identity =
+        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
     if timeout_elapsed < CODEX_OWNER_READINESS_TIMEOUT
         || timeout_elapsed > timeout_upper_bound
         || timeout_readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
@@ -36491,7 +36530,9 @@ public static class Program
         || !text.contains(&format!("owner={}", codex_fixture.display()))
         || !text.contains(&format!("identity_file={}", identity_file.display()))
         || !text.contains(&format!("expected_runtime={}", runtime.display()))
-        || text.contains("fixture cleanup also failed")
+        || !text.contains("owner fixture did not stop within five seconds")
+        || !text.contains("fixture cleanup also failed")
+        || windows_process_is_alive(&timeout_child_identity)?
     {
         return Err(io::Error::other(format!(
             "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
