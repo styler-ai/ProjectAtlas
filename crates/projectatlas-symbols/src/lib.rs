@@ -1618,9 +1618,6 @@ fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
     }
     let target = match expression.kind() {
         "string" | "encapsed_string" => php_static_string_target(expression, content)?,
-        "qualified_name" | "relative_name" | "name" => {
-            compact_text(node_text(expression, content).as_deref().unwrap_or(""))
-        }
         _ => return None,
     };
     Some(target).filter(|target| !target.is_empty() && target.chars().count() <= MAX_SNIPPET_CHARS)
@@ -1628,31 +1625,44 @@ fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Return the plain content of a PHP string literal when it has no interpolation.
 fn php_static_string_target(node: Node<'_>, content: &str) -> Option<String> {
-    if node.kind() != "string" {
-        let mut cursor = node.walk();
-        let mut children = node.named_children(&mut cursor);
-        let content_node = children.next()?;
-        return (content_node.kind() == "string_content" && children.next().is_none())
-            .then(|| named_text(content_node, content))
-            .flatten();
-    }
-
     let mut cursor = node.walk();
     let mut target = String::new();
     let mut has_part = false;
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "string_content" => target.push_str(&named_text(child, content)?),
-            "escape_sequence" => match node_text(child, content)?.as_str() {
-                r"\\" => target.push('\\'),
-                r"\'" => target.push('\''),
-                _ => return None,
-            },
+            "escape_sequence" if node.kind() == "string" => {
+                match node_text(child, content)?.as_str() {
+                    r"\\" => target.push('\\'),
+                    r"\'" => target.push('\''),
+                    _ => return None,
+                }
+            }
+            "escape_sequence" if node.kind() == "encapsed_string" => {
+                target.push_str(php_double_quoted_escape_target(child, content)?);
+            }
             _ => return None,
         }
         has_part = true;
     }
     has_part.then_some(target)
+}
+
+/// Decode one grammar-recognized, non-interpolating PHP double-quoted escape.
+fn php_double_quoted_escape_target(node: Node<'_>, content: &str) -> Option<&'static str> {
+    match node_text(node, content)?.as_str() {
+        r"\\" => Some("\\"),
+        r#"\""# => Some("\""),
+        r"\n" => Some("\n"),
+        r"\r" => Some("\r"),
+        r"\t" => Some("\t"),
+        r"\v" => Some("\x0b"),
+        r"\e" => Some("\x1b"),
+        r"\f" => Some("\x0c"),
+        r"\$" => Some("$"),
+        r"\`" => Some("`"),
+        _ => None,
+    }
 }
 
 /// Return every static namespace path from a PHP `use` declaration.
@@ -4944,6 +4954,57 @@ function run(): void {
                 && !relation.context.contains("$object->save(...)")
                 && relation.target_name != "$dynamic"
                 && relation.target_name != "$name"
+        }));
+    }
+
+    #[test]
+    fn php_static_include_literals_reject_constants_and_decode_double_quoted_escapes() {
+        let source = r#"<?php
+require "vendor\\bootstrap.php";
+require "vendor\"quoted.php";
+require "control\npath.php";
+require "dollar\$name.php";
+require "unsupported\x41.php";
+require "boot/$name.php";
+require $dynamic;
+require BOOTSTRAP;
+require Vendor\BOOTSTRAP;
+require (1 + 2);
+"#;
+        let graph = extract_symbol_graph("src/StaticIncludes.php", Some("php"), source);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        for (target, line) in [
+            ("vendor\\bootstrap.php", 2),
+            ("vendor\"quoted.php", 3),
+            ("control path.php", 4),
+            ("dollar$name.php", 5),
+        ] {
+            let matches = imports
+                .iter()
+                .filter(|relation| relation.target_name == target)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "missing exact escaped PHP include {target}: {imports:?}"
+            );
+            let relation = matches[0];
+            assert_eq!(relation.path, "src/StaticIncludes.php");
+            assert_eq!(relation.line, line);
+            assert_eq!(relation.context, target);
+        }
+        assert!(imports.iter().all(|relation| {
+            !relation.target_name.contains("unsupported")
+                && !relation.target_name.contains("boot/")
+                && relation.target_name != "$dynamic"
+                && relation.target_name != "BOOTSTRAP"
+                && !relation.target_name.contains("Vendor")
+                && !relation.target_name.contains("1 + 2")
         }));
     }
 
