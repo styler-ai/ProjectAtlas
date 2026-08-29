@@ -1595,12 +1595,31 @@ fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Return the plain content of a PHP string literal when it has no interpolation.
 fn php_static_string_target(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() != "string" {
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor);
+        let content_node = children.next()?;
+        return (content_node.kind() == "string_content" && children.next().is_none())
+            .then(|| named_text(content_node, content))
+            .flatten();
+    }
+
     let mut cursor = node.walk();
-    let mut children = node.named_children(&mut cursor);
-    let content_node = children.next()?;
-    (content_node.kind() == "string_content" && children.next().is_none())
-        .then(|| named_text(content_node, content))
-        .flatten()
+    let mut target = String::new();
+    let mut has_part = false;
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "string_content" => target.push_str(&named_text(child, content)?),
+            "escape_sequence" => match node_text(child, content)?.as_str() {
+                r"\\" => target.push('\\'),
+                r"\'" => target.push('\''),
+                _ => return None,
+            },
+            _ => return None,
+        }
+        has_part = true;
+    }
+    has_part.then_some(target)
 }
 
 /// Return every static namespace path from a PHP `use` declaration.
@@ -4794,6 +4813,8 @@ class Child extends Base {
         let source = r#"<?php
 use Vendor\One, Vendor\Two as TwoAlias;
 use Vendor\Group\{First, Second as GroupAlias};
+require 'vendor\\bootstrap.php';
+require 'vendor\\it\'s.php';
 require 'bootstrap.php';
 require "bootstrap.php";
 require "boot/$name.php";
@@ -4821,7 +4842,9 @@ function run(): void {
             ("Vendor\\Two", vec![2]),
             ("Vendor\\Group\\First", vec![3]),
             ("Vendor\\Group\\Second", vec![3]),
-            ("bootstrap.php", vec![4, 5]),
+            ("vendor\\bootstrap.php", vec![4]),
+            ("vendor\\it's.php", vec![5]),
+            ("bootstrap.php", vec![6, 7]),
         ] {
             assert_eq!(
                 imports
@@ -4836,9 +4859,7 @@ function run(): void {
                 .filter(|relation| relation.target_name == target)
                 .map(|relation| {
                     assert_eq!(relation.path, "src/Callable.php");
-                    assert!(relation.context.contains(target));
-                    assert!(!relation.context.contains('\''));
-                    assert!(!relation.context.contains('"'));
+                    assert_eq!(relation.context, target);
                     relation.line
                 })
                 .collect::<Vec<_>>();
@@ -4859,9 +4880,9 @@ function run(): void {
             .filter(|relation| relation.kind == RelationKind::Calls)
             .collect::<Vec<_>>();
         for (target, lines) in [
-            ("foo", vec![11, 12]),
-            ("Service::boot", vec![14]),
-            ("save", vec![16]),
+            ("foo", vec![13, 14]),
+            ("Service::boot", vec![16]),
+            ("save", vec![18]),
         ] {
             assert_eq!(
                 calls
