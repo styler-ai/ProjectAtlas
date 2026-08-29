@@ -905,13 +905,89 @@ fn tree_sitter_language(language: &str, content: &str) -> Option<Language> {
         TreeSitterGrammar::C => tree_sitter_c::LANGUAGE.into(),
         TreeSitterGrammar::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         TreeSitterGrammar::Php => {
-            if content.contains("<?") {
+            if contains_php_opening_tag(content) {
                 tree_sitter_php::LANGUAGE_PHP.into()
             } else {
                 tree_sitter_php::LANGUAGE_PHP_ONLY.into()
             }
         }
     })
+}
+
+/// Return whether PHP source contains an opening tag outside PHP literals/comments.
+///
+/// The PHP grammar has separate roots for PHP-only and mixed HTML/PHP input. A
+/// raw substring check misclassifies ordinary strings and comments, so keep the
+/// distinction at this small lexical boundary instead of adding a second lexer
+/// or parser framework. Once a closing tag is seen, HTML is opaque until the
+/// next opening tag; that is the only mixed-source state needed here.
+fn contains_php_opening_tag(content: &str) -> bool {
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        Html,
+        SingleQuote,
+        DoubleQuote,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = content.as_bytes();
+    let mut state = State::Code;
+    let mut index = 0;
+    while index < bytes.len() {
+        match state {
+            State::Code => match bytes[index] {
+                b'<' if bytes.get(index + 1) == Some(&b'?') => return true,
+                b'\'' => state = State::SingleQuote,
+                b'"' => state = State::DoubleQuote,
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    state = State::LineComment;
+                    index += 1;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = State::BlockComment;
+                    index += 1;
+                }
+                b'#' if bytes.get(index + 1) != Some(&b'[') => state = State::LineComment,
+                b'?' if bytes.get(index + 1) == Some(&b'>') => {
+                    state = State::Html;
+                    index += 1;
+                }
+                _ => {}
+            },
+            State::Html => {
+                if bytes[index] == b'<' && bytes.get(index + 1) == Some(&b'?') {
+                    return true;
+                }
+            }
+            State::SingleQuote | State::DoubleQuote => {
+                let quote = match state {
+                    State::SingleQuote => b'\'',
+                    State::DoubleQuote => b'"',
+                    _ => unreachable!(),
+                };
+                if bytes[index] == b'\\' {
+                    index += 1;
+                } else if bytes[index] == quote {
+                    state = State::Code;
+                }
+            }
+            State::LineComment => {
+                if bytes[index] == b'\n' {
+                    state = State::Code;
+                }
+            }
+            State::BlockComment => {
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    state = State::Code;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 /// Recursively inspect one tree-sitter node.
@@ -4512,6 +4588,38 @@ function helper(string $value): void {}
         let bounded = extract_symbol_graph("src/large.php", Some("php"), &large);
         assert_eq!(bounded.parser, ParserKind::TreeSitter);
         assert_eq!(bounded.symbols.len(), MAX_SYMBOLS_PER_FILE);
+    }
+
+    #[test]
+    fn php_opening_tag_detection_ignores_literals_and_comments() {
+        for source in [
+            r#"function marker(): string { return "<?"; }"#,
+            "// <?\nfunction marker(): string { return 'marker'; }",
+            "# <?\nfunction marker(): string { return 'marker'; }",
+            "/* <? */ function marker(): string { return 'marker'; }",
+        ] {
+            assert!(
+                !super::contains_php_opening_tag(source),
+                "PHP-only source was classified as mixed: {source:?}"
+            );
+            let graph = extract_symbol_graph("src/marker.php", Some("php"), source);
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == "marker"),
+                "PHP-only marker disappeared after opening-tag classification: {graph:?}"
+            );
+        }
+
+        for source in [
+            "<?php function tagged(): void {} ?>",
+            "<? function short_tagged(): void {} ?>",
+            "<?= $value ?><?php function after_echo(): void {} ?>",
+            "<main>content</main><?php function mixed(): void {} ?>",
+        ] {
+            assert!(
+                super::contains_php_opening_tag(source),
+                "genuine PHP opening tag was not classified as mixed: {source:?}"
+            );
+        }
     }
 
     #[test]
