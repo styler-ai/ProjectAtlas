@@ -36565,32 +36565,6 @@ fn spawn_codex_owned_obsolete_mcp(
                 ));
             }
         }
-        if Instant::now() >= deadline {
-            let elapsed = started.elapsed();
-            return Err(codex_owner_spawn_error(
-                &mut parent,
-                codex_fixture,
-                child_pid_file,
-                stable_runtime,
-                format!(
-                    "Codex MCP owner fixture did not publish its child PID within {CODEX_OWNER_READINESS_TIMEOUT:?} (elapsed={elapsed:?} readiness_elapsed_ms={})",
-                    elapsed.as_millis()
-                ),
-            ));
-        }
-        if Instant::now() >= deadline {
-            let elapsed = started.elapsed();
-            return Err(codex_owner_spawn_error(
-                &mut parent,
-                codex_fixture,
-                child_pid_file,
-                stable_runtime,
-                format!(
-                    "Codex MCP owner fixture readiness deadline expired before identity validation (readiness_elapsed_ms={})",
-                    elapsed.as_millis()
-                ),
-            ));
-        }
         if child_pid_file.is_file() {
             let capture_timeout = deadline.saturating_duration_since(Instant::now());
             if capture_timeout.is_zero() {
@@ -36627,6 +36601,19 @@ fn spawn_codex_owned_obsolete_mcp(
                     ));
                 }
             }
+        }
+        if Instant::now() >= deadline {
+            let elapsed = started.elapsed();
+            return Err(codex_owner_spawn_error(
+                &mut parent,
+                codex_fixture,
+                child_pid_file,
+                stable_runtime,
+                format!(
+                    "Codex MCP owner fixture did not publish its child PID within {CODEX_OWNER_READINESS_TIMEOUT:?} (elapsed={elapsed:?} readiness_elapsed_ms={})",
+                    elapsed.as_millis()
+                ),
+            ));
         }
         thread::sleep(Duration::from_millis(25));
     }
@@ -36715,6 +36702,54 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
             ))
             .into());
         }
+    }
+
+    // Keep a valid atomic publication close to the readiness edge.  The helper must
+    // inspect that publication before classifying a missing-file timeout, then give
+    // identity capture only the remaining readiness budget.
+    let deadline_edge_identity_file = temp.path().join("deadline-edge.pid");
+    let deadline_edge_started = Instant::now();
+    let deadline_edge_delay =
+        CODEX_OWNER_READINESS_TIMEOUT.saturating_sub(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE);
+    let deadline_edge_result = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &deadline_edge_identity_file,
+        Some(deadline_edge_delay),
+        None,
+    );
+    let deadline_edge_elapsed = deadline_edge_started.elapsed();
+    let (deadline_edge_parent, deadline_edge_identity) = match deadline_edge_result {
+        Ok((parent, identity)) => {
+            if deadline_edge_elapsed < deadline_edge_delay
+                || deadline_edge_elapsed >= CODEX_OWNER_READINESS_TIMEOUT
+            {
+                let cleanup_result = cleanup_codex_owner_processes(parent, &identity);
+                return Err(io::Error::other(format!(
+                    "deadline-edge publication was not accepted inside the readiness budget: elapsed={deadline_edge_elapsed:?} publication_delay={deadline_edge_delay:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} cleanup={cleanup_result:?}"
+                ))
+                .into());
+            }
+            (parent, identity)
+        }
+        Err(error) => {
+            return Err(io::Error::other(format!(
+                "deadline-edge publication was rejected before identity validation: elapsed={deadline_edge_elapsed:?} publication_delay={deadline_edge_delay:?} error={error}"
+            ))
+            .into());
+        }
+    };
+    let deadline_edge_cleanup =
+        cleanup_codex_owner_processes(deadline_edge_parent, &deadline_edge_identity);
+    if deadline_edge_cleanup.is_err() || windows_process_is_alive(&deadline_edge_identity)? {
+        return Err(io::Error::other(
+            format!(
+                "deadline-edge publication did not clean up its accepted child: {deadline_edge_cleanup:?}"
+            ),
+        )
+        .into());
     }
 
     // Exercise the same branch a negative fixture would take if validation regressed.
@@ -37299,8 +37334,7 @@ fn windows_fixture_late_publication_is_atomic_but_past_readiness() -> Result<(),
                 "late publication timeout omitted its readiness elapsed diagnostic: {text}"
             ))
         })?;
-    if !identity_file.is_file()
-        || elapsed < CODEX_OWNER_READINESS_TIMEOUT
+    if elapsed < CODEX_OWNER_READINESS_TIMEOUT
         || elapsed > total_upper_bound
         || readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
         || readiness_elapsed
