@@ -58,14 +58,14 @@ Sol assigns the label during specification using delivery-boundary complexity ra
 
 ### 5. Activate through a bounded live migration
 
-Before the new checker becomes authoritative, prepare exact body edits for every open mapped issue and one complexity-label update for every open issue. The body migration SHALL:
+Before the new checker becomes authoritative, prepare exact body edits for every open mapped issue and validate the complete live complexity-label inventory for every open issue. The body migration SHALL:
 
 - preserve all existing prose, links, tasks, checked state, relationships, and milestone facts;
 - rename only the authoritative task heading;
 - add the fixed acceptance checklist unchecked unless the issue already has complete independently accepted proof that is read back live;
 - rename pre-mortem ownership text from `(OpenSpec tasks: ...)` to `(Implementation tasks: ...)` without changing IDs or state;
 
-Unmapped backlog issues receive only the specification-owned complexity label until they gain a real OpenSpec mapping and implementation task authority.
+The user-authorized complexity classification is already live and independently useful to the external router. Unmapped backlog issues receive only that label until they gain a real OpenSpec mapping and implementation task authority. Checker activation treats the labels as validated input; a body/checker rollback does not remove them.
 
 Publish the issue edits only after the implementation has passed local independent review. The old main checker may fail closed during the short heading-transition window; no issue or release transition is authorized from that state. Push the accepted checker immediately, validate all live bodies with the new branch checker, merge only on complete readback, and rerun IssueOps on current `main`. If complete convergence cannot be achieved, restore the preserved prior bodies/labels and do not merge the checker.
 
@@ -90,11 +90,11 @@ The standard-library self-test owns parser/state-transition coverage. Existing R
 1. Create and map one sanitized v0.5 IssueOps owner with `complexity:high`, and declare its queued direct-child/blocker relationship to #492. Keep the live relationship, milestone, and readiness activation for the bounded publication step so accepted `main` and its existing release graph remain coherent during implementation.
 2. Implement and locally validate the checker, workflow trigger, templates, guidance, and contract tests without changing live issue bodies.
 3. Obtain Terra High acceptance of the immutable implementation head; this issue does not require the additional Sol gate unless its final specification is reclassified `complexity:very-high`.
-4. Prepare, diff, and validate every open mapped issue body, complexity label, and the queued #517/#492 relationship activation against the accepted checker while preserving prior state for rollback.
-5. Publish the live body/label/relationship migration, read back the exact state, push the Terra-accepted implementation head, run hosted checks, and reach exact merge-ready convergence only when the new checker sees the complete live set.
+4. Prepare, diff, and validate every open mapped issue body, read back every open issue complexity label, and prepare the queued #517/#492 relationship activation against the accepted checker while preserving the mutable activation state for rollback.
+5. Publish the live body/relationship migration, validate the exact body/label/relationship state, push the Terra-accepted implementation head, run hosted checks, and reach exact merge-ready convergence only when the new checker sees the complete live set.
 6. Synchronize both task lists at that accepted boundary, merge, rerun IssueOps from accepted `main`, verify this issue and #492 relationships/tasks, and then allow ordinary release work to continue.
 
-Rollback before merge restores the prior live issue bodies, labels, milestone/status, and native relationships and abandons the unmerged checker head. After merge, any defect is fixed forward under the same owner; closed historical bodies remain untouched throughout.
+Rollback before merge restores the prior live issue bodies, #517 milestone/status, and native relationships and abandons the unmerged checker head. The independently authorized complexity labels remain classified unless the user separately changes that policy. After merge, any defect is fixed forward under the same owner; closed historical bodies remain untouched throughout.
 
 ## Dependencies / Cross-Issue Impact
 

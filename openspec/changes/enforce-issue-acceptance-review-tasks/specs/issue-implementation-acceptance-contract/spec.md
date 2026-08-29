@@ -88,7 +88,7 @@ The migration SHALL preserve every existing open mapped issue section, substanti
 - **AND** it still rejects unchecked historical implementation tasks.
 
 ### Requirement: Activation fails closed across live state
-The new contract SHALL become authoritative only after the accepted checker, every open mapped live issue body, and every open issue complexity label converge. The migration SHALL validate exact live readback and provide restoration of prior bodies, labels, milestone/status, and native relationships before merge.
+The new contract SHALL become authoritative only after the accepted checker, every open mapped live issue body, and every open issue complexity label converge. The migration SHALL validate exact live readback and provide restoration of prior bodies, #517 milestone/status, and native relationships before merge. The independently authorized complexity classification SHALL remain intact across checker/body rollback.
 
 #### Scenario: Complete activation
 - **WHEN** the accepted implementation is ready to publish
@@ -99,7 +99,8 @@ The new contract SHALL become authoritative only after the accepted checker, eve
 #### Scenario: Partial or raced migration
 - **WHEN** an issue edit, label update, readback, branch validation, or hosted check is partial, stale, or mismatched
 - **THEN** no issue, merge, release, or acceptance transition is authorized
-- **AND** the prior live bodies, labels, milestone/status, and native relationships are restored when the checker has not merged.
+- **AND** the prior live bodies, #517 milestone/status, and native relationships are restored when the checker has not merged
+- **AND** the independently authorized complexity labels remain intact.
 
 ### Requirement: Repository guidance and tests share the contract
 The IssueOps self-test, behavior-focused repository E2E, issue templates, pull-request template, repository workflow guidance, repository agent guidance, and applicable version-matched ProjectAtlas plugin guidance SHALL describe and verify the same two-list, completion, complexity, and historical-compatibility rules without adding a dependency or model policy to IssueOps.
