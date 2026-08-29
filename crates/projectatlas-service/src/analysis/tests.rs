@@ -738,7 +738,11 @@ fn analysis_modes_are_closed_and_partial_evidence_stays_inconclusive() -> Result
             .with_aggregate_limits(Some(1), None, None, None, None, None)?;
     let bounded = fitted_report(&store, &bounded)?;
     require(
-        bounded.truncated && bounded.reached_limits.contains(&GraphLimitKind::Edges),
+        bounded.truncated
+            && bounded.reached_limits.contains(&GraphLimitKind::Edges)
+            && !bounded
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes),
         "edge budget truncation was not explicit in the analysis envelope",
     )?;
 
@@ -1014,11 +1018,87 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         output_bytes: 65_536,
         relation: None,
     };
-    let (_, bounded_edges, resource_truncated) =
-        admitted_community_scope(&nodes, &edges, parameters);
+    let (_, bounded_edges, resource_limits) = admitted_community_scope(&nodes, &edges, parameters);
     require(
-        resource_truncated && bounded_edges.len() <= parameters.edge_limit as usize,
+        resource_limits == vec![GraphLimitKind::Nodes, GraphLimitKind::Edges]
+            && bounded_edges.len() <= parameters.edge_limit as usize,
         "community resource ceilings did not truncate the admitted edge scope",
+    )?;
+    let mut node_limited_query = query.clone();
+    node_limited_query.relations.budget = node_limited_query
+        .relations
+        .budget
+        .with_aggregate_limits(Some(100), Some(3), None, None, None, None)?;
+    let (_, _, node_limits) = community_findings_with_budget(
+        &nodes,
+        &edges,
+        true,
+        &node_limited_query,
+        node_limited_query.relations.budget.intermediate_bytes(),
+        None,
+    )?;
+    require(
+        node_limits == vec![GraphLimitKind::Nodes],
+        "node-only community truncation reported an unrelated limit",
+    )?;
+    let mut edge_limited_query = query.clone();
+    edge_limited_query.relations.budget = edge_limited_query
+        .relations
+        .budget
+        .with_aggregate_limits(Some(1), Some(50), None, None, None, None)?;
+    let (_, _, edge_limits) = community_findings_with_budget(
+        &nodes,
+        &edges,
+        true,
+        &edge_limited_query,
+        edge_limited_query.relations.budget.intermediate_bytes(),
+        None,
+    )?;
+    require(
+        edge_limits == vec![GraphLimitKind::Edges],
+        "edge-only community truncation reported an unrelated limit",
+    )?;
+    let mut contains_edges = Vec::new();
+    for _ in 0..2048 {
+        contains_edges.push(LocalEdge {
+            source: edges[0].source.clone(),
+            target: edges[0].target.clone(),
+            kind: GraphRelationKind::Legacy(RelationKind::Contains),
+            complete: true,
+        });
+    }
+    let nodes_only_working_upper_bound = community_working_set_upper_bound(&nodes, &[], None)?;
+    let contains_only_working_upper_bound =
+        community_working_set_upper_bound(&nodes, &contains_edges, None)?;
+    require(
+        nodes_only_working_upper_bound == contains_only_working_upper_bound,
+        "excluded containment edges consumed community working-set budget",
+    )?;
+    let mut mixed_edges = contains_edges;
+    mixed_edges.push(edges[0].clone());
+    let mixed_working_upper_bound = community_working_set_upper_bound(&nodes, &mixed_edges, None)?;
+    require(
+        mixed_working_upper_bound > contains_only_working_upper_bound,
+        "admitted community edges did not consume working-set budget",
+    )?;
+    let (mixed, _, mixed_limits) = community_findings_with_budget(
+        &nodes,
+        &mixed_edges,
+        true,
+        &query,
+        query.relations.budget.intermediate_bytes(),
+        None,
+    )?;
+    require(
+        mixed_limits.is_empty()
+            && mixed.iter().all(|finding| {
+                finding.status == AnalysisStatus::Candidate
+                    && finding
+                        .community
+                        .as_ref()
+                        .is_some_and(|community| !community.truncated)
+            }),
+        "excluded containment edges prevented the admitted partition from fitting",
     )?;
     let (labels, iteration, convergence) = propagate_community_labels(&[], &[], 0, None)?;
     require(
@@ -1143,7 +1223,7 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         )?;
     let dense_working_upper_bound =
         community_working_set_upper_bound(&scale_nodes, &dense_edges, None)?;
-    let (dense_budgeted, dense_working_set_bytes) = community_findings_with_budget(
+    let (dense_budgeted, dense_working_set_bytes, dense_limits) = community_findings_with_budget(
         &scale_nodes,
         &dense_edges,
         true,
@@ -1159,6 +1239,7 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
     require(
         dense_working_upper_bound > dense_budget_query.relations.budget.intermediate_bytes()
             && dense_working_set_bytes == 0
+            && dense_limits == vec![GraphLimitKind::IntermediateBytes]
             && dense_working_set_bytes.saturating_add(dense_budgeted_bytes.len() as u64)
                 <= dense_budget_query.relations.budget.intermediate_bytes()
             && dense_budgeted_bytes.len()

@@ -1029,13 +1029,6 @@ fn load_relation_analysis_with_closure_deadline(
             .as_ref()
             .is_some_and(|community| community.truncated)
     });
-    if community_projection_truncated {
-        supplemental_work.composition_truncated = true;
-        push_limit(
-            &mut supplemental_work.reached_limits,
-            GraphLimitKind::IntermediateBytes,
-        );
-    }
     let full_finding_count = u32::try_from(findings.len()).map_err(|_overflow| {
         ServiceError::InvalidInput("analysis finding count overflowed".to_string())
     })?;
@@ -1760,17 +1753,29 @@ fn architecture_findings(
         }
         let community_budget = symbol_byte_budget.saturating_sub(existing_finding_bytes);
         if community_budget > 0 {
-            let (community_findings, community_working_set_bytes) = community_findings_with_budget(
-                nodes,
-                edges,
-                community_complete,
-                query,
-                community_budget,
-                control,
-            )?;
+            let (community_findings, community_working_set_bytes, community_limits) =
+                community_findings_with_budget(
+                    nodes,
+                    edges,
+                    community_complete,
+                    query,
+                    community_budget,
+                    control,
+                )?;
             supplemental_work.community_working_set_bytes = supplemental_work
                 .community_working_set_bytes
                 .max(community_working_set_bytes);
+            for limit in community_limits {
+                push_limit(&mut supplemental_work.reached_limits, limit);
+            }
+            if community_findings.iter().any(|finding| {
+                finding
+                    .community
+                    .as_ref()
+                    .is_some_and(|community| community.truncated)
+            }) {
+                supplemental_work.composition_truncated = true;
+            }
             findings.extend(community_findings);
         }
     }
@@ -2339,6 +2344,14 @@ fn community_relation_weight(kind: GraphRelationKind) -> Option<u32> {
     }
 }
 
+/// Return the weight for one complete relation admitted by the community projection.
+fn admitted_community_edge_weight(edge: &LocalEdge) -> Option<u32> {
+    if !edge.complete {
+        return None;
+    }
+    community_relation_weight(edge.kind)
+}
+
 /// Compute deterministic bounded weighted label-propagation communities.
 #[cfg(test)]
 fn community_findings(
@@ -2367,7 +2380,7 @@ fn community_findings_with_budget(
     query: &RelationAnalysisQuery,
     intermediate_bytes: u64,
     control: Option<&IndexWorkControl>,
-) -> ServiceResult<(Vec<AnalysisFinding>, u64)> {
+) -> ServiceResult<(Vec<AnalysisFinding>, u64, Vec<GraphLimitKind>)> {
     check_control(control)?;
     let weights = community_relation_weights();
     let parameters = CommunityParameters {
@@ -2403,11 +2416,13 @@ fn community_findings_with_budget(
                 marker_coverage,
             )],
             0,
+            vec![GraphLimitKind::IntermediateBytes],
         ));
     }
     let construction_bytes = intermediate_bytes.saturating_sub(working_set_bytes);
-    let (keys, admitted_edges, resource_truncated) =
+    let (keys, admitted_edges, resource_limits) =
         admitted_community_scope(nodes, edges, parameters);
+    let resource_truncated = !resource_limits.is_empty();
     if !complete || resource_truncated {
         let mut evidence = admitted_edges;
         if resource_truncated {
@@ -2423,6 +2438,10 @@ fn community_findings_with_budget(
             &[]
         };
         let metadata_truncated = resource_truncated || !metadata_fits;
+        let mut truncation_limits = resource_limits;
+        if !metadata_fits {
+            push_limit(&mut truncation_limits, GraphLimitKind::IntermediateBytes);
+        }
         let metadata = community_metadata(
             metadata_keys,
             metadata_evidence,
@@ -2454,6 +2473,7 @@ fn community_findings_with_budget(
                 community: Some(metadata),
             }],
             working_set_bytes,
+            truncation_limits,
         ));
     }
 
@@ -2475,6 +2495,10 @@ fn community_findings_with_budget(
             &[]
         };
         let metadata_truncated = !metadata_fits;
+        let mut truncation_limits = Vec::new();
+        if !metadata_fits {
+            truncation_limits.push(GraphLimitKind::IntermediateBytes);
+        }
         let metadata = community_metadata(
             metadata_keys,
             metadata_evidence,
@@ -2498,24 +2522,23 @@ fn community_findings_with_budget(
                 community: Some(metadata),
             }],
             working_set_bytes,
+            truncation_limits,
         ));
     }
 
-    Ok((
-        community_candidate_findings(
-            nodes,
-            &keys,
-            &admitted_edges,
-            &labels,
-            &weights,
-            parameters,
-            iteration,
-            convergence,
-            control,
-            construction_bytes.saturating_sub(truncation_marker_bytes),
-        )?,
-        working_set_bytes,
-    ))
+    let (findings, truncation_limits) = community_candidate_findings(
+        nodes,
+        &keys,
+        &admitted_edges,
+        &labels,
+        &weights,
+        parameters,
+        iteration,
+        convergence,
+        control,
+        construction_bytes.saturating_sub(truncation_marker_bytes),
+    )?;
+    Ok((findings, working_set_bytes, truncation_limits))
 }
 
 /// Admit the stable node and edge prefix under the community resource ceiling.
@@ -2523,7 +2546,7 @@ fn admitted_community_scope(
     nodes: &BTreeMap<String, DetailedRelationNode>,
     edges: &[LocalEdge],
     parameters: CommunityParameters,
-) -> (Vec<String>, Vec<CommunityEdgeEvidence>, bool) {
+) -> (Vec<String>, Vec<CommunityEdgeEvidence>, Vec<GraphLimitKind>) {
     let all_keys = nodes.keys().cloned().collect::<Vec<_>>();
     let keys = all_keys
         .iter()
@@ -2534,12 +2557,9 @@ fn admitted_community_scope(
     let mut admitted_edges = Vec::new();
     let mut edge_count = 0_usize;
     for edge in edges {
-        let Some(weight) = community_relation_weight(edge.kind) else {
+        let Some(weight) = admitted_community_edge_weight(edge) else {
             continue;
         };
-        if !edge.complete {
-            continue;
-        }
         if !admitted_nodes.contains(&edge.source) || !admitted_nodes.contains(&edge.target) {
             continue;
         }
@@ -2565,12 +2585,14 @@ fn admitted_community_scope(
             && left.target == right.target
             && left.relation == right.relation
     });
-    (
-        keys,
-        admitted_edges,
-        all_keys.len() > parameters.node_limit as usize
-            || edge_count > parameters.edge_limit as usize,
-    )
+    let mut reached_limits = Vec::new();
+    if all_keys.len() > parameters.node_limit as usize {
+        reached_limits.push(GraphLimitKind::Nodes);
+    }
+    if edge_count > parameters.edge_limit as usize {
+        reached_limits.push(GraphLimitKind::Edges);
+    }
+    (keys, admitted_edges, reached_limits)
 }
 
 /// Propagate labels in stable node order with a fixed sequential work budget.
@@ -2671,7 +2693,7 @@ fn community_candidate_findings(
     convergence: CommunityConvergence,
     control: Option<&IndexWorkControl>,
     intermediate_bytes: u64,
-) -> ServiceResult<Vec<AnalysisFinding>> {
+) -> ServiceResult<(Vec<AnalysisFinding>, Vec<GraphLimitKind>)> {
     let mut groups = BTreeMap::<String, Vec<String>>::new();
     for key in keys {
         check_control(control)?;
@@ -2750,10 +2772,19 @@ fn community_candidate_findings(
         }
         findings.push(marker);
     }
-    Ok(findings)
+    Ok((
+        findings,
+        truncated
+            .then_some(vec![GraphLimitKind::IntermediateBytes])
+            .unwrap_or_default(),
+    ))
 }
 
 /// Charge every graph-sized community temporary before allocating it.
+///
+/// The edge charge mirrors the complete, weighted relation admission used by
+/// `admitted_community_scope`; excluded relation families never own community
+/// clones and therefore do not consume this working-set budget.
 fn community_working_set_upper_bound(
     nodes: &BTreeMap<String, DetailedRelationNode>,
     edges: &[LocalEdge],
@@ -2766,8 +2797,13 @@ fn community_working_set_upper_bound(
             .saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX))
             .saturating_add(std::mem::size_of::<String>() as u64);
     }
+    let mut admitted_edge_count = 0_u64;
     for edge in edges {
         check_control(control)?;
+        if admitted_community_edge_weight(edge).is_none() {
+            continue;
+        }
+        admitted_edge_count = admitted_edge_count.saturating_add(1);
         endpoint_bytes = endpoint_bytes
             .saturating_add(u64::try_from(edge.source.len()).unwrap_or(u64::MAX))
             .saturating_add(u64::try_from(edge.target.len()).unwrap_or(u64::MAX))
@@ -2776,7 +2812,7 @@ fn community_working_set_upper_bound(
     }
     let entry_count = u64::try_from(nodes.len())
         .unwrap_or(u64::MAX)
-        .saturating_add(u64::try_from(edges.len()).unwrap_or(u64::MAX));
+        .saturating_add(admitted_edge_count);
     Ok(endpoint_bytes
         .saturating_mul(COMMUNITY_WORKING_SET_MULTIPLIER)
         .saturating_add(entry_count.saturating_mul(COMMUNITY_WORKING_SET_ENTRY_BYTES))
