@@ -1099,6 +1099,78 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
             })
         })
         .collect::<Vec<_>>();
+    let mut dense_edges = scale_edges.clone();
+    dense_edges.extend([
+        LocalEdge {
+            source: scale_keys[1].clone(),
+            target: scale_keys[1].clone(),
+            kind: calls,
+            complete: true,
+        },
+        LocalEdge {
+            source: scale_keys[2].clone(),
+            target: scale_keys[1].clone(),
+            kind: calls,
+            complete: true,
+        },
+        LocalEdge {
+            source: scale_keys[3].clone(),
+            target: scale_keys[1].clone(),
+            kind: references,
+            complete: true,
+        },
+        LocalEdge {
+            source: scale_keys[4].clone(),
+            target: scale_keys[1].clone(),
+            kind: GraphRelationKind::Legacy(RelationKind::DependsOn),
+            complete: true,
+        },
+    ]);
+    require(
+        scale_nodes.len() == MAX_ANALYSIS_NODES as usize
+            && dense_edges.len() == MAX_ANALYSIS_EDGES as usize,
+        "dense community regression did not reach the legal node and edge ceilings",
+    )?;
+    let mut dense_budget_query = query.clone();
+    dense_budget_query.relations.budget =
+        dense_budget_query.relations.budget.with_aggregate_limits(
+            Some(MAX_ANALYSIS_EDGES),
+            Some(MAX_ANALYSIS_NODES),
+            None,
+            None,
+            Some(64 * 1024),
+            None,
+        )?;
+    let dense_working_upper_bound =
+        community_working_set_upper_bound(&scale_nodes, &dense_edges, None)?;
+    let (dense_budgeted, dense_working_set_bytes) = community_findings_with_budget(
+        &scale_nodes,
+        &dense_edges,
+        true,
+        &dense_budget_query,
+        dense_budget_query.relations.budget.intermediate_bytes(),
+        None,
+    )?;
+    let dense_budgeted_bytes = serde_json::to_vec(&dense_budgeted)?;
+    let dense_community = dense_budgeted
+        .first()
+        .and_then(|finding| finding.community.as_ref())
+        .ok_or("dense community truncation metadata missing")?;
+    require(
+        dense_working_upper_bound > dense_budget_query.relations.budget.intermediate_bytes()
+            && dense_working_set_bytes == 0
+            && dense_working_set_bytes.saturating_add(dense_budgeted_bytes.len() as u64)
+                <= dense_budget_query.relations.budget.intermediate_bytes()
+            && dense_budgeted_bytes.len()
+                <= dense_budget_query.relations.budget.intermediate_bytes() as usize
+            && dense_budgeted.len() == 1
+            && dense_budgeted[0].kind == AnalysisFindingKind::Community
+            && dense_budgeted[0].status == AnalysisStatus::Inconclusive
+            && dense_community.truncated
+            && dense_community.parameters.node_limit == MAX_ANALYSIS_NODES
+            && dense_community.parameters.edge_limit == MAX_ANALYSIS_EDGES,
+        "dense minimum-budget community construction did not refuse before graph-sized allocation",
+    )?;
     let started = Instant::now();
     let scaled = community_findings(&scale_nodes, &scale_edges, true, &query, None)?;
     let elapsed = started.elapsed();
