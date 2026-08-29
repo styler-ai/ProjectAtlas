@@ -411,6 +411,7 @@ const MCP_TOOLS_SHA256: &str = "c364a97710088181c61ebf3ba57573fae5cf26b0eb21fe12
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
+#[cfg(windows)]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
 
 const CLI_E2E_INVENTORY_FILE: &str = "docs/v050-cli-e2e-inventory.json";
@@ -2677,6 +2678,35 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("  parser-pack-assets:").next())
         .ok_or_else(|| io::Error::other("release omitted the Windows prepublish job"))?;
+    let unix_permission_restore = unix_prepublish
+        .split("      - name: Restore packaged contract execute permissions")
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| {
+            io::Error::other(
+                "Unix prepublish omitted the packaged contract permission restoration step",
+            )
+        })?;
+    for required in [
+        "for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do",
+        "binary=\"contract-artifacts/bin/$binary_name\"",
+        "if [ ! -f \"$binary\" ]; then",
+        "Downloaded packaged contract binary was not found: $binary",
+        "chmod +x \"$binary\"",
+    ] {
+        if !unix_permission_restore.contains(required) {
+            return Err(io::Error::other(format!(
+                "Unix packaged contract permission restoration omitted {required:?}"
+            ))
+            .into());
+        }
+    }
+    if windows_prepublish.contains("Restore packaged contract execute permissions") {
+        return Err(io::Error::other(
+            "Windows prepublish must not run the Unix packaged contract permission restoration",
+        )
+        .into());
+    }
     let hosted_tui_step = ci
         .split("      - name: Capture hosted PTY token dashboards")
         .nth(1)

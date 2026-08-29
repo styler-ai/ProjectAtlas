@@ -447,6 +447,18 @@ jobs:
           name: packaged-contract-runner-${{ matrix.suffix }}
           path: contract-artifacts
 
+      - name: Restore packaged contract execute permissions
+        run: |
+          set -euo pipefail
+          for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
+            binary="contract-artifacts/bin/$binary_name"
+            if [ ! -f "$binary" ]; then
+              echo "Downloaded packaged contract binary was not found: $binary" >&2
+              exit 1
+            fi
+            chmod +x "$binary"
+          done
+
       - name: Install packaged runtime through plugin
         timeout-minutes: 5
         env:

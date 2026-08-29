@@ -142,6 +142,10 @@ const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
 
 const SUBDIR_CONFIG_DIR: &str = "config";
 
+#[cfg(any(
+    windows,
+    all(target_os = "macos", feature = "optional-parser-supervisor")
+))]
 const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
 
 #[cfg(all(not(windows), feature = "optional-parser-supervisor"))]
