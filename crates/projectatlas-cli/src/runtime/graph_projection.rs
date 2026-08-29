@@ -177,6 +177,9 @@ struct IdentityFactKey {
     span: IdentitySpan,
     /// Stable local discriminator for the parser strategy.
     parser: u8,
+    /// Admission owner for distinguishing parser identity from its derived
+    /// resolution-key outcome when both share one parser fact ordinal.
+    owner: u8,
     /// Internal parser-fact ordinal.
     fact_index: u64,
 }
@@ -191,6 +194,143 @@ fn parser_fact_kind(parser: ParserKind) -> u8 {
     }
 }
 
+/// Map one rejection field to the admission owner that re-derives it.
+fn identity_fact_owner(fields: &[(GraphIdentityField, GraphIdentityRejectionReason)]) -> u8 {
+    u8::from(
+        fields
+            .iter()
+            .any(|(field, _reason)| *field == GraphIdentityField::ResolutionKey),
+    )
+}
+
+/// Return whether a persisted fact is replaced by the current derivation.
+fn is_rederived_identity_fact(fact: &IdentityFactKey) -> bool {
+    fact.owner == 1
+        || matches!(
+            fact.fact_index & !((1_u64 << 56) - 1),
+            DERIVED_RELATION_FACT_INDEX_NAMESPACE | MARKDOWN_FACT_INDEX_NAMESPACE
+        )
+}
+
+/// Conservative bytes for one observed fact and its path/count map entries.
+fn identity_fact_retained_bytes(
+    path: &str,
+    new_observed_path: bool,
+    new_count_path: bool,
+) -> Result<u64, CliError> {
+    let path_bytes = u64::try_from(path.len()).map_err(|error| {
+        CliError::InvalidInput(format!(
+            "identity rejection path length overflowed: {error}"
+        ))
+    })?;
+    let path_entries = u64::from(u8::from(new_observed_path)) + u64::from(u8::from(new_count_path));
+    let path_bytes = path_bytes
+        .checked_mul(path_entries)
+        .and_then(|bytes| bytes.checked_add(STAGED_GRAPH_ROW_BYTES.checked_mul(path_entries)?))
+        .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))?;
+    path_bytes
+        .checked_add(STAGED_GRAPH_ROW_BYTES)
+        .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))
+}
+
+/// Conservative bytes for a count-only path retained after detail rows cap.
+fn identity_count_path_retained_bytes(path: &str) -> Result<u64, CliError> {
+    let path_bytes = u64::try_from(path.len()).map_err(|error| {
+        CliError::InvalidInput(format!(
+            "identity rejection path length overflowed: {error}"
+        ))
+    })?;
+    path_bytes
+        .checked_add(STAGED_GRAPH_ROW_BYTES)
+        .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))
+}
+
+/// Count the bounded map/set entries retained for observed identity facts.
+fn identity_maps_retained_bytes(
+    observed_facts: &BTreeMap<String, BTreeSet<IdentityFactKey>>,
+    rejected_facts_by_path: &BTreeMap<String, u64>,
+) -> Result<u64, CliError> {
+    let mut retained = 0_u64;
+    for (path, facts) in observed_facts {
+        let path_bytes = u64::try_from(path.len()).map_err(|error| {
+            CliError::InvalidInput(format!(
+                "identity rejection path length overflowed: {error}"
+            ))
+        })?;
+        let fact_bytes = STAGED_GRAPH_ROW_BYTES
+            .checked_mul(u64::try_from(facts.len()).map_err(|error| {
+                CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+            })?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
+        retained = retained
+            .checked_add(path_bytes)
+            .and_then(|bytes| bytes.checked_add(STAGED_GRAPH_ROW_BYTES))
+            .and_then(|bytes| bytes.checked_add(fact_bytes))
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
+    }
+    for path in rejected_facts_by_path.keys() {
+        retained = retained
+            .checked_add(identity_count_path_retained_bytes(path)?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
+    }
+    Ok(retained)
+}
+
+/// Count persisted fact identities retained for exact reuse reconciliation.
+fn identity_fact_sets_retained_bytes(
+    fact_sets: &BTreeMap<String, BTreeSet<IdentityFactKey>>,
+) -> Result<u64, CliError> {
+    let mut retained = 0_u64;
+    for (path, facts) in fact_sets {
+        let path_bytes = u64::try_from(path.len()).map_err(|error| {
+            CliError::InvalidInput(format!(
+                "identity rejection path length overflowed: {error}"
+            ))
+        })?;
+        let fact_bytes = STAGED_GRAPH_ROW_BYTES
+            .checked_mul(u64::try_from(facts.len()).map_err(|error| {
+                CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+            })?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
+        retained = retained
+            .checked_add(path_bytes)
+            .and_then(|bytes| bytes.checked_add(STAGED_GRAPH_ROW_BYTES))
+            .and_then(|bytes| bytes.checked_add(fact_bytes))
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
+    }
+    Ok(retained)
+}
+
+/// Count all identity state retained by one admission report.
+fn identity_admission_retained_bytes(report: &GraphIdentityAdmission) -> Result<u64, CliError> {
+    identity_maps_retained_bytes(&report.observed_facts, &report.rejected_facts_by_path)?
+        .checked_add(identity_fact_sets_retained_bytes(
+            &report.reused_rejection_facts,
+        )?)
+        .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))
+}
+
+/// Return the typed graph-work limit reached before retaining an observed fact.
+fn identity_fact_budget_failure(retained_bytes: u64) -> CliError {
+    IndexWorkFailure::resource_limit(
+        IndexWorkStage::SymbolParsing,
+        IndexWorkResource::OutputBytes,
+        MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+        retained_bytes,
+    )
+    .into()
+}
+
 /// Bounded admission report shared by entity, relation, and key projection.
 #[derive(Clone, Debug, Default)]
 pub(super) struct GraphIdentityAdmission {
@@ -203,6 +343,12 @@ pub(super) struct GraphIdentityAdmission {
     /// Every observed rejected parser fact, retained independently of detail
     /// rows so the global detail ceiling cannot make replays overcount.
     observed_facts: BTreeMap<String, BTreeSet<IdentityFactKey>>,
+    /// Conservative transient bytes retained by the observed fact and count
+    /// maps, charged to the graph-work budget before each insertion.
+    observed_fact_bytes: u64,
+    /// Persisted typed fact identities retained separately from current
+    /// observations so removed outcomes can be subtracted exactly.
+    reused_rejection_facts: BTreeMap<String, BTreeSet<IdentityFactKey>>,
     /// Original parser relation ordinal for each admitted relation after
     /// source-identity filtering. This remains private because it is only
     /// needed to keep derived rejection facts tied to parser observations.
@@ -210,9 +356,20 @@ pub(super) struct GraphIdentityAdmission {
     /// Resolution keys derived once at admission and carried into projection.
     resolution_projections: BTreeMap<String, ResolutionKeyProjection>,
     /// Omission counts retained from the current generation for safely reused
-    /// full-stage graphs. The count is restored after the current pass has
-    /// regenerated any key, Markdown, or derived details it owns.
+    /// graphs and reconciled with the current pass after it regenerates any
+    /// key, Markdown, or derived details it owns.
     reused_rejection_counts: BTreeMap<String, u64>,
+    /// Parser-baseline omission retained for reused structural/fallback
+    /// graphs. This stays separate from identity omissions because parser
+    /// coverage counts only relations when no identity fact was rejected.
+    reused_parser_rejection_counts: BTreeMap<String, u64>,
+    /// Number of persisted typed facts retained for each reused path. This is
+    /// the baseline for exact post-rederivation count reconciliation.
+    reused_rejection_detail_counts: BTreeMap<String, u64>,
+    /// Reused paths whose persisted detail ceiling leaves old identities
+    /// unknowable. These paths require a complete source reparse before a
+    /// replacement publication can be exact.
+    reused_rejection_details_incomplete: BTreeSet<String>,
     /// Test-only proof of one derivation per source path and generation.
     #[cfg(test)]
     resolution_derivations: BTreeMap<(String, IndexGeneration), usize>,
@@ -227,7 +384,9 @@ impl GraphIdentityAdmission {
         parser: ParserKind,
         fact_index: u64,
         fields: &[(GraphIdentityField, GraphIdentityRejectionReason)],
+        control: &IndexWorkControl,
     ) -> Result<(), CliError> {
+        control.check(IndexWorkStage::SymbolParsing)?;
         let path = RepositoryNodePath::new(Path::new(path)).map_err(invalid_graph_contract)?;
         let fact_span = span;
         let span = SourceSpan::new(
@@ -250,19 +409,38 @@ impl GraphIdentityAdmission {
         let fact_key = IdentityFactKey {
             span: fact_span,
             parser: parser_fact_kind(parser),
+            owner: identity_fact_owner(fields),
             fact_index,
         };
-        if self
+        let path_key = path.as_str().to_owned();
+        let observed_path_is_new = !self.observed_facts.contains_key(&path_key);
+        let count_path_is_new = !self.rejected_facts_by_path.contains_key(&path_key);
+        let fact_is_new = self
             .observed_facts
-            .entry(path.as_str().to_owned())
-            .or_default()
-            .insert(fact_key)
-        {
-            let count = self
-                .rejected_facts_by_path
-                .entry(path.as_str().to_owned())
-                .or_default();
-            *count = count.saturating_add(1);
+            .get(&path_key)
+            .is_none_or(|facts| !facts.contains(&fact_key));
+        if fact_is_new {
+            let additional_bytes = identity_fact_retained_bytes(
+                path.as_str(),
+                observed_path_is_new,
+                count_path_is_new,
+            )?;
+            let retained_bytes = self
+                .observed_fact_bytes
+                .checked_add(additional_bytes)
+                .ok_or_else(|| identity_fact_budget_failure(self.observed_fact_bytes))?;
+            if retained_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+                return Err(identity_fact_budget_failure(retained_bytes));
+            }
+            self.observed_fact_bytes = retained_bytes;
+            self.observed_facts
+                .entry(path_key.clone())
+                .or_default()
+                .insert(fact_key);
+            let count = self.rejected_facts_by_path.entry(path_key).or_default();
+            *count = count.checked_add(1).ok_or_else(|| {
+                CliError::InvalidInput("identity rejection count overflowed".to_string())
+            })?;
         }
         for (field, reason) in fields {
             if self.rejections.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
@@ -306,7 +484,13 @@ impl GraphIdentityAdmission {
     }
 
     /// Add rejected-fact count that exceeded the bounded typed-detail rows.
-    fn record_rejected_fact_count(&mut self, path: &str, count: usize) -> Result<(), CliError> {
+    fn record_rejected_fact_count(
+        &mut self,
+        path: &str,
+        count: usize,
+        control: &IndexWorkControl,
+    ) -> Result<(), CliError> {
+        control.check(IndexWorkStage::SymbolParsing)?;
         if count == 0 {
             return Ok(());
         }
@@ -314,17 +498,35 @@ impl GraphIdentityAdmission {
         let count = u64::try_from(count).map_err(|error| {
             CliError::InvalidInput(format!("identity rejection count overflowed: {error}"))
         })?;
-        let entry = self
-            .rejected_facts_by_path
-            .entry(path.as_str().to_owned())
-            .or_default();
-        *entry = entry.saturating_add(count);
+        let path = path.as_str().to_owned();
+        if !self.rejected_facts_by_path.contains_key(&path) {
+            let additional_bytes = identity_count_path_retained_bytes(&path)?;
+            let retained_bytes = self
+                .observed_fact_bytes
+                .checked_add(additional_bytes)
+                .ok_or_else(|| identity_fact_budget_failure(self.observed_fact_bytes))?;
+            if retained_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+                return Err(identity_fact_budget_failure(retained_bytes));
+            }
+            self.observed_fact_bytes = retained_bytes;
+        }
+        let entry = self.rejected_facts_by_path.entry(path).or_default();
+        *entry = entry.checked_add(count).ok_or_else(|| {
+            CliError::InvalidInput("identity rejection count overflowed".to_string())
+        })?;
         Ok(())
     }
 
     /// Merge one report while retaining the global detail bound.
     fn merge(&mut self, other: Self) -> Result<(), CliError> {
         self.source_admitted |= other.source_admitted;
+        let peak_observed_fact_bytes = self
+            .observed_fact_bytes
+            .checked_add(other.observed_fact_bytes)
+            .ok_or_else(|| identity_fact_budget_failure(self.observed_fact_bytes))?;
+        if peak_observed_fact_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+            return Err(identity_fact_budget_failure(peak_observed_fact_bytes));
+        }
         if other
             .resolution_projections
             .keys()
@@ -334,13 +536,75 @@ impl GraphIdentityAdmission {
                 "duplicate resolution projection admission".to_string(),
             ));
         }
-        for (path, count) in other.rejected_facts_by_path {
-            let entry = self.rejected_facts_by_path.entry(path).or_default();
-            *entry = entry.saturating_add(count);
+        let other_observed_facts = other.observed_facts;
+        let other_rejected_facts_by_path = other.rejected_facts_by_path;
+        let other_reused_rejection_facts = other.reused_rejection_facts;
+        let mut rejection_paths = self
+            .rejected_facts_by_path
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        rejection_paths.extend(other_rejected_facts_by_path.keys().cloned());
+        for path in rejection_paths {
+            let existing_total = self.rejected_facts_by_path.get(&path).copied().unwrap_or(0);
+            let existing_observed = self.observed_facts.get(&path).map_or(0, BTreeSet::len);
+            let existing_unobserved = existing_total
+                .checked_sub(u64::try_from(existing_observed).map_err(|error| {
+                    CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+                })?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput(
+                        "observed identity facts exceeded rejection count".to_string(),
+                    )
+                })?;
+            let incoming_total = other_rejected_facts_by_path
+                .get(&path)
+                .copied()
+                .unwrap_or(0);
+            let incoming_observed = other_observed_facts.get(&path).map_or(0, BTreeSet::len);
+            let incoming_unobserved = incoming_total
+                .checked_sub(u64::try_from(incoming_observed).map_err(|error| {
+                    CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+                })?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput(
+                        "observed identity facts exceeded rejection count".to_string(),
+                    )
+                })?;
+            if let Some(facts) = other_observed_facts.get(&path) {
+                self.observed_facts
+                    .entry(path.clone())
+                    .or_default()
+                    .extend(facts.iter().cloned());
+            }
+            let observed = self.observed_facts.get(&path).map_or(0, BTreeSet::len);
+            let total = u64::try_from(observed)
+                .map_err(|error| {
+                    CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+                })?
+                .checked_add(existing_unobserved)
+                .and_then(|count| count.checked_add(incoming_unobserved))
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection count overflowed".to_string())
+                })?;
+            if total == 0 {
+                self.rejected_facts_by_path.remove(&path);
+                self.observed_facts.remove(&path);
+            } else {
+                self.rejected_facts_by_path.insert(path, total);
+            }
         }
-        for (path, facts) in other.observed_facts {
-            self.observed_facts.entry(path).or_default().extend(facts);
+        for (path, facts) in other_reused_rejection_facts {
+            self.reused_rejection_facts
+                .entry(path)
+                .or_default()
+                .extend(facts);
         }
+        let observed_fact_bytes = identity_admission_retained_bytes(self)?;
+        if observed_fact_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+            return Err(identity_fact_budget_failure(observed_fact_bytes));
+        }
+        self.observed_fact_bytes = observed_fact_bytes;
         for (path, indices) in other.relation_fact_indices {
             if let Some(existing) = self.relation_fact_indices.get(&path) {
                 if existing != &indices {
@@ -352,9 +616,7 @@ impl GraphIdentityAdmission {
                 self.relation_fact_indices.insert(path, indices);
             }
         }
-        let remaining = MAX_GRAPH_IDENTITY_REJECTIONS.saturating_sub(self.rejections.len());
-        self.rejections
-            .extend(other.rejections.into_iter().take(remaining));
+        extend_bounded_identity_rejections(&mut self.rejections, other.rejections);
         self.resolution_projections
             .extend(other.resolution_projections);
         for (path, count) in other.reused_rejection_counts {
@@ -364,6 +626,30 @@ impl GraphIdentityAdmission {
                 ));
             }
         }
+        for (path, count) in other.reused_parser_rejection_counts {
+            if self
+                .reused_parser_rejection_counts
+                .insert(path, count)
+                .is_some()
+            {
+                return Err(CliError::InvalidInput(
+                    "duplicate reused parser rejection count".to_string(),
+                ));
+            }
+        }
+        for (path, count) in other.reused_rejection_detail_counts {
+            if self
+                .reused_rejection_detail_counts
+                .insert(path, count)
+                .is_some()
+            {
+                return Err(CliError::InvalidInput(
+                    "duplicate reused identity rejection detail count".to_string(),
+                ));
+            }
+        }
+        self.reused_rejection_details_incomplete
+            .extend(other.reused_rejection_details_incomplete);
         #[cfg(test)]
         for (key, count) in other.resolution_derivations {
             let entry = self.resolution_derivations.entry(key).or_default();
@@ -378,8 +664,20 @@ impl GraphIdentityAdmission {
     }
 
     /// Return the source-admission details owned by one publication path set.
-    fn for_paths(&self, paths: &BTreeSet<String>) -> Self {
-        Self {
+    fn for_paths(&self, paths: &BTreeSet<String>) -> Result<Self, CliError> {
+        let rejected_facts_by_path = self
+            .rejected_facts_by_path
+            .iter()
+            .filter(|(path, _count)| paths.contains(path.as_str()))
+            .map(|(path, count)| (path.clone(), *count))
+            .collect::<BTreeMap<_, _>>();
+        let observed_facts = self
+            .observed_facts
+            .iter()
+            .filter(|(path, _facts)| paths.contains(*path))
+            .map(|(path, facts)| (path.clone(), facts.clone()))
+            .collect::<BTreeMap<_, _>>();
+        Ok(Self {
             rejections: self
                 .rejections
                 .iter()
@@ -387,18 +685,13 @@ impl GraphIdentityAdmission {
                 .cloned()
                 .collect(),
             source_admitted: self.source_admitted,
-            rejected_facts_by_path: self
-                .rejected_facts_by_path
-                .iter()
-                .filter(|(path, _count)| paths.contains(path.as_str()))
-                .map(|(path, count)| (path.clone(), *count))
-                .collect(),
-            observed_facts: self
-                .observed_facts
-                .iter()
-                .filter(|(path, _facts)| paths.contains(*path))
-                .map(|(path, facts)| (path.clone(), facts.clone()))
-                .collect(),
+            observed_fact_bytes: identity_maps_retained_bytes(
+                &observed_facts,
+                &rejected_facts_by_path,
+            )?,
+            reused_rejection_facts: BTreeMap::new(),
+            rejected_facts_by_path,
+            observed_facts,
             relation_fact_indices: self
                 .relation_fact_indices
                 .iter()
@@ -407,9 +700,12 @@ impl GraphIdentityAdmission {
                 .collect(),
             resolution_projections: BTreeMap::new(),
             reused_rejection_counts: BTreeMap::new(),
+            reused_parser_rejection_counts: BTreeMap::new(),
+            reused_rejection_detail_counts: BTreeMap::new(),
+            reused_rejection_details_incomplete: BTreeSet::new(),
             #[cfg(test)]
             resolution_derivations: BTreeMap::new(),
-        }
+        })
     }
 
     /// Return whether this report contains any rejected source facts.
@@ -417,15 +713,86 @@ impl GraphIdentityAdmission {
         !self.rejected_facts_by_path.is_empty()
     }
 
-    /// Restore generation-owned omission counts after re-deriving reusable facts.
-    fn restore_reused_rejection_counts(&mut self) {
-        for (path, count) in &self.reused_rejection_counts {
-            if *count == 0 {
-                self.rejected_facts_by_path.remove(path);
-            } else {
-                self.rejected_facts_by_path.insert(path.clone(), *count);
-            }
+    /// Return reused paths that cannot be reconciled without reparsing source.
+    fn incomplete_reused_rejection_paths(&self) -> &BTreeSet<String> {
+        &self.reused_rejection_details_incomplete
+    }
+
+    /// Reconcile a reused path's persisted total with current re-derived facts.
+    fn rejected_facts_for_graph(&self, path: &str, derived: &Self) -> Result<u64, CliError> {
+        let Some(persisted) = self.reused_rejection_counts.get(path).copied() else {
+            return self
+                .rejected_facts_for(path)
+                .checked_add(derived.rejected_facts_for(path))
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection count overflowed".to_string())
+                });
+        };
+        let persisted_parser = self
+            .reused_parser_rejection_counts
+            .get(path)
+            .copied()
+            .unwrap_or(0);
+        let persisted_identity = persisted.checked_sub(persisted_parser).ok_or_else(|| {
+            CliError::InvalidInput("persisted parser rejection count exceeded total".to_string())
+        })?;
+        let mut current_facts = BTreeSet::<&IdentityFactKey>::new();
+        if let Some(facts) = self.observed_facts.get(path) {
+            current_facts.extend(facts);
         }
+        if let Some(facts) = derived.observed_facts.get(path) {
+            current_facts.extend(facts);
+        }
+        let current_known = u64::try_from(current_facts.len()).map_err(|error| {
+            CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+        })?;
+        let current_total = self
+            .rejected_facts_for(path)
+            .checked_add(derived.rejected_facts_for(path))
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection count overflowed".to_string())
+            })?;
+        let current_unknown = current_total.checked_sub(current_known).ok_or_else(|| {
+            CliError::InvalidInput("observed identity facts exceeded rejection count".to_string())
+        })?;
+        let persisted_facts = self.reused_rejection_facts.get(path);
+        let persisted_known = persisted_facts.map_or(0, BTreeSet::len);
+        let persisted_known = u64::try_from(persisted_known).map_err(|error| {
+            CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+        })?;
+        let persisted_unknown =
+            persisted_identity
+                .checked_sub(persisted_known)
+                .ok_or_else(|| {
+                    CliError::InvalidInput(
+                        "persisted identity facts exceeded rejection count".to_string(),
+                    )
+                })?;
+        let mut all_facts = current_facts;
+        if let Some(facts) = persisted_facts {
+            all_facts.extend(
+                facts
+                    .iter()
+                    .filter(|fact| !is_rederived_identity_fact(fact)),
+            );
+        }
+        u64::try_from(all_facts.len())
+            .map_err(|error| {
+                CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+            })?
+            .checked_add(persisted_unknown)
+            .and_then(|count| count.checked_add(current_unknown))
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection count overflowed".to_string())
+            })
+    }
+
+    /// Return the parser-baseline omission retained for one reused path.
+    fn parser_rejection_for_graph(&self, path: &str) -> u64 {
+        self.reused_parser_rejection_counts
+            .get(path)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Return whether parser-output graphs have passed the shared source boundary.
@@ -468,8 +835,27 @@ fn extend_bounded_identity_rejections(
     target: &mut Vec<GraphIdentityRejection>,
     incoming: impl IntoIterator<Item = GraphIdentityRejection>,
 ) {
-    let remaining = MAX_GRAPH_IDENTITY_REJECTIONS.saturating_sub(target.len());
-    target.extend(incoming.into_iter().take(remaining));
+    for rejection in incoming {
+        if target.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
+            break;
+        }
+        if let Some(existing) = target.iter_mut().find(|existing| {
+            existing.path == rejection.path
+                && existing.span == rejection.span
+                && existing.parser == rejection.parser
+                && existing.fact_index == rejection.fact_index
+                && existing.reason == rejection.reason
+        }) {
+            if rejection.field == GraphIdentityField::RelationTarget
+                || (rejection.field == GraphIdentityField::ResolutionKey
+                    && existing.field != GraphIdentityField::RelationTarget)
+            {
+                existing.field = rejection.field;
+            }
+        } else {
+            target.push(rejection);
+        }
+    }
 }
 
 /// One graph mutation staged outside the database writer transaction.
@@ -706,10 +1092,24 @@ pub(super) fn stage_full_repository_graph(
         store,
         project,
         &reused_paths,
+        &graphs,
         &mut identity_admission,
         control,
     )?;
-    identity_admission.merge(symbols.identity_admission.for_paths(&paths))?;
+    if !identity_admission
+        .incomplete_reused_rejection_paths()
+        .is_empty()
+    {
+        return Err(dependency_closure_limit(
+            root,
+            identity_admission
+                .incomplete_reused_rejection_paths()
+                .iter()
+                .cloned(),
+            identity_admission.incomplete_reused_rejection_paths().len(),
+        ));
+    }
+    identity_admission.merge(symbols.identity_admission.for_paths(&paths)?)?;
     let mut document_facts = complete_markdown_facts(root, nodes, &graphs, symbols, control)?;
     admit_markdown_facts(
         &mut document_facts,
@@ -730,7 +1130,6 @@ pub(super) fn stage_full_repository_graph(
         &mut identity_admission,
         control,
     )?;
-    identity_admission.restore_reused_rejection_counts();
     ensure_admitted_resolution_projections(&graphs, &identity_admission.resolution_projections)?;
     let entity_projection = build_entity_projection_with_config(
         project,
@@ -749,6 +1148,7 @@ pub(super) fn stage_full_repository_graph(
     let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
     let graph_work_bytes = symbols
         .retained_bytes
+        .saturating_add(identity_admission.observed_fact_bytes)
         .saturating_add(entity_projection.retained_bytes)
         .saturating_add(candidates.retained_bytes)
         .saturating_add(document_fact_map_retained_bytes(&document_facts))
@@ -883,7 +1283,7 @@ fn stage_incremental_repository_graph_with_limit(
         complete_symbol_graphs(store, &direct_graph_paths, symbols, control)?;
     let (direct_graphs, mut direct_identity_admission) =
         admit_symbol_graphs(loaded_direct_graphs, control)?;
-    direct_identity_admission.merge(symbols.identity_admission.for_paths(&direct_graph_paths))?;
+    direct_identity_admission.merge(symbols.identity_admission.for_paths(&direct_graph_paths)?)?;
     let package_graphs = complete_symbol_graphs(store, &package_only_paths, symbols, control)?;
     let (package_graphs, _package_context_admission) =
         admit_symbol_graphs(package_graphs, control)?;
@@ -992,9 +1392,25 @@ fn stage_incremental_repository_graph_with_limit(
         store,
         project,
         &newly_affected_graph_paths,
+        &newly_affected_graphs,
         &mut affected_identity_admission,
         control,
     )?;
+    if !affected_identity_admission
+        .incomplete_reused_rejection_paths()
+        .is_empty()
+    {
+        return Err(dependency_closure_limit(
+            root,
+            affected_identity_admission
+                .incomplete_reused_rejection_paths()
+                .iter()
+                .cloned(),
+            affected_identity_admission
+                .incomplete_reused_rejection_paths()
+                .len(),
+        ));
+    }
     let admitted_graphs = direct_graphs
         .iter()
         .map(Cow::as_ref)
@@ -1012,6 +1428,12 @@ fn stage_incremental_repository_graph_with_limit(
         control,
     )?;
     direct_identity_admission.merge(affected_identity_admission)?;
+    enforce_incremental_projection_budget(
+        root,
+        &affected_paths,
+        0,
+        direct_identity_admission.observed_fact_bytes,
+    )?;
     let affected_graphs = direct_graphs
         .iter()
         .filter(|graph| affected_graph_paths.contains(&graph.path))
@@ -1095,7 +1517,8 @@ fn stage_incremental_repository_graph_with_limit(
             .retained_bytes
             .saturating_add(candidates.retained_bytes)
             .saturating_add(document_fact_map_retained_bytes(&document_facts))
-            .saturating_add(document_projection_bytes),
+            .saturating_add(document_projection_bytes)
+            .saturating_add(direct_identity_admission.observed_fact_bytes),
     )?;
     let staged = finish_projection_with_documents(
         project,
@@ -2863,6 +3286,7 @@ fn project_graph_rows(
                 fact.relation.parser,
                 parser_fact_index(DERIVED_RELATION_FACT_INDEX_NAMESPACE, derived_index),
                 &failures,
+                control,
             )?;
         }
     }
@@ -4139,10 +4563,13 @@ fn coverage_for_graph(
     let scope = CoverageScope::Path {
         path: RepositoryNodePath::new(Path::new(&graph.path)).map_err(invalid_graph_contract)?,
     };
-    let omitted = identity_admission
-        .rejected_facts_for(&graph.path)
-        .saturating_add(derived_identity_admission.rejected_facts_for(&graph.path));
-    let covered = if omitted > 0 {
+    let identity_omitted =
+        identity_admission.rejected_facts_for_graph(&graph.path, derived_identity_admission)?;
+    let parser_omitted = identity_admission.parser_rejection_for_graph(&graph.path);
+    let omitted = identity_omitted
+        .checked_add(parser_omitted)
+        .ok_or_else(|| CliError::InvalidInput("identity rejection count overflowed".to_string()))?;
+    let covered = if identity_omitted > 0 {
         u64::try_from(graph.symbols.len().saturating_add(graph.relations.len())).unwrap_or(u64::MAX)
     } else {
         u64::try_from(graph.relations.len()).unwrap_or(u64::MAX)
@@ -4219,18 +4646,18 @@ fn relation_completeness(parser: ParserKind) -> Completeness {
     }
 }
 
-/// Carry current-generation rejection state for graphs safely reused by a full stage.
+/// Carry current-generation rejection state for graphs safely reused by a stage.
 ///
-/// A full publication replaces the complete graph and its rejection rows. Reused
-/// sanitized graphs no longer contain the rejected parser values, so only the
-/// details that this pass will not re-derive are hydrated. The persisted graph
-/// coverage row remains the authority for the complete per-path omission count;
-/// key, Markdown, and derived details are regenerated through their normal
-/// admission paths below.
+/// A publication replaces graph and rejection rows for its selected paths.
+/// Reused sanitized graphs no longer contain rejected parser values, so the
+/// persisted typed facts and total path coverage are hydrated before normal
+/// admission re-derives current key, Markdown, and derived facts. The detail
+/// count is retained separately to reconcile those two observations exactly.
 fn hydrate_reused_identity_admission(
     store: &AtlasStore,
     project: ProjectInstanceId,
     reused_paths: &BTreeSet<String>,
+    graphs: &[impl Borrow<SymbolGraph>],
     report: &mut GraphIdentityAdmission,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
@@ -4287,29 +4714,44 @@ fn hydrate_reused_identity_admission(
             }
         }
     }
-    let rederived_namespaces = [
-        DERIVED_RELATION_FACT_INDEX_NAMESPACE,
-        MARKDOWN_FACT_INDEX_NAMESPACE,
-    ];
+    let mut persisted_fact_counts = BTreeMap::<String, BTreeSet<IdentityFactKey>>::new();
+    let persisted_detail_ceiling_reached =
+        persisted_rejections.len() >= GraphLimits::MAX_ROWS as usize;
     for rejection in persisted_rejections {
         let namespace = rejection.fact_index & !((1_u64 << 56) - 1);
-        if rejection.field == GraphIdentityField::ResolutionKey
-            || rederived_namespaces.contains(&namespace)
-        {
+        let path = rejection.path.as_str().to_owned();
+        persisted_fact_counts
+            .entry(path.clone())
+            .or_default()
+            .insert(IdentityFactKey {
+                span: IdentitySpan {
+                    start_line: rejection.span.start_line() as usize,
+                    start_column: rejection.span.start_column() as usize,
+                    end_line: rejection.span.end_line() as usize,
+                    end_column: rejection.span.end_column() as usize,
+                },
+                parser: parser_fact_kind(rejection.parser),
+                owner: u8::from(rejection.field == GraphIdentityField::ResolutionKey),
+                fact_index: rejection.fact_index,
+            });
+        // Derived relations have their own admission report during projection;
+        // hydrating them into the parser report would double-count coverage.
+        if namespace == DERIVED_RELATION_FACT_INDEX_NAMESPACE {
             continue;
         }
-        report.record(
-            rejection.path.as_str(),
-            IdentitySpan {
-                start_line: rejection.span.start_line() as usize,
-                start_column: rejection.span.start_column() as usize,
-                end_line: rejection.span.end_line() as usize,
-                end_column: rejection.span.end_column() as usize,
-            },
-            rejection.parser,
-            rejection.fact_index,
-            &[(rejection.field, rejection.reason)],
-        )?;
+        control.check(IndexWorkStage::SymbolParsing)?;
+        extend_bounded_identity_rejections(&mut report.rejections, std::iter::once(rejection));
+    }
+    for (path, facts) in persisted_fact_counts {
+        report.reused_rejection_detail_counts.insert(
+            path.clone(),
+            u64::try_from(facts.len()).map_err(|error| {
+                CliError::InvalidInput(format!(
+                    "identity rejection detail count overflowed: {error}"
+                ))
+            })?,
+        );
+        report.reused_rejection_facts.insert(path, facts);
     }
     for (path, omitted) in persisted_coverage {
         // Persisted path coverage is authoritative for safely reused graphs,
@@ -4317,7 +4759,56 @@ fn hydrate_reused_identity_admission(
         // by the global rejection-detail ceiling.
         report.reused_rejection_counts.insert(path, omitted);
     }
-    report.restore_reused_rejection_counts();
+    let graph_parsers = graphs
+        .iter()
+        .map(|graph| {
+            let graph = Borrow::<SymbolGraph>::borrow(graph);
+            (graph.path.as_str(), graph.parser)
+        })
+        .collect::<BTreeMap<_, _>>();
+    for path in reused_paths {
+        let Some(omitted) = report.reused_rejection_counts.get(path).copied() else {
+            continue;
+        };
+        let details = report
+            .reused_rejection_detail_counts
+            .get(path)
+            .copied()
+            .unwrap_or(0);
+        let parser = graph_parsers.get(path.as_str()).copied();
+        let baseline = parser.map_or(0, |parser| {
+            u64::from(matches!(
+                parser,
+                ParserKind::Structural | ParserKind::Fallback
+            ))
+        });
+        if details == 0 && baseline > 0 {
+            // A structural/fallback path with no retained typed identity fact
+            // still owns its coarse parser omission. Keep that provenance out
+            // of identity reconciliation so unchanged graphs retain the same
+            // covered count as a clean parse.
+            report
+                .reused_parser_rejection_counts
+                .insert(path.clone(), baseline);
+        }
+        // Fallback rows intentionally carry one coarse parser omission and do
+        // not re-derive identity details. Structural and exact parsers must
+        // be reparsed when a capped persisted row set cannot identify every
+        // old fact without guessing.
+        if parser != Some(ParserKind::Fallback)
+            && ((persisted_detail_ceiling_reached && details == 0 && omitted > 0)
+                || omitted > baseline.saturating_add(details))
+        {
+            report
+                .reused_rejection_details_incomplete
+                .insert(path.clone());
+        }
+    }
+    let retained_bytes = identity_admission_retained_bytes(report)?;
+    if retained_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+        return Err(identity_fact_budget_failure(retained_bytes));
+    }
+    report.observed_fact_bytes = retained_bytes;
     Ok(())
 }
 
@@ -4407,6 +4898,7 @@ fn admit_symbol_graph<'a>(
                 symbol.parser,
                 symbol_parser_fact_index(&graph, index),
                 &failures,
+                control,
             )?;
         }
     }
@@ -4438,6 +4930,7 @@ fn admit_symbol_graph<'a>(
                 relation.parser,
                 parser_fact_index(RELATION_FACT_INDEX_NAMESPACE, index),
                 &failures,
+                control,
             )?;
         }
     }
@@ -4588,11 +5081,13 @@ fn admit_resolution_key_failures(
                             GraphIdentityField::ResolutionKey,
                             GraphIdentityRejectionReason::from_error(failure.error()),
                         )],
+                        control,
                     )?;
                 }
                 report.record_rejected_fact_count(
                     &graph.path,
                     rejected_count.saturating_sub(failures.len()),
+                    control,
                 )?;
                 report
                     .resolution_projections
@@ -4752,6 +5247,7 @@ fn admit_markdown_fact_batch(
             parser,
             parser_fact_index(MARKDOWN_FACT_INDEX_NAMESPACE, candidate_index),
             &[(GraphIdentityField::RelationTarget, reason)],
+            control,
         )?;
     }
     markdown
@@ -5440,6 +5936,7 @@ mod tests {
     fn admission_counts_distinct_same_span_facts_but_deduplicates_replays()
     -> Result<(), Box<dyn Error>> {
         let mut admission = GraphIdentityAdmission::default();
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let span = super::IdentitySpan {
             start_line: 7,
             start_column: 0,
@@ -5456,6 +5953,7 @@ mod tests {
             ParserKind::TreeSitter,
             super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 1),
             &failure,
+            &control,
         )?;
         admission.record(
             "src/facts.ts",
@@ -5463,6 +5961,7 @@ mod tests {
             ParserKind::TreeSitter,
             super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 2),
             &failure,
+            &control,
         )?;
         admission.record(
             "src/facts.ts",
@@ -5470,6 +5969,7 @@ mod tests {
             ParserKind::TreeSitter,
             super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 1),
             &failure,
+            &control,
         )?;
         require_eq(
             &admission.rejected_facts_for("src/facts.ts"),
@@ -5489,8 +5989,58 @@ mod tests {
     }
 
     #[test]
+    fn admission_merge_deduplicates_replayed_observed_facts() -> Result<(), Box<dyn Error>> {
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let span = super::IdentitySpan {
+            start_line: 7,
+            start_column: 0,
+            end_line: 7,
+            end_column: 0,
+        };
+        let failure = [(
+            GraphIdentityField::RelationTarget,
+            GraphIdentityRejectionReason::Empty,
+        )];
+        let mut first = GraphIdentityAdmission::default();
+        for fact_index in 1..=2 {
+            first.record(
+                "src/merged.ts",
+                span,
+                ParserKind::TreeSitter,
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, fact_index),
+                &failure,
+                &control,
+            )?;
+        }
+        let mut replay = GraphIdentityAdmission::default();
+        for fact_index in 1..=3 {
+            replay.record(
+                "src/merged.ts",
+                span,
+                ParserKind::TreeSitter,
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, fact_index),
+                &failure,
+                &control,
+            )?;
+        }
+        first.merge(replay)?;
+        require_eq(
+            &first.rejected_facts_for("src/merged.ts"),
+            &3,
+            "merged replayed identity count",
+        )?;
+        require_eq(
+            &first.rejections.len(),
+            &3,
+            "merged replayed typed detail count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn admission_deduplicates_replayed_facts_after_detail_ceiling() -> Result<(), Box<dyn Error>> {
         let mut admission = GraphIdentityAdmission::default();
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let span = super::IdentitySpan {
             start_line: 7,
             start_column: 0,
@@ -5508,6 +6058,7 @@ mod tests {
                 ParserKind::TreeSitter,
                 super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, fact_index),
                 &failure,
+                &control,
             )?;
         }
         require_eq(
@@ -5526,6 +6077,7 @@ mod tests {
             ParserKind::TreeSitter,
             super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 0),
             &failure,
+            &control,
         )?;
         require_eq(
             &admission.rejected_facts_for("src/capped.ts"),
@@ -5546,6 +6098,7 @@ mod tests {
                 super::MAX_GRAPH_IDENTITY_REJECTIONS,
             ),
             &failure,
+            &control,
         )?;
         require_eq(
             &admission.rejected_facts_for("src/capped.ts"),
@@ -5556,6 +6109,256 @@ mod tests {
             &admission.rejections.len(),
             &super::MAX_GRAPH_IDENTITY_REJECTIONS,
             "new capped typed detail count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn observed_identity_facts_charge_budget_at_minus_equal_plus_boundaries()
+    -> Result<(), Box<dyn Error>> {
+        let path = "src/budget.ts";
+        let span = super::IdentitySpan {
+            start_line: 7,
+            start_column: 0,
+            end_line: 7,
+            end_column: 0,
+        };
+        let failure = [(
+            GraphIdentityField::RelationTarget,
+            GraphIdentityRejectionReason::Empty,
+        )];
+        let additional = super::identity_fact_retained_bytes(path, true, true)?;
+
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let mut below = GraphIdentityAdmission {
+            observed_fact_bytes: MAX_IN_MEMORY_GRAPH_WORK_BYTES - additional + 1,
+            ..GraphIdentityAdmission::default()
+        };
+        let error = below
+            .record(
+                path,
+                span,
+                ParserKind::TreeSitter,
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 1),
+                &failure,
+                &control,
+            )
+            .err()
+            .ok_or_else(|| io::Error::other("one byte over the identity budget was retained"))?;
+        require(
+            matches!(
+                error,
+                CliError::IndexWork(IndexWorkFailure::ResourceLimitExceeded {
+                    stage: IndexWorkStage::SymbolParsing,
+                    resource: IndexWorkResource::OutputBytes,
+                    limit: MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                    observed,
+                }) if observed == MAX_IN_MEMORY_GRAPH_WORK_BYTES + 1
+            ),
+            "identity budget overflow did not return its typed refusal",
+        )?;
+        require(
+            below.observed_facts.is_empty() && below.rejected_facts_by_path.is_empty(),
+            "identity budget refusal retained partial state",
+        )?;
+
+        let mut equal = GraphIdentityAdmission {
+            observed_fact_bytes: MAX_IN_MEMORY_GRAPH_WORK_BYTES - additional,
+            ..GraphIdentityAdmission::default()
+        };
+        equal.record(
+            path,
+            span,
+            ParserKind::TreeSitter,
+            super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 1),
+            &failure,
+            &control,
+        )?;
+        require_eq(
+            &equal.observed_fact_bytes,
+            &MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+            "identity budget exact boundary",
+        )?;
+        require_eq(
+            &equal.rejected_facts_for(path),
+            &1,
+            "identity budget exact boundary count",
+        )?;
+
+        let error = equal
+            .record(
+                path,
+                span,
+                ParserKind::TreeSitter,
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 2),
+                &failure,
+                &control,
+            )
+            .err()
+            .ok_or_else(|| io::Error::other("one additional identity fact exceeded the budget"))?;
+        require(
+            matches!(
+                error,
+                CliError::IndexWork(IndexWorkFailure::ResourceLimitExceeded {
+                    stage: IndexWorkStage::SymbolParsing,
+                    resource: IndexWorkResource::OutputBytes,
+                    limit: MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                    observed,
+                }) if observed == MAX_IN_MEMORY_GRAPH_WORK_BYTES + super::STAGED_GRAPH_ROW_BYTES
+            ),
+            "identity budget plus boundary did not return its typed refusal",
+        )?;
+        require_eq(
+            &equal.rejected_facts_for(path),
+            &1,
+            "identity plus boundary changed retained count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn observed_identity_facts_honor_cancellation_before_retention() -> Result<(), Box<dyn Error>> {
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        cancellation.cancel();
+        let mut admission = GraphIdentityAdmission::default();
+        let error = admission
+            .record(
+                "src/canceled.ts",
+                super::IdentitySpan {
+                    start_line: 1,
+                    start_column: 0,
+                    end_line: 1,
+                    end_column: 0,
+                },
+                ParserKind::TreeSitter,
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 0),
+                &[(
+                    GraphIdentityField::RelationTarget,
+                    GraphIdentityRejectionReason::Empty,
+                )],
+                &control,
+            )
+            .err()
+            .ok_or_else(|| io::Error::other("canceled identity admission retained a fact"))?;
+        require(
+            matches!(
+                error,
+                CliError::IndexWork(IndexWorkFailure::Cancelled {
+                    stage: IndexWorkStage::SymbolParsing
+                })
+            ),
+            "identity admission cancellation was not typed",
+        )?;
+        require(
+            admission.observed_facts.is_empty()
+                && admission.rejected_facts_by_path.is_empty()
+                && admission.observed_fact_bytes == 0,
+            "canceled identity admission retained partial state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn reused_identity_counts_preserve_new_and_removed_derived_outcomes()
+    -> Result<(), Box<dyn Error>> {
+        let path = "src/reused.ts";
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let failure = [(
+            GraphIdentityField::ResolutionKey,
+            GraphIdentityRejectionReason::Oversized,
+        )];
+        let mut admission = GraphIdentityAdmission::default();
+        admission
+            .reused_rejection_counts
+            .insert(path.to_string(), 3);
+        admission
+            .reused_rejection_detail_counts
+            .insert(path.to_string(), 2);
+        for fact_index in 0..2 {
+            admission.record(
+                path,
+                super::IdentitySpan {
+                    start_line: fact_index + 1,
+                    start_column: 0,
+                    end_line: fact_index + 1,
+                    end_column: 0,
+                },
+                ParserKind::TreeSitter,
+                fact_index as u64,
+                &failure,
+                &control,
+            )?;
+        }
+        admission.reused_rejection_facts.insert(
+            path.to_string(),
+            admission
+                .observed_facts
+                .get(path)
+                .cloned()
+                .ok_or("persisted identity fact keys are missing")?,
+        );
+        require_eq(
+            &admission.rejected_facts_for_graph(path, &GraphIdentityAdmission::default())?,
+            &3,
+            "reused unchanged rejection count",
+        )?;
+
+        let mut derived = GraphIdentityAdmission::default();
+        derived.record(
+            path,
+            super::IdentitySpan {
+                start_line: 3,
+                start_column: 0,
+                end_line: 3,
+                end_column: 0,
+            },
+            ParserKind::TreeSitter,
+            2,
+            &failure,
+            &control,
+        )?;
+        require_eq(
+            &admission.rejected_facts_for_graph(path, &derived)?,
+            &4,
+            "reused genuinely new rejection count",
+        )?;
+
+        let mut removed = GraphIdentityAdmission::default();
+        removed.reused_rejection_counts.insert(path.to_string(), 2);
+        removed
+            .reused_rejection_detail_counts
+            .insert(path.to_string(), 2);
+        removed.reused_rejection_facts.insert(
+            path.to_string(),
+            admission
+                .reused_rejection_facts
+                .get(path)
+                .cloned()
+                .ok_or("persisted identity fact keys are missing")?,
+        );
+        removed.record(
+            path,
+            super::IdentitySpan {
+                start_line: 1,
+                start_column: 0,
+                end_line: 1,
+                end_column: 0,
+            },
+            ParserKind::TreeSitter,
+            0,
+            &failure,
+            &control,
+        )?;
+        require_eq(
+            &removed.rejected_facts_for_graph(path, &GraphIdentityAdmission::default())?,
+            &1,
+            "reused removed rejection count",
+        )?;
+        require_eq(
+            &removed.rejected_facts_for_graph(path, &derived)?,
+            &2,
+            "reused removed plus new rejection count",
         )?;
         Ok(())
     }
@@ -11746,6 +12549,253 @@ mod tests {
             )?,
             &initial_rows,
             "incremental affected dependent persisted rejection rows",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_reuse_reconciles_markdown_and_semantic_rejections_once()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        let semantic_components = (0..20)
+            .map(|_| "s".repeat(200))
+            .collect::<Vec<_>>()
+            .join("/");
+        let semantic_path = format!("src/semantic/{semantic_components}/graph.rs");
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("docs"))?;
+        fs::create_dir_all(
+            root.join(&semantic_path)
+                .parent()
+                .ok_or("semantic fixture parent is missing")?,
+        )?;
+        let guide_source = "[invalid](<../src/worker.rs#bad\u{1}>)\n[worker](../src/worker.rs)\n";
+        fs::write(root.join("src/worker.rs"), "pub fn worker() {}\n")?;
+        fs::write(root.join(&semantic_path), "use crate::worker;\n")?;
+        fs::write(root.join("docs/guide.md"), guide_source)?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("combined reuse project identity is missing")?;
+        let mut nodes = vec![
+            test_file_node("src/worker.rs", "rust"),
+            test_file_node(&semantic_path, "rust"),
+            test_file_node("docs/guide.md", "markdown"),
+        ];
+        let worker_graph =
+            extract_symbol_graph("src/worker.rs", Some("rust"), "pub fn worker() {}\n");
+        let semantic_graph = semantic_resolution_key_graph(&semantic_path, true);
+        let guide_facts = projectatlas_symbols::extract_markdown_facts(guide_source);
+        let guide_graph = guide_facts.symbol_graph("docs/guide.md", Some("markdown"));
+        let guide_bytes = guide_source.as_bytes();
+        nodes[2].size_bytes = Some(u64::try_from(guide_bytes.len())?);
+        nodes[2].content_hash = Some(blake3::hash(guide_bytes).to_hex().to_string());
+        let mut initial_symbols = symbol_build_stage_for_graphs(vec![worker_graph, semantic_graph]);
+        initial_symbols.report.candidates = initial_symbols.report.candidates.saturating_add(1);
+        initial_symbols.report.parsed = initial_symbols.report.parsed.saturating_add(1);
+        initial_symbols.report.summaries = initial_symbols.report.summaries.saturating_add(1);
+        initial_symbols
+            .changes
+            .push(SymbolProjectionChange::Parsed(SymbolParseSuccess {
+                path: "docs/guide.md".to_string(),
+                graph: guide_graph,
+                markdown_facts: Some(Box::new(guide_facts)),
+                source_parser: ParserKind::Structural,
+                summary: "combined reuse Markdown fixture".to_string(),
+                summary_is_structural: true,
+                purpose_suggestion: None,
+            }));
+        let initial_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        initial_symbols.identity_admission =
+            super::admit_symbol_build_stage(&mut initial_symbols, &initial_control)?;
+        let scan_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &initial_control)?;
+        let initial_stage = stage_full_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &scan_policy,
+            &initial_symbols,
+            &initial_control,
+        )?;
+        require(
+            initial_stage
+                .identity_rejections
+                .iter()
+                .any(|row| row.path.as_str() == "docs/guide.md"),
+            "combined reuse fixture did not retain Markdown rejection",
+        )?;
+        require(
+            initial_stage.identity_rejections.iter().any(|row| {
+                row.path.as_str() == semantic_path && row.field == GraphIdentityField::ResolutionKey
+            }),
+            "combined reuse fixture did not retain semantic rejection",
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &initial_stage,
+            &initial_control,
+            "combined-reuse-initial",
+        )?;
+        for change in &initial_symbols.changes {
+            if let SymbolProjectionChange::Parsed(parsed) = change {
+                store.replace_symbol_graph(&parsed.graph)?;
+            }
+        }
+        let base_generation = store
+            .index_publication()?
+            .ok_or("combined reuse initial publication is missing")?
+            .generation;
+        let paths = nodes
+            .iter()
+            .map(|node| RepositoryNodePath::new(Path::new(&node.path)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let initial_rows = store.repository_graph_identity_rejections(
+            project,
+            &paths,
+            GraphLimits::MAX_ROWS,
+            None,
+        )?;
+        let replacement =
+            extract_symbol_graph("src/worker.rs", Some("rust"), "pub fn replacement() {}\n");
+        let replacement_symbols = symbol_build_stage_for_graphs(vec![replacement]);
+        let incremental_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let incremental_stage = stage_incremental_repository_graph(
+            &store,
+            &root,
+            base_generation,
+            &nodes,
+            &["src/worker.rs".to_string()],
+            &scan_policy,
+            &replacement_symbols,
+            &incremental_control,
+        )?;
+        let guide_coverage = incremental_stage
+            .coverage
+            .iter()
+            .find(|coverage| {
+                matches!(
+                    coverage.scope(),
+                    CoverageScope::Path { path } if path.as_str() == "docs/guide.md"
+                ) && coverage.relation().is_none()
+            })
+            .ok_or("combined reuse Markdown coverage is missing")?;
+        let semantic_coverage = incremental_stage
+            .coverage
+            .iter()
+            .find(|coverage| {
+                matches!(
+                    coverage.scope(),
+                    CoverageScope::Path { path } if path.as_str() == semantic_path
+                ) && coverage.relation().is_none()
+            })
+            .ok_or("combined reuse semantic coverage is missing")?;
+        let initial_guide_omitted = initial_rows
+            .iter()
+            .filter(|row| row.path.as_str() == "docs/guide.md")
+            .count();
+        let initial_semantic_omitted = initial_rows
+            .iter()
+            .filter(|row| row.path.as_str() == semantic_path)
+            .count();
+        require_eq(
+            &guide_coverage.omitted(),
+            &u64::try_from(initial_guide_omitted)?,
+            "reused Markdown omission count",
+        )?;
+        require_eq(
+            &semantic_coverage.omitted(),
+            &u64::try_from(initial_semantic_omitted)?,
+            "reused semantic omission count",
+        )?;
+        require_eq(
+            &incremental_stage
+                .identity_rejections
+                .iter()
+                .filter(|row| row.path.as_str() == "docs/guide.md")
+                .count(),
+            &initial_guide_omitted,
+            "reused Markdown detail count",
+        )?;
+        require_eq(
+            &incremental_stage
+                .identity_rejections
+                .iter()
+                .filter(|row| row.path.as_str() == semantic_path)
+                .count(),
+            &initial_semantic_omitted,
+            "reused semantic detail count",
+        )?;
+        let canceled = IndexWorkControl::new(IndexCancellation::new(), None);
+        canceled.cancel();
+        {
+            let mut publication = store.begin_index_publication("combined-reuse-cancel")?;
+            require(
+                incremental_stage
+                    .apply(&mut publication, &canceled)
+                    .is_err(),
+                "combined reuse cancellation reached publication",
+            )?;
+        }
+        require_eq(
+            &store
+                .index_publication()?
+                .map(|publication| publication.generation),
+            &Some(base_generation),
+            "combined reuse cancellation changed generation",
+        )?;
+        {
+            let mut publication = store.begin_index_publication("combined-reuse-incremental")?;
+            incremental_stage.apply(&mut publication, &incremental_control)?;
+            publication.complete()?;
+        }
+        let persisted_rows = store.repository_graph_identity_rejections(
+            project,
+            &paths,
+            GraphLimits::MAX_ROWS,
+            None,
+        )?;
+        require_eq(
+            &persisted_rows,
+            &initial_rows,
+            "reused Markdown and semantic persisted rows",
+        )?;
+        let retry_generation = store
+            .index_publication()?
+            .ok_or("combined reuse incremental publication is missing")?
+            .generation;
+        let retry_stage = stage_incremental_repository_graph(
+            &store,
+            &root,
+            retry_generation,
+            &nodes,
+            &["src/worker.rs".to_string()],
+            &scan_policy,
+            &replacement_symbols,
+            &incremental_control,
+        )?;
+        require_eq(
+            &retry_stage
+                .identity_rejections
+                .iter()
+                .filter(|row| row.path.as_str() == "docs/guide.md")
+                .count(),
+            &initial_guide_omitted,
+            "reused Markdown deterministic retry detail count",
+        )?;
+        require_eq(
+            &retry_stage
+                .identity_rejections
+                .iter()
+                .filter(|row| row.path.as_str() == semantic_path)
+                .count(),
+            &initial_semantic_omitted,
+            "reused semantic deterministic retry detail count",
         )?;
         Ok(())
     }
