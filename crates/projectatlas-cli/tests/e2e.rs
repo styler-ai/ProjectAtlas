@@ -23334,6 +23334,125 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
         .success();
     assert_identity_navigation_survives_invalid_siblings(&db, relative_path)?;
     assert_identity_relation_surfaces(&repo, &db, relative_path)?;
+    // A second unchanged full scan must reuse the sanitized persisted graph
+    // while carrying its generation-owned typed rejection coverage forward.
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+    assert_identity_navigation_survives_invalid_siblings(&db, relative_path)?;
+    assert_identity_relation_surfaces(&repo, &db, relative_path)?;
+    let reused_health = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            relative_path,
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !reused_health.status.success() {
+        return Err(io::Error::other(format!(
+            "reused identity coverage failed: {}",
+            String::from_utf8_lossy(&reused_health.stderr)
+        ))
+        .into());
+    }
+    let reused_report: Value = serde_json::from_slice(&reused_health.stdout)?;
+    if reused_report["rows"][0]["omitted"] != 2
+        || reused_report["rows"][0]["identity_rejections"]
+            .as_array()
+            .is_none_or(|rows| rows.len() != 2)
+    {
+        return Err(io::Error::other(format!(
+            "reused full scan lost typed identity coverage: {reused_report}"
+        ))
+        .into());
+    }
+    let reused_toon = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("toon")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            relative_path,
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !reused_toon.status.success() {
+        return Err(io::Error::other(format!(
+            "reused identity TOON coverage failed: {}",
+            String::from_utf8_lossy(&reused_toon.stderr)
+        ))
+        .into());
+    }
+    let reused_toon_report: Value =
+        toon_format::decode_default(&String::from_utf8_lossy(&reused_toon.stdout))?;
+    if reused_toon_report["coverage"]["rows"][0]["omitted"] != 2
+        || reused_toon_report["coverage"]["rows"][0]["identity_rejections"]
+            .as_array()
+            .is_none_or(|rows| rows.len() != 2)
+    {
+        return Err(io::Error::other(format!(
+            "reused full scan lost typed TOON identity coverage: {reused_toon_report}"
+        ))
+        .into());
+    }
+    let reused_mcp_messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"identity-reuse-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_health",
+                "arguments": {
+                    "coverage": true,
+                    "path_prefix": relative_path,
+                    "limit": 10
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let reused_mcp_stdout = run_mcp_stdio(
+        &assert_cmd::cargo::cargo_bin("projectatlas"),
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &reused_mcp_messages,
+    )?;
+    let reused_mcp_text = mcp_tool_text(&reused_mcp_stdout, 2)?;
+    let reused_mcp_report: Value = toon_format::decode_default(&reused_mcp_text)?;
+    if reused_mcp_report["coverage"]["rows"][0]["omitted"] != 2
+        || reused_mcp_report["coverage"]["rows"][0]["identity_rejections"]
+            .as_array()
+            .is_none_or(|rows| rows.len() != 2)
+        || reused_mcp_text.contains("LeakedIdentity")
+    {
+        return Err(io::Error::other(format!(
+            "reused full scan lost typed MCP identity coverage: {reused_mcp_report}"
+        ))
+        .into());
+    }
     fs::write(
         repo.join(relative_path),
         format!("{source}// watch refresh\n"),

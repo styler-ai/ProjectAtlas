@@ -183,6 +183,10 @@ pub(super) struct GraphIdentityAdmission {
     relation_fact_indices: BTreeMap<String, Vec<usize>>,
     /// Resolution keys derived once at admission and carried into projection.
     resolution_projections: BTreeMap<String, ResolutionKeyProjection>,
+    /// Omission counts retained from the current generation for safely reused
+    /// full-stage graphs. The count is restored after the current pass has
+    /// regenerated any key, Markdown, or derived details it owns.
+    reused_rejection_counts: BTreeMap<String, u64>,
     /// Test-only proof of one derivation per source path and generation.
     #[cfg(test)]
     resolution_derivations: BTreeMap<(String, IndexGeneration), usize>,
@@ -319,6 +323,13 @@ impl GraphIdentityAdmission {
             .extend(other.rejections.into_iter().take(remaining));
         self.resolution_projections
             .extend(other.resolution_projections);
+        for (path, count) in other.reused_rejection_counts {
+            if self.reused_rejection_counts.insert(path, count).is_some() {
+                return Err(CliError::InvalidInput(
+                    "duplicate reused identity rejection count".to_string(),
+                ));
+            }
+        }
         #[cfg(test)]
         for (key, count) in other.resolution_derivations {
             let entry = self.resolution_derivations.entry(key).or_default();
@@ -355,6 +366,7 @@ impl GraphIdentityAdmission {
                 .map(|(path, indices)| (path.clone(), indices.clone()))
                 .collect(),
             resolution_projections: BTreeMap::new(),
+            reused_rejection_counts: BTreeMap::new(),
             #[cfg(test)]
             resolution_derivations: BTreeMap::new(),
         }
@@ -363,6 +375,17 @@ impl GraphIdentityAdmission {
     /// Return whether this report contains any rejected source facts.
     fn has_rejections(&self) -> bool {
         !self.rejected_facts_by_path.is_empty()
+    }
+
+    /// Restore generation-owned omission counts after re-deriving reusable facts.
+    fn restore_reused_rejection_counts(&mut self) {
+        for (path, count) in &self.reused_rejection_counts {
+            if *count == 0 {
+                self.rejected_facts_by_path.remove(path);
+            } else {
+                self.rejected_facts_by_path.insert(path.clone(), *count);
+            }
+        }
     }
 
     /// Return whether parser-output graphs have passed the shared source boundary.
@@ -626,6 +649,27 @@ pub(super) fn stage_full_repository_graph(
         .collect::<BTreeSet<_>>();
     let loaded_graphs = complete_symbol_graphs(store, &paths, symbols, control)?;
     let (graphs, mut identity_admission) = admit_symbol_graphs(loaded_graphs, control)?;
+    let changed_paths = symbols
+        .changes
+        .iter()
+        .map(|change| match change {
+            SymbolProjectionChange::Parsed(parsed) => parsed.path.as_str(),
+            SymbolProjectionChange::Clear { path, .. } => path.as_str(),
+        })
+        .collect::<BTreeSet<_>>();
+    let reused_paths = paths
+        .iter()
+        .filter(|path| !changed_paths.contains(path.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    hydrate_reused_identity_admission(
+        store,
+        project,
+        &graphs,
+        &reused_paths,
+        &mut identity_admission,
+        control,
+    )?;
     identity_admission.merge(symbols.identity_admission.for_paths(&paths))?;
     let mut document_facts = complete_markdown_facts(root, nodes, &graphs, symbols, control)?;
     admit_markdown_facts(
@@ -647,6 +691,7 @@ pub(super) fn stage_full_repository_graph(
         &mut identity_admission,
         control,
     )?;
+    identity_admission.restore_reused_rejection_counts();
     ensure_admitted_resolution_projections(&graphs, &identity_admission.resolution_projections)?;
     let entity_projection = build_entity_projection_with_config(
         project,
@@ -4126,6 +4171,123 @@ fn relation_completeness(parser: ParserKind) -> Completeness {
         ParserKind::TreeSitter | ParserKind::Manifest => Completeness::Complete,
         ParserKind::Structural | ParserKind::Fallback => Completeness::Partial,
     }
+}
+
+/// Carry current-generation rejection state for graphs safely reused by a full stage.
+///
+/// A full publication replaces the complete graph and its rejection rows. Reused
+/// sanitized graphs no longer contain the rejected parser values, so only the
+/// details that this pass will not re-derive are hydrated. The persisted graph
+/// coverage row remains the authority for the complete per-path omission count;
+/// key, Markdown, and derived details are regenerated through their normal
+/// admission paths below.
+fn hydrate_reused_identity_admission(
+    store: &AtlasStore,
+    project: ProjectInstanceId,
+    graphs: &[impl Borrow<SymbolGraph>],
+    reused_paths: &BTreeSet<String>,
+    report: &mut GraphIdentityAdmission,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    if reused_paths.is_empty() {
+        return Ok(());
+    }
+    let reused_node_paths = reused_paths
+        .iter()
+        .map(|path| RepositoryNodePath::new(Path::new(path)).map_err(invalid_graph_contract))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut persisted_rejections = Vec::new();
+    let mut persisted_coverage = BTreeMap::new();
+    for paths in reused_node_paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        let rejection_rows = match store.repository_graph_identity_rejections(
+            project,
+            paths,
+            GraphLimits::MAX_ROWS,
+            Some(control),
+        ) {
+            Ok(rows) => rows,
+            Err(projectatlas_db::DbError::GraphRowShape { table, reason })
+                if table == "project_identity"
+                    && reason == "typed graph generation does not match complete publication" =>
+            {
+                // A full stage can repair an older incomplete publication, but
+                // it cannot safely carry diagnostic rows from that state.
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        persisted_rejections.extend(rejection_rows);
+        let coverage = match store.repository_graph_path_coverage(project, paths, Some(control)) {
+            Ok(coverage) => coverage,
+            Err(projectatlas_db::DbError::GraphRowShape { table, reason })
+                if table == "project_identity"
+                    && reason == "typed graph generation does not match complete publication" =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if coverage.truncated {
+            return Err(CliError::InvalidInput(
+                "reused graph coverage exceeded the publication row ceiling".to_string(),
+            ));
+        }
+        for row in coverage.rows {
+            let CoverageScope::Path { path } = row.scope() else {
+                continue;
+            };
+            if row.relation().is_none() && row.omitted() > 0 {
+                persisted_coverage.insert(path.as_str().to_owned(), row.omitted());
+            }
+        }
+    }
+    let persisted_paths_with_rejections = persisted_rejections
+        .iter()
+        .map(|rejection| rejection.path.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let rederived_namespaces = [
+        DERIVED_RELATION_FACT_INDEX_NAMESPACE,
+        MARKDOWN_FACT_INDEX_NAMESPACE,
+    ];
+    for rejection in persisted_rejections {
+        let namespace = rejection.fact_index & !((1_u64 << 56) - 1);
+        if rejection.field == GraphIdentityField::ResolutionKey
+            || rederived_namespaces.contains(&namespace)
+        {
+            continue;
+        }
+        report.record(
+            rejection.path.as_str(),
+            IdentitySpan {
+                start_line: rejection.span.start_line() as usize,
+                start_column: rejection.span.start_column() as usize,
+                end_line: rejection.span.end_line() as usize,
+                end_column: rejection.span.end_column() as usize,
+            },
+            rejection.parser,
+            rejection.fact_index,
+            &[(rejection.field, rejection.reason)],
+        )?;
+    }
+    let graph_parsers = graphs
+        .iter()
+        .map(|graph| {
+            let graph = graph.borrow();
+            (graph.path.as_str(), graph.parser)
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (path, omitted) in persisted_coverage {
+        let is_parser_omission = matches!(
+            graph_parsers.get(path.as_str()),
+            Some(ParserKind::Structural | ParserKind::Fallback)
+        ) && !persisted_paths_with_rejections.contains(&path);
+        if !is_parser_omission {
+            report.reused_rejection_counts.insert(path, omitted);
+        }
+    }
+    report.restore_reused_rejection_counts();
+    Ok(())
 }
 
 /// Overlay staged symbol changes on persisted graphs for exact selected paths.
@@ -10916,6 +11078,279 @@ mod tests {
             &retried,
             &reopened_rejections,
             "deterministic full-stage retry",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_stage_reuse_carries_persisted_rejection_coverage_and_replaces_it()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("full-reuse-identity-admission");
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(
+            root.join("src/reused.rs"),
+            "pub fn caller() { helper(); }\nfn helper() {}\n",
+        )?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("full reuse project identity is missing")?;
+        let path = "src/reused.rs";
+        let nodes = vec![test_file_node(path, "rust")];
+        let graph = identity_sibling_graph(path, GraphIdentityField::RelationTarget);
+        let first_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let first_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &first_control)?;
+        let mut first_symbols = symbol_build_stage_for_graphs(vec![graph]);
+        first_symbols.identity_admission =
+            super::admit_symbol_build_stage(&mut first_symbols, &first_control)?;
+        let first_graph = first_symbols
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                SymbolProjectionChange::Parsed(parsed) => Some(parsed.graph.clone()),
+                SymbolProjectionChange::Clear { .. } => None,
+            })
+            .ok_or("full reuse parsed graph is missing")?;
+        let first_stage = stage_full_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &first_policy,
+            &first_symbols,
+            &first_control,
+        )?;
+        require_eq(
+            &first_stage.identity_rejections.len(),
+            &1,
+            "full reuse initial rejection detail count",
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &first_stage,
+            &first_control,
+            "full-reuse-initial",
+        )?;
+        // This is the same persistence sink used by apply_symbol_build_stage;
+        // the next full stage intentionally receives no parser changes.
+        store.replace_symbol_graph(&first_graph)?;
+        let first_generation = store
+            .index_publication()?
+            .ok_or("full reuse initial publication is missing")?
+            .generation;
+        drop(store);
+
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let reuse_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let reuse_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &reuse_control)?;
+        let reused_stage = stage_full_repository_graph(
+            &store,
+            &root,
+            first_generation,
+            &nodes,
+            &reuse_policy,
+            &empty_symbol_build_stage(),
+            &reuse_control,
+        )?;
+        require_eq(
+            &reused_stage.identity_rejections,
+            &first_stage.identity_rejections,
+            "full reuse retained exact persisted rejection details",
+        )?;
+        let reused_coverage = reused_stage
+            .coverage
+            .iter()
+            .find(|coverage| {
+                matches!(
+                    coverage.scope(),
+                    CoverageScope::Path { path: coverage_path } if coverage_path.as_str() == path
+                ) && coverage.relation().is_none()
+            })
+            .ok_or("full reuse coverage row is missing")?;
+        require_eq(
+            &reused_coverage.state(),
+            &CoverageState::Partial,
+            "full reuse retained partial coverage",
+        )?;
+        require_eq(
+            &reused_coverage.omitted(),
+            &1,
+            "full reuse retained rejection omission count",
+        )?;
+        require(
+            reused_stage
+                .relations
+                .iter()
+                .any(|relation| relation.resolution().resolved_target().is_some()),
+            "full reuse dropped the valid sibling relation",
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &reused_stage,
+            &reuse_control,
+            "full-reuse-republish",
+        )?;
+        let persisted_paths = vec![RepositoryNodePath::new(Path::new(path))?];
+        let persisted =
+            store.repository_graph_identity_rejections(project, &persisted_paths, 16, None)?;
+        require_eq(
+            &persisted,
+            &first_stage.identity_rejections,
+            "full reuse persisted exact rejection details",
+        )?;
+
+        let cancel_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let canceled_stage = stage_full_repository_graph(
+            &store,
+            &root,
+            first_generation
+                .checked_next()
+                .ok_or("full reuse generation overflow")?,
+            &nodes,
+            &reuse_policy,
+            &empty_symbol_build_stage(),
+            &cancel_control,
+        )?;
+        cancel_control.cancel();
+        {
+            let mut publication = store.begin_index_publication("full-reuse-cancel")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            publication.finish_scan_replacement()?;
+            require(
+                canceled_stage
+                    .apply(&mut publication, &cancel_control)
+                    .is_err(),
+                "full reuse cancellation was ignored",
+            )?;
+        }
+        let retained_generation = store
+            .index_publication()?
+            .ok_or("full reuse republished generation is missing")?
+            .generation;
+        require_eq(
+            &retained_generation,
+            &first_generation
+                .checked_next()
+                .ok_or("full reuse generation overflow")?,
+            "full reuse cancellation changed the current generation",
+        )?;
+        require_eq(
+            &store.repository_graph_identity_rejections(project, &persisted_paths, 16, None)?,
+            &persisted,
+            "full reuse cancellation changed rejection details",
+        )?;
+
+        let fault_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let fault_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &fault_control)?;
+        let mut fault_stage = stage_full_repository_graph(
+            &store,
+            &root,
+            retained_generation,
+            &nodes,
+            &fault_policy,
+            &empty_symbol_build_stage(),
+            &fault_control,
+        )?;
+        fault_stage.identity_rejections.resize(
+            usize::try_from(GraphLimits::MAX_ROWS)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+            fault_stage.identity_rejections[0].clone(),
+        );
+        {
+            let mut publication = store.begin_index_publication("full-reuse-fault")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&nodes)?;
+            publication.finish_scan_replacement()?;
+            require(
+                fault_stage.apply(&mut publication, &fault_control).is_err(),
+                "full reuse late rejection-detail fault was ignored",
+            )?;
+        }
+        require_eq(
+            &store
+                .index_publication()?
+                .ok_or("full reuse fault lost publication")?
+                .generation,
+            &retained_generation,
+            "full reuse late fault changed current generation",
+        )?;
+        require_eq(
+            &store.repository_graph_identity_rejections(project, &persisted_paths, 16, None)?,
+            &persisted,
+            "full reuse late fault changed rejection details",
+        )?;
+        let retry_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let retry_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &retry_control)?;
+        let retry_stage = stage_full_repository_graph(
+            &store,
+            &root,
+            retained_generation,
+            &nodes,
+            &retry_policy,
+            &empty_symbol_build_stage(),
+            &retry_control,
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &retry_stage,
+            &retry_control,
+            "full-reuse-retry",
+        )?;
+        require_eq(
+            &store.repository_graph_identity_rejections(project, &persisted_paths, 16, None)?,
+            &persisted,
+            "full reuse retry changed rejection details",
+        )?;
+        let retained_generation = store
+            .index_publication()?
+            .ok_or("full reuse retry publication is missing")?
+            .generation;
+
+        let valid_graph = extract_symbol_graph(
+            path,
+            Some("rust"),
+            "pub fn caller() { helper(); }\nfn helper() {}\n",
+        );
+        let valid_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let valid_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &valid_control)?;
+        let valid_stage = stage_full_repository_graph(
+            &store,
+            &root,
+            retained_generation,
+            &nodes,
+            &valid_policy,
+            &symbol_build_stage_for_graphs(vec![valid_graph]),
+            &valid_control,
+        )?;
+        require(
+            valid_stage.identity_rejections.is_empty(),
+            "full reuse changed graph retained stale rejection detail",
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &valid_stage,
+            &valid_control,
+            "full-reuse-repair",
+        )?;
+        require(
+            store
+                .repository_graph_identity_rejections(project, &persisted_paths, 16, None)?
+                .is_empty(),
+            "full reuse repaired graph retained stale rejection detail",
         )?;
         Ok(())
     }
