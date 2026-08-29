@@ -189,7 +189,11 @@ const CODEX_OWNER_CHILD_STOP_BUDGET: Duration = Duration::from_secs(5);
 // Allow normal scheduling variance without allowing a late readiness retry to hide.
 const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
 #[cfg(windows)]
-const CODEX_OWNER_EARLY_EXIT_MAX_ELAPSED: Duration = Duration::from_secs(10);
+// Early owner exit must be observed before readiness expires; this bound allows only
+// the same scheduler margin as the bounded publication contract.
+fn codex_owner_early_exit_max_elapsed() -> Duration {
+    CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+}
 #[cfg(windows)]
 const CODEX_OWNER_DELAYED_PUBLICATION: Duration = Duration::from_secs(6);
 #[cfg(windows)]
@@ -36346,13 +36350,15 @@ fn spawn_codex_owned_obsolete_mcp(
     loop {
         match parent.try_wait() {
             Ok(Some(status)) => {
+                let observation_elapsed = started.elapsed();
                 return Err(codex_owner_spawn_error(
                     &mut parent,
                     codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!(
-                        "Codex MCP owner fixture exited before publishing its child PID: {status}"
+                        "Codex MCP owner fixture exited before publishing its child PID: {status} (owner_observation_elapsed_ms={})",
+                        observation_elapsed.as_millis()
                     ),
                 ));
             }
@@ -36486,15 +36492,35 @@ public static class Program
         };
         let elapsed = started.elapsed();
         let text = error.to_string();
+        let early_exit_observation_elapsed = if mode == "early-exit" {
+            Some(
+                text.split("owner_observation_elapsed_ms=")
+                    .nth(1)
+                    .and_then(|value| value.split(')').next())
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "early-exit owner fixture omitted its observation elapsed diagnostic:\n{text}"
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
         if !text.contains(expected)
             || !text.contains(&format!("owner={}", codex_fixture.display()))
             || !text.contains(&format!("identity_file={}", identity_file.display()))
             || !text.contains(&format!("expected_runtime={}", runtime.display()))
-            || (mode == "early-exit" && elapsed > CODEX_OWNER_EARLY_EXIT_MAX_ELAPSED)
+            || (mode == "early-exit" && elapsed > codex_owner_early_exit_max_elapsed())
+            || early_exit_observation_elapsed
+                .as_ref()
+                .is_some_and(|observed| *observed >= CODEX_OWNER_READINESS_TIMEOUT)
             || text.contains("fixture cleanup also failed")
         {
             return Err(io::Error::other(format!(
-                "{mode} owner fixture failure was not bounded and diagnostic: elapsed={elapsed:?} max_early_exit={CODEX_OWNER_EARLY_EXIT_MAX_ELAPSED:?}\n{text}"
+                "{mode} owner fixture failure was not bounded and diagnostic: elapsed={elapsed:?} observed={early_exit_observation_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} max_early_exit={:?}\n{text}",
+                codex_owner_early_exit_max_elapsed()
             ))
             .into());
         }
