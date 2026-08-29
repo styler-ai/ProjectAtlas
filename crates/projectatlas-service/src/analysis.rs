@@ -9,6 +9,15 @@ mod analysis_test_observer {
     /// Named production phase reached by one synchronous analysis request.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) enum AnalysisPhaseEvent {
+        /// Exact byte ledger passed to the architecture community projection.
+        CompositionBudget {
+            /// Remaining bytes handed to architecture findings.
+            symbol_byte_budget: u64,
+            /// Existing architecture findings' append charge.
+            existing_finding_append_bytes: u64,
+            /// Remaining bytes handed to community findings.
+            community_budget: u64,
+        },
         /// Induced relationship closure is about to traverse its first bounded frontier.
         Traversal,
         /// Admitted symbol hydration is about to enter bounded storage work.
@@ -1806,6 +1815,14 @@ fn architecture_findings(
             }
         }
         let community_budget = symbol_byte_budget.saturating_sub(existing_finding_append_bytes);
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::CompositionBudget {
+                symbol_byte_budget,
+                existing_finding_append_bytes,
+                community_budget,
+            },
+        );
         let existing_community_finding_count =
             preceding_finding_count.saturating_add(findings.len());
         let (community_findings, community_working_set_bytes, community_limits) =

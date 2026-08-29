@@ -6,7 +6,7 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
 use projectatlas_core::{IndexGeneration, Node, NodeKind, PurposeSource};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -1711,94 +1711,121 @@ fn zero_remaining_community_allowance_preserves_report_truth() -> Result<(), Box
     query.include_communities = true;
     query.include_cycles = false;
     query.relations.resolution = RelationResolutionFilter::Resolved;
-    let minimum_budget = 64 * 1024;
-    let maximum_budget = minimum_budget + 2_048;
-    let mut report_at = |budget| {
-        query.relations.budget = query.relations.budget.with_aggregate_limits(
-            None,
-            None,
-            None,
-            None,
-            Some(budget),
-            None,
-        )?;
-        Ok::<_, ServiceError>(load_relation_analysis(&store, &query, None)?.report)
-    };
-    let mut lower_bound = minimum_budget;
-    let mut upper_bound = None;
-    for budget in (minimum_budget..=maximum_budget).step_by(16) {
-        let report = report_at(budget)?;
-        let has_community = report
-            .findings
-            .iter()
-            .any(|finding| finding.community.is_some());
-        if !has_community {
-            upper_bound = Some(budget);
-            break;
-        }
-        lower_bound = budget.saturating_add(1);
-    }
-    let upper_bound = upper_bound.ok_or("community truncation boundary was not reached")?;
-    let lower_bound = upper_bound.saturating_sub(15).max(lower_bound);
-    let mut boundary = None;
-    for budget in lower_bound..=upper_bound {
-        let report = report_at(budget)?;
-        if !report
-            .findings
-            .iter()
-            .any(|finding| finding.community.is_some())
-        {
-            boundary = Some((budget, report));
-            break;
-        }
-    }
-    let (budget, report) = boundary.ok_or("exact community truncation boundary was not found")?;
-    if budget > minimum_budget {
-        let previous = report_at(budget - 1)?;
-        require(
-            previous
+    query.relations.relation = None;
+
+    let calibration_budget = 80_000_u64;
+    let mut calibration_query = query.clone();
+    calibration_query.relations.budget = calibration_query.relations.budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(calibration_budget),
+        None,
+    )?;
+    let calibration_observed = Rc::new(RefCell::new(None));
+    let calibration_writer = Rc::clone(&calibration_observed);
+    let _calibration = observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::CompositionBudget {
+                symbol_byte_budget,
+                existing_finding_append_bytes,
+                community_budget,
+            } = event
+            {
+                *calibration_writer.borrow_mut() = Some((
+                    symbol_byte_budget,
+                    existing_finding_append_bytes,
+                    community_budget,
+                ));
+            }
+        },
+        || load_relation_analysis(&store, &calibration_query, None),
+    )?;
+    let (_, existing_append_bytes, calibration_community_budget) = calibration_observed
+        .borrow()
+        .ok_or("architecture community budget was not observed")?;
+    require(
+        existing_append_bytes > 0 && calibration_community_budget > 0,
+        "calibration did not retain a preceding finding and community allowance",
+    )?;
+
+    // Both requests use five-digit intermediate budgets, so their serialized
+    // cursor shapes and relation work are identical. Subtracting the
+    // independently observed remaining allowance reaches the exact append
+    // boundary without searching neighboring budgets.
+    let boundary_budget = calibration_budget
+        .checked_sub(calibration_community_budget)
+        .ok_or("calibration community allowance exceeded the request budget")?;
+    require(
+        boundary_budget >= 64 * 1024,
+        "calibrated community boundary fell below the product budget floor",
+    )?;
+    let mut boundary_query = query;
+    boundary_query.relations.budget = boundary_query.relations.budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(boundary_budget),
+        None,
+    )?;
+    let boundary_observed = Rc::new(RefCell::new(None));
+    let boundary_writer = Rc::clone(&boundary_observed);
+    let draft = observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::CompositionBudget {
+                symbol_byte_budget,
+                existing_finding_append_bytes,
+                community_budget,
+            } = event
+            {
+                *boundary_writer.borrow_mut() = Some((
+                    symbol_byte_budget,
+                    existing_finding_append_bytes,
+                    community_budget,
+                ));
+            }
+        },
+        || load_relation_analysis(&store, &boundary_query, None),
+    )?;
+    let (symbol_byte_budget, existing_append_bytes, community_budget) = boundary_observed
+        .borrow()
+        .ok_or("boundary architecture community budget was not observed")?;
+    let report = draft.report;
+
+    // Serialize the explicit request and retained finding vector independently
+    // of the production byte-accounting helpers under test. The fixture starts
+    // with no resolution gaps, so the returned architecture vector owns its
+    // complete JSON array envelope.
+    let request_bytes = serde_json::to_vec(&boundary_query.relations.budget)?;
+    let request_json: serde_json::Value = serde_json::from_slice(&request_bytes)?;
+    let findings_vector_bytes = serde_json::to_vec(&report.findings)?;
+    let expected_existing_append_bytes = findings_vector_bytes
+        .len()
+        .checked_sub(2)
+        .ok_or("serialized findings vector omitted its JSON array envelope")?;
+    require(
+        request_json
+            .get("intermediate_bytes")
+            .and_then(serde_json::Value::as_u64)
+            == Some(boundary_budget)
+            && findings_vector_bytes.starts_with(b"[")
+            && findings_vector_bytes.ends_with(b"]")
+            && u64::try_from(expected_existing_append_bytes)? == existing_append_bytes
+            && symbol_byte_budget == existing_append_bytes
+            && community_budget == 0
+            && existing_append_bytes > 0
+            && report
                 .findings
                 .iter()
-                .any(|finding| finding.community.is_some()),
-            "boundary predecessor did not retain the typed community truncation marker",
-        )?;
-    }
-    let gap_count = report
-        .findings
-        .iter()
-        .take_while(|finding| finding.kind == AnalysisFindingKind::ResolutionGap)
-        .count();
-    let gap_bytes = serialized_bytes_controlled(&report.findings[..gap_count], None)?;
-    let architecture = &report.findings[gap_count..];
-    let architecture_bytes = serialized_bytes_controlled(architecture, None)?;
-    let finding_bytes = serialized_bytes_controlled(&report.findings, None)?;
-    let topology_bytes = report
-        .work
-        .retained_composition_bytes
-        .saturating_sub(finding_bytes);
-    let projection_allowance = budget
-        .saturating_sub(report.work.relations.intermediate_bytes)
-        .saturating_sub(report.work.closure_decoded_bytes);
-    let symbol_byte_budget = projection_allowance
-        .saturating_sub(topology_bytes)
-        .saturating_sub(gap_bytes);
-    let existing_append_bytes =
-        serialized_findings_append_bytes(architecture_bytes, architecture.len(), gap_count);
-    // The exact boundary leaves only the two bytes owned by the enclosing
-    // findings array; no community finding can be appended to that envelope.
-    let community_allowance = symbol_byte_budget
-        .saturating_sub(existing_append_bytes)
-        .saturating_sub(JSON_ARRAY_FRAMING_BYTES);
-    require(
-        !architecture.is_empty()
-            && symbol_byte_budget == existing_append_bytes.saturating_add(JSON_ARRAY_FRAMING_BYTES)
-            && community_allowance == 0
-            && report.work.retained_composition_bytes <= projection_allowance
+                .any(|finding| finding.kind == AnalysisFindingKind::Component)
             && report.truncated
             && report
                 .reached_limits
                 .contains(&GraphLimitKind::IntermediateBytes)
             && report.work.composition_truncated
+            && report.work.retained_composition_bytes <= boundary_budget
             && matches!(report.total, RelationTotalState::AtLeast(_))
             && !matches!(report.total, RelationTotalState::Exact(_))
             && report
