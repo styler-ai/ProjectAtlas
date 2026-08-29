@@ -47,7 +47,7 @@ use std::convert::Infallible;
 use std::ops::ControlFlow;
 use std::path::Path;
 use toml::Value as TomlValue;
-use tree_sitter::{Language, Node, ParseOptions, Parser};
+use tree_sitter::{Language, Node, ParseOptions, Parser, Tree};
 
 /// Maximum symbols kept from one file to bound large generated sources.
 const MAX_SYMBOLS_PER_FILE: usize = 4_000;
@@ -848,12 +848,89 @@ fn extract_tree_sitter_graph<E>(
     let Some(language_name) = language else {
         return Ok(None);
     };
-    let Some(parser_language) = tree_sitter_language(language_name, content) else {
+    let Some(grammar) = tree_sitter_grammar(language_name) else {
+        return Ok(None);
+    };
+    let tree = if grammar == TreeSitterGrammar::Php {
+        parse_php_tree(content, check)?
+    } else {
+        let Some(parser_language) = tree_sitter_language(language_name) else {
+            return Ok(None);
+        };
+        parse_tree_sitter_language(&parser_language, content, check)?
+    };
+    let Some(tree) = tree else {
         return Ok(None);
     };
     check()?;
+    let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
+    let root = tree.root_node();
+    let had_errors = root.has_error();
+    visit_node(root, content, &mut graph, check)?;
+    check()?;
+    languages::augment_language_graph(&mut graph, content, check)?;
+    check()?;
+    Ok(Some(TreeSitterParse { graph, had_errors }))
+}
+
+/// Select the official PHP-only or mixed grammar from their parsed roots.
+fn parse_php_tree<E>(
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
+    let php_only_language: Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
+    let php_only = parse_tree_sitter_language(&php_only_language, content, check)?;
+    let needs_mixed_probe = php_only.as_ref().is_some_and(|tree| {
+        tree.root_node().has_error() || tree_contains_php_tag(tree.root_node())
+    });
+    if !needs_mixed_probe {
+        return Ok(php_only);
+    }
+
+    let mixed_language: Language = tree_sitter_php::LANGUAGE_PHP.into();
+    let mixed = parse_tree_sitter_language(&mixed_language, content, check)?;
+    if mixed
+        .as_ref()
+        .zip(php_only.as_ref())
+        .is_some_and(|(mixed, php_only)| {
+            tree_contains_php_tag_outside_literals(mixed.root_node(), php_only.root_node())
+        })
+    {
+        Ok(mixed)
+    } else {
+        Ok(php_only)
+    }
+}
+
+/// Return a tree-sitter language for supported source families.
+fn tree_sitter_language(language: &str) -> Option<Language> {
+    Some(match tree_sitter_grammar(language)? {
+        TreeSitterGrammar::Rust => tree_sitter_rust::LANGUAGE.into(),
+        TreeSitterGrammar::Python => tree_sitter_python::LANGUAGE.into(),
+        TreeSitterGrammar::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        TreeSitterGrammar::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        TreeSitterGrammar::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        TreeSitterGrammar::Java => tree_sitter_java::LANGUAGE.into(),
+        TreeSitterGrammar::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+        TreeSitterGrammar::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        TreeSitterGrammar::Go => tree_sitter_go::LANGUAGE.into(),
+        TreeSitterGrammar::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),
+        TreeSitterGrammar::Zig => tree_sitter_zig::LANGUAGE.into(),
+        TreeSitterGrammar::C => tree_sitter_c::LANGUAGE.into(),
+        TreeSitterGrammar::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        TreeSitterGrammar::Php => tree_sitter_php::LANGUAGE_PHP_ONLY.into(),
+    })
+}
+
+/// Parse source with one pinned tree-sitter grammar while observing cancellation.
+fn parse_tree_sitter_language<E>(
+    parser_language: &Language,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
+    check()?;
     let mut parser = Parser::new();
-    if parser.set_language(&parser_language).is_err() {
+    if parser.set_language(parser_language).is_err() {
         return Ok(None);
     }
     let mut parse_failure = None;
@@ -875,119 +952,79 @@ fn extract_tree_sitter_graph<E>(
         return Err(error);
     }
     check()?;
-    let Some(tree) = tree else {
-        return Ok(None);
-    };
-    let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
-    let root = tree.root_node();
-    let had_errors = root.has_error();
-    visit_node(root, content, &mut graph, check)?;
-    check()?;
-    languages::augment_language_graph(&mut graph, content, check)?;
-    check()?;
-    Ok(Some(TreeSitterParse { graph, had_errors }))
+    Ok(tree)
 }
 
-/// Return a tree-sitter language for supported source families.
-fn tree_sitter_language(language: &str, content: &str) -> Option<Language> {
-    Some(match tree_sitter_grammar(language)? {
-        TreeSitterGrammar::Rust => tree_sitter_rust::LANGUAGE.into(),
-        TreeSitterGrammar::Python => tree_sitter_python::LANGUAGE.into(),
-        TreeSitterGrammar::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-        TreeSitterGrammar::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        TreeSitterGrammar::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        TreeSitterGrammar::Java => tree_sitter_java::LANGUAGE.into(),
-        TreeSitterGrammar::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
-        TreeSitterGrammar::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-        TreeSitterGrammar::Go => tree_sitter_go::LANGUAGE.into(),
-        TreeSitterGrammar::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),
-        TreeSitterGrammar::Zig => tree_sitter_zig::LANGUAGE.into(),
-        TreeSitterGrammar::C => tree_sitter_c::LANGUAGE.into(),
-        TreeSitterGrammar::Cpp => tree_sitter_cpp::LANGUAGE.into(),
-        TreeSitterGrammar::Php => {
-            if contains_php_opening_tag(content) {
-                tree_sitter_php::LANGUAGE_PHP.into()
-            } else {
-                tree_sitter_php::LANGUAGE_PHP_ONLY.into()
-            }
+/// Return whether a tree contains an opening-tag node.
+fn tree_contains_php_tag(node: Node<'_>) -> bool {
+    if node.kind() == "php_tag" {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(tree_contains_php_tag)
+}
+
+/// Return whether a mixed parse contains a tag outside a PHP literal or comment.
+fn tree_contains_php_tag_outside_literals(mixed: Node<'_>, php_only: Node<'_>) -> bool {
+    let mut opaque_ranges = Vec::new();
+    collect_php_only_opaque_ranges(php_only, &mut opaque_ranges);
+    let mut next_opaque = 0;
+    tree_contains_php_tag_outside_ranges(mixed, &opaque_ranges, &mut next_opaque)
+}
+
+/// Collect top-level literal/comment ranges from the PHP-only parse in source order.
+fn collect_php_only_opaque_ranges(node: Node<'_>, ranges: &mut Vec<(usize, usize)>) {
+    if is_php_opaque_node(node.kind()) {
+        ranges.push((node.start_byte(), node.end_byte()));
+        return;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .for_each(|child| collect_php_only_opaque_ranges(child, ranges));
+}
+
+/// Return whether a mixed parse contains a tag outside the sorted opaque ranges.
+fn tree_contains_php_tag_outside_ranges(
+    node: Node<'_>,
+    opaque_ranges: &[(usize, usize)],
+    next_opaque: &mut usize,
+) -> bool {
+    if node.kind() == "php_tag" {
+        while *next_opaque < opaque_ranges.len()
+            && opaque_ranges[*next_opaque].1 <= node.start_byte()
+        {
+            *next_opaque += 1;
         }
-    })
+        if *next_opaque >= opaque_ranges.len() || opaque_ranges[*next_opaque].0 >= node.end_byte() {
+            return true;
+        }
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| tree_contains_php_tag_outside_ranges(child, opaque_ranges, next_opaque))
 }
 
-/// Return whether PHP source contains an opening tag outside PHP literals/comments.
-///
-/// The PHP grammar has separate roots for PHP-only and mixed HTML/PHP input. A
-/// raw substring check misclassifies ordinary strings and comments, so keep the
-/// distinction at this small lexical boundary instead of adding a second lexer
-/// or parser framework. Once a closing tag is seen, HTML is opaque until the
-/// next opening tag; that is the only mixed-source state needed here.
+/// Return whether the PHP-only parse node is opaque to mixed-grammar tags.
+fn is_php_opaque_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "comment"
+            | "encapsed_string"
+            | "heredoc"
+            | "nowdoc"
+            | "shell_command_expression"
+            | "string"
+    )
+}
+
+/// Return whether the official PHP grammars recognize an opening tag.
+#[cfg(test)]
 fn contains_php_opening_tag(content: &str) -> bool {
-    #[derive(Clone, Copy)]
-    enum State {
-        Code,
-        Html,
-        SingleQuote,
-        DoubleQuote,
-        LineComment,
-        BlockComment,
-    }
-
-    let bytes = content.as_bytes();
-    let mut state = State::Code;
-    let mut index = 0;
-    while index < bytes.len() {
-        match state {
-            State::Code => match bytes[index] {
-                b'<' if bytes.get(index + 1) == Some(&b'?') => return true,
-                b'\'' => state = State::SingleQuote,
-                b'"' => state = State::DoubleQuote,
-                b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                    state = State::LineComment;
-                    index += 1;
-                }
-                b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                    state = State::BlockComment;
-                    index += 1;
-                }
-                b'#' if bytes.get(index + 1) != Some(&b'[') => state = State::LineComment,
-                b'?' if bytes.get(index + 1) == Some(&b'>') => {
-                    state = State::Html;
-                    index += 1;
-                }
-                _ => {}
-            },
-            State::Html => {
-                if bytes[index] == b'<' && bytes.get(index + 1) == Some(&b'?') {
-                    return true;
-                }
-            }
-            State::SingleQuote | State::DoubleQuote => {
-                let quote = match state {
-                    State::SingleQuote => b'\'',
-                    State::DoubleQuote => b'"',
-                    _ => unreachable!(),
-                };
-                if bytes[index] == b'\\' {
-                    index += 1;
-                } else if bytes[index] == quote {
-                    state = State::Code;
-                }
-            }
-            State::LineComment => {
-                if bytes[index] == b'\n' {
-                    state = State::Code;
-                }
-            }
-            State::BlockComment => {
-                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    state = State::Code;
-                    index += 1;
-                }
-            }
-        }
-        index += 1;
-    }
-    false
+    let mut check = || Ok::<(), Infallible>(());
+    parse_php_tree(content, &mut check)
+        .ok()
+        .flatten()
+        .is_some_and(|tree| tree_contains_php_tag(tree.root_node()))
 }
 
 /// Recursively inspect one tree-sitter node.
@@ -4597,6 +4634,16 @@ function helper(string $value): void {}
             "// <?\nfunction marker(): string { return 'marker'; }",
             "# <?\nfunction marker(): string { return 'marker'; }",
             "/* <? */ function marker(): string { return 'marker'; }",
+            r"function marker(): string { return <<<TEXT
+<?
+TEXT;
+}",
+            r"function marker(): string { return <<<'TEXT'
+<?
+TEXT;
+}",
+            "function marker(): string { return `echo <?`; }",
+            "// <?\rfunction marker(): string { return 'marker'; }",
         ] {
             assert!(
                 !super::contains_php_opening_tag(source),
@@ -4609,15 +4656,38 @@ function helper(string $value): void {}
             );
         }
 
-        for source in [
-            "<?php function tagged(): void {} ?>",
-            "<? function short_tagged(): void {} ?>",
-            "<?= $value ?><?php function after_echo(): void {} ?>",
-            "<main>content</main><?php function mixed(): void {} ?>",
+        for (source, symbol_name) in [
+            ("<?php function tagged(): void {} ?>", "tagged"),
+            ("<? function short_tagged(): void {} ?>", "short_tagged"),
+            (
+                "<?= $value ?><?php function after_echo(): void {} ?>",
+                "after_echo",
+            ),
+            (
+                "<main>content</main><?php function mixed(): void {} ?>",
+                "mixed",
+            ),
+            ("// <? ?><?php function reopened(): void {} ?>", "reopened"),
+            (
+                "# <? ?><?php function reopened_hash(): void {} ?>",
+                "reopened_hash",
+            ),
+            (
+                "/* <? ?> */<?php function reopened_block(): void {} ?>",
+                "reopened_block",
+            ),
         ] {
             assert!(
                 super::contains_php_opening_tag(source),
                 "genuine PHP opening tag was not classified as mixed: {source:?}"
+            );
+            let graph = extract_symbol_graph("src/tagged.php", Some("php"), source);
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == symbol_name),
+                "mixed PHP symbol disappeared after opening-tag classification: {source:?}"
             );
         }
     }
