@@ -1,6 +1,7 @@
 //! Purpose: Validate installer, release, packaged, and plugin delivery contracts.
 #![allow(unused_imports)]
 
+mod support;
 use assert_cmd::Command;
 use predicates::prelude::*;
 #[cfg(feature = "optional-parser-supervisor")]
@@ -15,10 +16,9 @@ use projectatlas_cli::parser_supervisor::{
 use projectatlas_core::IndexCancellation;
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
-    ExtendedRelationKind, ExternalSelector, GraphEntity, GraphIdentityField,
-    GraphIdentityRejection, GraphIdentityRejectionReason, GraphIdentityText, GraphLimitKind,
-    GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector, RelationResolution,
-    RepositoryFilePath, RepositoryNodePath, SourceSpan,
+    ExtendedRelationKind, ExternalSelector, GraphEntity, GraphIdentityText, GraphLimitKind,
+    GraphRelationKind, LogicalRelation, PackageSelector, RelationResolution, RepositoryFilePath,
+    RepositoryNodePath,
 };
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
 #[cfg(all(
@@ -74,6 +74,14 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use support::{
+    MCP_CONTRACT_METADATA_CANARY, McpDatabaseSnapshot, complete_mcp_test_after_shutdown,
+    git_command_for_root, json_at, json_summary_command, mcp_contract_executable,
+    mcp_database_snapshot, mcp_tool_text, require_json_array_len, require_json_bool,
+    require_json_contains, require_json_string, require_json_usize, require_json_usize_at_least,
+    require_json_usize_greater_than, run_mcp_stdio, run_mcp_stdio_with_env, sha256_hex,
+    sqlite_table_digests, workspace_root,
+};
 use yaml_rust2::{Yaml, YamlLoader};
 
 const TEST_REPO_DIR: &str = "repo";
@@ -103,24 +111,6 @@ const ISSUE_TEMPLATE_DIR_NAME: &str = "ISSUE_TEMPLATE";
 const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 
 const PACKAGE_JSON_FILE_NAME: &str = "package.json";
-
-const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_GRAFT_FILE",
-    "GIT_INDEX_FILE",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_PREFIX",
-    "GIT_SHALLOW_FILE",
-    "GIT_COMMON_DIR",
-];
 
 const OPENSPEC_DIR_NAME: &str = "openspec";
 
@@ -211,71 +201,6 @@ const WINDOWS_POWERSHELL_EXECUTABLE: &str = "powershell.exe";
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(windows)]
-const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(windows)]
-// The failure path gives the owner this bounded window to observe the stop marker and exit.
-const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
-#[cfg(windows)]
-// The exact child-stop helper allows its owned process up to this wait budget to exit.
-const CODEX_OWNER_CHILD_STOP_BUDGET: Duration = Duration::from_secs(5);
-#[cfg(windows)]
-// One exact-identity fallback is allowed when the stop helper itself stalls before killing.
-const CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET: Duration = Duration::from_secs(5);
-#[cfg(windows)]
-// A direct exact-identity stop keeps a known child from surviving two stalled helpers.
-const CODEX_OWNER_CHILD_STOP_FINAL_BUDGET: Duration = Duration::from_secs(5);
-#[cfg(windows)]
-// Keep the complete cleanup envelope truthful when one bounded phase is delayed by suite load.
-const CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
-#[cfg(windows)]
-// Allow normal scheduling variance without allowing a late readiness retry to hide.
-const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
-#[cfg(windows)]
-const CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(windows)]
-const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(6);
-#[cfg(windows)]
-const CODEX_OWNER_READINESS_BOUNDARY_PUBLICATION_DELAY: Duration = Duration::from_secs(24);
-#[cfg(windows)]
-const CODEX_OWNER_READINESS_BOUNDARY_CAPTURE_DELAY: Duration = Duration::from_secs(8);
-#[cfg(windows)]
-// Delay the polling caller, not the child operation, so a completed helper is observed late.
-const CODEX_OWNER_LATE_COMPLETION_TEST_DELAY: Duration = Duration::from_secs(2);
-#[cfg(windows)]
-// Delay the outer owner observer past its deadline after the fixture has received stop.
-const CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(6);
-#[cfg(windows)]
-// Delay the readiness poll past the deadline after the fixture has published, without
-// changing process-global state, proving the admission guard through the real helper.
-const CODEX_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(31);
-#[cfg(windows)]
-#[cfg(windows)]
-const CODEX_OWNER_STOP_HELPER_TEST_DELAY: Duration = Duration::from_secs(6);
-#[cfg(windows)]
-// Early owner exit must be observed before readiness expires; this bound allows only
-// the same scheduler margin as the bounded publication contract.
-fn codex_owner_early_exit_max_elapsed() -> Duration {
-    CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
-}
-#[cfg(windows)]
-const CODEX_OWNER_DELAYED_PUBLICATION: Duration = Duration::from_secs(6);
-#[cfg(windows)]
-const CODEX_OWNER_PUBLICATION_DELAY_ENV: &str =
-    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_DELAY_MS";
-#[cfg(windows)]
-const CODEX_OWNER_PUBLICATION_MODE_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE";
-#[cfg(windows)]
-#[cfg(windows)]
-const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
-    "PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS";
-#[cfg(windows)]
-const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS";
-#[cfg(windows)]
-const OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME: &str = "obsolete-projectatlas.cs";
-#[cfg(windows)]
-const OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME: &str = "obsolete-projectatlas.exe";
-
-#[cfg(windows)]
 const CODEX_MCP_OWNER_FIXTURE_SOURCE: &str = r#"using System;
 using System.Diagnostics;
 using System.IO;
@@ -310,69 +235,16 @@ public static class Program
             {
                 string identityPath = arguments[0];
                 string temporaryIdentityPath = identityPath + ".tmp";
-                string retainedIdentityPath = identityPath + ".owner";
-                string retainedIdentityTemporaryPath = retainedIdentityPath + ".tmp";
-                // Retain exact fixture ownership even when normal publication is withheld.
-                string retainedIdentityDelay = Environment.GetEnvironmentVariable(
-                    "PROJECTATLAS_TEST_CODEX_OWNER_RETAINED_IDENTITY_DELAY_MS"
-                );
-                int retainedIdentityDelayMilliseconds;
-                if (!String.IsNullOrWhiteSpace(retainedIdentityDelay)
-                    && Int32.TryParse(retainedIdentityDelay, out retainedIdentityDelayMilliseconds)
-                    && retainedIdentityDelayMilliseconds > 0)
-                {
-                    Thread.Sleep(retainedIdentityDelayMilliseconds);
-                }
-                string creationTime = child.StartTime.ToUniversalTime()
-                    .ToFileTimeUtc()
-                    .ToString();
-                File.WriteAllLines(retainedIdentityTemporaryPath, new[]
+                File.WriteAllLines(temporaryIdentityPath, new[]
                 {
                     child.Id.ToString(),
-                    creationTime,
+                    child.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(),
                     childPath
                 });
-                File.Move(retainedIdentityTemporaryPath, retainedIdentityPath);
-                string publicationMode = Environment.GetEnvironmentVariable(
-                    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE"
-                );
-                if (publicationMode == "early-exit")
-                    return 3;
-                string publicationDelay = Environment.GetEnvironmentVariable(
-                    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_DELAY_MS"
-                );
-                int delayMilliseconds;
-                if (!String.IsNullOrWhiteSpace(publicationDelay)
-                    && Int32.TryParse(publicationDelay, out delayMilliseconds)
-                    && delayMilliseconds > 0)
-                {
-                    Thread.Sleep(delayMilliseconds);
-                }
-                if (publicationMode != "timeout"
-                    && publicationMode != "timeout-ignore-stop")
-                {
-                    if (publicationMode == "malformed")
-                    {
-                        File.WriteAllText(temporaryIdentityPath, "not-an-identity");
-                    }
-                    else
-                    {
-                        if (publicationMode == "mismatched")
-                            creationTime = (Int64.Parse(creationTime) + 1).ToString();
-                        File.WriteAllLines(temporaryIdentityPath, new[]
-                        {
-                            child.Id.ToString(),
-                            creationTime,
-                            childPath
-                        });
-                    }
-                    File.Move(temporaryIdentityPath, identityPath);
-                }
+                File.Move(temporaryIdentityPath, identityPath);
                 while (!child.WaitForExit(25))
                 {
-                    if (publicationMode != "timeout-ignore-stop"
-                        && publicationMode != "ignore-stop"
-                        && File.Exists(identityPath + ".stop"))
+                    if (File.Exists(identityPath + ".stop"))
                     {
                         child.Kill();
                         child.WaitForExit();
@@ -380,7 +252,6 @@ public static class Program
                     }
                 }
                 Thread.Sleep(Timeout.Infinite);
-                return 0;
             }
             finally
             {
@@ -391,6 +262,7 @@ public static class Program
                 }
             }
         }
+        return 0;
     }
 }
 "#;
@@ -401,11 +273,7 @@ const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
-const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
-
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
-
-const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
 
 const MCP_TOOLS_SHA256: &str = "c364a97710088181c61ebf3ba57573fae5cf26b0eb21fe12f49d956a18ad6fcd";
 
@@ -417,6 +285,152 @@ const PROJECTATLAS_LOCAL_APPDATA_DIR: &str = "ProjectAtlas";
 const CLI_E2E_INVENTORY_FILE: &str = "docs/v050-cli-e2e-inventory.json";
 
 const CLI_E2E_INVENTORY_NORMALIZATION: &str = "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata";
+
+const CLI_E2E_SUPPORT_PATH: &str = "crates/projectatlas-cli/tests/support/mod.rs";
+
+const CLI_E2E_BASELINE_COMMIT: &str = "b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb";
+
+const CLI_E2E_BASELINE_SOURCE: &str = "crates/projectatlas-cli/tests/e2e.rs";
+
+const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
+    "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c";
+
+const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
+    "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
+
+const CLI_E2E_SYMBOL_COUNT: usize = 427;
+
+const CLI_E2E_FIXTURE_COUNT: usize = 91;
+
+const CLI_E2E_SELECTOR_BEFORE_MOVE_COUNT: usize = 52;
+
+const CLI_E2E_ALL_OWNERS: &[&str] = &[
+    "e2e_delivery",
+    "e2e_lifecycle",
+    "e2e_maintenance",
+    "e2e_navigation",
+    "e2e_worktrees",
+];
+
+const CLI_E2E_SUPPORT_ALL_OWNERS: &[&str] = CLI_E2E_ALL_OWNERS;
+
+const CLI_E2E_SUPPORT_WORKSPACE_ROOT_OWNERS: &[&str] =
+    &["e2e_delivery", "e2e_lifecycle", "e2e_maintenance"];
+
+const CLI_E2E_SUPPORT_USIZE_AT_LEAST_OWNERS: &[&str] = &[
+    "e2e_lifecycle",
+    "e2e_delivery",
+    "e2e_navigation",
+    "e2e_worktrees",
+];
+
+const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
+
+const CLI_E2E_SYMBOLS_DIGEST: &str =
+    "675e56e758db092d494e93f27d8550cca5ec0e9ee2ec0268d075e8d73884a18b";
+
+const CLI_E2E_FIXTURES_DIGEST: &str =
+    "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
+
+const CLI_E2E_ENVIRONMENT_FACETS_DIGEST: &str =
+    "2789e6dc790b730c110127224b2c95c71e63f50a673e964fcb32c756053b04a2";
+
+const CLI_E2E_TIMEOUT_FACETS_DIGEST: &str =
+    "3243ff08732536fdfc4c16022027ae3b21087a3d05dc6d456f4375e1db2b96d3";
+
+const CLI_E2E_CLEANUP_FACETS_DIGEST: &str =
+    "7a0fbb05943f286af21c81d69fece4add167553e22493e117862cfa241d39aa8";
+
+const CLI_E2E_ISOLATION_FACETS_DIGEST: &str =
+    "a34f40d2d7249dafba32af229a0a068c7ab0ab6c2ffd5128c90c8d65a8c834bf";
+
+const CLI_E2E_PACKAGED_FACETS_DIGEST: &str =
+    "84db4b04a30eac5af863610d296d76d7b8936b478507a2022656349cbde546b0";
+
+const CLI_E2E_ATTRIBUTES_FACETS_DIGEST: &str =
+    "cdd9b72f5c1ec65285a955a0383a33b7fcac509e38d1889022cb108f41f5423d";
+
+const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
+    "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
+
+const CLI_E2E_SUPPORT_FUNCTION_DIGESTS: &[(&str, &str)] = &[
+    (
+        "run_mcp_stdio",
+        "3ec25297b4c4d6d4de77f10fe77894e5e76f1b14a1b84156a15352f438ec382b",
+    ),
+    (
+        "run_mcp_stdio_with_env",
+        "2c5f7fedb1acca1beef43c8f1d5186df46d0b608e778c4c5d1d531c1159daaed",
+    ),
+    (
+        "mcp_tool_text",
+        "48d7ad7d82fbc7a9e690b5e1e03caa4ee26baa0148b17ead4dc872322c1f425e",
+    ),
+    (
+        "sqlite_table_digests",
+        "86edce386cc43ea4b49ce82bd8b7b6eb61c1374c3cd1f45515820e44e3e29d66",
+    ),
+    (
+        "mcp_database_snapshot",
+        "ffb57f16567b4102818d436d784c7cf9948431f8ba543e74fc24ae7963c69b1e",
+    ),
+    (
+        "require_json_string",
+        "a6b1592c1511d27ae87706f43422be9baa409baab7f19bf6169753ab76c561ab",
+    ),
+    (
+        "require_json_contains",
+        "6887763fb3907308fedadd5b705c08a8d935b0d1997209602d1b8b4fd00216f7",
+    ),
+    (
+        "require_json_usize",
+        "dd15d0f9557b459a7b9ab287aae0e73c6ce862bddda20a352c331f65799b9cc5",
+    ),
+    (
+        "require_json_usize_at_least",
+        "61f0b0c4948557a4bf21be1063bab94ff676b9e2cdb179637f623d11afdf0ede",
+    ),
+    (
+        "require_json_usize_greater_than",
+        "0069f458a74c051120836ab9e2da36fb6e77c59b159f146e2b240ff2241a5c8b",
+    ),
+    (
+        "require_json_array_len",
+        "46f96f13c6a06bc979f8ae902ded96628d7f16c4cba72248d24d98ca3cbb6cfc",
+    ),
+    (
+        "require_json_bool",
+        "07db4c0162aa34da888a8e999069d721d4ac548577cdec1f3598785ad5648916",
+    ),
+    (
+        "sha256_hex",
+        "9c6bea79718ab673d0922fa377ec538b19bf95ce5ac3996a1866be3fabfaed5a",
+    ),
+    (
+        "json_at",
+        "69d489b24b797448236158093b3b0fb05981e3b523e0d7c1d399128598a7670b",
+    ),
+    (
+        "mcp_contract_executable",
+        "fe8d21098610880896eaedb698708010b12cc15d39016a8868b83fc30f843735",
+    ),
+    (
+        "json_summary_command",
+        "b14d8700a35b8b20fde3a298ca23d0fdcc82b264aacf3e0a1bd1db682e76094d",
+    ),
+    (
+        "git_command_for_root",
+        "ebe25d59ffc9aa6d822e99d32865404399cbb8d5b64334586e9850ab89339d3f",
+    ),
+    (
+        "workspace_root",
+        "35f0c72afa5bb9ce7a646b59f16684825845a4651b7bdc1132fb11fb5950b6fe",
+    ),
+    (
+        "complete_mcp_test_after_shutdown",
+        "d0dbb9ab956678a455f82e0cddfb8fd601f047cec04c3ad9d47bb2f75874d8fc",
+    ),
+];
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
     "crates/projectatlas-cli/tests/e2e_delivery.rs",
@@ -478,22 +492,6 @@ struct CliContractCase {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct McpDatabaseSnapshot {
-    authoritative: BTreeMap<String, String>,
-    usage: BTreeMap<String, String>,
-    authored_purposes: BTreeMap<String, String>,
-    metadata_canary: Option<String>,
-    project_instance_id: Option<String>,
-    usage_calls: usize,
-    usage_events: Vec<String>,
-    active_usage_instances: usize,
-    sealed_mcp_instances: usize,
-    generation: u64,
-    purpose_revision: u64,
-    publication_state: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct SqliteCompatibilitySnapshot {
     database_bytes: Vec<u8>,
     wal_bytes: Option<Vec<u8>>,
@@ -505,11 +503,19 @@ struct SqliteCompatibilitySnapshot {
 #[derive(Debug, Deserialize)]
 struct CliE2eInventory {
     schema_version: u64,
+    baseline_commit: String,
+    source: String,
+    source_sha256_baseline: String,
+    source_sha256_before_deletion: String,
     test_count: usize,
     symbol_count: usize,
     binaries: BTreeMap<String, String>,
     enforcement_tests: Vec<String>,
     tests: Vec<CliE2eInventoryTest>,
+    symbols: Vec<CliE2eInventorySymbol>,
+    fixtures: Vec<CliE2eInventoryFixture>,
+    contract_facets: CliE2eContractFacets,
+    selectors_before_move: Vec<CliE2eInventorySelectorBeforeMove>,
     selectors_after_move: Vec<CliE2eInventorySelector>,
     source_contract: CliE2eSourceContract,
 }
@@ -522,8 +528,52 @@ struct CliE2eInventoryTest {
 }
 
 #[derive(Debug, Deserialize)]
+struct CliE2eInventorySymbol {
+    kind: String,
+    name: String,
+    owners: Vec<String>,
+    attributes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eInventoryFixture {
+    name: String,
+    owners: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eInventoryFacetLine {
+    line: usize,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eInventoryFacetAttributes {
+    test: String,
+    line: usize,
+    attributes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eContractFacets {
+    environment_mutations: Vec<CliE2eInventoryFacetLine>,
+    attributes_and_platform_gates: Vec<CliE2eInventoryFacetAttributes>,
+    timeouts_and_deadlines: Vec<CliE2eInventoryFacetLine>,
+    cleanup_and_process_ownership: Vec<CliE2eInventoryFacetLine>,
+    process_isolation_and_fixtures: Vec<CliE2eInventoryFacetLine>,
+    packaged_product_routes: Vec<CliE2eInventoryFacetLine>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CliE2eInventorySelector {
     workflow: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliE2eInventorySelectorBeforeMove {
+    workflow: String,
+    line: usize,
     text: String,
 }
 
@@ -539,6 +589,177 @@ struct ObservedCliE2eTest {
     attributes: Vec<String>,
 }
 
+#[derive(Debug)]
+struct ObservedCliE2eSymbol {
+    kind: String,
+    name: String,
+    attributes: Vec<String>,
+}
+
+fn scan_cli_e2e_symbols(source: &str) -> Vec<ObservedCliE2eSymbol> {
+    let mut pending_attributes = Vec::new();
+    let mut symbols = Vec::new();
+    for line in normalize_cli_e2e_text(source).lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("#[") || trimmed.starts_with("///") {
+            pending_attributes.push(trimmed.to_owned());
+            continue;
+        }
+        let mut tokens = trimmed.split_whitespace();
+        let declaration = loop {
+            let Some(token) = tokens.next() else {
+                break None;
+            };
+            if matches!(
+                token,
+                "const" | "static" | "fn" | "struct" | "enum" | "type" | "trait"
+            ) {
+                break Some(token);
+            }
+        };
+        if let Some(kind) = declaration
+            && let Some(name) = tokens.next().and_then(|token| {
+                token
+                    .trim_start_matches("r#")
+                    .split(['(', '<', ':', '=', '{', ';'])
+                    .next()
+                    .filter(|name| !name.is_empty())
+            })
+        {
+            symbols.push(ObservedCliE2eSymbol {
+                kind: if kind == "const" || kind == "static" {
+                    "value".to_owned()
+                } else if kind == "fn" {
+                    "function".to_owned()
+                } else {
+                    kind.to_owned()
+                },
+                name: name.to_owned(),
+                attributes: pending_attributes.clone(),
+            });
+        }
+        if !trimmed.is_empty() {
+            pending_attributes.clear();
+        }
+    }
+    symbols
+}
+
+fn support_function_fingerprint(source: &str, name: &str) -> Option<String> {
+    let start = source.find(&format!("pub(super) fn {name}"))?;
+    let opening_brace = source[start..].find('{')? + start;
+    let mut depth = 0usize;
+    let mut end = None;
+    for (offset, character) in source[opening_brace..].char_indices() {
+        match character {
+            '{' => depth = depth.checked_add(1)?,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    end = Some(opening_brace + offset + character.len_utf8());
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(sha256_text(&source[start..end?]))
+}
+
+fn inventory_symbol_digest(symbols: &[CliE2eInventorySymbol]) -> String {
+    let mut canonical = String::new();
+    for symbol in symbols {
+        canonical.push_str(&symbol.kind);
+        canonical.push('\u{1f}');
+        canonical.push_str(&symbol.name);
+        canonical.push('\u{1f}');
+        canonical.push_str(&symbol.owners.join("\u{1d}"));
+        canonical.push('\u{1f}');
+        canonical.push_str(&symbol.attributes.join("\u{1d}"));
+        canonical.push('\u{1e}');
+    }
+    sha256_text(&canonical)
+}
+
+fn inventory_fixture_digest(fixtures: &[CliE2eInventoryFixture]) -> String {
+    let mut canonical = String::new();
+    for fixture in fixtures {
+        canonical.push_str(&fixture.name);
+        canonical.push('\u{1f}');
+        canonical.push_str(&fixture.owners.join("\u{1d}"));
+        canonical.push('\u{1e}');
+    }
+    sha256_text(&canonical)
+}
+
+fn inventory_facet_lines_digest(lines: &[CliE2eInventoryFacetLine]) -> String {
+    let mut canonical = String::new();
+    for line in lines {
+        canonical.push_str(&line.line.to_string());
+        canonical.push('\u{1f}');
+        canonical.push_str(&line.text);
+        canonical.push('\u{1e}');
+    }
+    sha256_text(&canonical)
+}
+
+fn inventory_attribute_facets_digest(facets: &[CliE2eInventoryFacetAttributes]) -> String {
+    let mut canonical = String::new();
+    for facet in facets {
+        canonical.push_str(&facet.test);
+        canonical.push('\u{1f}');
+        canonical.push_str(&facet.line.to_string());
+        canonical.push('\u{1f}');
+        canonical.push_str(&facet.attributes.join("\u{1d}"));
+        canonical.push('\u{1e}');
+    }
+    sha256_text(&canonical)
+}
+
+fn inventory_selector_before_move_digest(
+    selectors: &[CliE2eInventorySelectorBeforeMove],
+) -> String {
+    let mut canonical = String::new();
+    for selector in selectors {
+        canonical.push_str(&selector.workflow);
+        canonical.push('\u{1f}');
+        canonical.push_str(&selector.line.to_string());
+        canonical.push('\u{1f}');
+        canonical.push_str(&selector.text);
+        canonical.push('\u{1e}');
+    }
+    sha256_text(&canonical)
+}
+
+fn cli_e2e_support_owners(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "workspace_root" => Some(CLI_E2E_SUPPORT_WORKSPACE_ROOT_OWNERS),
+        "require_json_usize_at_least" => Some(CLI_E2E_SUPPORT_USIZE_AT_LEAST_OWNERS),
+        "require_json_usize_greater_than" => Some(CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS),
+        "McpDatabaseSnapshot"
+        | "MCP_CONTRACT_EXECUTABLE_ENV"
+        | "MCP_CONTRACT_METADATA_CANARY"
+        | "GIT_REPOSITORY_ENVIRONMENT_VARIABLES"
+        | "run_mcp_stdio"
+        | "run_mcp_stdio_with_env"
+        | "mcp_tool_text"
+        | "sqlite_table_digests"
+        | "mcp_database_snapshot"
+        | "require_json_string"
+        | "require_json_contains"
+        | "require_json_usize"
+        | "require_json_array_len"
+        | "require_json_bool"
+        | "sha256_hex"
+        | "json_at"
+        | "mcp_contract_executable"
+        | "json_summary_command"
+        | "git_command_for_root"
+        | "complete_mcp_test_after_shutdown" => Some(CLI_E2E_SUPPORT_ALL_OWNERS),
+        _ => None,
+    }
+}
+
 /// Enforce the frozen CLI E2E ownership contract against current split sources.
 fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dyn Error>> {
     let inventory_path = workspace_root.join(CLI_E2E_INVENTORY_FILE);
@@ -550,8 +771,54 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
         ))
         .into());
     }
+    if inventory.baseline_commit != CLI_E2E_BASELINE_COMMIT {
+        return Err(io::Error::other("CLI E2E baseline commit identity drifted").into());
+    }
+    if inventory.source != CLI_E2E_BASELINE_SOURCE {
+        return Err(io::Error::other("CLI E2E baseline source identity drifted").into());
+    }
+    if inventory.source_sha256_baseline != CLI_E2E_SOURCE_SHA256_BASELINE {
+        return Err(io::Error::other("CLI E2E baseline source digest drifted").into());
+    }
+    if inventory.source_sha256_before_deletion != CLI_E2E_SOURCE_SHA256_BEFORE_DELETION {
+        return Err(io::Error::other("CLI E2E pre-deletion source digest drifted").into());
+    }
     if inventory.source_contract.normalization != CLI_E2E_INVENTORY_NORMALIZATION {
         return Err(io::Error::other("CLI E2E inventory normalization contract drifted").into());
+    }
+    if inventory.symbol_count != CLI_E2E_SYMBOL_COUNT
+        || inventory.symbols.len() != CLI_E2E_SYMBOL_COUNT
+    {
+        return Err(io::Error::other(format!(
+            "CLI E2E inventory symbol coverage drifted: expected {CLI_E2E_SYMBOL_COUNT}, found {}",
+            inventory.symbols.len()
+        ))
+        .into());
+    }
+    if inventory_fixture_digest(&inventory.fixtures) != CLI_E2E_FIXTURES_DIGEST {
+        return Err(io::Error::other("CLI E2E inventory fixture identity drifted").into());
+    }
+    if inventory_symbol_digest(&inventory.symbols) != CLI_E2E_SYMBOLS_DIGEST {
+        return Err(io::Error::other("CLI E2E inventory symbol identity drifted").into());
+    }
+    if inventory.fixtures.len() != CLI_E2E_FIXTURE_COUNT {
+        return Err(io::Error::other(format!(
+            "CLI E2E inventory fixture coverage drifted: expected {CLI_E2E_FIXTURE_COUNT}, found {}",
+            inventory.fixtures.len()
+        ))
+        .into());
+    }
+    if inventory.selectors_before_move.len() != CLI_E2E_SELECTOR_BEFORE_MOVE_COUNT {
+        return Err(io::Error::other(format!(
+            "CLI E2E pre-move selector coverage drifted: expected {CLI_E2E_SELECTOR_BEFORE_MOVE_COUNT}, found {}",
+            inventory.selectors_before_move.len()
+        ))
+        .into());
+    }
+    if inventory_selector_before_move_digest(&inventory.selectors_before_move)
+        != CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST
+    {
+        return Err(io::Error::other("CLI E2E pre-move selector identity drifted").into());
     }
     if inventory.symbol_count == 0 {
         return Err(
@@ -603,6 +870,92 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
             "CLI E2E source contract files drifted: expected {expected_files:?}, found {recorded_files:?}"
         ))
         .into());
+    }
+    let facet_counts = [
+        (
+            "environment_mutations",
+            inventory.contract_facets.environment_mutations.len(),
+            416,
+        ),
+        (
+            "attributes_and_platform_gates",
+            inventory
+                .contract_facets
+                .attributes_and_platform_gates
+                .len(),
+            158,
+        ),
+        (
+            "timeouts_and_deadlines",
+            inventory.contract_facets.timeouts_and_deadlines.len(),
+            184,
+        ),
+        (
+            "cleanup_and_process_ownership",
+            inventory
+                .contract_facets
+                .cleanup_and_process_ownership
+                .len(),
+            313,
+        ),
+        (
+            "process_isolation_and_fixtures",
+            inventory
+                .contract_facets
+                .process_isolation_and_fixtures
+                .len(),
+            1_029,
+        ),
+        (
+            "packaged_product_routes",
+            inventory.contract_facets.packaged_product_routes.len(),
+            651,
+        ),
+    ];
+    for (name, observed, expected) in facet_counts {
+        if observed != expected {
+            return Err(io::Error::other(format!(
+                "CLI E2E {name} facet coverage drifted: expected {expected}, found {observed}"
+            ))
+            .into());
+        }
+    }
+    let facet_digests = [
+        (
+            "environment_mutations",
+            inventory_facet_lines_digest(&inventory.contract_facets.environment_mutations),
+            CLI_E2E_ENVIRONMENT_FACETS_DIGEST,
+        ),
+        (
+            "timeouts_and_deadlines",
+            inventory_facet_lines_digest(&inventory.contract_facets.timeouts_and_deadlines),
+            CLI_E2E_TIMEOUT_FACETS_DIGEST,
+        ),
+        (
+            "cleanup_and_process_ownership",
+            inventory_facet_lines_digest(&inventory.contract_facets.cleanup_and_process_ownership),
+            CLI_E2E_CLEANUP_FACETS_DIGEST,
+        ),
+        (
+            "process_isolation_and_fixtures",
+            inventory_facet_lines_digest(&inventory.contract_facets.process_isolation_and_fixtures),
+            CLI_E2E_ISOLATION_FACETS_DIGEST,
+        ),
+        (
+            "packaged_product_routes",
+            inventory_facet_lines_digest(&inventory.contract_facets.packaged_product_routes),
+            CLI_E2E_PACKAGED_FACETS_DIGEST,
+        ),
+    ];
+    for (name, observed, expected) in facet_digests {
+        if observed != expected {
+            return Err(io::Error::other(format!("CLI E2E {name} facet identity drifted")).into());
+        }
+    }
+    if inventory_attribute_facets_digest(&inventory.contract_facets.attributes_and_platform_gates)
+        != CLI_E2E_ATTRIBUTES_FACETS_DIGEST
+    {
+        return Err(io::Error::other("CLI E2E attribute/platform facet identity drifted").into());
     }
 
     let mut expected_tests = BTreeMap::new();
@@ -734,6 +1087,195 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
         }
     }
 
+    let mut observed_symbols_by_owner = BTreeMap::<String, Vec<ObservedCliE2eSymbol>>::new();
+    let mut observed_source_lines = BTreeSet::new();
+    for relative_path in CLI_E2E_SOURCE_PATHS
+        .iter()
+        .copied()
+        .chain(std::iter::once(CLI_E2E_SUPPORT_PATH))
+    {
+        let source =
+            normalize_cli_e2e_text(&fs::read_to_string(workspace_root.join(relative_path))?);
+        for line in source.lines() {
+            observed_source_lines.insert(line.to_owned());
+            if let Some(unqualified) = line.strip_prefix("pub(super) ") {
+                observed_source_lines.insert(unqualified.to_owned());
+            }
+        }
+        let owner = relative_path
+            .strip_prefix("crates/projectatlas-cli/tests/")
+            .and_then(|path| path.strip_suffix(".rs"))
+            .unwrap_or(relative_path)
+            .to_owned();
+        observed_symbols_by_owner.insert(owner, scan_cli_e2e_symbols(&source));
+    }
+    let observed_support_symbols = observed_symbols_by_owner
+        .get("support/mod")
+        .ok_or_else(|| io::Error::other("CLI E2E shared support source is missing"))?;
+    let support_source = normalize_cli_e2e_text(&fs::read_to_string(
+        workspace_root.join(CLI_E2E_SUPPORT_PATH),
+    )?);
+    for (name, expected_digest) in CLI_E2E_SUPPORT_FUNCTION_DIGESTS {
+        let observed_digest =
+            support_function_fingerprint(&support_source, name).ok_or_else(|| {
+                io::Error::other(format!(
+                    "CLI E2E shared support function is missing: {name}"
+                ))
+            })?;
+        if observed_digest != *expected_digest {
+            return Err(io::Error::other(format!(
+                "CLI E2E shared support function drifted: {name}"
+            ))
+            .into());
+        }
+    }
+    let observed_binary_symbols = observed_symbols_by_owner
+        .iter()
+        .filter(|(owner, _)| owner.as_str() != "support/mod");
+    for symbol in &inventory.symbols {
+        let matching_support = observed_support_symbols.iter().any(|observed| {
+            observed.kind == symbol.kind
+                && observed.name == symbol.name
+                && observed.attributes == symbol.attributes
+        });
+        let mut observed_owners = BTreeSet::<String>::new();
+        for (owner, symbols) in observed_binary_symbols.clone() {
+            if symbols
+                .iter()
+                .any(|observed| observed.kind == symbol.kind && observed.name == symbol.name)
+            {
+                observed_owners.insert(owner.clone());
+            }
+        }
+        let expected_owners = cli_e2e_support_owners(&symbol.name)
+            .map(|owners| {
+                owners
+                    .iter()
+                    .map(|owner| (*owner).to_owned())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or(observed_owners.clone());
+        if !matching_support
+            && cli_e2e_support_owners(&symbol.name).is_some()
+            && observed_owners.is_empty()
+        {
+            return Err(io::Error::other(format!(
+                "CLI E2E shared support symbol is missing: {}",
+                symbol.name
+            ))
+            .into());
+        }
+        if observed_owners.is_empty() && !matching_support {
+            return Err(io::Error::other(format!(
+                "CLI E2E inventory symbol is missing from current sources: {}",
+                symbol.name
+            ))
+            .into());
+        }
+        if symbol.owners.iter().cloned().collect::<BTreeSet<_>>() != expected_owners {
+            return Err(io::Error::other(format!(
+                "CLI E2E symbol ownership drift for {}",
+                symbol.name
+            ))
+            .into());
+        }
+    }
+    let mut observed_fixture_owners = BTreeMap::<String, BTreeSet<String>>::new();
+    for (owner, symbols) in observed_symbols_by_owner
+        .iter()
+        .filter(|(owner, _)| owner.as_str() != "support/mod")
+    {
+        for symbol in symbols.iter().filter(|symbol| symbol.kind == "value") {
+            observed_fixture_owners
+                .entry(symbol.name.clone())
+                .or_default()
+                .insert(owner.clone());
+        }
+    }
+    let mut recorded_fixture_names = BTreeSet::new();
+    for fixture in &inventory.fixtures {
+        if !recorded_fixture_names.insert(&fixture.name) {
+            return Err(io::Error::other(format!(
+                "CLI E2E inventory contains duplicate fixture {}",
+                fixture.name
+            ))
+            .into());
+        }
+        let support_owners = cli_e2e_support_owners(&fixture.name);
+        let expected_owners = if let Some(owners) = support_owners {
+            owners
+                .iter()
+                .map(|owner| (*owner).to_owned())
+                .collect::<BTreeSet<_>>()
+        } else {
+            observed_fixture_owners
+                .get(&fixture.name)
+                .ok_or_else(|| {
+                    io::Error::other(format!(
+                        "CLI E2E inventory fixture is missing from current sources: {}",
+                        fixture.name
+                    ))
+                })?
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        if fixture.owners.iter().cloned().collect::<BTreeSet<_>>() != expected_owners {
+            return Err(io::Error::other(format!(
+                "CLI E2E fixture ownership drift for {}",
+                fixture.name
+            ))
+            .into());
+        }
+    }
+
+    for (name, facets) in [
+        (
+            "environment_mutations",
+            &inventory.contract_facets.environment_mutations,
+        ),
+        (
+            "timeouts_and_deadlines",
+            &inventory.contract_facets.timeouts_and_deadlines,
+        ),
+        (
+            "cleanup_and_process_ownership",
+            &inventory.contract_facets.cleanup_and_process_ownership,
+        ),
+        (
+            "process_isolation_and_fixtures",
+            &inventory.contract_facets.process_isolation_and_fixtures,
+        ),
+        (
+            "packaged_product_routes",
+            &inventory.contract_facets.packaged_product_routes,
+        ),
+    ] {
+        for facet in facets {
+            if !observed_source_lines.contains(&facet.text) {
+                return Err(io::Error::other(format!(
+                    "CLI E2E {name} facet line disappeared: {}",
+                    facet.text.trim()
+                ))
+                .into());
+            }
+        }
+    }
+    let observed_attributes = inventory
+        .tests
+        .iter()
+        .map(|test| (test.name.as_str(), test.attributes.as_slice()))
+        .collect::<BTreeMap<_, _>>();
+    for facet in &inventory.contract_facets.attributes_and_platform_gates {
+        if observed_attributes.get(facet.test.as_str()) != Some(&facet.attributes.as_slice()) {
+            return Err(io::Error::other(format!(
+                "CLI E2E attribute/platform facet drift for {}",
+                facet.test
+            ))
+            .into());
+        }
+    }
+
     let expected_selectors = inventory
         .selectors_after_move
         .iter()
@@ -849,6 +1391,7 @@ fn copy_cli_e2e_contract_fixture(
     fixture_root: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let mut paths = CLI_E2E_SOURCE_PATHS.to_vec();
+    paths.push(CLI_E2E_SUPPORT_PATH);
     paths.extend_from_slice(CLI_E2E_WORKFLOW_PATHS);
     paths.push(CLI_E2E_INVENTORY_FILE);
     for relative_path in paths {
@@ -859,6 +1402,19 @@ fn copy_cli_e2e_contract_fixture(
         fs::copy(workspace_root.join(relative_path), destination)?;
     }
     Ok(())
+}
+
+fn tampered_cli_e2e_inventory_fixture(
+    workspace_root: &Path,
+    mutate: impl FnOnce(&mut Value),
+) -> Result<tempfile::TempDir, Box<dyn Error>> {
+    let fixture = tempfile::tempdir()?;
+    copy_cli_e2e_contract_fixture(workspace_root, fixture.path())?;
+    let inventory_path = fixture.path().join(CLI_E2E_INVENTORY_FILE);
+    let mut inventory: Value = serde_json::from_str(&fs::read_to_string(&inventory_path)?)?;
+    mutate(&mut inventory);
+    fs::write(inventory_path, serde_json::to_string_pretty(&inventory)?)?;
+    Ok(fixture)
 }
 
 fn require_cli_e2e_contract_rejection(
@@ -960,6 +1516,110 @@ fn cli_e2e_inventory_contract_rejects_source_and_selector_drift() -> Result<(), 
     require_cli_e2e_contract_rejection(
         assert_cli_e2e_inventory_contract(fixture.path()),
         "workflow selector drift",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift()
+-> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+
+    for (field, expected_fragment) in [
+        ("symbols", "missing field `symbols`"),
+        ("fixtures", "missing field `fixtures`"),
+        ("contract_facets", "missing field `contract_facets`"),
+        (
+            "selectors_before_move",
+            "missing field `selectors_before_move`",
+        ),
+    ] {
+        let fixture = tampered_cli_e2e_inventory_fixture(&workspace_root, |inventory| {
+            if let Some(object) = inventory.as_object_mut() {
+                object.remove(field);
+            }
+        })?;
+        require_cli_e2e_contract_rejection(
+            assert_cli_e2e_inventory_contract(fixture.path()),
+            expected_fragment,
+        )?;
+    }
+
+    let fixture = tampered_cli_e2e_inventory_fixture(&workspace_root, |inventory| {
+        inventory["symbols"][0]["name"] = json!("drifted_shared_helper");
+    })?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "inventory symbol identity drifted",
+    )?;
+
+    let fixture = tampered_cli_e2e_inventory_fixture(&workspace_root, |inventory| {
+        inventory["fixtures"][0]["name"] = json!("drifted_fixture");
+    })?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "inventory fixture identity drifted",
+    )?;
+
+    let fixture = tampered_cli_e2e_inventory_fixture(&workspace_root, |inventory| {
+        inventory["contract_facets"]["environment_mutations"][0]["text"] =
+            json!("drifted environment mutation");
+    })?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "environment_mutations facet identity drifted",
+    )?;
+
+    let fixture = tampered_cli_e2e_inventory_fixture(&workspace_root, |inventory| {
+        inventory["baseline_commit"] = json!("drifted_baseline");
+    })?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "baseline commit identity drifted",
+    )?;
+
+    let fixture = tampered_cli_e2e_inventory_fixture(&workspace_root, |inventory| {
+        if let Some(selectors) = inventory["selectors_before_move"].as_array_mut() {
+            selectors.pop();
+        }
+    })?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "pre-move selector coverage drifted",
+    )?;
+
+    let fixture = tempfile::tempdir()?;
+    copy_cli_e2e_contract_fixture(&workspace_root, fixture.path())?;
+    let support_path = fixture.path().join(CLI_E2E_SUPPORT_PATH);
+    let support_source = fs::read_to_string(&support_path)?;
+    let drifted_source = support_source.replacen(
+        "let input = format!(",
+        "let input = String::new();\n    let input = format!(",
+        1,
+    );
+    fs::write(support_path, drifted_source)?;
+    let inventory_path = fixture.path().join(CLI_E2E_INVENTORY_FILE);
+    let mut inventory: Value = serde_json::from_str(&fs::read_to_string(&inventory_path)?)?;
+    let delivery_path = fixture.path().join(CLI_E2E_SOURCE_PATHS[0]);
+    let delivery_source = fs::read_to_string(delivery_path)?;
+    inventory["source_contract"]["files"][CLI_E2E_SOURCE_PATHS[0]] =
+        json!(sha256_text(&normalize_cli_e2e_text(&delivery_source)));
+    fs::write(inventory_path, serde_json::to_string_pretty(&inventory)?)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "shared support function drifted",
+    )?;
+
+    let fixture = tempfile::tempdir()?;
+    copy_cli_e2e_contract_fixture(&workspace_root, fixture.path())?;
+    let support_path = fixture.path().join(CLI_E2E_SUPPORT_PATH);
+    let support_source = fs::read_to_string(&support_path)?;
+    let missing_helper_source =
+        support_source.replacen("pub(super) fn mcp_tool_text", "fn mcp_tool_text", 1);
+    fs::write(support_path, missing_helper_source)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "shared support function is missing",
     )?;
     Ok(())
 }
@@ -7115,41 +7775,6 @@ fn write_fake_codex_projectatlas_integration(
         &marketplace_manifest,
         r#"{"name":"projectatlas","plugins":[{"name":"projectatlas","source":{"source":"local","path":"./plugins/projectatlas"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"}}]}"#,
     )?;
-    git_success(
-        &fixture_repo,
-        &["init", "--object-format=sha256", "--initial-branch=main"],
-    )?;
-    git_success(
-        &fixture_repo,
-        &["config", "user.email", "test@example.invalid"],
-    )?;
-    git_success(&fixture_repo, &["config", "user.name", "ProjectAtlas test"])?;
-    git_success(&fixture_repo, &["add", "."])?;
-    git_success(&fixture_repo, &["commit", "-m", "baseline (#549)"])?;
-    let base_output = git_command_for_root(&fixture_repo)
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    if !base_output.status.success() {
-        return Err(io::Error::other("ignored-document fixture base lookup failed").into());
-    }
-    let base = String::from_utf8(base_output.stdout)?.trim().to_owned();
-    git_success(&fixture_repo, &["checkout", "-b", "feature"])?;
-    git_success(
-        &fixture_repo,
-        &["commit", "--allow-empty", "-m", "candidate (#549)"],
-    )?;
-    let head_output = git_command_for_root(&fixture_repo)
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    if !head_output.status.success() {
-        return Err(io::Error::other("ignored-document fixture HEAD lookup failed").into());
-    }
-    let head = String::from_utf8(head_output.stdout)?.trim().to_owned();
-    git_success(
-        &fixture_repo,
-        &["update-ref", "refs/remotes/origin/main", &base],
-    )?;
-    fs::create_dir_all(fixture_repo.join("docs"))?;
     fs::write(
         marketplace_root.join(CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME),
         format!(
@@ -9897,12 +10522,6 @@ exec stat "$@"
         if lock.exists() {
             fs::remove_file(lock)?;
         }
-    };
-    if try_native_lock()? {
-        return Err(io::Error::other(
-            "POSIX plugin lock was released while the mutation child still held its descriptor",
-        )
-        .into());
     }
     Ok(())
 }
@@ -10263,29 +10882,6 @@ fn windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion()
             "Codex ProjectAtlas plugin marketplace updated to {release_tag}."
         ))
     {
-        Err(io::Error::other(format!(
-            "second installer read Codex state before the first rollback completed:\n{calls_while_first_held}"
-        )))
-    } else {
-        Ok(())
-    };
-    fs::write(&release_first, b"release")?;
-    let first_output =
-        wait_for_plugin_installer_output(first_child, "first", Duration::from_secs(45))?;
-    let second_output =
-        wait_for_plugin_installer_output(second_child, "second", Duration::from_secs(45))?;
-    queued_result?;
-    require_successful_plugin_installer_output(first_output)?;
-    require_successful_plugin_installer_output(second_output)?;
-
-    if fs::read_to_string(&second_observed)?.trim() != "restored" {
-        return Err(io::Error::other(
-            "second installer observed the first installer's incomplete mutation",
-        )
-        .into());
-    }
-    let state_after = repository_filesystem_snapshot(&codex_dir)?;
-    if state_after != state_before {
         return Err(io::Error::other(format!(
             "successful update did not refuse a swapped cleanup path truthfully:\n{output_text}\nlinks={snapshot_links:#?}\ntarget={cleanup_target:?}"
         ))
@@ -12410,8 +13006,6 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             }
         }
     }
-    mcp_tool_text(&stdout, 2)
-}
 
     for case in &cases {
         match case.name {
@@ -12523,8 +13117,6 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
             .into());
         }
     }
-    Ok(())
-}
 
     let missing_index_root = temp.path().join(MISSING_INDEX_DIR_NAME);
     fs::create_dir(&missing_index_root)?;
@@ -12577,8 +13169,6 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
     if missing_index_root.join(ATLAS_DIR_NAME).exists() {
         return Err(io::Error::other("missing-index MCP review created project state").into());
     }
-    Ok(())
-}
 
     let stale_before = mcp_database_snapshot(&db)?;
     let (stale_response, stale_stdout) = run_mcp_contract_raw_call(
@@ -13382,13 +13972,1892 @@ fn coverage_semantics(
     }))?)
 }
 
-fn git_command_for_root(root: &Path) -> StdCommand {
-    let mut command = StdCommand::new("git");
-    command.current_dir(root);
-    for variable in GIT_REPOSITORY_ENVIRONMENT_VARIABLES {
-        command.env_remove(variable);
+struct CliHelpSurface {
+    subcommands: Vec<String>,
+    defaults: Vec<String>,
+    possible_values: Vec<String>,
+    help_present: bool,
+}
+
+/// Read one packaged help route and retain its command/default contract.
+fn cli_help_surface(executable: &Path, route: &str) -> Result<CliHelpSurface, Box<dyn Error>> {
+    let output = StdCommand::new(executable)
+        .args(route.split_whitespace())
+        .arg("--help")
+        .output()?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(io::Error::other(format!(
+            "packaged CLI help failed for {route:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
     }
-    command
+    let help = String::from_utf8(output.stdout)?.replace("\r\n", "\n");
+    let mut subcommands = Vec::new();
+    let mut help_present = false;
+    let mut in_commands = false;
+    for line in help.lines() {
+        if line == "Commands:" {
+            in_commands = true;
+            continue;
+        }
+        if in_commands && line.trim().is_empty() {
+            break;
+        }
+        if in_commands {
+            let name = line.split_whitespace().next().unwrap_or("");
+            if name == "help" {
+                help_present = true;
+            } else if !name.is_empty() {
+                subcommands.push(name.to_string());
+            }
+        }
+    }
+    let possible_values = help
+        .lines()
+        .skip_while(|line| line.trim() != "Possible values:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("- ")
+                .and_then(|value| value.split(':').next())
+                .map(str::to_string)
+        })
+        .collect();
+    let mut defaults = Vec::new();
+    let mut default_owner = None;
+    for line in help.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--")
+            || trimmed.starts_with('<')
+            || (trimmed.starts_with('[') && !trimmed.starts_with("[default:"))
+        {
+            default_owner = trimmed.split_whitespace().next().map(str::to_string);
+        }
+        if let Some((_, tail)) = trimmed.split_once("[default: ") {
+            let (value, _) = tail.split_once(']').ok_or_else(|| {
+                io::Error::other(format!("unterminated default in {route:?} help"))
+            })?;
+            let owner = default_owner.as_deref().ok_or_else(|| {
+                io::Error::other(format!("unowned default {value:?} in {route:?} help"))
+            })?;
+            defaults.push(format!("{owner}={value}"));
+        }
+    }
+    Ok(CliHelpSurface {
+        subcommands,
+        defaults,
+        possible_values,
+        help_present,
+    })
+}
+
+/// Decode one ordered string array from the frozen CLI surface fixture.
+fn cli_value_strings(value: &Value, label: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    value
+        .as_array()
+        .ok_or_else(|| io::Error::other(format!("{label:?} CLI fixture value was not an array")))?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                io::Error::other(format!("{label:?} CLI fixture contained a non-string")).into()
+            })
+        })
+        .collect()
+}
+
+/// Decode one ordered string array at a frozen CLI fixture path.
+fn cli_surface_strings(value: &Value, path: &[&str]) -> Result<Vec<String>, Box<dyn Error>> {
+    cli_value_strings(json_at(value, path)?, &path.join("."))
+}
+
+/// Return whether every older value survives in order among additive defaults.
+fn ordered_subsequence(expected: &[String], actual: &[String]) -> bool {
+    let mut actual = actual.iter();
+    expected
+        .iter()
+        .all(|expected| actual.by_ref().any(|actual| actual == expected))
+}
+
+/// Require the selected runtime and plugin skill to be the exact workspace release candidate.
+fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let runtime = run_mcp_contract_json(
+        executable,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            "--require-version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+            "runtime-info".to_string(),
+        ],
+    )?;
+    require_json_string(&runtime, &["version"], env!("CARGO_PKG_VERSION"))?;
+    let plugin_root = if let Some(plugin_root) = std::env::var_os(MCP_CONTRACT_PLUGIN_ROOT_ENV) {
+        PathBuf::from(plugin_root)
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .ok_or_else(|| io::Error::other("MCP contract workspace root was not found"))?
+            .join("plugins")
+            .join("projectatlas")
+    };
+    let manifest: Value = serde_json::from_slice(&fs::read(
+        plugin_root.join(".codex-plugin").join("plugin.json"),
+    )?)?;
+    require_json_string(&manifest, &["version"], env!("CARGO_PKG_VERSION"))?;
+    let skill = fs::read_to_string(
+        plugin_root
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_FILE_NAME),
+    )?;
+    for route in [
+        "atlas_worktree_list",
+        "atlas_worktree_add",
+        "atlas_worktree_remove",
+        "atlas_init",
+        "atlas_session_brief",
+        "atlas_file_summary",
+        "atlas_symbol_relations",
+        "atlas_slice",
+        "atlas_token_report",
+    ] {
+        if !skill.contains(route) {
+            return Err(io::Error::other(format!(
+                "release-candidate ProjectAtlas skill omitted {route}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Run one release-candidate CLI command and decode its typed JSON output.
+fn run_mcp_contract_json(
+    executable: &Path,
+    cwd: &Path,
+    arguments: &[String],
+) -> Result<Value, Box<dyn Error>> {
+    let output = StdCommand::new(executable)
+        .current_dir(cwd)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .args(arguments)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "MCP contract CLI failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+/// Run one packaged CLI command and enforce its stream and typed-output contract.
+fn run_packaged_cli_contract_case(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    case: &CliContractCase,
+) -> Result<Option<Value>, Box<dyn Error>> {
+    if matches!(case.output, CliContractOutput::Mcp) {
+        let stdout = run_mcp_contract_inventory(executable, cwd, database)?;
+        let response = mcp_response(&stdout, 2)?;
+        let tools = json_at(&response, &["result", "tools"])?
+            .as_array()
+            .ok_or_else(|| io::Error::other("packaged CLI mcp omitted its tool inventory"))?;
+        if tools.is_empty() {
+            return Err(io::Error::other("packaged CLI mcp advertised no tools").into());
+        }
+        assert_cli_contract_payload(case.name, &response)?;
+        return Ok(Some(response));
+    }
+
+    let output = StdCommand::new(executable)
+        .current_dir(cwd)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--require-version",
+            env!("CARGO_PKG_VERSION"),
+            "--format",
+            "json",
+            "--db",
+        ])
+        .arg(database)
+        .args(&case.arguments)
+        .output()?;
+    let exit_code = output.status.code().unwrap_or(-1);
+    if exit_code != case.expected_exit_code {
+        return Err(io::Error::other(format!(
+            "{} exited {exit_code} instead of {}: stdout={} stderr={}",
+            case.name,
+            case.expected_exit_code,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    match case.output {
+        CliContractOutput::JsonObject | CliContractOutput::JsonArray => {
+            if !output.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "{} wrote typed success output to stderr: {}",
+                    case.name,
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            let decoded: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+                io::Error::other(format!(
+                    "{} emitted invalid JSON: {error}; stdout={}",
+                    case.name,
+                    String::from_utf8_lossy(&output.stdout)
+                ))
+            })?;
+            let expected_shape = match case.output {
+                CliContractOutput::JsonObject => decoded.is_object(),
+                CliContractOutput::JsonArray => decoded.is_array(),
+                CliContractOutput::Empty | CliContractOutput::Mcp => false,
+            };
+            if !expected_shape {
+                return Err(io::Error::other(format!(
+                    "{} emitted the wrong JSON shape: {decoded}",
+                    case.name
+                ))
+                .into());
+            }
+            assert_cli_contract_payload(case.name, &decoded)?;
+            Ok(Some(decoded))
+        }
+        CliContractOutput::Empty => {
+            if !output.stdout.is_empty() || !output.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "{} unexpectedly wrote output: stdout={} stderr={}",
+                    case.name,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            Ok(None)
+        }
+        CliContractOutput::Mcp => unreachable!("MCP output returned above"),
+    }
+}
+
+/// Require one behavior-owned discriminator from every packaged CLI success payload.
+fn assert_cli_contract_payload(name: &str, payload: &Value) -> Result<(), Box<dyn Error>> {
+    match name {
+        "init" => {
+            require_json_bool(payload, &["ok"], true)?;
+            require_json_array_len(payload, &["host_configs"], 3)?;
+        }
+        "map" | "lint" => {}
+        "scan" => {
+            require_json_usize_at_least(payload, &["overview", "files"], 1)?;
+            require_json_usize_at_least(payload, &["symbols", "parsed"], 1)?;
+        }
+        "overview" => require_json_usize_at_least(payload, &["files"], 1)?,
+        "folders" => require_json_string(payload, &["0", "path"], SRC_DIR_NAME)?,
+        "files" => require_json_string(payload, &["0", "path"], "src/duplicate.rs")?,
+        "next" => {
+            require_json_string(payload, &["query"], "contract")?;
+            require_json_string(
+                payload,
+                &["files", "0", "next_call", "capability"],
+                "summary",
+            )?;
+        }
+        "outline" => require_json_string(payload, &["path"], "src/lib.rs")?,
+        "summary" => {
+            require_json_string(payload, &["file_path"], "src/lib.rs")?;
+            require_json_string(payload, &["source_status"], "live-source")?;
+            require_json_string(payload, &["coverage", "trust"], "trusted")?;
+        }
+        "search" => {
+            require_json_string(payload, &["query"], "contract")?;
+            require_json_bool(payload, &["truncated"], true)?;
+            require_json_string(payload, &["truncation_reason"], "result-limit")?;
+        }
+        "slice" => {
+            require_json_string(payload, &["path"], "src/lib.rs")?;
+            require_json_contains(payload, &["content"], "indexed")?;
+        }
+        "symbols" => {
+            require_json_usize_at_least(payload, &["parsed"], 1)?;
+            require_json_usize_at_least(payload, &["symbols"], 1)?;
+        }
+        "settings" => {
+            require_json_bool(payload, &["root_verified"], true)?;
+            require_json_string(payload, &["database", "schema", "compatibility"], "current")?;
+            require_json_string(payload, &["database", "publication", "state"], "complete")?;
+            require_json_usize_at_least(payload, &["database", "publication", "generation"], 1)?;
+        }
+        "snapshot" => {
+            let digest = json_at(payload, &["snapshot_digest"])?
+                .as_str()
+                .ok_or_else(|| io::Error::other("snapshot digest was not a string"))?;
+            if digest.len() != 64
+                || !digest
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+            {
+                return Err(io::Error::other(format!(
+                    "snapshot digest was not a SHA-256 hex digest: {digest:?}"
+                ))
+                .into());
+            }
+            require_json_string(payload, &["signature"], "unsigned_local")?;
+        }
+        "parser-pack" => {
+            require_json_string(payload, &["operation"], "status")?;
+            require_json_string(payload, &["pack_id"], "broad-parser")?;
+        }
+        "root" => {
+            require_json_bool(payload, &["verified"], true)?;
+            require_json_string(payload, &["runtime_version"], env!("CARGO_PKG_VERSION"))?;
+        }
+        "config" => {
+            let extensions = json_at(payload, &["source_extensions"])?
+                .as_array()
+                .ok_or_else(|| io::Error::other("config source_extensions was not an array"))?;
+            if extensions.is_empty() {
+                return Err(io::Error::other("config advertised no source extensions").into());
+            }
+        }
+        "ignore" => {
+            require_json_bool(payload, &["gitignore_present"], true)?;
+            require_json_string(payload, &["manual_layer_order"], "after-gitignore")?;
+        }
+        "watch-status" => require_json_contains(payload, &["recommendation"], "watch")?,
+        "watch" => {
+            require_json_string(payload, &["mode"], "single-refresh")?;
+            require_json_usize(payload, &["cycles"], 1)?;
+        }
+        "health-check" => require_json_usize_at_least(payload, &["total"], 1)?,
+        "health" => {
+            require_json_string(payload, &["category"], "duplicate-purpose")?;
+            require_json_string(payload, &["path"], "src/lib.rs")?;
+        }
+        "token" => require_json_string(payload, &["detail_availability"], "retained")?,
+        "parity" => {
+            require_json_string(payload, &["profile"], "repository-intelligence")?;
+            require_json_bool(payload, &["ok"], true)?;
+        }
+        "strip-legacy-purpose" => require_json_bool(payload, &["applied"], false)?,
+        "reset-index" => require_json_bool(payload, &["dry_run"], true)?,
+        "mcp" => require_json_array_len(payload, &["result", "tools"], 43)?,
+        "mcp-config" => {
+            let arguments = json_at(payload, &["mcpServers", "projectatlas", "args"])?
+                .as_array()
+                .ok_or_else(|| io::Error::other("mcp-config args was not an array"))?;
+            if !arguments.iter().any(|argument| argument == "mcp")
+                || !arguments
+                    .iter()
+                    .any(|argument| argument == env!("CARGO_PKG_VERSION"))
+            {
+                return Err(io::Error::other(
+                    "mcp-config omitted the command or exact runtime-version guard",
+                )
+                .into());
+            }
+        }
+        "runtime-info" => {
+            require_json_string(payload, &["version"], env!("CARGO_PKG_VERSION"))?;
+            require_json_array_len(payload, &["mcp_tools"], 43)?;
+        }
+        "purpose" => {
+            require_json_string(payload, &["purpose_set", "path"], "src/watched.rs")?;
+            require_json_bool(payload, &["purpose_set", "agent_reviewed"], true)?;
+        }
+        unknown => {
+            return Err(io::Error::other(format!(
+                "packaged CLI contract has no payload discriminator for {unknown}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Verify the small filesystem surface owned by packaged commands in the main table.
+fn assert_cli_contract_filesystem_effect(name: &str, repo: &Path) -> Result<(), Box<dyn Error>> {
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    match name {
+        "init" => {
+            for relative in [
+                "config.toml",
+                "projectatlas-nonsource-files.toon",
+                "projectatlas.db",
+                "projectatlas.mcp.json",
+                "projectatlas.claude.mcp.json",
+                "projectatlas.opencode.json",
+            ] {
+                let path = atlas.join(relative);
+                if !path.is_file() || fs::metadata(&path)?.len() == 0 {
+                    return Err(io::Error::other(format!(
+                        "packaged init omitted owned artifact {}",
+                        path.display()
+                    ))
+                    .into());
+                }
+            }
+        }
+        "map" => {
+            let path = atlas.join("projectatlas.toon");
+            let map = fs::read_to_string(&path).map_err(|error| {
+                io::Error::other(format!(
+                    "packaged map omitted readable artifact {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if !map.contains("src/lib.rs") {
+                return Err(io::Error::other(
+                    "packaged map artifact omitted the indexed Rust source",
+                )
+                .into());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Verify a packaged snapshot is a bounded readable archive with both owned entries.
+fn assert_cli_snapshot_archive(path: &Path) -> Result<(), Box<dyn Error>> {
+    let decoder = zstd::stream::read::Decoder::new(fs::File::open(path)?)?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut entries = Vec::new();
+    for entry in archive.entries()? {
+        let entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            return Err(io::Error::other("snapshot archive contained a non-file entry").into());
+        }
+        entries.push(entry.path()?.to_string_lossy().replace('\\', "/"));
+    }
+    entries.sort();
+    let expected = vec![
+        "projectatlas-derived-snapshot/graph.json".to_string(),
+        "projectatlas-derived-snapshot/manifest.json".to_string(),
+    ];
+    if entries != expected {
+        return Err(io::Error::other(format!(
+            "snapshot archive entries drifted: actual={entries:?} expected={expected:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Prove first-run init owns exactly its declared non-database repository files.
+fn assert_packaged_cli_first_init_filesystem(
+    executable: &Path,
+    temp: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let repo = temp.join("cli-first-init-contract");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn init_contract() {}\n",
+    )?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n")?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let before = repository_filesystem_snapshot(temp)?;
+    let report = run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+    )?;
+    require_json_bool(&report, &["ok"], true)?;
+    let after = repository_filesystem_snapshot(temp)?;
+    let expected_additions = BTreeSet::from([
+        "cli-first-init-contract/.projectatlas".to_string(),
+        "cli-first-init-contract/.projectatlas/config.toml".to_string(),
+        "cli-first-init-contract/.projectatlas/projectatlas-nonsource-files.toon".to_string(),
+        "cli-first-init-contract/.projectatlas/projectatlas.claude.mcp.json".to_string(),
+        "cli-first-init-contract/.projectatlas/projectatlas.mcp.json".to_string(),
+        "cli-first-init-contract/.projectatlas/projectatlas.opencode.json".to_string(),
+    ]);
+    let additions = after
+        .keys()
+        .filter(|path| !before.contains_key(*path))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let removals = before
+        .keys()
+        .filter(|path| !after.contains_key(*path))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let modifications = before
+        .iter()
+        .filter(|(path, value)| after.get(*path) != Some(*value))
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    if additions != expected_additions || !removals.is_empty() || !modifications.is_empty() {
+        return Err(io::Error::other(format!(
+            "first-run init filesystem ownership drifted: additions={additions:?} removals={removals:?} modifications={modifications:?}"
+        ))
+        .into());
+    }
+    if !database.is_file() || fs::metadata(&database)?.len() == 0 {
+        return Err(io::Error::other("first-run init omitted its SQLite database").into());
+    }
+    Ok(())
+}
+
+/// Snapshot repository paths, types, and file bytes while `SQLite` owns its own checks.
+fn repository_filesystem_snapshot(repo: &Path) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+    fn visit(
+        repo: &Path,
+        directory: &Path,
+        snapshot: &mut BTreeMap<String, String>,
+    ) -> Result<(), Box<dyn Error>> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(repo)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative == ".git" || relative.ends_with("/.git") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                snapshot.insert(
+                    relative,
+                    format!("symlink:{}", fs::read_link(&path)?.to_string_lossy()),
+                );
+            } else if file_type.is_dir() {
+                snapshot.insert(relative, "directory".to_string());
+                visit(repo, &path, snapshot)?;
+            } else if file_type.is_file() {
+                if matches!(
+                    relative.as_str(),
+                    ".projectatlas/projectatlas.db"
+                        | ".projectatlas/projectatlas.db-wal"
+                        | ".projectatlas/projectatlas.db-shm"
+                ) || relative.ends_with("/.projectatlas/projectatlas.db")
+                    || relative.ends_with("/.projectatlas/projectatlas.db-wal")
+                    || relative.ends_with("/.projectatlas/projectatlas.db-shm")
+                {
+                    continue;
+                }
+                let bytes = fs::read(&path)?;
+                snapshot.insert(
+                    relative,
+                    format!("file:{}:{}", bytes.len(), sha256_hex(&bytes)),
+                );
+            } else {
+                snapshot.insert(relative, "other".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(repo, repo, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+#[cfg(windows)]
+fn output_contains_path_name(output: &str, path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        output
+            .replace(['\r', '\n'], "")
+            .contains(name.to_string_lossy().as_ref())
+    })
+}
+
+/// Require exact effects across the enclosing contract fixture, including explicit output paths.
+fn assert_cli_contract_outer_filesystem_delta(
+    name: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    let allowed_path = match name {
+        "map" => Some("cli-contract/.projectatlas/projectatlas.toon"),
+        "snapshot" => Some("cli-contract-snapshot.tar.zst"),
+        _ => None,
+    };
+    let mut expected = before.clone();
+    if let Some(path) = allowed_path {
+        let value = after.get(path).ok_or_else(|| {
+            io::Error::other(format!(
+                "{name} omitted its declared outer filesystem artifact"
+            ))
+        })?;
+        expected.insert(path.to_string(), value.clone());
+    }
+    if after != &expected {
+        return Err(io::Error::other(format!(
+            "{name} changed an undeclared path in the enclosing fixture: before={before:?} after={after:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Require one exact repository-filesystem delta for a packaged command family.
+fn assert_cli_contract_filesystem_delta(
+    name: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    if name == "map" {
+        let path = ".projectatlas/projectatlas.toon";
+        let mut expected = before.clone();
+        let value = after
+            .get(path)
+            .ok_or_else(|| io::Error::other("packaged map omitted its repository artifact"))?;
+        expected.insert(path.to_string(), value.clone());
+        if after == &expected {
+            return Ok(());
+        }
+    } else if before == after {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "{name} changed an undeclared repository filesystem path: before={before:?} after={after:?}"
+    ))
+    .into())
+}
+
+/// Run every frozen v0.3.26 nested leaf through the real packaged executable.
+fn assert_packaged_cli_legacy_leaf_contracts(
+    executable: &Path,
+    repo: &Path,
+    database: &Path,
+    temp: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let before = mcp_database_snapshot(database)?;
+    let filesystem_before = repository_filesystem_snapshot(repo)?;
+
+    let symbols = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["symbols", "list", "--file", "src/lib.rs", "--limit", "2"],
+    )?;
+    require_json_string(&symbols, &["0", "path"], "src/lib.rs")?;
+    let relations = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &[
+            "symbols",
+            "relations",
+            "--file",
+            "src/lib.rs",
+            "--limit",
+            "2",
+        ],
+    )?;
+    require_json_string(&relations, &["0", "path"], "src/lib.rs")?;
+    let symbol_slice = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["symbols", "slice", "src/lib.rs", "indexed"],
+    )?;
+    require_json_string(&symbol_slice, &["path"], "src/lib.rs")?;
+    require_json_contains(&symbol_slice, &["content"], "indexed")?;
+
+    let root = repo
+        .canonicalize()?
+        .to_string_lossy()
+        .trim_start_matches("\\\\?\\")
+        .replace('\\', "/");
+    let root_set = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["root", "set", &root, "--transition", "bind"],
+    )?;
+    require_json_string(&root_set, &["transition"], "bind")?;
+    require_json_bool(&root_set, &["verified"], true)?;
+    for arguments in [&["root", "show"][..], &["root", "verify"][..]] {
+        let report = run_packaged_cli_json(executable, repo, database, arguments)?;
+        require_json_bool(&report, &["verified"], true)?;
+    }
+    let filesystem_after_root = repository_filesystem_snapshot(repo)?;
+    assert_root_bind_filesystem_delta(&filesystem_before, &filesystem_after_root)?;
+
+    let gitignore = repo.join(".gitignore");
+    let gitignore_before = fs::read(&gitignore)?;
+    let gitignore_report =
+        run_packaged_cli_json(executable, repo, database, &["ignore", "init-gitignore"])?;
+    require_json_bool(&gitignore_report, &["existed"], true)?;
+    require_json_bool(&gitignore_report, &["created"], false)?;
+    if fs::read(&gitignore)? != gitignore_before {
+        return Err(io::Error::other("ignore init-gitignore rewrote an existing file").into());
+    }
+
+    let added = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["ignore", "add", "--kind", "dir-name", "cli-contract-temp"],
+    )?;
+    require_json_string(&added, &["action"], "add")?;
+    require_json_bool(&added, &["changed"], true)?;
+    let listed = run_packaged_cli_json(executable, repo, database, &["ignore", "list"])?;
+    let names = json_at(&listed, &["exclude_dir_names"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("ignore list directory names was not an array"))?;
+    if !names.iter().any(|name| name == "cli-contract-temp") {
+        return Err(io::Error::other("ignore add was absent from the packaged list route").into());
+    }
+    let removed = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &[
+            "ignore",
+            "remove",
+            "--kind",
+            "dir-name",
+            "cli-contract-temp",
+        ],
+    )?;
+    require_json_string(&removed, &["action"], "remove")?;
+    require_json_bool(&removed, &["changed"], true)?;
+    let listed = run_packaged_cli_json(executable, repo, database, &["ignore", "list"])?;
+    let names = json_at(&listed, &["exclude_dir_names"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("ignore list directory names was not an array"))?;
+    if names.iter().any(|name| name == "cli-contract-temp") {
+        return Err(io::Error::other("ignore remove left its packaged list entry behind").into());
+    }
+    let filesystem_after_ignore = repository_filesystem_snapshot(repo)?;
+    if filesystem_after_ignore != filesystem_after_root {
+        return Err(io::Error::other(format!(
+            "ignore init/add/remove did not preserve the post-root-binding repository filesystem bytes exactly: before={filesystem_after_root:?} after={filesystem_after_ignore:?}"
+        ))
+        .into());
+    }
+
+    let review_file = temp.join("cli-contract-purpose-review.json");
+    fs::write(
+        &review_file,
+        serde_json::to_vec(&serde_json::json!({
+            "items": [{"path": "src/lib.rs", "confirm_existing": true}]
+        }))?,
+    )?;
+    let review_path = review_file.to_string_lossy().into_owned();
+    let review = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["purpose", "review", "--from-file", &review_path],
+    )?;
+    require_json_bool(&review, &["applied"], false)?;
+    require_json_usize(&review, &["failed"], 0)?;
+    let queue = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["purpose", "queue", "--task", "cli-contract", "--limit", "2"],
+    )?;
+    require_json_string(&queue, &["task"], "cli-contract")?;
+    require_json_usize(&queue, &["limit"], 2)?;
+
+    let parity = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["parity", "report", "--profile", "repository-intelligence"],
+    )?;
+    require_json_bool(&parity, &["ok"], true)?;
+
+    let after = mcp_database_snapshot(database)?;
+    if after != before {
+        return Err(
+            io::Error::other("a frozen v0.3.26 nested CLI leaf changed SQLite state").into(),
+        );
+    }
+    if repository_filesystem_snapshot(repo)? != filesystem_after_root {
+        return Err(io::Error::other(
+            "a frozen v0.3.26 nested CLI leaf changed the post-root repository filesystem state",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Run one normal packaged JSON command with telemetry disabled and an exact version guard.
+fn run_packaged_cli_json(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    arguments: &[&str],
+) -> Result<Value, Box<dyn Error>> {
+    let mut command = vec![
+        "--require-version".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        "--db".to_string(),
+        database.display().to_string(),
+    ];
+    command.extend(arguments.iter().map(|argument| (*argument).to_string()));
+    run_mcp_contract_json(executable, cwd, &command)
+}
+
+/// Prove help, invalid input, bounded failure, cancellation, and TOON behavior.
+fn assert_packaged_cli_edge_contracts(
+    executable: &Path,
+    repo: &Path,
+    database: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let before_toon = mcp_database_snapshot(database)?;
+    let toon = StdCommand::new(executable)
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--require-version", env!("CARGO_PKG_VERSION"), "--db"])
+        .arg(database)
+        .arg("overview")
+        .output()?;
+    if !toon.status.success() || !toon.stderr.is_empty() {
+        return Err(io::Error::other(format!(
+            "packaged CLI TOON overview failed: {}",
+            String::from_utf8_lossy(&toon.stderr)
+        ))
+        .into());
+    }
+    let toon_payload: Value = toon_format::decode_default(&String::from_utf8(toon.stdout)?)?;
+    if !toon_payload.is_object() || mcp_database_snapshot(database)? != before_toon {
+        return Err(
+            io::Error::other("packaged CLI TOON overview was untyped or changed SQLite").into(),
+        );
+    }
+
+    for arguments in [
+        vec!["unknown-contract-command"],
+        vec!["folders"],
+        vec!["help", "unknown-contract-command"],
+    ] {
+        let output = StdCommand::new(executable)
+            .current_dir(repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(&arguments)
+            .output()?;
+        if output.status.code() != Some(2) || !output.stdout.is_empty() || output.stderr.is_empty()
+        {
+            return Err(io::Error::other(format!(
+                "packaged CLI parse failure contract drifted for {arguments:?}: status={:?} stdout={} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+
+    let before_invalid = mcp_database_snapshot(database)?;
+    let invalid = StdCommand::new(executable)
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "--db"])
+        .arg(database)
+        .args([
+            "slice",
+            "src/lib.rs",
+            "--start-line",
+            "1",
+            "--output-bytes",
+            "0",
+        ])
+        .output()?;
+    let invalid_error = String::from_utf8(invalid.stderr)?;
+    if invalid.status.code() != Some(1)
+        || !invalid.stdout.is_empty()
+        || !invalid_error.contains("output byte")
+        || mcp_database_snapshot(database)? != before_invalid
+    {
+        return Err(io::Error::other(format!(
+            "packaged CLI invalid-input contract drifted: status={:?} stderr={invalid_error}",
+            invalid.status.code()
+        ))
+        .into());
+    }
+
+    let pending = repo.join("src/deadline.rs");
+    fs::write(&pending, "pub fn deadline_contract() {}\n")?;
+    let before_deadline = mcp_database_snapshot(database)?;
+    let deadline = StdCommand::new(executable)
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "--db"])
+        .arg(database)
+        .args(["watch", ".", "--once", "--timeout-seconds", "0"])
+        .output()?;
+    let deadline_message = String::from_utf8(deadline.stderr)?.to_ascii_lowercase();
+    if deadline.status.code() != Some(1)
+        || !deadline.stdout.is_empty()
+        || (!deadline_message.contains("deadline") && !deadline_message.contains("canceled"))
+        || mcp_database_snapshot(database)? != before_deadline
+    {
+        return Err(io::Error::other(format!(
+            "packaged CLI deadline preserved partial state: status={:?} stderr={deadline_message}",
+            deadline.status.code()
+        ))
+        .into());
+    }
+    fs::remove_file(pending)?;
+    assert_packaged_cli_restart_cleanup_interruption(executable, repo, database)?;
+    Ok(())
+}
+
+/// Interrupt packaged restart cleanup after one owned abandoned stage is removed.
+fn assert_packaged_cli_restart_cleanup_interruption(
+    executable: &Path,
+    repo: &Path,
+    database: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let pending = repo.join("src/restart-cleanup.rs");
+    fs::write(&pending, "pub fn restart_cleanup_contract() {}\n")?;
+    let project = AtlasStore::open(database)?
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("CLI interruption fixture omitted project identity"))?;
+    let canonical_repo = fs::canonicalize(repo)?;
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    for index in 0..64 {
+        let stage = atlas.join(format!("graph-stage-interruption-{index:02}"));
+        fs::create_dir(&stage)?;
+        drop(AtlasStore::create_repository_graph_staging(
+            &stage.join("projectatlas.db"),
+            &canonical_repo,
+            project,
+        )?);
+    }
+    let initial_stages = graph_stage_directories(repo)?.len();
+    let before = mcp_database_snapshot(database)?;
+    let mut child = StdCommand::new(executable)
+        .current_dir(repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--require-version",
+            env!("CARGO_PKG_VERSION"),
+            "--format",
+            "json",
+            "--db",
+        ])
+        .arg(database)
+        .args(["watch", ".", "--once", "--max-workers", "1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let observation_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if graph_stage_directories(repo)?.len() < initial_stages {
+            break;
+        }
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "packaged CLI completed before restart cleanup could be interrupted: status={} stdout={} stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if Instant::now() >= observation_deadline {
+            child.kill()?;
+            let _status = child.wait()?;
+            return Err(io::Error::other(
+                "packaged CLI exposed no restart-cleanup progress within 30 seconds",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let interrupted_at = Instant::now();
+    child.kill()?;
+    let output = child.wait_with_output()?;
+    if output.status.success()
+        || !output.stdout.is_empty()
+        || interrupted_at.elapsed() > Duration::from_secs(5)
+    {
+        return Err(io::Error::other(format!(
+            "packaged CLI restart-cleanup interruption was not prompt and stream-safe: elapsed={:?} status={} stdout={} stderr={}",
+            interrupted_at.elapsed(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    let after = mcp_database_snapshot(database)?;
+    if after != before {
+        return Err(io::Error::other(
+            "packaged CLI restart-cleanup interruption changed the primary SQLite state",
+        )
+        .into());
+    }
+
+    fs::remove_file(pending)?;
+    let recovered = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["watch", ".", "--once", "--max-workers", "1"],
+    )?;
+    require_json_string(&recovered, &["mode"], "single-refresh")?;
+    require_json_usize(&recovered, &["cycles"], 1)?;
+    if !graph_stage_directories(repo)?.is_empty() {
+        return Err(io::Error::other(
+            "packaged CLI restart left an abandoned graph staging directory",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// List only ProjectAtlas-owned disposable graph stages in a test repository.
+fn graph_stage_directories(repo: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    let mut stages = Vec::new();
+    for entry in fs::read_dir(atlas)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("graph-stage-")
+        {
+            stages.push(entry.path());
+        }
+    }
+    Ok(stages)
+}
+
+/// Prove packaged CLI freshness and CLI/MCP reopen behavior without Git metadata.
+fn assert_cli_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("cli-non-git-contract");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn baseline() {}\n",
+    )?;
+    if repo.join(GIT_DIR_NAME).exists() {
+        return Err(io::Error::other("non-Git CLI fixture unexpectedly contained .git").into());
+    }
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    for arguments in [
+        vec![
+            "--db".to_string(),
+            database.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+        vec![
+            "--db".to_string(),
+            database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    ] {
+        run_mcp_contract_json(executable, &repo, &arguments)?;
+    }
+    Connection::open(&database)?.execute(
+        "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+        (MCP_CONTRACT_METADATA_CANARY, "preserve"),
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn baseline() {}\n\npub fn non_git_cli_contract() {}\n",
+    )?;
+    let case = CliContractCase {
+        name: "summary",
+        arguments: vec![
+            "summary".to_string(),
+            "src/lib.rs".to_string(),
+            "--limit".to_string(),
+            "5".to_string(),
+        ],
+        output: CliContractOutput::JsonObject,
+        effect: McpSqliteEffect::DerivedSourceAdvance,
+        expected_exit_code: 0,
+    };
+    let before = mcp_database_snapshot(&database)?;
+    let summary = run_packaged_cli_contract_case(executable, &repo, &database, &case)?
+        .ok_or_else(|| io::Error::other("non-Git CLI summary omitted output"))?;
+    require_json_contains(&summary, &["content_summary"], "non_git_cli_contract")?;
+    let after = mcp_database_snapshot(&database)?;
+    assert_contract_sqlite_effect(case.name, case.effect, &before, &after)?;
+    assert_mcp_matches_clean_packaged_scan(
+        executable,
+        &repo,
+        &database,
+        temp.path(),
+        "cli-non-git-freshness",
+    )?;
+
+    let stable_before = after;
+    let stable = run_packaged_cli_contract_case(
+        executable,
+        &repo,
+        &database,
+        &CliContractCase {
+            effect: McpSqliteEffect::None,
+            ..case
+        },
+    )?
+    .ok_or_else(|| io::Error::other("stable non-Git CLI summary omitted output"))?;
+    require_json_contains(&stable, &["content_summary"], "non_git_cli_contract")?;
+    if mcp_database_snapshot(&database)? != stable_before {
+        return Err(io::Error::other("unchanged non-Git CLI summary republished state").into());
+    }
+
+    let reopen_case = McpToolContractCase {
+        name: "atlas_file_summary",
+        arguments: serde_json::json!({
+            "project_path": repo,
+            "file": "src/lib.rs",
+            "compact": true
+        }),
+        expected_marker: "file_summary:",
+        payload_key: Some("file_summary"),
+        effect: McpSqliteEffect::None,
+        telemetry_enabled: false,
+    };
+    let reopened = run_mcp_contract_call(executable, &repo, &database, &reopen_case)?;
+    if !reopened.contains("non_git_cli_contract") {
+        return Err(io::Error::other("MCP reopen lost packaged CLI non-Git freshness").into());
+    }
+    Ok(())
+}
+
+/// Return the exact advertised inventory from a real release-candidate stdio process.
+fn run_mcp_contract_inventory(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+) -> Result<String, Box<dyn Error>> {
+    let (mut session, initialized) = McpContractSession::spawn_initialized(
+        executable,
+        cwd,
+        database,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+    )?;
+    let operation_result = (|| -> Result<String, Box<dyn Error>> {
+        let tools = session.request("tools/list", &serde_json::json!({}))?;
+        Ok(format!(
+            "{}\n{}\n",
+            serde_json::to_string(&initialized)?,
+            serde_json::to_string(&tools)?
+        ))
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
+}
+
+/// Execute one advertised tool through its own real stdio process.
+fn run_mcp_contract_call(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    case: &McpToolContractCase,
+) -> Result<String, Box<dyn Error>> {
+    let (response, stdout) = run_mcp_contract_raw_call(
+        executable,
+        cwd,
+        database,
+        case.name,
+        &case.arguments,
+        case.telemetry_enabled,
+    )?;
+    if response
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        || response.get("error").is_some()
+    {
+        return Err(io::Error::other(format!(
+            "MCP contract call {} failed: {response}",
+            case.name
+        ))
+        .into());
+    }
+    mcp_tool_text(&stdout, 2)
+}
+
+/// Execute one tool call and retain its complete success or error envelope.
+fn run_mcp_contract_raw_call(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    name: &str,
+    arguments: &Value,
+    telemetry_enabled: bool,
+) -> Result<(Value, String), Box<dyn Error>> {
+    let telemetry = if telemetry_enabled { None } else { Some("1") };
+    let (mut session, initialized) = McpContractSession::spawn_initialized(
+        executable,
+        cwd,
+        database,
+        &[("PROJECTATLAS_NO_TELEMETRY", telemetry)],
+    )?;
+    let operation_result = (|| -> Result<(Value, String), Box<dyn Error>> {
+        let response = session.request(
+            "tools/call",
+            &serde_json::json!({"name": name, "arguments": arguments}),
+        )?;
+        let stdout = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&initialized)?,
+            serde_json::to_string(&response)?
+        );
+        Ok((response, stdout))
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
+}
+
+/// Require an invalid real MCP call to fail without changing logical `SQLite` state.
+fn assert_mcp_contract_failure_no_mutation(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    name: &str,
+    arguments: &Value,
+    expected_error: &str,
+) -> Result<(), Box<dyn Error>> {
+    let before = mcp_database_snapshot(database)?;
+    let (response, stdout) =
+        run_mcp_contract_raw_call(executable, cwd, database, name, arguments, false)?;
+    let error_text = if let Some(error) = response.get("error") {
+        error.get("code").and_then(Value::as_i64).ok_or_else(|| {
+            io::Error::other(format!("{name} protocol error omitted integer code"))
+        })?;
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::other(format!("{name} protocol error omitted message")))?;
+        error.to_string()
+    } else if response
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        require_json_string(&response, &["result", "content", "0", "type"], "text")?;
+        let text = mcp_tool_text(&stdout, 2)?;
+        match toon_format::decode_default::<Value>(&text) {
+            Ok(error) if error.is_object() => error.to_string(),
+            Ok(error) => {
+                return Err(io::Error::other(format!(
+                    "{name} typed error payload was not an object: {error}"
+                ))
+                .into());
+            }
+            Err(_) if text.starts_with("failed to deserialize parameters:") => text,
+            Err(decode_error) => {
+                return Err(io::Error::other(format!(
+                    "{name} returned invalid typed error TOON: {decode_error}; payload={text:?}"
+                ))
+                .into());
+            }
+        }
+    } else {
+        let text = mcp_tool_text(&stdout, 2)?;
+        let error: Value = toon_format::decode_default(&text).map_err(|decode_error| {
+            io::Error::other(format!(
+                "{name} invalid contract call returned neither an MCP nor typed domain error: {decode_error}; response={response}"
+            ))
+        })?;
+        if error.get("error").is_none() {
+            return Err(io::Error::other(format!(
+                "{name} invalid contract call unexpectedly succeeded: {response}"
+            ))
+            .into());
+        }
+        error.to_string()
+    };
+    if !error_text
+        .to_ascii_lowercase()
+        .contains(&expected_error.to_ascii_lowercase())
+    {
+        return Err(io::Error::other(format!(
+            "{name} error omitted {expected_error:?}: {error_text}"
+        ))
+        .into());
+    }
+    let after = mcp_database_snapshot(database)?;
+    if before != after {
+        return Err(io::Error::other(format!(
+            "{name} invalid contract call changed SQLite state: before={before:?} after={after:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Prove saved-source freshness and stable reopen behavior without Git metadata.
+fn assert_mcp_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("non-git-contract");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn baseline() {}\n",
+    )?;
+    if repo.join(GIT_DIR_NAME).exists() {
+        return Err(io::Error::other("non-Git MCP fixture unexpectedly contained .git").into());
+    }
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "init".to_string(),
+            "--no-scan".to_string(),
+        ],
+    )?;
+    run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    )?;
+
+    let before = mcp_database_snapshot(&database)?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn baseline() {}\n\npub fn non_git_contract() {}\n",
+    )?;
+    let case = McpToolContractCase {
+        name: "atlas_file_summary",
+        arguments: serde_json::json!({"project_path": repo, "file": "src/lib.rs", "compact": true}),
+        expected_marker: "file_summary:",
+        payload_key: Some("file_summary"),
+        effect: McpSqliteEffect::DerivedSourceAdvance,
+        telemetry_enabled: false,
+    };
+    let text = run_mcp_contract_call(executable, &repo, &database, &case)?;
+    let decoded: Value = toon_format::decode_default(&text)?;
+    require_json_contains(
+        &decoded,
+        &["file_summary", "content_summary"],
+        "non_git_contract",
+    )?;
+    require_json_string(
+        &decoded,
+        &["file_summary", "parser_kind"],
+        "tree-sitter-symbol-graph",
+    )?;
+    require_json_string(&decoded, &["file_summary", "summary_status"], "ok")?;
+
+    let after = mcp_database_snapshot(&database)?;
+    let changed = changed_snapshot_keys(&before.authoritative, &after.authoritative);
+    if changed.is_empty()
+        || changed
+            .iter()
+            .any(|table| !mcp_source_publication_table(table))
+        || before.usage != after.usage
+        || before.authored_purposes != after.authored_purposes
+        || before.purpose_revision != after.purpose_revision
+        || after.generation != before.generation.saturating_add(1)
+        || after.publication_state != "complete"
+    {
+        return Err(io::Error::other(format!(
+            "non-Git MCP freshness escaped atomic source ownership: changed={changed:?} before={before:?} after={after:?}"
+        ))
+        .into());
+    }
+    assert_mcp_matches_clean_packaged_scan(
+        executable,
+        &repo,
+        &database,
+        temp.path(),
+        "non-git-freshness",
+    )?;
+
+    let stable_before = after;
+    let stable_text = run_mcp_contract_call(executable, &repo, &database, &case)?;
+    if !stable_text.contains("non_git_contract")
+        || mcp_database_snapshot(&database)? != stable_before
+    {
+        return Err(io::Error::other(
+            "unchanged non-Git MCP reopen repeated publication or lost fresh source",
+        )
+        .into());
+    }
+    let reopened = run_mcp_contract_json(
+        executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "summary".to_string(),
+            "src/lib.rs".to_string(),
+            "--limit".to_string(),
+            "5".to_string(),
+        ],
+    )?;
+    require_json_contains(&reopened, &["content_summary"], "non_git_contract")?;
+    Ok(())
+}
+
+/// Require one MCP publication to equal a clean packaged scan of the same source.
+fn assert_mcp_matches_clean_packaged_scan(
+    executable: &Path,
+    repo: &Path,
+    database: &Path,
+    scratch: &Path,
+    checkpoint: &str,
+) -> Result<(), Box<dyn Error>> {
+    let clean_database = scratch.join(format!("mcp-clean-{checkpoint}.db"));
+    run_mcp_contract_json(
+        executable,
+        repo,
+        &[
+            "--db".to_string(),
+            clean_database.display().to_string(),
+            "scan".to_string(),
+            ".".to_string(),
+        ],
+    )?;
+    let actual = derived_result_snapshot(database)?;
+    let mut clean = derived_result_snapshot(&clean_database)?;
+    for path in authored_purpose_paths(database)? {
+        clean.unreviewed_purposes.remove(&path);
+    }
+    if actual != clean {
+        return Err(io::Error::other(format!(
+            "{checkpoint} MCP publication diverged from an exact clean packaged scan:\nactual={actual:#?}\nclean={clean:#?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Return whether one table belongs to a derived source publication.
+fn mcp_source_publication_table(table: &str) -> bool {
+    matches!(
+        table,
+        "metadata"
+            | "nodes"
+            | "summaries"
+            | "symbols"
+            | "source_parse_metadata"
+            | "symbol_relations"
+            | "file_texts"
+            | "file_content_classifications"
+            | "graph_entities"
+            | "graph_relations"
+            | "graph_relation_occurrences"
+            | "graph_coverage"
+            | "graph_resolution_keys"
+            | "graph_entity_exports"
+            | "graph_relation_dependencies"
+            | "project_identity"
+            | "purposes"
+    ) || table.starts_with("file_text_fts")
+}
+
+/// Persistent real MCP session used by E2E contract clients.
+struct McpContractSession {
+    child: Option<Child>,
+    stdin: Option<ChildStdin>,
+    responses: Receiver<io::Result<String>>,
+    stdout_reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    next_request_id: u64,
+}
+
+#[allow(dead_code)]
+impl McpContractSession {
+    /// Spawn and initialize one telemetry-disabled release-candidate MCP process.
+    fn spawn(executable: &Path, repo: &Path, database: &Path) -> Result<Self, Box<dyn Error>> {
+        let (session, _initialized) = Self::spawn_initialized(
+            executable,
+            repo,
+            database,
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        )?;
+        Ok(session)
+    }
+
+    /// Spawn and initialize one release-candidate MCP process.
+    fn spawn_initialized(
+        executable: &Path,
+        repo: &Path,
+        database: &Path,
+        environment: &[(&str, Option<&str>)],
+    ) -> Result<(Self, Value), Box<dyn Error>> {
+        let mut command = StdCommand::new(executable);
+        command
+            .current_dir(repo)
+            .arg("--db")
+            .arg(database)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in environment {
+            if let Some(value) = value {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        let mut child = command.spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract stdin was not piped"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract stdout was not piped"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract stderr was not piped"))?;
+        let (sender, responses) = mpsc::sync_channel(64);
+        let stdout_reader = thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                let response = match stdout.read_line(&mut line) {
+                    Ok(0) => Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "MCP contract stdout closed",
+                    )),
+                    Ok(_) => Ok(line),
+                    Err(error) => Err(error),
+                };
+                let terminal = response.is_err();
+                if sender.send(response).is_err() || terminal {
+                    break;
+                }
+            }
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut output = Vec::new();
+            stderr.read_to_end(&mut output)?;
+            Ok(output)
+        });
+        let mut session = Self {
+            child: Some(child),
+            stdin: Some(stdin),
+            responses,
+            stdout_reader: Some(stdout_reader),
+            stderr_reader: Some(stderr_reader),
+            next_request_id: 1,
+        };
+        let operation_result = (|| -> Result<Value, Box<dyn Error>> {
+            let initialized = session.request(
+                "initialize",
+                &serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "projectatlas-mcp-contract",
+                        "version": "0.4.0"
+                    }
+                }),
+            )?;
+            if initialized.get("result").is_none() {
+                return Err(io::Error::other("MCP contract initialize omitted result").into());
+            }
+            session.notify("notifications/initialized", &serde_json::json!({}))?;
+            Ok(initialized)
+        })();
+        match operation_result {
+            Ok(initialized) => Ok((session, initialized)),
+            Err(error) => complete_mcp_test_after_shutdown(Err(error), || session.shutdown()),
+        }
+    }
+
+    /// Call one real MCP tool and return its text payload.
+    fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String, Box<dyn Error>> {
+        self.call_tool_text(name, arguments, false)
+    }
+
+    /// Call one real MCP tool and require a visible tool-level error result.
+    fn call_tool_error(&mut self, name: &str, arguments: &Value) -> Result<String, Box<dyn Error>> {
+        self.call_tool_text(name, arguments, true)
+    }
+
+    /// Call one real MCP tool and require the expected `isError` state.
+    fn call_tool_text(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        expected_error: bool,
+    ) -> Result<String, Box<dyn Error>> {
+        let response = self.request(
+            "tools/call",
+            &serde_json::json!({"name": name, "arguments": arguments}),
+        )?;
+        if response.get("error").is_some() {
+            return Err(io::Error::other(format!(
+                "MCP contract tool {name} returned a protocol error: {response}"
+            ))
+            .into());
+        }
+        let is_error = response
+            .get("result")
+            .and_then(|result| result.get("isError"))
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "MCP contract tool {name} omitted boolean result.isError: {response}"
+                ))
+            })?;
+        if is_error != expected_error {
+            return Err(io::Error::other(format!(
+                "MCP contract tool {name} returned isError={is_error}, expected {expected_error}: {response}"
+            ))
+            .into());
+        }
+        response
+            .get("result")
+            .and_then(|result| result.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|content| content.get("text"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                io::Error::other(format!("MCP contract tool {name} returned no text")).into()
+            })
+    }
+
+    /// Send one request and wait for its matching response under a fixed deadline.
+    fn request(&mut self, method: &str, params: &Value) -> Result<Value, Box<dyn Error>> {
+        let request_id = self.start_request(method, params)?;
+        self.wait_for_response(request_id, method)
+    }
+
+    /// Send one request and return its id before waiting for the response.
+    fn start_request(&mut self, method: &str, params: &Value) -> Result<u64, Box<dyn Error>> {
+        let request_id = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("MCP contract request id overflowed"))?;
+        self.write_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params
+        }))?;
+        Ok(request_id)
+    }
+
+    /// Wait for one previously sent request under the contract deadline.
+    fn wait_for_response(
+        &mut self,
+        request_id: u64,
+        method: &str,
+    ) -> Result<Value, Box<dyn Error>> {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("MCP contract request {request_id} for {method} timed out"),
+                )
+                .into());
+            }
+            let line = self
+                .responses
+                .recv_timeout(remaining)
+                .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+            let response: Value = serde_json::from_str(line.trim())?;
+            if response.get("id").and_then(Value::as_u64) == Some(request_id) {
+                return Ok(response);
+            }
+        }
+    }
+
+    /// Wait for a follow-up response while rejecting a late response to a
+    /// request that the MCP peer already cancelled.
+    fn wait_for_response_rejecting(
+        &mut self,
+        request_id: u64,
+        method: &str,
+        rejected_id: u64,
+        rejected_method: &str,
+    ) -> Result<Value, Box<dyn Error>> {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;
+        let follow_up = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("MCP contract request {request_id} for {method} timed out"),
+                )
+                .into());
+            }
+            let line = match self.responses.recv_timeout(remaining) {
+                Ok(line) => line?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("MCP contract request {request_id} for {method} timed out"),
+                    )
+                    .into());
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "MCP contract response stream disconnected",
+                    )
+                    .into());
+                }
+            };
+            let response: Value = serde_json::from_str(line.trim())?;
+            match response.get("id").and_then(Value::as_u64) {
+                Some(id) if id == rejected_id => {
+                    return Err(io::Error::other(format!(
+                        "MCP emitted a late response for cancelled {rejected_method}: {response}"
+                    ))
+                    .into());
+                }
+                Some(id) if id == request_id => break response,
+                _ => {}
+            }
+        };
+
+        let grace_deadline = Instant::now()
+            .checked_add(Duration::from_millis(300))
+            .ok_or_else(|| io::Error::other("MCP cancellation grace deadline overflowed"))?;
+        loop {
+            let remaining = grace_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(follow_up);
+            }
+            let line = match self.responses.recv_timeout(remaining) {
+                Ok(line) => line?,
+                Err(mpsc::RecvTimeoutError::Timeout) => return Ok(follow_up),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "MCP contract response stream disconnected during cancellation grace window",
+                    )
+                    .into());
+                }
+            };
+            let response: Value = serde_json::from_str(line.trim())?;
+            if response.get("id").and_then(Value::as_u64) == Some(rejected_id) {
+                return Err(io::Error::other(format!(
+                    "MCP emitted a late response for cancelled {rejected_method}: {response}"
+                ))
+                .into());
+            }
+        }
+    }
+
+    /// Send one notification without waiting for a response.
+    fn notify(&mut self, method: &str, params: &Value) -> Result<(), Box<dyn Error>> {
+        self.write_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }))
+    }
+
+    /// Write and flush one newline-delimited JSON-RPC message.
+    fn write_message(&mut self, message: &Value) -> Result<(), Box<dyn Error>> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("MCP contract stdin was closed"))?;
+        serde_json::to_writer(&mut *stdin, message)?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()?;
+        Ok(())
+    }
+
+    /// Close stdin and require a clean bounded process exit.
+    fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
+        self.stdin.take();
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
+        let status = loop {
+            let child = self
+                .child
+                .as_mut()
+                .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                let _status = child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "MCP contract server did not exit after stdin closed",
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        self.child.take();
+        if let Some(reader) = self.stdout_reader.take() {
+            reader
+                .join()
+                .map_err(|_panic| io::Error::other("MCP contract stdout reader panicked"))?;
+        }
+        let stderr = self
+            .stderr_reader
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract stderr reader was consumed"))?
+            .join()
+            .map_err(|_panic| io::Error::other("MCP contract stderr reader panicked"))??;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "MCP contract server failed: {}",
+                String::from_utf8_lossy(&stderr)
+            ))
+            .into());
+        }
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+impl Drop for McpContractSession {
+    fn drop(&mut self) {
+        self.stdin.take();
+        if let Some(child) = self.child.as_mut() {
+            drop(child.kill());
+            drop(child.wait());
+        }
+        self.child.take();
+        if let Some(reader) = self.stdout_reader.take() {
+            drop(reader.join());
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            drop(reader.join());
+        }
+    }
 }
 
 /// Prove a real active background task accepts cancellation without partial publication.
@@ -13495,473 +15964,6 @@ fn assert_mcp_active_cancellation_preserves_generation(
         .into());
     }
     Ok(())
-}
-
-/// Launch a real MCP stdio child and return stdout after stdin closes.
-fn run_mcp_stdio(
-    executable: &std::path::Path,
-    cwd: &std::path::Path,
-    args: &[String],
-    messages: &[impl AsRef<str>],
-) -> Result<String, Box<dyn Error>> {
-    run_mcp_stdio_with_env(executable, cwd, args, messages, &[])
-}
-
-/// Launch a real MCP stdio child and close stdin only after every request has a response.
-fn run_mcp_stdio_with_env(
-    executable: &std::path::Path,
-    cwd: &std::path::Path,
-    args: &[String],
-    messages: &[impl AsRef<str>],
-    environment: &[(&str, Option<&str>)],
-) -> Result<String, Box<dyn Error>> {
-    run_mcp_stdio_with_env_and_test_delay_and_kill(
-        executable,
-        cwd,
-        args,
-        messages,
-        environment,
-        Duration::from_secs(10),
-        None,
-        false,
-        &mut |child| child.kill(),
-    )
-}
-
-struct McpStdioCleanupPacket {
-    child: Child,
-    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-}
-
-/// Reap one test-owned MCP stdio packet after the observer has returned.
-fn reap_mcp_stdio_packet(mut packet: McpStdioCleanupPacket) -> Result<(), Box<dyn Error>> {
-    packet.child.stdin.take();
-    if packet.child.try_wait()?.is_none() {
-        packet.child.kill()?;
-    }
-    packet.child.wait()?;
-    packet
-        .stdout_reader
-        .join()
-        .map_err(|_panic| io::Error::other("mcp stdout cleanup reader panicked"))??;
-    packet
-        .stderr_reader
-        .join()
-        .map_err(|_panic| io::Error::other("mcp stderr cleanup reader panicked"))??;
-    Ok(())
-}
-
-fn run_mcp_stdio_with_env_and_test_delay(
-    executable: &std::path::Path,
-    cwd: &std::path::Path,
-    args: &[String],
-    messages: &[impl AsRef<str>],
-    environment: &[(&str, Option<&str>)],
-    timeout: Duration,
-    observer_delay: Option<Duration>,
-    hold_stdin_until_observation: bool,
-) -> Result<String, Box<dyn Error>> {
-    run_mcp_stdio_with_env_and_test_delay_and_kill(
-        executable,
-        cwd,
-        args,
-        messages,
-        environment,
-        timeout,
-        observer_delay,
-        hold_stdin_until_observation,
-        &mut |child| child.kill(),
-    )
-}
-
-fn run_mcp_stdio_with_env_and_test_delay_and_kill(
-    executable: &std::path::Path,
-    cwd: &std::path::Path,
-    args: &[String],
-    messages: &[impl AsRef<str>],
-    environment: &[(&str, Option<&str>)],
-    timeout: Duration,
-    observer_delay: Option<Duration>,
-    hold_stdin_until_observation: bool,
-    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
-) -> Result<String, Box<dyn Error>> {
-    run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
-        executable,
-        cwd,
-        args,
-        messages,
-        environment,
-        timeout,
-        observer_delay,
-        hold_stdin_until_observation,
-        None,
-        None,
-        kill_child,
-        None,
-    )
-}
-
-/// Test-only variant that transfers a proven-live child and its readers to the
-/// caller when injected termination cannot safely reap it here.
-fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
-    executable: &std::path::Path,
-    cwd: &std::path::Path,
-    args: &[String],
-    messages: &[impl AsRef<str>],
-    environment: &[(&str, Option<&str>)],
-    timeout: Duration,
-    observer_delay: Option<Duration>,
-    hold_stdin_until_observation: bool,
-    exit_probe_error: Option<io::Error>,
-    cleanup_probe_error: Option<io::Error>,
-    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
-    handoff_live_child: Option<
-        &mut dyn FnMut(
-            Child,
-            thread::JoinHandle<io::Result<Vec<u8>>>,
-            thread::JoinHandle<io::Result<Vec<u8>>>,
-        ),
-    >,
-) -> Result<String, Box<dyn Error>> {
-    let mut exit_probe_error = exit_probe_error;
-    let mut cleanup_probe_error = cleanup_probe_error;
-    let mut expected_responses = BTreeSet::new();
-    for message in messages {
-        let request: Value = serde_json::from_str(message.as_ref())?;
-        if let Some(id) = request.get("id") {
-            expected_responses.insert(id.to_string());
-        }
-    }
-    let input = format!(
-        "{}\n",
-        messages
-            .iter()
-            .map(AsRef::as_ref)
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    let mut command = StdCommand::new(executable);
-    command
-        .current_dir(cwd)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (key, value) in environment {
-        if let Some(value) = value {
-            command.env(key, value);
-        } else {
-            command.env_remove(key);
-        }
-    }
-    let mut child = command.spawn()?;
-    let mut stdin = Some(
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?,
-    );
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("mcp stdout was not piped"))?;
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("mcp stderr was not piped"))?;
-    let (response_sender, response_receiver) = mpsc::channel();
-    let stdout_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
-        let mut reader = BufReader::new(&mut stdout_pipe);
-        let mut output = Vec::new();
-        loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line)? == 0 {
-                break;
-            }
-            output.extend_from_slice(line.as_bytes());
-            drop(response_sender.send(line));
-        }
-        Ok(output)
-    });
-    let stderr_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
-        let mut output = Vec::new();
-        stderr_pipe.read_to_end(&mut output)?;
-        Ok(output)
-    });
-
-    let response_result = (|| -> Result<(), Box<dyn Error>> {
-        let stdin = stdin
-            .as_mut()
-            .ok_or_else(|| io::Error::other("mcp stdin was closed before requests were sent"))?;
-        stdin.write_all(input.as_bytes())?;
-        stdin.flush()?;
-        let mut response_deadline = Instant::now()
-            .checked_add(Duration::from_secs(10))
-            .ok_or_else(|| io::Error::other("MCP response deadline overflowed"))?;
-        while !expected_responses.is_empty() {
-            let remaining = response_deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "projectatlas mcp did not answer request ids before shutdown: {expected_responses:?}"
-                    ),
-                )
-                .into());
-            }
-            let line = response_receiver
-                .recv_timeout(remaining)
-                .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Timeout => io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!(
-                            "projectatlas mcp response deadline elapsed with request ids pending: {expected_responses:?}"
-                        ),
-                    ),
-                    mpsc::RecvTimeoutError::Disconnected => io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "projectatlas mcp closed before answering every request",
-                    ),
-                })?;
-            let response: Value = serde_json::from_str(line.trim())?;
-            if response
-                .get("id")
-                .is_some_and(|id| expected_responses.remove(&id.to_string()))
-            {
-                response_deadline = Instant::now()
-                    .checked_add(Duration::from_secs(10))
-                    .ok_or_else(|| io::Error::other("MCP response deadline overflowed"))?;
-            }
-        }
-        Ok(())
-    })();
-    if !hold_stdin_until_observation {
-        stdin.take();
-    }
-    drop(response_receiver);
-
-    if observer_delay.is_some()
-        && (!hold_stdin_until_observation || exit_probe_error.is_some())
-        && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
-            &mut child,
-            "projectatlas mcp",
-            exit_probe_error.take(),
-        )
-    {
-        let kill_result = kill_child(&mut child);
-        stdin.take();
-        let status_after_kill = child.try_wait();
-        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
-            if let Some(handoff) = handoff_live_child {
-                handoff(child, stdout_reader, stderr_reader);
-            } else {
-                drop(child);
-                drop(stdout_reader);
-                drop(stderr_reader);
-            }
-            let mut diagnostic = format!(
-                "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
-            );
-            if let Some(kill_error) = kill_result.as_ref().err() {
-                diagnostic.push_str("; termination failed: ");
-                diagnostic.push_str(&kill_error.to_string());
-            }
-            if let Err(probe_error) = status_after_kill {
-                diagnostic.push_str("; re-probe failed after termination attempt: ");
-                diagnostic.push_str(&probe_error.to_string());
-            }
-            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-        }
-        let status = child.wait()?;
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
-        let diagnostic = format!(
-            "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
-        );
-        let _ = (stdout, stderr);
-        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-    }
-
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| io::Error::other("MCP process deadline overflowed"))?;
-    if let Some(delay) = observer_delay {
-        thread::sleep(delay);
-    }
-    let mut timeout_reason = None;
-    let mut accepted_completion = false;
-    let mut pre_termination_probe_error = None;
-    let mut post_termination_probe_error = None;
-    loop {
-        if Instant::now() >= deadline {
-            timeout_reason = Some("still running at deadline".to_string());
-            break;
-        }
-        let (status, observed_at) = {
-            let status = child.try_wait()?;
-            let observed_at = Instant::now();
-            (status, observed_at)
-        };
-        match status {
-            Some(_) if observed_at < deadline => {
-                accepted_completion = true;
-                break;
-            }
-            Some(_) => {
-                timeout_reason = Some(format!(
-                    "completed after deadline (observed_at={observed_at:?})"
-                ));
-                break;
-            }
-            None => {
-                let remaining = deadline.saturating_duration_since(observed_at);
-                if remaining.is_zero() {
-                    timeout_reason = Some("still running at deadline".to_string());
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100).min(remaining));
-            }
-        }
-    }
-
-    if timeout_reason.is_some() {
-        let (status, observed_at) = {
-            let status = match cleanup_probe_error.take() {
-                Some(error) => {
-                    pre_termination_probe_error = Some(error);
-                    None
-                }
-                None => match child.try_wait() {
-                    Ok(status) => status,
-                    Err(error) => {
-                        pre_termination_probe_error = Some(error);
-                        None
-                    }
-                },
-            };
-            let observed_at = Instant::now();
-            (status, observed_at)
-        };
-        if status.is_none() {
-            let kill_result = kill_child(&mut child);
-            let status_after_kill = match exit_probe_error.take() {
-                Some(error) => Err(error),
-                None => child.try_wait(),
-            };
-            let status_after_kill = match status_after_kill {
-                Ok(status) => status,
-                Err(error) if kill_result.is_ok() => {
-                    post_termination_probe_error = Some(error);
-                    None
-                }
-                Err(error) => {
-                    stdin.take();
-                    if let Some(handoff) = handoff_live_child {
-                        handoff(child, stdout_reader, stderr_reader);
-                    } else {
-                        drop(child);
-                        drop(stdout_reader);
-                        drop(stderr_reader);
-                    }
-                    let mut diagnostic = format!(
-                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child/readers detached)",
-                        timeout_reason.as_deref().unwrap_or("timeout")
-                    );
-                    if let Some(kill_error) = kill_result.as_ref().err() {
-                        diagnostic.push_str("; termination failed: ");
-                        diagnostic.push_str(&kill_error.to_string());
-                    }
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-                }
-            };
-            if let Err(error) = kill_result
-                && status_after_kill.is_none()
-            {
-                stdin.take();
-                if let Some(handoff) = handoff_live_child {
-                    handoff(child, stdout_reader, stderr_reader);
-                } else {
-                    drop(child);
-                    drop(stdout_reader);
-                    drop(stderr_reader);
-                }
-                let diagnostic = format!(
-                    "projectatlas mcp did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; cleanup incomplete: operating system refused termination; child was not reaped; child/readers detached)",
-                    timeout_reason.as_deref().unwrap_or("timeout")
-                );
-                return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-            }
-        } else if timeout_reason.as_deref() == Some("still running at deadline") {
-            timeout_reason = Some(format!(
-                "completed after deadline (observed_at={observed_at:?})"
-            ));
-        }
-    }
-    stdin.take();
-    let wait_result = child.wait();
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
-    if let Some(reason) = timeout_reason {
-        let mut diagnostic = format!("projectatlas mcp did not exit after stdin closed: {reason}");
-        if let Some(error) = pre_termination_probe_error {
-            diagnostic.push_str(" status=unknown (re-probe failed before termination attempt: ");
-            diagnostic.push_str(&error.to_string());
-            diagnostic.push(')');
-        }
-        if let Some(error) = post_termination_probe_error {
-            diagnostic.push_str(" status=unknown (re-probe failed after successful termination: ");
-            diagnostic.push_str(&error.to_string());
-            diagnostic.push(')');
-        }
-        if let Ok(status) = &wait_result {
-            diagnostic.push_str(" status=");
-            diagnostic.push_str(&status.to_string());
-        }
-        if !stderr.is_empty() {
-            diagnostic.push_str(" stderr=");
-            diagnostic.push_str(&String::from_utf8_lossy(&stderr));
-        }
-        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-    }
-    response_result?;
-    let status = wait_result?;
-    if !accepted_completion || !status.success() {
-        return Err(io::Error::other(format!(
-            "projectatlas mcp failed: {}",
-            String::from_utf8_lossy(&stderr)
-        ))
-        .into());
-    }
-    Ok(String::from_utf8(stdout)?)
-}
-
-/// Return the text payload for one MCP tool-call response id.
-fn mcp_tool_text(stdout: &str, id: i64) -> Result<String, Box<dyn Error>> {
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let response: Value = serde_json::from_str(line)?;
-        if response.get("id").and_then(Value::as_i64) != Some(id) {
-            continue;
-        }
-        return response
-            .get("result")
-            .and_then(|result| result.get("content"))
-            .and_then(Value::as_array)
-            .and_then(|content| content.first())
-            .and_then(|content| content.get("text"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| io::Error::other(format!("MCP tool response {id} has no text")).into());
-    }
-    Err(io::Error::other(format!("MCP tool response {id} is missing")).into())
 }
 
 /// Return one complete MCP response envelope by numeric request id.
@@ -14323,93 +16325,6 @@ fn inline_legacy_purpose_review_item_schema(schema: &Value) -> Result<Value, Box
     Ok(schema)
 }
 
-/// Hash every bounded user-table row through one read-only `SQLite` connection.
-fn sqlite_table_digests(
-    connection: &Connection,
-) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
-    const MAX_TABLE_ROWS: usize = 16_384;
-    const MAX_TABLE_BYTES: usize = 8 * 1024 * 1024;
-
-    let table_names = {
-        let mut statement = connection.prepare(
-            "SELECT name
-             FROM sqlite_schema
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-             ORDER BY name",
-        )?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    let mut tables = BTreeMap::new();
-    for table_name in table_names {
-        let quoted_name = format!("\"{}\"", table_name.replace('"', "\"\""));
-        let column_count = {
-            let statement = connection.prepare(&format!("SELECT * FROM {quoted_name} LIMIT 0"))?;
-            statement.column_count()
-        };
-        if column_count == 0 {
-            return Err(io::Error::other(format!(
-                "MCP contract table {table_name} has no columns"
-            ))
-            .into());
-        }
-        let ordering = (1..=column_count)
-            .map(|index| index.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut statement =
-            connection.prepare(&format!("SELECT * FROM {quoted_name} ORDER BY {ordering}"))?;
-        let mut rows = statement.query([])?;
-        let mut encoded = Vec::new();
-        let mut row_count = 0usize;
-        while let Some(row) = rows.next()? {
-            row_count = row_count
-                .checked_add(1)
-                .ok_or_else(|| io::Error::other("MCP contract row count overflowed"))?;
-            if row_count > MAX_TABLE_ROWS {
-                return Err(io::Error::other(format!(
-                    "MCP contract table {table_name} exceeded {MAX_TABLE_ROWS} rows"
-                ))
-                .into());
-            }
-            for index in 0..column_count {
-                match row.get_ref(index)? {
-                    ValueRef::Null => encoded.push(0),
-                    ValueRef::Integer(value) => {
-                        encoded.push(1);
-                        encoded.extend_from_slice(&value.to_le_bytes());
-                    }
-                    ValueRef::Real(value) => {
-                        encoded.push(2);
-                        encoded.extend_from_slice(&value.to_bits().to_le_bytes());
-                    }
-                    ValueRef::Text(value) => {
-                        encoded.push(3);
-                        encoded.extend_from_slice(&u64::try_from(value.len())?.to_le_bytes());
-                        encoded.extend_from_slice(value);
-                    }
-                    ValueRef::Blob(value) => {
-                        encoded.push(4);
-                        encoded.extend_from_slice(&u64::try_from(value.len())?.to_le_bytes());
-                        encoded.extend_from_slice(value);
-                    }
-                }
-            }
-            encoded.push(0xff);
-            if encoded.len() > MAX_TABLE_BYTES {
-                return Err(io::Error::other(format!(
-                    "MCP contract table {table_name} exceeded {MAX_TABLE_BYTES} encoded bytes"
-                ))
-                .into());
-            }
-        }
-        let digest = format!("{row_count}:{}", sha256_hex(&encoded));
-        tables.insert(table_name, digest);
-    }
-    Ok(tables)
-}
-
 /// Capture durable bytes, schema objects, and all logical rows without checkpointing.
 fn sqlite_compatibility_snapshot(
     database: &Path,
@@ -14449,79 +16364,6 @@ fn sqlite_compatibility_snapshot(
         sidecars,
         schema_objects,
         tables,
-    })
-}
-
-/// Capture bounded logical rows so WAL/page-layout changes do not masquerade as product state.
-fn mcp_database_snapshot(database: &Path) -> Result<McpDatabaseSnapshot, Box<dyn Error>> {
-    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let tables = sqlite_table_digests(&connection)?;
-    let (usage, authoritative) = tables
-        .into_iter()
-        .partition(|(table_name, _)| table_name.starts_with("usage_"));
-    drop(connection);
-
-    let store = AtlasStore::open_read_only(database)?;
-    let publication = store
-        .index_publication()?
-        .ok_or_else(|| io::Error::other("MCP contract database has no publication"))?;
-    let authored_purposes = {
-        let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut statement = connection.prepare(
-            "SELECT n.path, COALESCE(p.purpose, ''), p.source, p.status
-             FROM purposes AS p
-             JOIN nodes AS n ON n.id = p.node_id
-             WHERE p.source IN ('imported', 'agent')
-             ORDER BY n.path",
-        )?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    format!(
-                        "{}\0{}\0{}",
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?
-                    ),
-                ))
-            })?
-            .collect::<Result<BTreeMap<_, _>, _>>()?
-    };
-    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let metadata_canary = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key = ?1",
-            [MCP_CONTRACT_METADATA_CANARY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let sealed_mcp_instances = usize::try_from(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM usage_instances WHERE owner = 'mcp_process' AND state = 'sealed'",
-        [],
-        |row| row.get(0),
-    )?)?;
-    let usage_events = store
-        .usage_events(None)?
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()?;
-    let retention = store.telemetry_retention_state()?;
-    Ok(McpDatabaseSnapshot {
-        authoritative,
-        usage,
-        authored_purposes,
-        metadata_canary,
-        project_instance_id: store
-            .project_instance_id()?
-            .map(projectatlas_core::graph::ProjectInstanceId::as_hex),
-        usage_calls: store.token_overview(None)?.calls,
-        usage_events,
-        active_usage_instances: retention.active_instance_rows,
-        sealed_mcp_instances,
-        generation: publication.generation.get(),
-        purpose_revision: store.authored_purpose_revision()?,
-        publication_state: format!("{:?}", publication.state).to_ascii_lowercase(),
     })
 }
 
@@ -14678,64 +16520,20 @@ fn assert_contract_sqlite_effect(
         ))
         .into());
     }
-    Ok(())
-}
-
-/// Return whether one table belongs to a derived source publication.
-fn mcp_source_publication_table(table: &str) -> bool {
-    matches!(
-        table,
-        "metadata"
-            | "nodes"
-            | "summaries"
-            | "symbols"
-            | "source_parse_metadata"
-            | "symbol_relations"
-            | "file_texts"
-            | "file_content_classifications"
-            | "graph_entities"
-            | "graph_relations"
-            | "graph_relation_occurrences"
-            | "graph_coverage"
-            | "graph_resolution_keys"
-            | "graph_entity_exports"
-            | "graph_relation_dependencies"
-            | "project_identity"
-            | "purposes"
-    ) || table.starts_with("file_text_fts")
-}
-
-fn complete_mcp_test_after_shutdown<T>(
-    operation_result: Result<T, Box<dyn Error>>,
-    shutdown: impl FnOnce() -> Result<(), Box<dyn Error>>,
-) -> Result<T, Box<dyn Error>> {
-    let shutdown_result = shutdown();
-    let value = operation_result?;
-    shutdown_result?;
-    Ok(value)
-}
-
-/// Persistent real MCP session used by E2E contract clients.
-struct McpContractSession {
-    child: Option<Child>,
-    stdin: Option<ChildStdin>,
-    responses: Receiver<io::Result<String>>,
-    stdout_reader: Option<thread::JoinHandle<()>>,
-    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
-    next_request_id: u64,
-}
-
-#[allow(dead_code)]
-impl McpContractSession {
-    /// Spawn and initialize one telemetry-disabled release-candidate MCP process.
-    fn spawn(executable: &Path, repo: &Path, database: &Path) -> Result<Self, Box<dyn Error>> {
-        let (session, _initialized) = Self::spawn_initialized(
-            executable,
-            repo,
-            database,
-            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
-        )?;
-        Ok(session)
+    let authoritative = changed_snapshot_keys(&before.authoritative, &after.authoritative);
+    let usage = changed_snapshot_keys(&before.usage, &after.usage);
+    if before.metadata_canary != after.metadata_canary
+        || before.project_instance_id != after.project_instance_id
+    {
+        return Err(io::Error::other(format!(
+            "{} changed unrelated metadata or project identity: canary={:?}->{:?} project={:?}->{:?}",
+            name,
+            before.metadata_canary,
+            after.metadata_canary,
+            before.project_instance_id,
+            after.project_instance_id
+        ))
+        .into());
     }
     match effect {
         McpSqliteEffect::None => {
@@ -14919,13 +16717,10 @@ fn assert_mcp_typed_payload(
         .into());
     }
 
-#[allow(dead_code)]
-impl Drop for McpContractSession {
-    fn drop(&mut self) {
-        self.stdin.take();
-        if let Some(child) = self.child.as_mut() {
-            drop(child.kill());
-            drop(child.wait());
+    match case.name {
+        "atlas_set_project_path" => {
+            require_json_string(decoded, &["project", "status"], "active")?;
+            json_string_at(decoded, &["project", "db"])?;
         }
         "atlas_worktree_list" => {
             require_json_string(decoded, &["worktrees", "control_alias"], "main")?;
@@ -15349,87 +17144,6 @@ fn assert_json_contract_subset(
     }
 }
 
-/// Require that a real CLI summary reports a caller for a named function.
-fn assert_summary_called_by(
-    repo: &std::path::Path,
-    db: &std::path::Path,
-    file_path: &str,
-    function_name: &str,
-    expected_caller: &str,
-) -> Result<(), Box<dyn Error>> {
-    let raw_summary = Command::cargo_bin("projectatlas")?
-        .current_dir(repo)
-        .arg("--format")
-        .arg("json")
-        .arg("--db")
-        .arg(db)
-        .args(["summary", file_path, "--limit", "10"])
-        .output()?;
-    if !raw_summary.status.success() {
-        return Err(io::Error::other(format!(
-            "summary command failed for {file_path}: {}",
-            String::from_utf8_lossy(&raw_summary.stderr)
-        ))
-        .into());
-    }
-    let summary_json: Value = serde_json::from_slice(&raw_summary.stdout)?;
-    let function = summary_json["functions"]
-        .as_array()
-        .and_then(|functions| {
-            functions
-                .iter()
-                .find(|function| function["name"].as_str() == Some(function_name))
-        })
-        .ok_or_else(|| io::Error::other(format!("function {function_name} missing")))?;
-    let called_by = function["called_by"]
-        .as_array()
-        .ok_or_else(|| io::Error::other(format!("called_by missing for {function_name}")))?;
-    if called_by
-        .iter()
-        .any(|caller| caller.as_str() == Some(expected_caller))
-    {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "expected {function_name} in {file_path} to be called by {expected_caller}, found {called_by:?}"
-        ))
-        .into())
-    }
-}
-
-/// Return the current token telemetry call count without mutating telemetry.
-fn token_call_count(repo: &std::path::Path, db: &std::path::Path) -> Result<u64, Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
-        .current_dir(repo)
-        .env("PROJECTATLAS_NO_TELEMETRY", "1")
-        .arg("--format")
-        .arg("json")
-        .arg("--db")
-        .arg(db)
-        .arg("token")
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "token call-count command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-        .into());
-    }
-    let token_json: Value = serde_json::from_slice(&output.stdout)?;
-    token_json["calls"]
-        .as_u64()
-        .ok_or_else(|| io::Error::other("token call count missing").into())
-}
-
-/// Return the repository workspace root for fixture access.
-fn workspace_root() -> Result<std::path::PathBuf, Box<dyn Error>> {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| io::Error::other("workspace root not found").into())
-}
-
 /// Return one top-level GitHub Actions job block from a workflow document.
 fn workflow_job_block(workflow: &str, job: &str) -> Result<String, Box<dyn Error>> {
     let marker = format!("  {job}:");
@@ -15457,22 +17171,6 @@ fn workflow_job_block(workflow: &str, job: &str) -> Result<String, Box<dyn Error
     }
 }
 
-/// Return every shell command owned by one GitHub Actions job.
-fn workflow_job_runs(workflow: &str, job: &str) -> Result<Vec<String>, Box<dyn Error>> {
-    let documents = YamlLoader::load_from_str(workflow)?;
-    let document = documents
-        .first()
-        .ok_or_else(|| io::Error::other("workflow document is empty"))?;
-    let steps = document["jobs"][job]["steps"]
-        .as_vec()
-        .ok_or_else(|| io::Error::other(format!("workflow job {job:?} has no steps")))?;
-    Ok(steps
-        .iter()
-        .filter_map(|step| step["run"].as_str())
-        .map(str::to_owned)
-        .collect())
-}
-
 /// Return one uniquely named step from a GitHub Actions job.
 fn workflow_job_step(workflow: &str, job: &str, step_name: &str) -> Result<Yaml, Box<dyn Error>> {
     let documents = YamlLoader::load_from_str(workflow)?;
@@ -15498,103 +17196,6 @@ fn workflow_job_step(workflow: &str, job: &str, step_name: &str) -> Result<Yaml,
     found.ok_or_else(|| {
         io::Error::other(format!("workflow job {job:?} omitted step {step_name:?}")).into()
     })
-}
-
-/// Detect `ProjectAtlas` maintenance commands that belong only in local agent workflows.
-fn command_runs_projectatlas_maintenance(command: &str) -> bool {
-    const MAINTENANCE_COMMANDS: [&str; 5] = ["init", "scan", "purpose", "parity", "lint"];
-
-    let command = command.replace("\\\r\n", " ").replace("\\\n", " ");
-    command
-        .lines()
-        .flat_map(|line| line.split([';', '|', '&']))
-        .any(|segment| {
-            let tokens = segment
-                .split_whitespace()
-                .map(|token| {
-                    token.trim_matches(|character: char| {
-                        matches!(character, '\'' | '"' | '(' | ')' | '{' | '}')
-                    })
-                })
-                .filter(|token| !token.is_empty())
-                .collect::<Vec<_>>();
-
-            if let Some(executable) = tokens.iter().position(|token| {
-                let name = token
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or(token)
-                    .to_ascii_lowercase();
-                matches!(name.as_str(), "projectatlas" | "projectatlas.exe")
-            }) {
-                return tokens[executable + 1..]
-                    .iter()
-                    .any(|token| MAINTENANCE_COMMANDS.contains(token));
-            }
-
-            let Some(cargo) = tokens.iter().position(|token| {
-                let name = token
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or(token)
-                    .to_ascii_lowercase();
-                matches!(name.as_str(), "cargo" | "cargo.exe")
-            }) else {
-                return false;
-            };
-            let Some(run) = tokens[cargo + 1..]
-                .iter()
-                .position(|token| *token == "run")
-                .map(|index| cargo + 1 + index)
-            else {
-                return false;
-            };
-            let Some(arguments) = tokens[run + 1..]
-                .iter()
-                .rposition(|token| *token == "--")
-                .map(|index| run + 1 + index)
-            else {
-                return false;
-            };
-            let owns_projectatlas_cli = tokens[run + 1..arguments]
-                .windows(2)
-                .any(|pair| matches!(pair[0], "-p" | "--package") && pair[1] == "projectatlas-cli")
-                || tokens[run + 1..arguments].contains(&"--package=projectatlas-cli");
-
-            owns_projectatlas_cli
-                && tokens[arguments + 1..]
-                    .iter()
-                    .any(|token| MAINTENANCE_COMMANDS.contains(token))
-        })
-}
-
-/// Require every GitHub Actions `uses:` reference to pin an immutable 40-char SHA.
-fn assert_actions_are_sha_pinned(name: &str, workflow: &str) -> Result<(), Box<dyn Error>> {
-    for (index, line) in workflow.lines().enumerate() {
-        let Some((_, reference)) = line.split_once("uses:") else {
-            continue;
-        };
-        let reference = reference.split('#').next().unwrap_or("").trim();
-        let Some((_, revision)) = reference.rsplit_once('@') else {
-            return Err(io::Error::other(format!(
-                "{name}:{} uses reference {reference:?} without an @revision",
-                index + 1
-            ))
-            .into());
-        };
-        if revision.len() != 40
-            || !revision
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-        {
-            return Err(io::Error::other(format!(
-                "{name}:{} uses reference {reference:?} is not pinned to a 40-character SHA",
-                index + 1
-            ))
-            .into());
-        }
-    }
-    Ok(())
 }
 
 /// Return the deterministic quarantine path for a fixture stale shim.
@@ -15814,17 +17415,6 @@ fn serve_release_assets(
     Ok((base_url, handle))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(bytes);
-    let mut rendered = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        rendered.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
-        rendered.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
-    }
-    rendered
-}
-
 fn write_executable_script(path: &Path, script: &str) -> Result<(), Box<dyn Error>> {
     fs::write(path, script)?;
     #[cfg(unix)]
@@ -15855,49 +17445,6 @@ fn compile_codex_mcp_owner_fixture(output: &Path) -> Result<(), Box<dyn Error>> 
     if !compile_output.status.success() {
         return Err(io::Error::other(format!(
             "failed to compile Codex MCP owner fixture:\n{}",
-            String::from_utf8_lossy(&compile_output.stderr)
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn compile_obsolete_projectatlas_fixture(output: &Path) -> Result<(), Box<dyn Error>> {
-    let source = output.with_extension("cs");
-    fs::write(
-        &source,
-        r#"using System;
-using System.Threading;
-
-public static class Program
-{
-    public static int Main(string[] arguments)
-    {
-        if (Array.IndexOf(arguments, "mcp") >= 0)
-        {
-            Thread.Sleep(Timeout.Infinite);
-            return 0;
-        }
-        return 2;
-    }
-}
-"#,
-    )?;
-    let compile_output = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(
-            "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
-        )
-        .env("PROJECTATLAS_FIXTURE_SOURCE", &source)
-        .env("PROJECTATLAS_FIXTURE_RUNTIME", output)
-        .output()?;
-    if !compile_output.status.success() {
-        return Err(io::Error::other(format!(
-            "failed to compile obsolete ProjectAtlas fixture runtime:\n{}",
             String::from_utf8_lossy(&compile_output.stderr)
         ))
         .into());
@@ -16029,259 +17576,49 @@ fn windows_test_process_id_allowlist(process_ids: &[u32]) -> io::Result<String> 
 }
 
 #[cfg(windows)]
-/// Derive the fixture-private identity record used when normal publication is absent.
-fn codex_owner_retained_identity_path(child_identity_file: &Path) -> PathBuf {
-    let mut retained_identity = child_identity_file.as_os_str().to_os_string();
-    retained_identity.push(".owner");
-    PathBuf::from(retained_identity)
-}
-
-#[cfg(windows)]
-fn codex_owner_cleanup_deadline(started: Instant) -> Instant {
-    started
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
-}
-
-#[cfg(windows)]
-fn codex_owner_cleanup_capture_deadline(cleanup_deadline: Instant) -> Instant {
-    let now = Instant::now();
-    let capture_budget = cleanup_deadline
-        .saturating_duration_since(now)
-        .saturating_sub(CODEX_OWNER_CHILD_STOP_BUDGET)
-        .saturating_sub(CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET)
-        .saturating_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET)
-        .min(CODEX_OWNER_FAILURE_CLEANUP_BUDGET);
-    now + capture_budget
-}
-
-#[cfg(windows)]
-fn cleanup_codex_owner_processes_after_spawn_failure(
-    parent: &mut Child,
-    child_identity_file: &Path,
-    stable_runtime: &Path,
-    mut failures: Vec<String>,
-    cleanup_deadline: Instant,
-    identity_capture_delay: Option<Duration>,
-    child_stop_delay: Option<Duration>,
-    fail_helper_spawns: bool,
-) -> Result<(), Box<dyn Error>> {
-    let retained_identity_file = codex_owner_retained_identity_path(child_identity_file);
-    let capture_deadline = codex_owner_cleanup_capture_deadline(cleanup_deadline);
-    let mut capture_failures = Vec::new();
-    let child_identity = match read_codex_owner_child_identity_with_test_delay(
-        child_identity_file,
-        stable_runtime,
-        capture_deadline,
-        identity_capture_delay,
-    ) {
-        Ok(identity) => Some(identity),
-        Err(error) => {
-            capture_failures.push(format!("normal child identity capture failed: {error}"));
-            match read_codex_owner_child_identity_with_test_delay(
-                &retained_identity_file,
-                stable_runtime,
-                capture_deadline,
-                identity_capture_delay,
-            ) {
-                Ok(identity) => Some(identity),
-                Err(error) => {
-                    capture_failures
-                        .push(format!("retained child identity capture failed: {error}"));
-                    None
-                }
-            }
-        }
-    };
-    let child_cleanup_result = match child_identity {
-        Some(identity) => stop_windows_fixture_process_until_with_fallback_test_delay(
-            &identity,
-            cleanup_deadline,
-            child_stop_delay,
-            None,
-            None,
-            fail_helper_spawns,
-        ),
-        None => match read_codex_owner_identity_record(&retained_identity_file) {
-            Ok(identity) => stop_windows_fixture_process_until_with_fallback_test_delay(
-                &identity,
-                cleanup_deadline,
-                child_stop_delay,
-                None,
-                None,
-                fail_helper_spawns,
-            ),
-            Err(error) => Err(io::Error::other(format!(
-                "no retained child identity was available after capture failure ({}): {error}",
-                capture_failures.join("; ")
-            ))
-            .into()),
-        },
-    };
-    if let Err(error) = child_cleanup_result {
-        failures.push(format!("could not retire its owned child safely: {error}"));
-    }
-    let kill_result = parent.kill();
-    let wait_result = parent.wait();
-    if let Err(error) = kill_result
-        && error.kind() != io::ErrorKind::InvalidInput
-    {
-        failures.push(format!(
-            "could not terminate the held owner process: {error}"
-        ));
-    }
-    if let Err(error) = wait_result {
-        failures.push(format!("could not reap the held owner process: {error}"));
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "Codex owner fixture cleanup failed: {}",
-            failures.join("; ")
-        ))
-        .into())
-    }
-}
-
-#[cfg(windows)]
-fn codex_owner_observation_failure(
-    parent: &mut Child,
-    child_identity_file: &Path,
-    stable_runtime: &Path,
-    error: impl std::fmt::Display,
-    cleanup_deadline: Instant,
-) -> Result<(), Box<dyn Error>> {
-    match cleanup_codex_owner_processes_after_spawn_failure(
-        parent,
-        child_identity_file,
-        stable_runtime,
-        Vec::new(),
-        cleanup_deadline,
-        None,
-        None,
-        false,
-    ) {
-        Ok(()) => Ok(()),
-        Err(cleanup_error) => Err(io::Error::other(format!(
-            "failed to preserve child-first cleanup after owner observation error ({error}): {cleanup_error}"
-        ))
-        .into()),
-    }
-}
-
-#[cfg(windows)]
 fn stop_codex_owner_after_spawn_failure(
     parent: &mut Child,
     child_identity_file: &Path,
     stable_runtime: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    stop_codex_owner_after_spawn_failure_with_test_delays(
-        parent,
-        child_identity_file,
-        stable_runtime,
-        None,
-        None,
-        None,
-        false,
-    )
-}
-
-#[cfg(windows)]
-fn stop_codex_owner_after_spawn_failure_with_test_delays(
-    parent: &mut Child,
-    child_identity_file: &Path,
-    stable_runtime: &Path,
-    identity_capture_delay: Option<Duration>,
-    child_stop_delay: Option<Duration>,
-    owner_observation_delay: Option<Duration>,
-    fail_helper_spawns: bool,
-) -> Result<(), Box<dyn Error>> {
     let mut stop_file = child_identity_file.as_os_str().to_os_string();
     stop_file.push(".stop");
     let stop_result = fs::write(PathBuf::from(stop_file), b"stop");
-    let cleanup_started = Instant::now();
-    let cleanup_deadline = codex_owner_cleanup_deadline(cleanup_started);
-    let observation_deadline = cleanup_started + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
-    let mut observation_error = None;
-    let mut failures = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
     if stop_result.is_ok() {
-        if let Some(delay) = owner_observation_delay {
-            thread::sleep(delay);
-        }
         loop {
             match parent.try_wait() {
-                Ok(Some(status)) => {
-                    if Instant::now() >= observation_deadline {
-                        failures.push(format!(
-                            "owner fixture exited after observation deadline: {status} (owner_observation_elapsed_ms={})",
-                            cleanup_started.elapsed().as_millis()
-                        ));
-                        break;
-                    }
-                    return Ok(());
-                }
+                Ok(Some(_)) => return Ok(()),
                 Ok(None) => {}
                 Err(error) => {
-                    observation_error = Some(error);
-                    break;
+                    drop(parent.kill());
+                    drop(parent.wait());
+                    return Err(io::Error::other(format!(
+                        "failed to observe Codex owner fixture cleanup: {error}"
+                    ))
+                    .into());
                 }
             }
-            if Instant::now() >= observation_deadline {
+            if Instant::now() >= deadline {
                 break;
             }
-            let remaining = observation_deadline.saturating_duration_since(Instant::now());
-            thread::sleep(remaining.min(Duration::from_millis(25)));
+            thread::sleep(Duration::from_millis(25));
         }
     }
 
-    if let Some(error) = observation_error {
-        codex_owner_observation_failure(
-            parent,
-            child_identity_file,
-            stable_runtime,
-            error,
-            cleanup_deadline,
-        )?;
-        return Ok(());
-    }
-
+    let child_cleanup_result = read_codex_owner_child_identity(child_identity_file, stable_runtime)
+        .and_then(|identity| stop_windows_fixture_process(&identity));
+    let kill_result = parent.kill();
+    let wait_result = parent.wait();
+    let mut failures = Vec::new();
     if let Err(error) = stop_result {
         failures.push(format!("could not signal the owner fixture: {error}"));
     } else {
         failures.push("owner fixture did not stop within five seconds".to_string());
     }
-    cleanup_codex_owner_processes_after_spawn_failure(
-        parent,
-        child_identity_file,
-        stable_runtime,
-        failures,
-        cleanup_deadline,
-        identity_capture_delay,
-        child_stop_delay,
-        fail_helper_spawns,
-    )
-}
-
-#[cfg(windows)]
-/// Retire the exact published child, then kill and reap its owned parent.
-fn cleanup_codex_owner_processes(
-    mut parent: Child,
-    child_identity: &WindowsProcessIdentity,
-) -> Result<(), Box<dyn Error>> {
-    let cleanup_deadline = codex_owner_cleanup_deadline(Instant::now());
-    let child_cleanup_result =
-        stop_windows_fixture_process_until(child_identity, cleanup_deadline, None, None);
-    let kill_result = parent.kill();
-    let wait_result = parent.wait();
-    let mut failures = Vec::new();
     if let Err(error) = child_cleanup_result {
         failures.push(format!(
-            "could not retire the published child safely: {error}"
+            "could not retire its published child safely: {error}"
         ));
     }
     if let Err(error) = kill_result
@@ -16294,89 +17631,17 @@ fn cleanup_codex_owner_processes(
     if let Err(error) = wait_result {
         failures.push(format!("could not reap the held owner process: {error}"));
     }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(io::Error::other(failures.join("; ")).into())
-    }
+    Err(io::Error::other(format!(
+        "Codex owner fixture cleanup failed: {}",
+        failures.join("; ")
+    ))
+    .into())
 }
 
 #[cfg(windows)]
-/// Preserve a negative assertion while cleaning up an unexpectedly accepted owner.
-fn codex_owner_unexpected_acceptance_error(
-    mode: &str,
-    parent: Child,
-    child_identity: &WindowsProcessIdentity,
-) -> Box<dyn Error> {
-    let cleanup_result = cleanup_codex_owner_processes(parent, child_identity);
-    let mut message = format!("{mode} owner fixture publication was accepted");
-    if let Err(error) = cleanup_result {
-        message.push_str("; fixture cleanup also failed: ");
-        message.push_str(&error.to_string());
-    }
-    io::Error::other(message).into()
-}
-
-#[cfg(windows)]
-fn read_codex_owner_child_identity_with_test_delay(
+fn read_codex_owner_child_identity(
     child_identity_file: &Path,
     stable_runtime: &Path,
-    readiness_deadline: Instant,
-    test_delay: Option<Duration>,
-) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
-    if Instant::now() >= readiness_deadline {
-        return Err(io::Error::other(
-            "Windows fixture identity validation reached the readiness deadline before probing",
-        )
-        .into());
-    }
-    let published = read_codex_owner_identity_record(child_identity_file)?;
-    let captured = capture_windows_process_identity_until(
-        published.process_id,
-        readiness_deadline,
-        test_delay,
-        None,
-    )?;
-    if captured.process_id != published.process_id
-        || captured.creation_file_time_utc != published.creation_file_time_utc
-    {
-        return Err(io::Error::other(format!(
-            "owner-published child identity differed: published_pid={} captured_pid={} published_creation={} captured_creation={}",
-            published.process_id,
-            captured.process_id,
-            published.creation_file_time_utc,
-            captured.creation_file_time_utc
-        ))
-        .into());
-    }
-    let owner_canonical =
-        normalize_native_path_display(fs::canonicalize(&published.executable_path)?);
-    let captured_canonical =
-        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
-    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
-    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
-        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
-    {
-        return Err(io::Error::other(format!(
-            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
-            published.executable_path.display(),
-            captured.executable_path.display(),
-            stable_runtime.display()
-        ))
-        .into());
-    }
-    if Instant::now() >= readiness_deadline {
-        return Err(io::Error::other(
-            "Windows fixture identity validation completed after the readiness deadline",
-        )
-        .into());
-    }
-    Ok(captured)
-}
-
-#[cfg(windows)]
-fn read_codex_owner_identity_record(
-    child_identity_file: &Path,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
     let identity_text = fs::read_to_string(child_identity_file)?;
     let mut identity_lines = identity_text.lines();
@@ -16394,44 +17659,49 @@ fn read_codex_owner_identity_record(
             .filter(|path| !path.is_empty())
             .ok_or_else(|| io::Error::other("owner fixture omitted child executable path"))?,
     );
-    Ok(WindowsProcessIdentity {
-        process_id,
-        creation_file_time_utc: owner_creation_file_time_utc,
-        executable_path: owner_executable_path,
-    })
+    let captured = capture_windows_process_identity(process_id)?;
+    if captured.process_id != process_id
+        || captured.creation_file_time_utc != owner_creation_file_time_utc
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child identity differed: published_pid={process_id} captured_pid={} published_creation={owner_creation_file_time_utc} captured_creation={}",
+            captured.process_id,
+            captured.creation_file_time_utc
+        ))
+        .into());
+    }
+    let owner_canonical = normalize_native_path_display(fs::canonicalize(&owner_executable_path)?);
+    let captured_canonical =
+        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
+    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
+    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
+        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
+            owner_executable_path.display(),
+            captured.executable_path.display(),
+            stable_runtime.display()
+        ))
+        .into());
+    }
+    Ok(captured)
 }
 
 #[cfg(windows)]
 fn codex_owner_spawn_error(
     parent: &mut Child,
-    codex_fixture: &Path,
     child_identity_file: &Path,
     stable_runtime: &Path,
     error: impl std::fmt::Display,
 ) -> Box<dyn Error> {
     match stop_codex_owner_after_spawn_failure(parent, child_identity_file, stable_runtime) {
-        Ok(()) => io::Error::other(format!(
-            "{error}; owner={}; identity_file={}; expected_runtime={}",
-            codex_fixture.display(),
-            child_identity_file.display(),
-            stable_runtime.display()
-        ))
-        .into(),
+        Ok(()) => io::Error::other(error.to_string()).into(),
         Err(cleanup_error) => io::Error::other(format!(
-            "{error}; owner={}; identity_file={}; expected_runtime={}; fixture cleanup also failed: {cleanup_error}",
-            codex_fixture.display(),
-            child_identity_file.display(),
-            stable_runtime.display()
+            "{error}; fixture cleanup also failed: {cleanup_error}"
         ))
         .into(),
     }
-}
-
-#[cfg(windows)]
-fn codex_owner_readiness_deadline(started: Instant) -> Result<Instant, Box<dyn Error>> {
-    started
-        .checked_add(CODEX_OWNER_READINESS_TIMEOUT)
-        .ok_or_else(|| io::Error::other("Codex MCP owner readiness deadline overflow").into())
 }
 
 #[cfg(windows)]
@@ -16441,36 +17711,7 @@ fn spawn_codex_owned_obsolete_mcp(
     db: &Path,
     config: Option<&Path>,
     child_pid_file: &Path,
-    publication_delay: Option<Duration>,
-    publication_mode: Option<&str>,
 ) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
-    spawn_codex_owned_obsolete_mcp_with_test_delays(
-        codex_fixture,
-        stable_runtime,
-        db,
-        config,
-        child_pid_file,
-        publication_delay,
-        publication_mode,
-        None,
-        None,
-    )
-}
-
-#[cfg(windows)]
-fn spawn_codex_owned_obsolete_mcp_with_test_delays(
-    codex_fixture: &Path,
-    stable_runtime: &Path,
-    db: &Path,
-    config: Option<&Path>,
-    child_pid_file: &Path,
-    publication_delay: Option<Duration>,
-    publication_mode: Option<&str>,
-    identity_capture_delay: Option<Duration>,
-    observation_delay: Option<Duration>,
-) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
-    let started = Instant::now();
-    let deadline = codex_owner_readiness_deadline(started)?;
     let mut command = StdCommand::new(codex_fixture);
     command
         .arg(child_pid_file)
@@ -16482,31 +17723,17 @@ fn spawn_codex_owned_obsolete_mcp_with_test_delays(
     if let Some(config) = config {
         command.arg(config).arg("--config").arg("model=\"o3\"");
     }
-    if let Some(delay) = publication_delay {
-        command.env(
-            CODEX_OWNER_PUBLICATION_DELAY_ENV,
-            delay.as_millis().to_string(),
-        );
-    }
-    if let Some(mode) = publication_mode {
-        command.env(CODEX_OWNER_PUBLICATION_MODE_ENV, mode);
-    }
     let mut parent = command.spawn()?;
-    if let Some(delay) = observation_delay {
-        thread::sleep(delay);
-    }
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match parent.try_wait() {
             Ok(Some(status)) => {
-                let observation_elapsed = started.elapsed();
                 return Err(codex_owner_spawn_error(
                     &mut parent,
-                    codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!(
-                        "Codex MCP owner fixture exited before publishing its child PID: {status} (owner_observation_elapsed_ms={})",
-                        observation_elapsed.as_millis()
+                        "Codex MCP owner fixture exited before publishing its child PID: {status}"
                     ),
                 ));
             }
@@ -16514,7 +17741,6 @@ fn spawn_codex_owned_obsolete_mcp_with_test_delays(
             Err(error) => {
                 return Err(codex_owner_spawn_error(
                     &mut parent,
-                    codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!("failed to inspect Codex MCP owner fixture: {error}"),
@@ -16522,1628 +17748,123 @@ fn spawn_codex_owned_obsolete_mcp_with_test_delays(
             }
         }
         if child_pid_file.is_file() {
-            let observed_at = Instant::now();
-            if observed_at >= deadline {
-                let elapsed = started.elapsed();
-                return Err(codex_owner_spawn_error(
-                    &mut parent,
-                    codex_fixture,
-                    child_pid_file,
-                    stable_runtime,
-                    format!(
-                        "Codex MCP owner fixture published its child PID after the readiness deadline (readiness_elapsed_ms={})",
-                        elapsed.as_millis()
-                    ),
-                ));
-            }
-            // Publication and exact identity validation share this one readiness deadline.
-            match read_codex_owner_child_identity_with_test_delay(
-                child_pid_file,
-                stable_runtime,
-                deadline,
-                identity_capture_delay,
-            ) {
+            match read_codex_owner_child_identity(child_pid_file, stable_runtime) {
                 Ok(captured) => return Ok((parent, captured)),
                 Err(error) => {
                     return Err(codex_owner_spawn_error(
                         &mut parent,
-                        codex_fixture,
                         child_pid_file,
                         stable_runtime,
-                        format!(
-                            "failed to validate published child identity (readiness_elapsed_ms={}): {error}",
-                            started.elapsed().as_millis()
-                        ),
+                        error,
                     ));
                 }
             }
         }
         if Instant::now() >= deadline {
-            let elapsed = started.elapsed();
             return Err(codex_owner_spawn_error(
                 &mut parent,
-                codex_fixture,
                 child_pid_file,
                 stable_runtime,
-                format!(
-                    "Codex MCP owner fixture did not publish its child PID within {CODEX_OWNER_READINESS_TIMEOUT:?} (elapsed={elapsed:?} readiness_elapsed_ms={})",
-                    elapsed.as_millis()
-                ),
+                "Codex MCP owner fixture did not publish its child PID",
             ));
         }
         thread::sleep(Duration::from_millis(25));
     }
 }
 
-#[test]
 #[cfg(windows)]
-fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Result<(), Box<dyn Error>>
-{
-    let temp = tempfile::tempdir()?;
-    let repo = temp.path().join(TEST_REPO_DIR);
-    let atlas_dir = repo.join(ATLAS_DIR_NAME);
-    fs::create_dir_all(&atlas_dir)?;
-    fs::write(
-        atlas_dir.join("config.toml"),
-        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
-    )?;
-    let db = atlas_dir.join("projectatlas.db");
-    let runtime = temp
-        .path()
-        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
-    compile_obsolete_projectatlas_fixture(&runtime)?;
-    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
-    compile_codex_mcp_owner_fixture(&codex_fixture)?;
-
-    // Exercise the production readiness helper with prompt publication plus a real PowerShell
-    // identity capture delay beyond the former five-second boundary, while remaining inside the
-    // one absolute readiness deadline.
-    let delayed_identity_file = temp.path().join("delayed-identity.pid");
-    let delayed_started = Instant::now();
-    let (delayed_parent, delayed_identity) = spawn_codex_owned_obsolete_mcp_with_test_delays(
-        &codex_fixture,
-        &runtime,
-        &db,
-        None,
-        &delayed_identity_file,
-        Some(CODEX_OWNER_DELAYED_PUBLICATION),
-        None,
-        Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
-        None,
-    )?;
-    let delayed_elapsed = delayed_started.elapsed();
-    if delayed_elapsed <= Duration::from_secs(5) || delayed_elapsed >= CODEX_OWNER_READINESS_TIMEOUT
-    {
-        let cleanup_result = cleanup_codex_owner_processes(delayed_parent, &delayed_identity);
-        return Err(io::Error::other(format!(
-            "delayed publication and identity capture did not stay inside one readiness deadline: elapsed={delayed_elapsed:?} publication_delay={CODEX_OWNER_DELAYED_PUBLICATION:?} capture_delay={CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} cleanup={cleanup_result:?}"
-        ))
-        .into());
-    }
-    let delayed_cleanup = cleanup_codex_owner_processes(delayed_parent, &delayed_identity);
-    if delayed_cleanup.is_err() || windows_process_is_alive(&delayed_identity)? {
-        return Err(io::Error::other(format!(
-            "delayed publication and identity capture did not clean up its accepted child: {delayed_cleanup:?}"
-        ))
-        .into());
-    }
-
-    for (index, (mode, expected)) in [
-        ("early-exit", "exited before publishing"),
-        ("malformed", "failed to validate published child identity"),
-        ("mismatched", "owner-published child identity differed"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let identity_file = temp.path().join(format!("{mode}-{index}.pid"));
-        let started = Instant::now();
-        let result = spawn_codex_owned_obsolete_mcp(
-            &codex_fixture,
-            &runtime,
-            &db,
-            Some(&atlas_dir.join("config.toml")),
-            &identity_file,
-            None,
-            Some(mode),
-        );
-        let error = match result {
-            Ok((parent, child_identity)) => {
-                return Err(codex_owner_unexpected_acceptance_error(
-                    mode,
-                    parent,
-                    &child_identity,
-                ));
-            }
-            Err(error) => error,
-        };
-        let elapsed = started.elapsed();
-        let text = error.to_string();
-        let early_exit_observation_elapsed = if mode == "early-exit" {
-            Some(
-                text.split("owner_observation_elapsed_ms=")
-                    .nth(1)
-                    .and_then(|value| value.split(')').next())
-                    .and_then(|value| value.trim().parse::<u64>().ok())
-                    .map(Duration::from_millis)
-                    .ok_or_else(|| {
-                        io::Error::other(format!(
-                            "early-exit owner fixture omitted its observation elapsed diagnostic:\n{text}"
-                        ))
-                    })?,
-            )
-        } else {
-            None
-        };
-        if !text.contains(expected)
-            || !text.contains(&format!("owner={}", codex_fixture.display()))
-            || !text.contains(&format!("identity_file={}", identity_file.display()))
-            || !text.contains(&format!("expected_runtime={}", runtime.display()))
-            || (mode == "early-exit" && elapsed > codex_owner_early_exit_max_elapsed())
-            || early_exit_observation_elapsed
-                .as_ref()
-                .is_some_and(|observed| *observed >= CODEX_OWNER_READINESS_TIMEOUT)
-            || text.contains("fixture cleanup also failed")
-        {
-            return Err(io::Error::other(format!(
-                "{mode} owner fixture failure was not bounded and diagnostic: elapsed={elapsed:?} observed={early_exit_observation_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} max_early_exit={:?}\n{text}",
-                codex_owner_early_exit_max_elapsed()
-            ))
-            .into());
-        }
-    }
-
-    // Exercise the same branch a negative fixture would take if validation regressed.
-    let accepted_identity_file = temp.path().join("unexpected-acceptance.pid");
-    let accepted = spawn_codex_owned_obsolete_mcp(
-        &codex_fixture,
-        &runtime,
-        &db,
-        Some(&atlas_dir.join("config.toml")),
-        &accepted_identity_file,
-        None,
-        None,
-    )?;
-    let accepted_identity = accepted.1.clone();
-    let unexpected_error =
-        codex_owner_unexpected_acceptance_error("mismatched", accepted.0, &accepted_identity);
-    let unexpected_error_text = unexpected_error.to_string();
-    if windows_process_is_alive(&accepted_identity)?
-        || !unexpected_error_text.contains("mismatched owner fixture publication was accepted")
-        || unexpected_error_text.contains("fixture cleanup also failed")
-    {
-        return Err(io::Error::other(format!(
-            "unexpectedly accepted negative owner fixture did not clean up its owned processes: {unexpected_error}"
-        ))
-        .into());
-    }
-
-    let observation_identity_file = temp.path().join("observation-failure.pid");
-    let (mut observation_parent, observation_identity) = spawn_codex_owned_obsolete_mcp(
-        &codex_fixture,
-        &runtime,
-        &db,
-        Some(&atlas_dir.join("config.toml")),
-        &observation_identity_file,
-        None,
-        None,
-    )?;
-    // Inject only the observation decision while exercising the same child-first cleanup path;
-    // the production caller retains the actual observation error in its spawn diagnostic.
-    let observation_cleanup_deadline = Instant::now()
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-    let observation_cleanup_result = codex_owner_observation_failure(
-        &mut observation_parent,
-        &observation_identity_file,
-        &runtime,
-        "synthetic parent observation failure",
-        observation_cleanup_deadline,
-    );
-    if observation_parent.try_wait()?.is_none()
-        || windows_process_is_alive(&observation_identity)?
-        || observation_cleanup_result.is_err()
-    {
-        return Err(io::Error::other(format!(
-            "parent observation failure did not preserve exact child-first cleanup: {observation_cleanup_result:?}"
-        ))
-        .into());
-    }
-
-    // A promptly stopped owner can be observed after the five-second owner-observation
-    // deadline when the polling caller is descheduled.  The late completion is a failure
-    // classification, but it must still use the retained-identity child-first cleanup path.
-    let late_observation_identity_file = temp.path().join("late-owner-observation.pid");
-    let (mut late_observation_parent, late_observation_identity) = spawn_codex_owned_obsolete_mcp(
-        &codex_fixture,
-        &runtime,
-        &db,
-        Some(&atlas_dir.join("config.toml")),
-        &late_observation_identity_file,
-        None,
-        None,
-    )?;
-    // Remove normal publication so cleanup must use the fixture-retained identity record.
-    fs::remove_file(&late_observation_identity_file)?;
-    let late_observation_result = stop_codex_owner_after_spawn_failure_with_test_delays(
-        &mut late_observation_parent,
-        &late_observation_identity_file,
-        &runtime,
-        None,
-        None,
-        Some(CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY),
-        false,
-    );
-    let late_observation_text = late_observation_result
-        .as_ref()
-        .err()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    let late_observation_elapsed = late_observation_text
-        .split("owner_observation_elapsed_ms=")
-        .nth(1)
-        .and_then(|value| value.split(')').next())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "late owner observation omitted its elapsed diagnostic: {late_observation_text}"
-            ))
-        })?;
-    if late_observation_result.is_ok()
-        || !late_observation_text.contains("owner fixture exited after observation deadline")
-        || late_observation_elapsed < CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY
-        || late_observation_elapsed
-            > CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY
-                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
-        || late_observation_parent.try_wait()?.is_none()
-        || windows_process_is_alive(&late_observation_identity)?
-        || late_observation_text.contains("could not retire its owned child safely")
-    {
-        return Err(io::Error::other(format!(
-            "late owner observation did not fail closed through exact child-first cleanup: result={late_observation_result:?} child_alive={}\n{late_observation_text}",
-            windows_process_is_alive(&late_observation_identity)?
-        ))
-        .into());
-    }
-
-    // Exercise the real production helper when publication and PowerShell identity capture
-    // compose beyond the same absolute readiness deadline. Cleanup must reap the exact retained
-    // child and the held owner without creating a second readiness envelope.
-    let boundary_identity_file = temp.path().join("readiness-boundary.pid");
-    let boundary_started = Instant::now();
-    let boundary_result = spawn_codex_owned_obsolete_mcp_with_test_delays(
-        &codex_fixture,
-        &runtime,
-        &db,
-        None,
-        &boundary_identity_file,
-        Some(CODEX_OWNER_READINESS_BOUNDARY_PUBLICATION_DELAY),
-        None,
-        Some(CODEX_OWNER_READINESS_BOUNDARY_CAPTURE_DELAY),
-        None,
-    );
-    let boundary_elapsed = boundary_started.elapsed();
-    let boundary_error = match boundary_result {
-        Ok((parent, child_identity)) => {
-            return Err(codex_owner_unexpected_acceptance_error(
-                "readiness-boundary",
-                parent,
-                &child_identity,
-            ));
-        }
-        Err(error) => error,
-    };
-    let boundary_text = boundary_error.to_string();
-    let boundary_identity = read_codex_owner_identity_record(&codex_owner_retained_identity_path(
-        &boundary_identity_file,
-    ))?;
-    let boundary_readiness_elapsed = boundary_text
-        .split("readiness_elapsed_ms=")
-        .nth(1)
-        .and_then(|value| value.split(')').next())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "readiness-boundary capture failure omitted total readiness elapsed: {boundary_text}"
-            ))
-        })?;
-    let boundary_total_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
-        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
-    if boundary_elapsed < CODEX_OWNER_READINESS_TIMEOUT
-        || boundary_elapsed > boundary_total_upper_bound
-        || boundary_readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
-        || boundary_readiness_elapsed
-            > CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
-        || !boundary_text.contains("timed out capturing Windows fixture process identity")
-        || !boundary_text.contains("readiness_elapsed_ms=")
-        || !boundary_text.contains(&format!("owner={}", codex_fixture.display()))
-        || !boundary_text.contains(&format!(
-            "identity_file={}",
-            boundary_identity_file.display()
-        ))
-        || !boundary_text.contains(&format!("expected_runtime={}", runtime.display()))
-        || boundary_text.contains("fixture cleanup also failed")
-        || windows_process_is_alive(&boundary_identity)?
-    {
-        return Err(io::Error::other(format!(
-            "readiness-boundary capture did not fail at the one bounded deadline or clean up its exact child: total_elapsed={boundary_elapsed:?} readiness_elapsed={boundary_readiness_elapsed:?} publication_delay={CODEX_OWNER_READINESS_BOUNDARY_PUBLICATION_DELAY:?} capture_delay={CODEX_OWNER_READINESS_BOUNDARY_CAPTURE_DELAY:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} total_upper_bound={boundary_total_upper_bound:?}\n{boundary_text}"
-        ))
-        .into());
-    }
-
-    let identity_file = temp.path().join("timeout.pid");
-    let timeout_started = Instant::now();
-    let result = spawn_codex_owned_obsolete_mcp(
-        &codex_fixture,
-        &runtime,
-        &db,
-        Some(&atlas_dir.join("config.toml")),
-        &identity_file,
-        None,
-        Some("timeout-ignore-stop"),
-    );
-    let error = match result {
-        Ok((parent, child_identity)) => {
-            return Err(codex_owner_unexpected_acceptance_error(
-                "timeout",
-                parent,
-                &child_identity,
-            ));
-        }
-        Err(error) => error,
-    };
-    let timeout_elapsed = timeout_started.elapsed();
-    let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
-        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
-    let text = error.to_string();
-    let timeout_readiness_elapsed = text
-        .split("readiness_elapsed_ms=")
-        .nth(1)
-        .and_then(|value| value.split(')').next())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "true owner fixture timeout omitted its pre-cleanup readiness elapsed diagnostic:\n{text}"
-            ))
-        })?;
-    let timeout_readiness_upper_bound =
-        CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
-    let timeout_child_identity =
-        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
-    if timeout_elapsed < CODEX_OWNER_READINESS_TIMEOUT
-        || timeout_elapsed > timeout_upper_bound
-        || timeout_readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
-        || timeout_readiness_elapsed > timeout_readiness_upper_bound
-        || !text.contains("did not publish its child PID within 30s")
-        || !text.contains("elapsed=")
-        || !text.contains(&format!("owner={}", codex_fixture.display()))
-        || !text.contains(&format!("identity_file={}", identity_file.display()))
-        || !text.contains(&format!("expected_runtime={}", runtime.display()))
-        || !text.contains("owner fixture did not stop within five seconds")
-        || !text.contains("fixture cleanup also failed")
-        || windows_process_is_alive(&timeout_child_identity)?
-    {
-        return Err(io::Error::other(format!(
-            "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} owner_observation_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} child_stop_budget={CODEX_OWNER_CHILD_STOP_BUDGET:?} cleanup_scheduler_tolerance={CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-/// Return the repository workspace root for fixture access.
-fn workspace_root() -> Result<std::path::PathBuf, Box<dyn Error>> {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| io::Error::other("workspace root not found").into())
+#[derive(Clone, Debug)]
+struct WindowsProcessIdentity {
+    process_id: u32,
+    creation_file_time_utc: i64,
+    executable_path: PathBuf,
 }
 
 #[cfg(windows)]
-fn terminate_windows_identity_capture(capture: &mut Child, deadline: Instant) -> io::Result<()> {
-    let process_id = capture.id();
-    let kill_error = match capture.kill() {
-        Ok(()) => None,
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput => None,
-        Err(error) => Some(error),
-    };
-    loop {
-        match capture.try_wait() {
-            Ok(Some(_status)) => {
-                return kill_error.map_or(Ok(()), |error| {
-                    Err(io::Error::other(format!(
-                        "could not terminate identity capture process {process_id}: {error}"
-                    )))
-                });
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "identity capture process {process_id} was not reaped by its bounded cleanup deadline"
-                    ),
-                ));
-            }
-            Ok(None) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                thread::sleep(remaining.min(Duration::from_millis(25)));
-            }
-            Err(error) => {
-                return Err(io::Error::other(format!(
-                    "could not observe identity capture process {process_id} after termination: {error}"
-                )));
-            }
-        }
+fn capture_windows_process_identity(
+    process_id: u32,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    let output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(
+            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction Stop; [pscustomobject]@{ process_id = [uint32]$process.Id; creation_file_time_utc = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); executable_path = [System.IO.Path]::GetFullPath($process.Path) } | ConvertTo-Json -Compress",
+        )
+        .env("PROJECTATLAS_FIXTURE_PID", process_id.to_string())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to capture Windows fixture process identity {process_id}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
     }
-}
-
-/// Return one uniquely named step from a GitHub Actions job.
-fn workflow_job_step(workflow: &str, job: &str, step_name: &str) -> Result<Yaml, Box<dyn Error>> {
-    let documents = YamlLoader::load_from_str(workflow)?;
-    let document = documents
-        .first()
-        .ok_or_else(|| io::Error::other("workflow document is empty"))?;
-    let steps = document["jobs"][job]["steps"]
-        .as_vec()
-        .ok_or_else(|| io::Error::other(format!("workflow job {job:?} has no steps")))?;
-    let mut found = None;
-    for step in steps {
-        if step["name"].as_str() != Some(step_name) {
-            continue;
-        }
-        if found.is_some() {
-            return Err(io::Error::other(format!(
-                "workflow job {job:?} has duplicate step {step_name:?}"
-            ))
-            .into());
-        }
-        found = Some(step.clone());
-    }
-    found.ok_or_else(|| {
-        io::Error::other(format!("workflow job {job:?} omitted step {step_name:?}")).into()
+    let identity: Value = serde_json::from_slice(&output.stdout)?;
+    let captured_process_id = identity["process_id"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| io::Error::other("Windows fixture identity omitted its process ID"))?;
+    let creation_file_time_utc = identity["creation_file_time_utc"]
+        .as_i64()
+        .ok_or_else(|| io::Error::other("Windows fixture identity omitted its creation time"))?;
+    let executable_path = identity["executable_path"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("Windows fixture identity omitted its executable path"))?;
+    Ok(WindowsProcessIdentity {
+        process_id: captured_process_id,
+        creation_file_time_utc,
+        executable_path,
     })
 }
 
-    fn process_exit_code(handle: Handle) -> io::Result<u32> {
-        let mut exit_code = 0;
-        if unsafe { GetExitCodeProcess(handle, &raw mut exit_code) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(exit_code)
-    }
-
-    fn verify_identity(handle: Handle, expected: &WindowsProcessIdentity) -> io::Result<()> {
-        let (actual_creation_time, actual_path) = query_identity(handle)?;
-        let actual_path = fs::canonicalize(actual_path)?;
-        let expected_path = fs::canonicalize(&expected.executable_path)?;
-        let actual_path = actual_path.to_str().ok_or_else(|| {
-            io::Error::other("native exact child cleanup received a non-UTF-8 executable path")
-        })?;
-        let expected_path = expected_path.to_str().ok_or_else(|| {
-            io::Error::other("native exact child cleanup retained a non-UTF-8 executable path")
-        })?;
-        if actual_creation_time != expected.creation_file_time_utc
-            || !actual_path.eq_ignore_ascii_case(expected_path)
-        {
-            return Err(io::Error::other(format!(
-                "native exact child cleanup refused Windows fixture process {} because its creation time or executable path did not match",
-                expected.process_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn query_identity(handle: Handle) -> io::Result<(i64, PathBuf)> {
-        let mut creation_time = FileTime {
-            low_date_time: 0,
-            high_date_time: 0,
-        };
-        let mut exit_time = FileTime {
-            low_date_time: 0,
-            high_date_time: 0,
-        };
-        let mut kernel_time = FileTime {
-            low_date_time: 0,
-            high_date_time: 0,
-        };
-        let mut user_time = FileTime {
-            low_date_time: 0,
-            high_date_time: 0,
-        };
-        if unsafe {
-            GetProcessTimes(
-                handle,
-                &raw mut creation_time,
-                &raw mut exit_time,
-                &raw mut kernel_time,
-                &raw mut user_time,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let actual_creation_time = (u64::from(creation_time.high_date_time) << 32
-            | u64::from(creation_time.low_date_time)) as i64;
-        let mut path = vec![0; MAX_PROCESS_PATH];
-        let mut path_length = path.len() as u32;
-        if unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &raw mut path_length) }
-            == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        path.truncate(path_length as usize);
-        Ok((
-            actual_creation_time,
-            PathBuf::from(OsString::from_wide(&path)),
-        ))
-    }
+#[cfg(windows)]
+fn windows_process_is_alive(identity: &WindowsProcessIdentity) -> Result<bool, Box<dyn Error>> {
+    let status = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(
+            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 1 }; try { $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -eq [long]$env:PROJECTATLAS_FIXTURE_CREATION -and [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { exit 0 } } catch {}; exit 1",
+        )
+        .env(
+            "PROJECTATLAS_FIXTURE_PID",
+            identity.process_id.to_string(),
+        )
+        .env(
+            "PROJECTATLAS_FIXTURE_CREATION",
+            identity.creation_file_time_utc.to_string(),
+        )
+        .env("PROJECTATLAS_FIXTURE_PATH", &identity.executable_path)
+        .status()?;
+    Ok(status.success())
 }
 
 #[cfg(windows)]
-fn stop_windows_fixture_process_native(
-    identity: &WindowsProcessIdentity,
-    deadline: Instant,
-) -> Result<(), Box<dyn Error>> {
-    match windows_native_process::stop_exact(identity, deadline) {
-        Ok(()) => Ok(()),
-        Err(error) => Err(io::Error::other(format!(
-            "native exact child cleanup failed for Windows fixture process {}: {error}",
-            identity.process_id
-        ))
-        .into()),
-    }
-}
-
-#[cfg(windows)]
-fn windows_fixture_stop_failure_with_fallback(
-    identity: &WindowsProcessIdentity,
-    detail: impl std::fmt::Display,
-    fallback_deadline: Instant,
-    final_deadline: Instant,
-    fallback_test_delay: Option<Duration>,
-    fail_helper_spawn: bool,
-) -> Box<dyn Error> {
-    let fallback_result = force_stop_windows_fixture_process(
-        identity,
-        fallback_deadline,
-        fallback_test_delay,
-        fail_helper_spawn,
-    );
-    let fallback_succeeded = fallback_result.is_ok();
-    let fallback_detail = match fallback_result.as_ref() {
-        Ok(()) => "exact child cleanup fallback completed".to_string(),
-        Err(error) => format!("exact child cleanup fallback failed: {error}"),
-    };
-    let final_detail = if fallback_succeeded {
-        "exact child cleanup final stop skipped after fallback success".to_string()
-    } else {
-        match stop_windows_fixture_process_native(identity, final_deadline) {
-            Ok(()) => "exact child cleanup final stop completed".to_string(),
-            Err(error) => format!("exact child cleanup final stop failed: {error}"),
-        }
-    };
-    io::Error::other(format!("{detail}; {fallback_detail}; {final_detail}")).into()
-}
-
-#[cfg(windows)]
-fn stop_windows_fixture_process_until(
-    identity: &WindowsProcessIdentity,
-    deadline: Instant,
-    test_delay: Option<Duration>,
-    observation_delay: Option<Duration>,
-) -> Result<(), Box<dyn Error>> {
-    stop_windows_fixture_process_until_with_fallback_test_delay(
-        identity,
-        deadline,
-        test_delay,
-        observation_delay,
-        None,
-        false,
-    )
-}
-
-#[cfg(windows)]
-fn stop_windows_fixture_process_until_with_fallback_test_delay(
-    identity: &WindowsProcessIdentity,
-    deadline: Instant,
-    test_delay: Option<Duration>,
-    observation_delay: Option<Duration>,
-    fallback_test_delay: Option<Duration>,
-    fail_helper_spawns: bool,
-) -> Result<(), Box<dyn Error>> {
-    let primary_deadline = deadline
-        .checked_sub(CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET)
-        .and_then(|deadline| deadline.checked_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET))
-        .unwrap_or(deadline);
-    let fallback_deadline = deadline
-        .checked_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET)
-        .unwrap_or(deadline);
-    let mut stop = match spawn_windows_fixture_stop_helper(identity, test_delay, fail_helper_spawns)
-    {
-        Ok(stop) => stop,
-        Err(error) => {
-            return Err(windows_fixture_stop_failure_with_fallback(
-                identity,
-                format!(
-                    "failed to start Windows fixture stop helper for {}: {error}",
-                    identity.process_id
-                ),
-                fallback_deadline,
-                deadline,
-                fallback_test_delay,
-                fail_helper_spawns,
-            ));
-        }
-    };
-    let started = Instant::now();
-    if let Some(delay) = observation_delay {
-        thread::sleep(delay);
-    }
-    let status = loop {
-        match stop.try_wait() {
-            Ok(Some(status)) => {
-                let observed_elapsed = started.elapsed();
-                if Instant::now() >= primary_deadline {
-                    let wait_result = stop.wait();
-                    let reap_detail = wait_result
-                        .err()
-                        .map(|error| format!("; late stop-helper reap failed: {error}"))
-                        .unwrap_or_default();
-                    return Err(windows_fixture_stop_failure_with_fallback(
-                        identity,
-                        format!(
-                            "timed out stopping Windows fixture process {} after {:?}; stop helper completed after deadline (observed after {observed_elapsed:?}){reap_detail}",
-                            identity.process_id, observed_elapsed
-                        ),
-                        fallback_deadline,
-                        deadline,
-                        fallback_test_delay,
-                        fail_helper_spawns,
-                    ));
-                }
-                break status;
-            }
-            Ok(None) if Instant::now() >= primary_deadline => {
-                let kill_result = stop.kill();
-                let wait_result = stop.wait();
-                let cleanup_detail = match (kill_result, wait_result) {
-                    (Ok(()), Ok(_)) => String::new(),
-                    (kill, wait) => {
-                        format!("; stop-helper cleanup kill={kill:?} wait={wait:?}")
-                    }
-                };
-                return Err(windows_fixture_stop_failure_with_fallback(
-                    identity,
-                    format!(
-                        "timed out stopping Windows fixture process {} after {:?}{cleanup_detail}",
-                        identity.process_id,
-                        started.elapsed()
-                    ),
-                    fallback_deadline,
-                    deadline,
-                    fallback_test_delay,
-                    fail_helper_spawns,
-                ));
-            }
-            Ok(None) => {
-                let remaining = primary_deadline.saturating_duration_since(Instant::now());
-                thread::sleep(remaining.min(Duration::from_millis(25)));
-            }
-            Err(error) => {
-                let kill_result = stop.kill();
-                let wait_result = stop.wait();
-                return Err(windows_fixture_stop_failure_with_fallback(
-                    identity,
-                    format!(
-                        "failed to observe Windows fixture stop helper for {}: {error}; cleanup kill={kill_result:?} wait={wait_result:?}",
-                        identity.process_id
-                    ),
-                    fallback_deadline,
-                    deadline,
-                    fallback_test_delay,
-                    fail_helper_spawns,
-                ));
-            }
-        }
-    };
+fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(), Box<dyn Error>> {
+    let status = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(
+            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result",
+        )
+        .env(
+            "PROJECTATLAS_FIXTURE_PID",
+            identity.process_id.to_string(),
+        )
+        .env(
+            "PROJECTATLAS_FIXTURE_CREATION",
+            identity.creation_file_time_utc.to_string(),
+        )
+        .env("PROJECTATLAS_FIXTURE_PATH", &identity.executable_path)
+        .status()?;
     if !status.success() {
-        return Err(windows_fixture_stop_failure_with_fallback(
-            identity,
-            format!(
-                "refused to stop Windows fixture process {} without its exact captured identity",
-                identity.process_id
-            ),
-            fallback_deadline,
-            deadline,
-            fallback_test_delay,
-            fail_helper_spawns,
-        ));
-    }
-    Ok(())
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
-    let mut process = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg("Start-Sleep -Seconds 30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let identity = match capture_windows_process_identity(process.id()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            drop(process.kill());
-            drop(process.wait());
-            return Err(error);
-        }
-    };
-    let started = Instant::now();
-    let result = capture_windows_process_identity_with_timeout(
-        identity.process_id,
-        CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
-        Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
-        None,
-    );
-    let elapsed = started.elapsed();
-    let cleanup_result = if windows_process_is_alive(&identity)? {
-        stop_windows_fixture_process(&identity)
-    } else {
-        Ok(())
-    };
-    process.wait()?;
-    cleanup_result?;
-    if result.is_ok()
-        || elapsed
-            > CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
-    {
         return Err(io::Error::other(format!(
-            "stalled Windows fixture identity capture was not bounded: elapsed={elapsed:?} timeout={CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} result={result:?}"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_fixture_identity_capture_rejects_late_completion() -> Result<(), Box<dyn Error>> {
-    let mut process = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg("Start-Sleep -Seconds 30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let identity = match capture_windows_process_identity(process.id()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            drop(process.kill());
-            drop(process.wait());
-            return Err(error);
-        }
-    };
-    let result = capture_windows_process_identity_with_timeout(
-        identity.process_id,
-        CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
-        None,
-        Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
-    );
-    let child_alive = windows_process_is_alive(&identity)?;
-    let cleanup_result = if child_alive {
-        stop_windows_fixture_process(&identity)
-    } else {
-        Ok(())
-    };
-    process.wait()?;
-    cleanup_result?;
-    let Err(error) = result else {
-        return Err(io::Error::other("late identity capture completion was accepted").into());
-    };
-    if !error.to_string().contains("completed after") {
-        return Err(io::Error::other(format!(
-            "late identity capture did not exercise the completion-after-deadline branch: {error}"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn Error>> {
-    let mut process = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg("Start-Sleep -Seconds 30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let identity = match capture_windows_process_identity(process.id()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            drop(process.kill());
-            drop(process.wait());
-            return Err(error);
-        }
-    };
-    let started = Instant::now();
-    let deadline = started
-        + CODEX_OWNER_CHILD_STOP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-    let result = stop_windows_fixture_process_until(
-        &identity,
-        deadline,
-        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
-        None,
-    );
-    let elapsed = started.elapsed();
-    let child_alive_before_cleanup = windows_process_is_alive(&identity)?;
-    let wait_result = if child_alive_before_cleanup {
-        let kill_result = process.kill();
-        let wait_result = process.wait();
-        if let Err(error) = kill_result
-            && error.kind() != io::ErrorKind::InvalidInput
-        {
-            return Err(error.into());
-        }
-        wait_result
-    } else {
-        process.wait()
-    };
-    wait_result?;
-    let child_alive_after_cleanup = windows_process_is_alive(&identity)?;
-    let result_text = result
-        .as_ref()
-        .err()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    if result.is_ok()
-        || !result_text.contains("exact child cleanup fallback completed")
-        || child_alive_after_cleanup
-        || elapsed
-            > CODEX_OWNER_CHILD_STOP_BUDGET
-                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
-    {
-        return Err(io::Error::other(format!(
-            "stalled Windows fixture stop helper was not bounded or left its child alive: elapsed={elapsed:?} timeout={CODEX_OWNER_CHILD_STOP_BUDGET:?} fallback={CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} child_alive_before_cleanup={child_alive_before_cleanup} child_alive_after_cleanup={child_alive_after_cleanup} result={result:?}"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_fixture_stop_helper_total_cleanup_deadline_is_bounded() -> Result<(), Box<dyn Error>> {
-    let mut process = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg("Start-Sleep -Seconds 30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let identity = match capture_windows_process_identity(process.id()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            drop(process.kill());
-            drop(process.wait());
-            return Err(error);
-        }
-    };
-    let started = Instant::now();
-    let deadline = started
-        + CODEX_OWNER_CHILD_STOP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-    let result = stop_windows_fixture_process_until_with_fallback_test_delay(
-        &identity,
-        deadline,
-        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
-        None,
-        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
-        false,
-    );
-    let elapsed = started.elapsed();
-    let child_alive_after_cleanup = windows_process_is_alive(&identity)?;
-    process.wait()?;
-    let result_text = result
-        .as_ref()
-        .err()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    let helper_budget = CODEX_OWNER_CHILD_STOP_BUDGET + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET;
-    let total_budget = helper_budget + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-    let lower_bound = helper_budget.saturating_sub(CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE);
-    let upper_bound = total_budget + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
-    if result.is_ok()
-        || child_alive_after_cleanup
-        || !result_text.contains("timed out stopping Windows fixture process")
-        || !result_text.contains("exact child cleanup fallback timed out")
-        || !result_text.contains("exact child cleanup final stop completed")
-        || elapsed < lower_bound
-        || elapsed > upper_bound
-    {
-        return Err(io::Error::other(format!(
-            "stalled Windows fixture cleanup exceeded its absolute deadline or skipped a bounded phase: elapsed={elapsed:?} lower_bound={lower_bound:?} upper_bound={upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} result={result:?}"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_fixture_stop_helper_primary_spawn_failure_cleans_exact_child()
--> Result<(), Box<dyn Error>> {
-    let mut process = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg("Start-Sleep -Seconds 30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let identity = match capture_windows_process_identity(process.id()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            drop(process.kill());
-            drop(process.wait());
-            return Err(error);
-        }
-    };
-    let mut sentinel = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg("Start-Sleep -Seconds 30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let sentinel_identity = match capture_windows_process_identity(sentinel.id()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            drop(process.kill());
-            drop(process.wait());
-            drop(sentinel.kill());
-            drop(sentinel.wait());
-            return Err(error);
-        }
-    };
-    let test_result = (|| -> Result<(), Box<dyn Error>> {
-        let started = Instant::now();
-        let deadline = started
-            + CODEX_OWNER_CHILD_STOP_BUDGET
-            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-        let result = stop_windows_fixture_process_until_with_fallback_test_delay(
-            &identity, deadline, None, None, None, true,
-        );
-        let elapsed = started.elapsed();
-        let exact_child_alive_before_cleanup = windows_process_is_alive(&identity)?;
-        let mut mismatched_sentinel_identity = sentinel_identity.clone();
-        mismatched_sentinel_identity.creation_file_time_utc += 1;
-        let mismatch_result = stop_windows_fixture_process_until_with_fallback_test_delay(
-            &mismatched_sentinel_identity,
-            Instant::now() + CODEX_OWNER_CHILD_STOP_BUDGET,
-            None,
-            None,
-            None,
-            true,
-        );
-        let sentinel_alive_after_mismatch = windows_process_is_alive(&sentinel_identity)?;
-        let result_text = result
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let mismatch_text = mismatch_result
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let total_budget = CODEX_OWNER_CHILD_STOP_BUDGET
-            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-        let upper_bound = total_budget + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
-        if result.is_ok()
-            || result_text
-                .matches("test-injected Windows fixture stop-helper spawn failure")
-                .count()
-                < 2
-            || !result_text.contains("exact child cleanup fallback failed")
-            || !result_text.contains("exact child cleanup final stop completed")
-            || exact_child_alive_before_cleanup
-            || mismatch_result.is_ok()
-            || !mismatch_text.contains("native exact child cleanup failed")
-            || !mismatch_text.contains("creation time or executable path did not match")
-            || !sentinel_alive_after_mismatch
-            || elapsed > upper_bound
-        {
-            return Err(io::Error::other(format!(
-                "primary stop-helper spawn failure did not preserve bounded exact cleanup: elapsed={elapsed:?} upper_bound={upper_bound:?} exact_child_alive_before_cleanup={exact_child_alive_before_cleanup} sentinel_alive_after_mismatch={sentinel_alive_after_mismatch} mismatch_result={mismatch_result:?} result={result:?}"
-            ))
-            .into());
-        }
-        Ok(())
-    })();
-    let exact_cleanup_result = if windows_process_is_alive(&identity)? {
-        let kill_result = process.kill();
-        let wait_result = process.wait();
-        if let Err(error) = kill_result
-            && error.kind() != io::ErrorKind::InvalidInput
-        {
-            Err(error)
-        } else {
-            wait_result
-        }
-    } else {
-        process.wait()
-    };
-    let sentinel_cleanup_result = if windows_process_is_alive(&sentinel_identity)? {
-        let cleanup_result = stop_windows_fixture_process(&sentinel_identity);
-        let wait_result = sentinel.wait();
-        cleanup_result.and(wait_result.map_err(Into::into))
-    } else {
-        sentinel.wait().map_err(Into::into)
-    };
-    exact_cleanup_result?;
-    sentinel_cleanup_result?;
-    test_result
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_codex_owner_native_cleanup_retires_child_when_helpers_fail() -> Result<(), Box<dyn Error>>
-{
-    windows_codex_owner_native_cleanup_with_injected_failure(
-        WindowsNativeCleanupInjectedFailure::None,
-    )
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_codex_owner_native_cleanup_retires_child_when_sentinel_spawn_fails()
--> Result<(), Box<dyn Error>> {
-    windows_codex_owner_native_cleanup_with_injected_failure(
-        WindowsNativeCleanupInjectedFailure::SentinelSpawn,
-    )
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_codex_owner_native_cleanup_retires_processes_when_owner_identity_capture_fails()
--> Result<(), Box<dyn Error>> {
-    windows_codex_owner_native_cleanup_with_injected_failure(
-        WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture,
-    )
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_codex_owner_native_cleanup_retires_processes_when_sentinel_identity_capture_fails()
--> Result<(), Box<dyn Error>> {
-    windows_codex_owner_native_cleanup_with_injected_failure(
-        WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture,
-    )
-}
-
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowsNativeCleanupInjectedFailure {
-    None,
-    OwnerIdentityCapture,
-    SentinelSpawn,
-    SentinelIdentityCapture,
-}
-
-#[cfg(windows)]
-fn windows_codex_owner_native_cleanup_with_injected_failure(
-    injected_failure: WindowsNativeCleanupInjectedFailure,
-) -> Result<(), Box<dyn Error>> {
-    let temp = tempfile::tempdir()?;
-    let runtime = temp
-        .path()
-        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
-    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
-    let db = temp.path().join("projectatlas.db");
-    let identity_file = temp.path().join("uncooperative-owner.pid");
-    compile_obsolete_projectatlas_fixture(&runtime)?;
-    compile_codex_mcp_owner_fixture(&codex_fixture)?;
-
-    let (mut owner, child_identity) = spawn_codex_owned_obsolete_mcp(
-        &codex_fixture,
-        &runtime,
-        &db,
-        None,
-        &identity_file,
-        None,
-        Some("ignore-stop"),
-    )?;
-    let injected_owner_identity = if injected_failure
-        == WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture
-    {
-        match capture_windows_process_identity(owner.id()) {
-            Ok(identity) => Some(identity),
-            Err(error) => {
-                let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
-                return Err(io::Error::other(format!(
-                    "failed to prepare the injected owner identity-capture failure: {error}; child-first owner cleanup={cleanup_result:?}"
-                ))
-                .into());
-            }
-        }
-    } else {
-        None
-    };
-    let owner_identity = match if injected_owner_identity.is_some() {
-        Err(io::Error::other("test-injected Windows owner identity capture failure").into())
-    } else {
-        capture_windows_process_identity(owner.id())
-    } {
-        Ok(identity) => identity,
-        Err(error) => {
-            let cleanup_started = Instant::now();
-            let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
-            if injected_failure == WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture {
-                let expected_owner_identity =
-                    injected_owner_identity.as_ref().ok_or_else(|| {
-                        io::Error::other(
-                            "injected owner capture failure omitted its exact test identity",
-                        )
-                    })?;
-                let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
-                let owner_alive_after_cleanup = windows_process_is_alive(expected_owner_identity)?;
-                let cleanup_elapsed = cleanup_started.elapsed();
-                let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-                    + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-                    + CODEX_OWNER_CHILD_STOP_BUDGET
-                    + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-                    + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-                    + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
-                let safety_child_cleanup = if child_alive_after_cleanup {
-                    stop_windows_fixture_process(&child_identity)
-                } else {
-                    Ok(())
-                };
-                let safety_owner_cleanup = if owner_alive_after_cleanup {
-                    stop_windows_fixture_process(expected_owner_identity)
-                } else {
-                    Ok(())
-                };
-                if !error
-                    .to_string()
-                    .contains("test-injected Windows owner identity capture failure")
-                    || cleanup_result.is_err()
-                    || child_alive_after_cleanup
-                    || owner_alive_after_cleanup
-                    || cleanup_elapsed > cleanup_upper_bound
-                {
-                    return Err(io::Error::other(format!(
-                        "forced owner identity-capture failure did not preserve bounded child-first cleanup: elapsed={cleanup_elapsed:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} cleanup={cleanup_result:?} safety_child_cleanup={safety_child_cleanup:?} safety_owner_cleanup={safety_owner_cleanup:?}"
-                    ))
-                    .into());
-                }
-                return Ok(());
-            }
-            return Err(io::Error::other(format!(
-                "failed to capture uncooperative Codex owner identity: {error}; child-first owner cleanup={cleanup_result:?}"
-            ))
-            .into());
-        }
-    };
-
-    let mut sentinel = match if injected_failure
-        == WindowsNativeCleanupInjectedFailure::SentinelSpawn
-    {
-        Err(io::Error::other(
-            "test-injected mismatched Windows sentinel spawn failure",
-        ))
-    } else {
-        StdCommand::new("powershell")
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg("Start-Sleep -Seconds 30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-    } {
-        Ok(sentinel) => sentinel,
-        Err(error) => {
-            // Force this setup-failure arm in one test without relying on host resource exhaustion.
-            let cleanup_started = Instant::now();
-            let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
-            let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
-            let owner_alive_after_cleanup = windows_process_is_alive(&owner_identity)?;
-            let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-                + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-                + CODEX_OWNER_CHILD_STOP_BUDGET
-                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-                + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-                + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
-            if injected_failure == WindowsNativeCleanupInjectedFailure::SentinelSpawn {
-                if !error
-                    .to_string()
-                    .contains("test-injected mismatched Windows sentinel spawn failure")
-                    || cleanup_result.is_err()
-                    || child_alive_after_cleanup
-                    || owner_alive_after_cleanup
-                    || cleanup_started.elapsed() > cleanup_upper_bound
-                {
-                    return Err(io::Error::other(format!(
-                        "forced mismatched sentinel spawn failure did not preserve bounded child-first owner cleanup: elapsed={:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} cleanup={cleanup_result:?}",
-                        cleanup_started.elapsed()
-                    ))
-                    .into());
-                }
-                return Ok(());
-            }
-            return Err(io::Error::other(format!(
-                "failed to start mismatched Windows sentinel: {error}; child-first owner cleanup={cleanup_result:?}"
-            ))
-            .into());
-        }
-    };
-    let injected_sentinel_identity = if injected_failure
-        == WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture
-    {
-        match capture_windows_process_identity(sentinel.id()) {
-            Ok(identity) => Some(identity),
-            Err(error) => {
-                let owner_cleanup = cleanup_codex_owner_processes(owner, &child_identity);
-                let sentinel_kill = sentinel.kill();
-                let sentinel_wait = sentinel.wait();
-                return Err(io::Error::other(format!(
-                    "failed to prepare the injected sentinel identity-capture failure: {error}; child-first owner cleanup={owner_cleanup:?}; sentinel cleanup kill={sentinel_kill:?} wait={sentinel_wait:?}"
-                ))
-                .into());
-            }
-        }
-    } else {
-        None
-    };
-    let sentinel_identity = match if injected_sentinel_identity.is_some() {
-        Err(io::Error::other("test-injected Windows sentinel identity capture failure").into())
-    } else {
-        capture_windows_process_identity(sentinel.id())
-    } {
-        Ok(identity) => identity,
-        Err(error) => {
-            let cleanup_started = Instant::now();
-            let owner_cleanup = cleanup_codex_owner_processes(owner, &child_identity);
-            let sentinel_kill = sentinel.kill();
-            let sentinel_wait = sentinel.wait();
-            if injected_failure == WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture {
-                let expected_sentinel_identity =
-                    injected_sentinel_identity.as_ref().ok_or_else(|| {
-                        io::Error::other(
-                            "injected sentinel capture failure omitted its exact test identity",
-                        )
-                    })?;
-                let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
-                let owner_alive_after_cleanup = windows_process_is_alive(&owner_identity)?;
-                let sentinel_alive_after_cleanup =
-                    windows_process_is_alive(expected_sentinel_identity)?;
-                let cleanup_elapsed = cleanup_started.elapsed();
-                let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-                    + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-                    + CODEX_OWNER_CHILD_STOP_BUDGET
-                    + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-                    + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-                    + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
-                let safety_child_cleanup = if child_alive_after_cleanup {
-                    stop_windows_fixture_process(&child_identity)
-                } else {
-                    Ok(())
-                };
-                let safety_owner_cleanup = if owner_alive_after_cleanup {
-                    stop_windows_fixture_process(&owner_identity)
-                } else {
-                    Ok(())
-                };
-                let safety_sentinel_cleanup = if sentinel_alive_after_cleanup {
-                    stop_windows_fixture_process(expected_sentinel_identity)
-                } else {
-                    Ok(())
-                };
-                if !error
-                    .to_string()
-                    .contains("test-injected Windows sentinel identity capture failure")
-                    || owner_cleanup.is_err()
-                    || sentinel_kill.is_err()
-                    || sentinel_wait.is_err()
-                    || child_alive_after_cleanup
-                    || owner_alive_after_cleanup
-                    || sentinel_alive_after_cleanup
-                    || cleanup_elapsed > cleanup_upper_bound
-                {
-                    return Err(io::Error::other(format!(
-                        "forced sentinel identity-capture failure did not preserve bounded child-first owner and sentinel cleanup: elapsed={cleanup_elapsed:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} sentinel_alive_after_cleanup={sentinel_alive_after_cleanup} owner_cleanup={owner_cleanup:?} sentinel_kill={sentinel_kill:?} sentinel_wait={sentinel_wait:?} safety_child_cleanup={safety_child_cleanup:?} safety_owner_cleanup={safety_owner_cleanup:?} safety_sentinel_cleanup={safety_sentinel_cleanup:?}"
-                    ))
-                    .into());
-                }
-                return Ok(());
-            }
-            return Err(io::Error::other(format!(
-                "failed to capture mismatched Windows sentinel identity: {error}; child-first owner cleanup={owner_cleanup:?}; sentinel cleanup kill={sentinel_kill:?} wait={sentinel_wait:?}"
-            ))
-            .into());
-        }
-    };
-
-    let test_result = (|| -> Result<(), Box<dyn Error>> {
-        if !windows_process_is_alive(&child_identity)? || owner.try_wait()?.is_some() {
-            return Err(io::Error::other(
-                "uncooperative Codex owner did not retain a live exact child before cleanup",
-            )
-            .into());
-        }
-        let started = Instant::now();
-        let result = stop_codex_owner_after_spawn_failure_with_test_delays(
-            &mut owner,
-            &identity_file,
-            &runtime,
-            None,
-            None,
-            None,
-            true,
-        );
-        let elapsed = started.elapsed();
-        let owner_reaped = owner.try_wait()?.is_some();
-        let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
-        let result_text = result
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let mut mismatched_sentinel_identity = sentinel_identity.clone();
-        mismatched_sentinel_identity.creation_file_time_utc += 1;
-        let mismatch_started = Instant::now();
-        let mismatch_result = stop_windows_fixture_process_until_with_fallback_test_delay(
-            &mismatched_sentinel_identity,
-            mismatch_started
-                + CODEX_OWNER_CHILD_STOP_BUDGET
-                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-                + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET,
-            None,
-            None,
-            None,
-            true,
-        );
-        let mismatch_elapsed = mismatch_started.elapsed();
-        let sentinel_alive_after_mismatch = windows_process_is_alive(&sentinel_identity)?;
-        let total_budget = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-            + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-            + CODEX_OWNER_CHILD_STOP_BUDGET
-            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-            + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
-        let mismatch_budget = CODEX_OWNER_CHILD_STOP_BUDGET
-            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-            + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
-        if result.is_ok()
-            || !result_text.contains("owner fixture did not stop within five seconds")
-            || result_text
-                .matches("test-injected Windows fixture stop-helper spawn failure")
-                .count()
-                < 2
-            || !result_text.contains("exact child cleanup fallback failed")
-            || !result_text.contains("exact child cleanup final stop completed")
-            || !owner_reaped
-            || child_alive_after_cleanup
-            || elapsed < CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-            || elapsed > total_budget
-            || mismatch_result.is_ok()
-            || !mismatch_result.as_ref().err().is_some_and(|error| {
-                error
-                    .to_string()
-                    .contains("native exact child cleanup failed")
-            })
-            || !mismatch_result.as_ref().err().is_some_and(|error| {
-                error
-                    .to_string()
-                    .contains("creation time or executable path did not match")
-            })
-            || !sentinel_alive_after_mismatch
-            || mismatch_elapsed > mismatch_budget
-        {
-            return Err(io::Error::other(format!(
-                "uncooperative Codex owner did not preserve native child-first cleanup: elapsed={elapsed:?} total_budget={total_budget:?} owner_reaped={owner_reaped} child_alive_after_cleanup={child_alive_after_cleanup} sentinel_alive_after_mismatch={sentinel_alive_after_mismatch} mismatch_elapsed={mismatch_elapsed:?} mismatch_budget={mismatch_budget:?} result={result:?} mismatch_result={mismatch_result:?}"
-            ))
-            .into());
-        }
-        Ok(())
-    })();
-
-    let owner_cleanup_result = if owner.try_wait()?.is_none() {
-        let kill_result = owner.kill();
-        let wait_result = owner.wait();
-        if let Err(error) = kill_result
-            && error.kind() != io::ErrorKind::InvalidInput
-        {
-            Err(error)
-        } else {
-            wait_result
-        }
-    } else {
-        owner.wait()
-    };
-    let child_cleanup_result = if windows_process_is_alive(&child_identity)? {
-        stop_windows_fixture_process(&child_identity)
-    } else {
-        Ok(())
-    };
-    let sentinel_cleanup_result = if windows_process_is_alive(&sentinel_identity)? {
-        let cleanup_result = stop_windows_fixture_process(&sentinel_identity);
-        let wait_result = sentinel.wait();
-        cleanup_result.and(wait_result.map_err(Into::into))
-    } else {
-        sentinel.wait().map_err(Into::into)
-    };
-    owner_cleanup_result?;
-    child_cleanup_result?;
-    sentinel_cleanup_result?;
-    test_result
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_fixture_stop_helper_rejects_late_completion() -> Result<(), Box<dyn Error>> {
-    let mut process = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg("Start-Sleep -Seconds 30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let identity = match capture_windows_process_identity(process.id()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            drop(process.kill());
-            drop(process.wait());
-            return Err(error);
-        }
-    };
-    let deadline = Instant::now() + CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT;
-    let result = stop_windows_fixture_process_until(
-        &identity,
-        deadline,
-        None,
-        Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
-    );
-    let child_alive = windows_process_is_alive(&identity)?;
-    if child_alive {
-        drop(process.kill());
-    }
-    process.wait()?;
-    if child_alive
-        || result.as_ref().is_ok()
-        || !result
-            .as_ref()
-            .err()
-            .is_some_and(|error| error.to_string().contains("completed after deadline"))
-    {
-        return Err(io::Error::other(format!(
-            "late stop-helper completion did not fail closed or clean its child: child_alive={child_alive} result={result:?}"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-#[test]
-#[cfg(windows)]
-fn windows_fixture_identity_observed_after_readiness_is_rejected() -> Result<(), Box<dyn Error>> {
-    let temp = tempfile::tempdir()?;
-    let runtime = temp
-        .path()
-        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
-    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
-    let db = temp.path().join("projectatlas.db");
-    let identity_file = temp.path().join("late-publication.pid");
-    compile_obsolete_projectatlas_fixture(&runtime)?;
-    compile_codex_mcp_owner_fixture(&codex_fixture)?;
-
-    let started = Instant::now();
-    let result = spawn_codex_owned_obsolete_mcp_with_test_delays(
-        &codex_fixture,
-        &runtime,
-        &db,
-        None,
-        &identity_file,
-        Some(CODEX_OWNER_DELAYED_PUBLICATION),
-        Some("late-publication"),
-        None,
-        Some(CODEX_OWNER_OBSERVATION_TEST_DELAY),
-    );
-    let elapsed = started.elapsed();
-    let error = match result {
-        Ok((parent, child_identity)) => {
-            return Err(codex_owner_unexpected_acceptance_error(
-                "late-publication",
-                parent,
-                &child_identity,
-            ));
-        }
-        Err(error) => error,
-    };
-    let text = error.to_string();
-    let retained_identity =
-        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
-    let total_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
-        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
-        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
-        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
-    let readiness_elapsed = text
-        .split("readiness_elapsed_ms=")
-        .nth(1)
-        .and_then(|value| value.split(')').next())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "late-observed identity timeout omitted its readiness elapsed diagnostic: {text}"
-            ))
-        })?;
-    // The helper starts its absolute deadline before spawning the fixture. Keep the wall-clock
-    // assertion's process-start allowance bounded while preserving the 30-second readiness
-    // contract and the explicit observer delay.
-    let readiness_observation_upper_bound = CODEX_OWNER_OBSERVATION_TEST_DELAY
-        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
-        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
-    if elapsed < CODEX_OWNER_READINESS_TIMEOUT
-        || elapsed > total_upper_bound
-        || readiness_elapsed <= CODEX_OWNER_READINESS_TIMEOUT
-        || readiness_elapsed > readiness_observation_upper_bound
-        || !text.contains("published its child PID after the readiness deadline")
-        || !text.contains(&format!("owner={}", codex_fixture.display()))
-        || !text.contains(&format!("identity_file={}", identity_file.display()))
-        || !text.contains(&format!("expected_runtime={}", runtime.display()))
-        || windows_process_is_alive(&retained_identity)?
-    {
-        return Err(io::Error::other(format!(
-            "late-observed identity was accepted or not bounded: elapsed={elapsed:?} readiness_elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} readiness_observation_upper_bound={readiness_observation_upper_bound:?} readiness_scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_deadline={total_upper_bound:?}\n{text}"
+            "refused to stop Windows fixture process {} without its exact captured identity",
+            identity.process_id
         ))
         .into());
     }
@@ -18437,219 +18158,28 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     Ok(command)
 }
 
-/// Reap one test-owned installer child after the observer has returned.
-fn reap_plugin_installer_child(mut child: Child) -> Result<std::process::Output, Box<dyn Error>> {
-    child.stdin.take();
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-    }
-    Ok(child.wait_with_output()?)
-}
-
 /// Collect one coordinated installer process under an explicit deadline.
 fn wait_for_plugin_installer_output(
-    child: Child,
-    label: &str,
-    timeout: Duration,
-) -> Result<std::process::Output, Box<dyn Error>> {
-    wait_for_plugin_installer_output_with_test_delay(child, label, timeout, None)
-}
-
-fn wait_for_plugin_installer_output_with_test_delay(
-    child: Child,
-    label: &str,
-    timeout: Duration,
-    observer_delay: Option<Duration>,
-) -> Result<std::process::Output, Box<dyn Error>> {
-    wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
-        child,
-        label,
-        timeout,
-        observer_delay,
-        None,
-        None,
-        &mut |child| child.kill(),
-        None,
-    )
-}
-
-/// Test-only variant that transfers a proven-live child to the caller when
-/// injected termination cannot safely reap it here.
-fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     mut child: Child,
     label: &str,
     timeout: Duration,
-    observer_delay: Option<Duration>,
-    exit_probe_error: Option<io::Error>,
-    cleanup_probe_error: Option<io::Error>,
-    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
-    handoff_live_child: Option<&mut dyn FnMut(Child)>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    let mut exit_probe_error = exit_probe_error;
-    let mut cleanup_probe_error = cleanup_probe_error;
-    if observer_delay.is_some()
-        && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
-            &mut child,
-            label,
-            exit_probe_error.take(),
-        )
-    {
-        let kill_result = kill_child(&mut child);
-        child.stdin.take();
-        let status_after_kill = child.try_wait();
-        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
-            if let Some(handoff) = handoff_live_child {
-                handoff(child);
-            } else {
-                drop(child);
-            }
-            let mut diagnostic = format!(
-                "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup incomplete: child detached"
-            );
-            if let Some(kill_error) = kill_result.as_ref().err() {
-                diagnostic.push_str("; termination failed: ");
-                diagnostic.push_str(&kill_error.to_string());
-            }
-            if let Err(probe_error) = status_after_kill {
-                diagnostic.push_str("; re-probe failed after termination attempt: ");
-                diagnostic.push_str(&probe_error.to_string());
-            }
-            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-        }
-        let output = child.wait_with_output()?;
-        let diagnostic = format!(
-            "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and output drained status={}",
-            output.status
-        );
-        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-    }
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| io::Error::other("plugin installer deadline overflowed"))?;
-    if let Some(delay) = observer_delay {
-        thread::sleep(delay);
-    }
+    let deadline = Instant::now() + timeout;
     loop {
-        if Instant::now() >= deadline {
-            let mut pre_termination_probe_error = None;
-            let (status, _observed_at) = {
-                let status = match cleanup_probe_error.take() {
-                    Some(error) => {
-                        pre_termination_probe_error = Some(error);
-                        None
-                    }
-                    None => match child.try_wait() {
-                        Ok(status) => status,
-                        Err(error) => {
-                            pre_termination_probe_error = Some(error);
-                            None
-                        }
-                    },
-                };
-                let observed_at = Instant::now();
-                (status, observed_at)
-            };
-            let still_running = status.is_none();
-            let mut post_termination_probe_error = None;
-            if still_running {
-                let kill_result = kill_child(&mut child);
-                let status_after_kill = match exit_probe_error.take() {
-                    Some(error) => Err(error),
-                    None => child.try_wait(),
-                };
-                let status_after_kill = match status_after_kill {
-                    Ok(status) => status,
-                    Err(error) if kill_result.is_ok() => {
-                        post_termination_probe_error = Some(error);
-                        None
-                    }
-                    Err(error) => {
-                        child.stdin.take();
-                        if let Some(handoff) = handoff_live_child {
-                            handoff(child);
-                        } else {
-                            drop(child);
-                        }
-                        let mut diagnostic = format!(
-                            "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child detached)"
-                        );
-                        if let Some(kill_error) = kill_result.as_ref().err() {
-                            diagnostic.push_str("; termination failed: ");
-                            diagnostic.push_str(&kill_error.to_string());
-                        }
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-                    }
-                };
-                if let Err(kill_error) = kill_result
-                    && status_after_kill.is_none()
-                {
-                    child.stdin.take();
-                    if let Some(handoff) = handoff_live_child {
-                        handoff(child);
-                    } else {
-                        drop(child);
-                    }
-                    let diagnostic = format!(
-                        "{label} plugin installer exceeded {timeout:?}: still running at deadline status=still-running at deadline (termination failed: {kill_error}; cleanup incomplete: operating system refused termination; child was not reaped; child detached)"
-                    );
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-                }
-            }
-            let output = child.wait_with_output()?;
-            let mut diagnostic = format!(
-                "{label} plugin installer exceeded {timeout:?}: {}",
-                if still_running {
-                    "still running at deadline"
-                } else {
-                    "completed after deadline"
-                }
-            );
-            if let Some(error) = post_termination_probe_error {
-                diagnostic
-                    .push_str(" status=unknown (re-probe failed after successful termination: ");
-                diagnostic.push_str(&error.to_string());
-                diagnostic.push(')');
-            }
-            if let Some(error) = pre_termination_probe_error {
-                diagnostic
-                    .push_str(" status=unknown (re-probe failed before termination attempt: ");
-                diagnostic.push_str(&error.to_string());
-                diagnostic.push(')');
-            }
-            diagnostic.push_str(" status=");
-            diagnostic.push_str(&output.status.to_string());
-            diagnostic.push_str("\nstdout:\n");
-            diagnostic.push_str(&String::from_utf8_lossy(&output.stdout));
-            diagnostic.push_str("\nstderr:\n");
-            diagnostic.push_str(&String::from_utf8_lossy(&output.stderr));
-            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
         }
-        let (status, observed_at) = {
-            let status = child.try_wait()?;
-            let observed_at = Instant::now();
-            (status, observed_at)
-        };
-        if let Some(_status) = status {
-            if observed_at < deadline {
-                return Ok(child.wait_with_output()?);
-            }
+        if Instant::now() >= deadline {
+            drop(child.kill());
             let output = child.wait_with_output()?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "{label} plugin installer exceeded {timeout:?}: completed after deadline (observed_at={observed_at:?}) status={}\nstdout:\n{}\nstderr:\n{}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            )
+            return Err(io::Error::other(format!(
+                "{label} plugin installer exceeded {timeout:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
             .into());
         }
-        let remaining = deadline.saturating_duration_since(observed_at);
-        if remaining.is_zero() {
-            continue;
-        }
-        thread::sleep(Duration::from_millis(25).min(remaining));
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -18744,19 +18274,6 @@ fn require_same_directory(
     }
 }
 
-/// Require a nested JSON string value.
-fn require_json_string(value: &Value, path: &[&str], expected: &str) -> Result<(), Box<dyn Error>> {
-    let current = json_at(value, path)?;
-    if current.as_str() == Some(expected) {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "expected {path:?} to equal {expected:?}, found {current:?}"
-        ))
-        .into())
-    }
-}
-
 /// Require the shared privacy-safe CLI/MCP schema mismatch contract.
 fn require_schema_version_mismatch(
     value: &Value,
@@ -18786,149 +18303,4 @@ fn require_schema_version_mismatch(
         &["error", "schema_version_mismatch", "recovery"],
         "do not reset",
     )
-}
-
-/// Require a nested JSON string to contain a substring.
-fn require_json_contains(
-    value: &Value,
-    path: &[&str],
-    expected: &str,
-) -> Result<(), Box<dyn Error>> {
-    let current = json_at(value, path)?;
-    let text = current
-        .as_str()
-        .ok_or_else(|| io::Error::other(format!("expected string at {path:?}")))?;
-    if text.contains(expected) {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "expected {path:?} to contain {expected:?}, found {text:?}"
-        ))
-        .into())
-    }
-}
-
-/// Require a nested JSON integer value.
-fn require_json_usize(value: &Value, path: &[&str], expected: usize) -> Result<(), Box<dyn Error>> {
-    let current = json_at(value, path)?;
-    if current.as_u64() == Some(u64::try_from(expected)?) {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "expected {path:?} to equal {expected}, found {current:?}"
-        ))
-        .into())
-    }
-}
-
-/// Require a nested JSON integer value to be at least a threshold.
-fn require_json_usize_at_least(
-    value: &Value,
-    path: &[&str],
-    expected_minimum: usize,
-) -> Result<(), Box<dyn Error>> {
-    let current = json_at(value, path)?;
-    let actual = current
-        .as_u64()
-        .ok_or_else(|| io::Error::other(format!("expected integer at {path:?}")))?;
-    if actual >= u64::try_from(expected_minimum)? {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "expected {path:?} to be at least {expected_minimum}, found {actual}"
-        ))
-        .into())
-    }
-}
-
-/// Require a nested JSON integer value to be greater than a threshold.
-fn require_json_usize_greater_than(
-    value: &Value,
-    path: &[&str],
-    threshold: usize,
-) -> Result<(), Box<dyn Error>> {
-    let current = json_at(value, path)?;
-    let actual = current
-        .as_u64()
-        .ok_or_else(|| io::Error::other(format!("expected integer at {path:?}")))?;
-    if actual > u64::try_from(threshold)? {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "expected {path:?} to be greater than {threshold}, found {actual}"
-        ))
-        .into())
-    }
-}
-
-/// Require a nested JSON array length.
-fn require_json_array_len(
-    value: &Value,
-    path: &[&str],
-    expected: usize,
-) -> Result<(), Box<dyn Error>> {
-    let current = json_at(value, path)?;
-    let length = current
-        .as_array()
-        .ok_or_else(|| io::Error::other(format!("expected array at {path:?}")))?
-        .len();
-    if length == expected {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "expected {path:?} length {expected}, found {length}"
-        ))
-        .into())
-    }
-}
-
-/// Require a nested JSON boolean value.
-fn require_json_bool(value: &Value, path: &[&str], expected: bool) -> Result<(), Box<dyn Error>> {
-    let current = json_at(value, path)?;
-    if current.as_bool() == Some(expected) {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "expected {path:?} to equal {expected}, found {current:?}"
-        ))
-        .into())
-    }
-}
-
-/// Run a JSON summary command for one indexed path.
-fn json_summary_command(repo: &Path, db: &Path, file: &str) -> Result<Value, Box<dyn Error>> {
-    let output = Command::new(mcp_contract_executable())
-        .current_dir(repo)
-        .arg("--format")
-        .arg("json")
-        .arg("--db")
-        .arg(db)
-        .args(["summary", file, "--limit", "10"])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "summary command failed for {file}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-        .into());
-    }
-    serde_json::from_slice(&output.stdout).map_err(Into::into)
-}
-
-/// Navigate a JSON value by object keys and decimal array indexes.
-fn json_at<'a>(value: &'a Value, path: &[&str]) -> Result<&'a Value, Box<dyn Error>> {
-    let mut current = value;
-    for segment in path {
-        current = if let Some(array) = current.as_array() {
-            let index = segment.parse::<usize>()?;
-            array
-                .get(index)
-                .ok_or_else(|| io::Error::other(format!("missing json array index {segment}")))?
-        } else {
-            current
-                .get(segment)
-                .ok_or_else(|| io::Error::other(format!("missing json segment {segment}")))?
-        };
-    }
-    Ok(current)
 }

@@ -3,11 +3,11 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "6113aaa832ac50bf21e582c1c80cc68a3e7d13271c53df440532a0a022b19580",
-      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b3d437fa2db96648995208d88c874ad222178c042a3d7aa411806abdb1fd8fad",
-      "crates/projectatlas-cli/tests/e2e_maintenance.rs": "b1eddac89052449d9673b5be9cb53ff4033ded34d435026e067fcd63e40d8490",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "17fcdfbf7777cf07f996af253d83ca1f424b95ce3f6ec0fed3c1053aa765d49d",
-      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "c4a319f890b8f441d1089bbd4deaf3c3e64087447290661adf894bf68fdd9503"
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "82992877ded1d516cf6cb59d3c46aae503f75173e7732ca46fe0e348c890c019",
+      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
+      "crates/projectatlas-cli/tests/e2e_maintenance.rs": "f56144991337cb7697cdf49c602f2afb605c3679c8a0d107a0c9148b0eb04219",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "62878446bfe17180204b6ad840c7aef019f346e71a02750d81829a95ae2d8870",
+      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "8e79ebf6628b010a9ff7eac09276662017752f9294a562cf6a67f8f88a66167d"
     }
   },
   "baseline_commit": "b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb",
@@ -25,7 +25,8 @@
   },
   "enforcement_tests": [
     "cli_e2e_inventory_contract_matches_split_sources_and_workflows",
-    "cli_e2e_inventory_contract_rejects_source_and_selector_drift"
+    "cli_e2e_inventory_contract_rejects_source_and_selector_drift",
+    "cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift"
   ],
   "tests": [
     {
