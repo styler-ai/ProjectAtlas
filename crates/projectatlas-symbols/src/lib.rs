@@ -37,6 +37,7 @@ use projectatlas_core::language::{
 };
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    SymbolSourceSelector,
 };
 use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
 use regex::Regex;
@@ -847,7 +848,7 @@ fn extract_tree_sitter_graph<E>(
     let Some(language_name) = language else {
         return Ok(None);
     };
-    let Some(parser_language) = tree_sitter_language(language_name) else {
+    let Some(parser_language) = tree_sitter_language(language_name, content) else {
         return Ok(None);
     };
     check()?;
@@ -888,7 +889,7 @@ fn extract_tree_sitter_graph<E>(
 }
 
 /// Return a tree-sitter language for supported source families.
-fn tree_sitter_language(language: &str) -> Option<Language> {
+fn tree_sitter_language(language: &str, content: &str) -> Option<Language> {
     Some(match tree_sitter_grammar(language)? {
         TreeSitterGrammar::Rust => tree_sitter_rust::LANGUAGE.into(),
         TreeSitterGrammar::Python => tree_sitter_python::LANGUAGE.into(),
@@ -903,6 +904,13 @@ fn tree_sitter_language(language: &str) -> Option<Language> {
         TreeSitterGrammar::Zig => tree_sitter_zig::LANGUAGE.into(),
         TreeSitterGrammar::C => tree_sitter_c::LANGUAGE.into(),
         TreeSitterGrammar::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        TreeSitterGrammar::Php => {
+            if content.contains("<?") {
+                tree_sitter_php::LANGUAGE_PHP.into()
+            } else {
+                tree_sitter_php::LANGUAGE_PHP_ONLY.into()
+            }
+        }
     })
 }
 
@@ -978,6 +986,12 @@ fn should_emit_declaration_symbol(node: Node<'_>, content: &str) -> bool {
     if node.kind() == "field_declaration"
         && has_descendant_kind(node, &["function_declarator", "method_declarator"])
     {
+        return false;
+    }
+    if node.kind() == "property_declaration" && has_descendant_kind(node, &["property_element"]) {
+        return false;
+    }
+    if node.kind() == "const_declaration" && has_descendant_kind(node, &["const_element"]) {
         return false;
     }
     if matches!(node.kind(), "function_declarator" | "method_declarator") {
@@ -1216,6 +1230,12 @@ fn push_tree_symbol(
         exported,
         documentation.as_deref(),
     );
+    if admitted
+        && is_php_language(graph.language.as_deref())
+        && let Some(symbol) = graph.symbols.last_mut()
+    {
+        symbol.source_selector = Some(tree_source_selector(node, content));
+    }
     if admitted && let Some(parent_name) = parent {
         push_relation(
             graph,
@@ -1226,6 +1246,30 @@ fn push_tree_symbol(
             node.kind(),
         );
     }
+}
+
+/// Build the exact persisted selector represented by a Tree-sitter node.
+fn tree_source_selector(node: Node<'_>, content: &str) -> SymbolSourceSelector {
+    let start = node.start_position();
+    let end = node.end_position();
+    SymbolSourceSelector {
+        byte_start: node.start_byte(),
+        byte_end: node.end_byte(),
+        column_start: tree_source_column(node.start_byte(), start.column, content),
+        column_end: tree_source_column(node.end_byte(), end.column, content),
+    }
+}
+
+/// Convert Tree-sitter's byte column to the Unicode-scalar column persisted by the graph.
+fn tree_source_column(byte_offset: usize, byte_column: usize, content: &str) -> usize {
+    if content.is_ascii() {
+        return byte_column;
+    }
+    let byte_offset = byte_offset.min(content.len());
+    let line_start = content[..byte_offset]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    content[line_start..byte_offset].chars().count()
 }
 
 /// Return whether a declaration is directly wrapped by a JavaScript-like export.
@@ -1311,7 +1355,12 @@ fn symbol_parent(node: Node<'_>, content: &str) -> Option<String> {
     {
         return node_name(type_node, content);
     }
-    enclosing_symbol_name(node.parent(), content)
+    let parent = if matches!(node.kind(), "property_element" | "const_element") {
+        node.parent().and_then(|declaration| declaration.parent())
+    } else {
+        node.parent()
+    };
+    enclosing_symbol_name(parent, content)
 }
 
 /// Map tree-sitter node kinds to `ProjectAtlas` symbol kinds.
@@ -1335,11 +1384,12 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         | "class_implementation" => Some(SymbolKind::Class),
         "struct_item" | "struct_specifier" | "struct_declaration" => Some(SymbolKind::Struct),
         "enum_item" | "enum_declaration" | "enum_specifier" => Some(SymbolKind::Enum),
-        "trait_item" => Some(SymbolKind::Trait),
+        "trait_item" | "trait_declaration" => Some(SymbolKind::Trait),
         "interface_declaration" | "interface_type" => Some(SymbolKind::Interface),
         "mod_item"
         | "module_declaration"
         | "namespace_declaration"
+        | "namespace_definition"
         | "file_scoped_namespace_declaration"
         | "package_declaration"
         | "package_clause"
@@ -1351,13 +1401,18 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         | "field_declaration"
         | "lexical_declaration"
         | "var_declaration"
-        | "short_var_declaration" => Some(SymbolKind::Value),
+        | "short_var_declaration"
+        | "property_declaration"
+        | "property_element"
+        | "const_element"
+        | "enum_case" => Some(SymbolKind::Value),
         "use_declaration"
         | "import_statement"
         | "import_declaration"
         | "import_from_statement"
         | "using_directive"
-        | "preproc_include" => Some(SymbolKind::Import),
+        | "preproc_include"
+        | "namespace_use_declaration" => Some(SymbolKind::Import),
         _ => None,
     }
 }
@@ -1372,6 +1427,11 @@ fn is_import_node(kind: &str) -> bool {
             | "import_from_statement"
             | "using_directive"
             | "preproc_include"
+            | "namespace_use_declaration"
+            | "include_expression"
+            | "include_once_expression"
+            | "require_expression"
+            | "require_once_expression"
     )
 }
 
@@ -1384,7 +1444,108 @@ fn is_call_node(kind: &str) -> bool {
             | "invocation_expression"
             | "call"
             | "macro_invocation"
+            | "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression"
     )
+}
+
+/// Return whether a node is one of PHP's include/require expressions.
+fn is_php_include_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "include_expression"
+            | "include_once_expression"
+            | "require_expression"
+            | "require_once_expression"
+    )
+}
+
+/// Return whether a supplied language identifier selects the PHP owner.
+fn is_php_language(language: Option<&str>) -> bool {
+    language.is_some_and(|language| language.eq_ignore_ascii_case("php"))
+}
+
+/// Return a static PHP include target, omitting dynamic or ambiguous expressions.
+fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
+    let expression = first_named_child(node)?;
+    let target = if expression.kind() == "encapsed_string" {
+        let mut cursor = expression.walk();
+        let mut children = expression.named_children(&mut cursor);
+        let content_node = children.next()?;
+        (content_node.kind() == "string_content" && children.next().is_none())
+            .then(|| named_text(content_node, content))
+            .flatten()
+    } else {
+        matches!(
+            expression.kind(),
+            "string" | "qualified_name" | "relative_name" | "name"
+        )
+        .then(|| compact_text(node_text(expression, content).as_deref().unwrap_or("")))
+    }?;
+    Some(target).filter(|target| !target.is_empty() && target.chars().count() <= MAX_SNIPPET_CHARS)
+}
+
+/// Return the first static namespace path from a PHP `use` declaration.
+fn php_namespace_use_target(node: Node<'_>, content: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "namespace_name" | "qualified_name" | "relative_name"
+        ) && let Some(target) = named_text(child, content)
+        {
+            return Some(target);
+        }
+        if let Some(target) = php_namespace_use_target(child, content) {
+            return Some(target);
+        }
+    }
+    None
+}
+
+/// Return a conservative PHP call target, suppressing dynamic calls.
+fn php_call_target(node: Node<'_>, content: &str) -> Option<String> {
+    let target = match node.kind() {
+        "scoped_call_expression" => {
+            let scope = node.child_by_field_name("scope")?;
+            let name = node.child_by_field_name("name")?;
+            let scope = php_static_call_part(scope, content)?;
+            let name = php_static_call_part(name, content)?;
+            format!("{scope}::{name}")
+        }
+        "member_call_expression" | "nullsafe_member_call_expression" => {
+            let name = node.child_by_field_name("name")?;
+            php_static_call_part(name, content)?
+        }
+        _ => php_static_call_part(node.child_by_field_name("function")?, content)?,
+    };
+    let target = compact_text(&target);
+    (!target.is_empty() && target.chars().count() <= MAX_SNIPPET_CHARS).then_some(target)
+}
+
+/// Return a static PHP name-like call component, excluding variables and expressions.
+fn php_static_call_part(node: Node<'_>, content: &str) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "dynamic_variable_name"
+            | "variable_name"
+            | "expression"
+            | "parenthesized_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "function_call_expression"
+            | "scoped_call_expression"
+    ) {
+        return None;
+    }
+    matches!(
+        node.kind(),
+        "name" | "qualified_name" | "relative_name" | "identifier"
+    )
+    .then(|| named_text(node, content))
+    .flatten()
 }
 
 /// Return whether a subtree contains any node with one of the given kinds.
@@ -1400,7 +1561,13 @@ fn has_descendant_kind(node: Node<'_>, kinds: &[&str]) -> bool {
 
 /// Push an import relation from an import node.
 fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
-    let import_text = compact_text(node_text(node, content).as_deref().unwrap_or(""));
+    let import_text = if is_php_include_node(node.kind()) {
+        php_static_include_target(node, content).unwrap_or_default()
+    } else if node.kind() == "namespace_use_declaration" {
+        php_namespace_use_target(node, content).unwrap_or_default()
+    } else {
+        compact_text(node_text(node, content).as_deref().unwrap_or(""))
+    };
     if import_text.is_empty() {
         return;
     }
@@ -1422,7 +1589,14 @@ fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
     let Some(target_node) = target_node else {
         return;
     };
-    let target = compact_text(node_text(target_node, content).as_deref().unwrap_or(""));
+    let target = if is_php_language(graph.language.as_deref()) {
+        let Some(target) = php_call_target(node, content) else {
+            return;
+        };
+        target
+    } else {
+        compact_text(node_text(target_node, content).as_deref().unwrap_or(""))
+    };
     if target.is_empty() || target.len() > MAX_SNIPPET_CHARS {
         return;
     }
@@ -1542,6 +1716,14 @@ fn node_name(node: Node<'_>, content: &str) -> Option<String> {
 fn declaration_specific_name(node: Node<'_>, content: &str) -> Option<String> {
     match node.kind() {
         kind if is_import_node(kind) => import_declaration_name(node, content),
+        "namespace_definition" => node
+            .child_by_field_name("name")
+            .and_then(|name| named_text(name, content)),
+        "property_declaration"
+        | "property_element"
+        | "const_declaration"
+        | "const_element"
+        | "enum_case" => php_declaration_name(node, content),
         "package_declaration" | "package_clause" | "package_header" => {
             prefixed_declaration_name(node, content, &["package"])
         }
@@ -1563,6 +1745,12 @@ fn declaration_specific_name(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Extract the semantic target of an import-like declaration.
 fn import_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "namespace_use_declaration" {
+        return php_namespace_use_target(node, content);
+    }
+    if is_php_include_node(node.kind()) {
+        return php_static_include_target(node, content);
+    }
     if node.kind() == "import_spec_list" {
         let mut cursor = node.walk();
         let mut children = node.named_children(&mut cursor);
@@ -1596,6 +1784,29 @@ fn import_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
                 | "system_lib_string"
                 | "type"
         ) && let Some(name) = named_text(child, content)
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Extract a PHP property, constant, or enum-case name without initializer text.
+fn php_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
+    if let Some(name) = node.child_by_field_name("name")
+        && let Some(name) = named_text(name, content)
+    {
+        return Some(name.trim_start_matches('$').to_string());
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "name" | "variable_name")
+            && let Some(name) = named_text(child, content)
+        {
+            return Some(name.trim_start_matches('$').to_string());
+        }
+        if matches!(child.kind(), "property_element" | "const_element")
+            && let Some(name) = php_declaration_name(child, content)
         {
             return Some(name);
         }
@@ -1734,6 +1945,9 @@ fn named_text(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Build a compact declaration signature for a node.
 fn declaration_signature(node: Node<'_>, content: &str) -> String {
+    if matches!(node.kind(), "property_element" | "const_element") {
+        return php_element_signature(node, content);
+    }
     let header_end = declaration_body_start(node).unwrap_or_else(|| node.end_byte());
     let mut signature = String::new();
     append_declaration_tokens(node, content, header_end, &mut signature);
@@ -1744,8 +1958,40 @@ fn declaration_signature(node: Node<'_>, content: &str) -> String {
     }
 }
 
+/// Build a PHP property or constant element signature with its declaration header.
+fn php_element_signature(node: Node<'_>, content: &str) -> String {
+    let Some(parent) = node.parent() else {
+        return node_text(node, content).map_or_else(String::new, |raw| compact_text(&raw));
+    };
+    let mut cursor = parent.walk();
+    let first_element_start = parent
+        .named_children(&mut cursor)
+        .find(|child| matches!(child.kind(), "property_element" | "const_element"))
+        .map_or(node.start_byte(), |child| child.start_byte());
+    let mut signature = String::new();
+    append_declaration_tokens(parent, content, first_element_start, &mut signature);
+    let element_end = declaration_body_start(node).unwrap_or_else(|| node.end_byte());
+    append_declaration_tokens(node, content, element_end, &mut signature);
+    if signature.is_empty() {
+        node_text(node, content).map_or_else(String::new, |raw| compact_text(&raw))
+    } else {
+        signature
+    }
+}
+
 /// Return the byte at which executable or member body syntax begins.
 fn declaration_body_start(node: Node<'_>) -> Option<usize> {
+    if matches!(
+        node.kind(),
+        "property_declaration"
+            | "property_element"
+            | "const_declaration"
+            | "const_element"
+            | "enum_case"
+    ) && let Some(initializer) = php_initializer_start(node)
+    {
+        return Some(initializer);
+    }
     if declaration_has_direct_callable_initializer(node)
         && let Some(initializer) = first_declaration_initializer(node)
         && let Some(body) = initializer.child_by_field_name("body")
@@ -1769,6 +2015,21 @@ fn declaration_body_start(node: Node<'_>) -> Option<usize> {
             ) || child.kind().ends_with("_body")
         })
         .map(|body| body.start_byte())
+}
+
+/// Return the first byte of a PHP value initializer, if one is present.
+fn php_initializer_start(node: Node<'_>) -> Option<usize> {
+    let mut cursor = node.walk();
+    let mut after_equals = false;
+    for child in node.children(&mut cursor) {
+        if after_equals && child.is_named() {
+            return Some(child.start_byte());
+        }
+        after_equals = child.kind() == "=";
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find_map(php_initializer_start)
 }
 
 /// Append non-comment leaf tokens before a declaration body in source order.
@@ -1809,6 +2070,10 @@ fn is_exported_symbol(language: Option<&str>, name: &str, signature: &str) -> bo
         || trimmed.starts_with("export ")
         || trimmed.starts_with("public ")
         || trimmed.starts_with("open ")
+        || is_php_language(language)
+            && !trimmed.starts_with("private ")
+            && !trimmed.starts_with("protected ")
+            && !trimmed.starts_with("use ")
         || matches!(language, Some("go")) && starts_with_uppercase(name)
 }
 
@@ -2286,7 +2551,7 @@ mod tests {
         extract_vue_sfc_graph_checked, languages, specialized_languages,
     };
     use projectatlas_core::symbols::{
-        CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind,
+        CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolSourceSelector,
     };
     use projectatlas_core::{
         IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
@@ -2341,6 +2606,11 @@ mod tests {
                 "config/atlas.txt",
                 Some("text"),
                 "function fallbackOnly() {}\n",
+            ),
+            (
+                "src/Service.php",
+                Some("php"),
+                "<?php class Service { public function run(): void {} }\n",
             ),
             (
                 "src/Atlas.kt",
@@ -2413,6 +2683,9 @@ mod tests {
         assert_parser_cancels_at!("fallback", 3, |check| {
             extract_fallback_graph_checked(fixtures[5].0, fixtures[5].1, fixtures[5].2, check)
         });
+        assert_parser_cancels_at!("PHP tree-sitter", 3, |check| {
+            extract_symbol_graph_checked(fixtures[6].0, fixtures[6].1, fixtures[6].2, check)
+        });
         assert_parser_cancels_at!("Vue structural adapter", 8, |check| {
             extract_vue_sfc_graph_checked(fixtures[3].0, fixtures[3].1, fixtures[3].2, check)
         });
@@ -2427,18 +2700,18 @@ mod tests {
         });
 
         let mut native_augmentation =
-            empty_graph(fixtures[6].0, fixtures[6].1, ParserKind::TreeSitter);
+            empty_graph(fixtures[7].0, fixtures[7].1, ParserKind::TreeSitter);
         assert_parser_cancels_at!("native language augmentation", 3, |check| {
-            languages::augment_language_graph(&mut native_augmentation, fixtures[6].2, check)
+            languages::augment_language_graph(&mut native_augmentation, fixtures[7].2, check)
                 .map(|()| native_augmentation.clone())
         });
 
         let mut fallback_augmentation =
-            empty_graph(fixtures[7].0, fixtures[7].1, ParserKind::Fallback);
+            empty_graph(fixtures[8].0, fixtures[8].1, ParserKind::Fallback);
         assert_parser_cancels_at!("fallback language augmentation", 4, |check| {
             languages::augment_fallback_language_graph(
                 &mut fallback_augmentation,
-                fixtures[7].2,
+                fixtures[8].2,
                 check,
             )
             .map(|()| fallback_augmentation.clone())
@@ -4007,8 +4280,273 @@ version = "0.60.0"
             "go",
             "objective-c",
             "zig",
+            "php",
         ] {
             assert!(specialized_languages().contains(&expected));
         }
+    }
+
+    #[test]
+    fn extracts_php_symbols_relations_and_exact_selectors() {
+        let source = r#"<?php
+namespace Atlas\Domain;
+use Vendor\Thing as ThingAlias;
+require_once "bootstrap.php";
+include $dynamic;
+interface Contract {}
+trait Auditable {}
+enum State: string { case Ready = 'ready'; }
+class Service {
+    public const VERSION = 1;
+    private string $name = 'service';
+    public function run(string $value): string {
+        helper();
+        $this->save();
+        Service::boot();
+    }
+}
+function helper(string $value): void {}
+"#;
+        let graph = extract_symbol_graph("src/Service.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+
+        for name in [
+            "Atlas\\Domain",
+            "Contract",
+            "Auditable",
+            "State",
+            "Ready",
+            "Service",
+            "VERSION",
+            "name",
+            "run",
+            "helper",
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == name),
+                "missing PHP symbol {name}: {:?}",
+                graph.symbols
+            );
+        }
+        for (name, kind, parent) in [
+            ("Contract", SymbolKind::Interface, None),
+            ("Auditable", SymbolKind::Trait, None),
+            ("State", SymbolKind::Enum, None),
+            ("Ready", SymbolKind::Value, Some("State")),
+            ("Service", SymbolKind::Class, None),
+            ("VERSION", SymbolKind::Value, Some("Service")),
+            ("name", SymbolKind::Value, Some("Service")),
+            ("run", SymbolKind::Method, Some("Service")),
+            ("helper", SymbolKind::Function, None),
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.name == name && symbol.kind == kind && symbol.parent.as_deref() == parent
+                }),
+                "missing PHP kind/parent for {name}: {:?}",
+                graph.symbols
+            );
+        }
+        assert!(
+            source.contains("public function run"),
+            "method start missing from PHP fixture"
+        );
+        let method_start = source.find("public function run").unwrap_or_default();
+        assert!(
+            source[method_start..].contains("\n    }\n"),
+            "method end missing from PHP fixture"
+        );
+        let method_relative_end = source[method_start..].find("\n    }\n").unwrap_or_default();
+        let method_end = method_start + method_relative_end + 6;
+        assert!(
+            graph.symbols.iter().any(|symbol| symbol.name == "run"),
+            "method symbol missing from PHP graph"
+        );
+        let Some(method) = graph.symbols.iter().find(|symbol| symbol.name == "run") else {
+            return;
+        };
+        assert_eq!(
+            method.source_selector,
+            Some(SymbolSourceSelector {
+                byte_start: method_start,
+                byte_end: method_end,
+                column_start: 4,
+                column_end: 5,
+            })
+        );
+        assert!(method.signature.contains("public function run"));
+        assert!(!method.signature.contains("helper"));
+        assert!(
+            graph.symbols.iter().any(|symbol| symbol.name == "name"),
+            "property symbol missing from PHP graph"
+        );
+        let Some(property) = graph.symbols.iter().find(|symbol| symbol.name == "name") else {
+            return;
+        };
+        assert!(property.signature.contains("private string"));
+        assert!(!property.signature.contains("service"));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports && relation.target_name == "Vendor\\Thing"
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports && relation.target_name == "bootstrap.php"
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Import && symbol.name == "Vendor\\Thing" && !symbol.exported
+        }));
+        for target in ["helper", "save", "Service::boot"] {
+            assert!(
+                graph.relations.iter().any(|relation| {
+                    relation.kind == RelationKind::Calls && relation.target_name == target
+                }),
+                "missing PHP call target {target}: {:?}",
+                graph.relations
+            );
+        }
+        assert!(
+            graph
+                .relations
+                .iter()
+                .all(|relation| relation.target_name != "$dynamic")
+        );
+
+        let multiple = extract_symbol_graph(
+            "src/Multiple.php",
+            Some("php"),
+            "<?php class Multiple { public string $first = 'one', $second = 'two'; const FIRST = 1, SECOND = 2; }",
+        );
+        for (name, signature) in [
+            ("first", "public string $ first ="),
+            ("second", "public string $ second ="),
+            ("FIRST", "const FIRST ="),
+            ("SECOND", "const SECOND ="),
+        ] {
+            assert!(
+                multiple
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == name && symbol.signature == signature),
+                "missing PHP element {name} with signature {signature}: {:?}",
+                multiple.symbols
+            );
+        }
+
+        let braced = extract_symbol_graph(
+            "src/Braced.php",
+            Some("php"),
+            "<?php namespace Atlas { class Service { public function run(): void {} } }",
+        );
+        assert!(braced.symbols.iter().any(|symbol| {
+            symbol.name == "Service" && symbol.parent.as_deref() == Some("Atlas")
+        }));
+        assert!(
+            braced.symbols.iter().any(|symbol| {
+                symbol.name == "run" && symbol.parent.as_deref() == Some("Service")
+            })
+        );
+
+        let duplicates = extract_symbol_graph(
+            "src/duplicates.php",
+            Some("php"),
+            "<?php function same(): void {} function same(): void {}",
+        );
+        assert_eq!(
+            duplicates
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.name == "same" && symbol.kind == SymbolKind::Function)
+                .count(),
+            2,
+            "duplicate PHP declarations must remain visible rather than being merged"
+        );
+    }
+
+    #[test]
+    fn php_mixed_recovery_dynamic_and_bounded_inputs_stay_conservative() {
+        let mixed = extract_symbol_graph(
+            "templates/page.php",
+            Some("php"),
+            "<main>static</main><?php function render(): void { helper(); } ?>",
+        );
+        assert_eq!(mixed.parser, ParserKind::TreeSitter);
+        assert!(mixed.symbols.iter().any(|symbol| symbol.name == "render"));
+
+        let pure = extract_symbol_graph(
+            "src/pure.php",
+            Some("php"),
+            "function pure(): void { return; }",
+        );
+        assert_eq!(pure.parser, ParserKind::TreeSitter);
+        assert!(pure.symbols.iter().any(|symbol| symbol.name == "pure"));
+
+        let dynamic = extract_symbol_graph(
+            "src/dynamic.php",
+            Some("php"),
+            "<?php $callable(); $object->$method(); include $path;",
+        );
+        assert!(dynamic.relations.iter().all(|relation| {
+            !matches!(relation.kind, RelationKind::Calls | RelationKind::Imports)
+                || ![
+                    "$callable",
+                    "$method",
+                    "$path",
+                    "callable",
+                    "method",
+                    "path",
+                ]
+                .contains(&relation.target_name.as_str())
+        }));
+
+        let malformed = extract_symbol_graph(
+            "src/broken.php",
+            Some("php"),
+            "<?php function broken( { $unknown->();",
+        );
+        assert!(malformed.symbols.len() <= MAX_SYMBOLS_PER_FILE);
+        assert!(malformed.relations.len() <= 8_000);
+
+        let mut large = String::from("<?php\n");
+        for index in 0..(MAX_SYMBOLS_PER_FILE + 50) {
+            assert!(writeln!(large, "function function_{index}(): void {{}}").is_ok());
+        }
+        let bounded = extract_symbol_graph("src/large.php", Some("php"), &large);
+        assert_eq!(bounded.parser, ParserKind::TreeSitter);
+        assert_eq!(bounded.symbols.len(), MAX_SYMBOLS_PER_FILE);
+    }
+
+    #[test]
+    fn indexes_composer_style_php_source_through_the_builtin_owner() {
+        let source = r"<?php
+namespace Composer\Autoload;
+
+use Composer\Autoload\ClassLoader as Loader;
+
+class ClassLoader {
+    public function loadClass(string $class): bool {
+        return $this->findFile($class) !== null;
+    }
+    private function findFile(string $class): ?string { return null; }
+}
+";
+        let graph = extract_symbol_graph("vendor/composer/ClassLoader.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Class && symbol.name == "ClassLoader" })
+        );
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "loadClass"
+                && symbol.parent.as_deref() == Some("ClassLoader")
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports
+                && relation.target_name == "Composer\\Autoload\\ClassLoader"
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Calls && relation.target_name == "findFile"
+        }));
     }
 }

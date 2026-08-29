@@ -53,7 +53,7 @@ language_pipelines[63]{language,support,summary_adapter,symbol_adapter}:
   "graphql","fallback","none","fallback"
   "config","structural","config-text","none"
   "ruby","fallback","none","fallback"
-  "php","fallback","none","fallback"
+  "php","native","none","tree-sitter"
   "swift","fallback","none","fallback"
   "scala","fallback","none","fallback"
   "shell","fallback","none","fallback"
@@ -74,7 +74,7 @@ semantic_witnesses[5]{language,path,base_adapter,source,symbol_kind,symbol_name,
   "objective-c","src/Runner.m","tree-sitter","@interface Runner\n@end\n@implementation Runner\n@end\n","class","Runner","class_implementation",""
   "zig","src/runner.zig","tree-sitter","const Runner = struct { pub fn run(self: Runner) void {} };\n","struct","Runner","zig-struct-binding",""
   "groovy","build.gradle","fallback","tasks.register('verifyAtlas')\n","function","verifyAtlas","gradle-groovy-dsl-task",""
-specialized_parsers[16]{language,package,source,symbol_kind,symbol_name}:
+specialized_parsers[17]{language,package,source,symbol_kind,symbol_name}:
   "rust","tree-sitter-rust","fn run() {}","function","run"
   "rust-build-script","tree-sitter-rust","fn main() {}","function","main"
   "python","tree-sitter-python","def run():\n    return None\n","function","run"
@@ -91,6 +91,7 @@ specialized_parsers[16]{language,package,source,symbol_kind,symbol_name}:
   "cpp","tree-sitter-cpp","class Runner {};","class","Runner"
   "h","tree-sitter-c","int run(void);","function","run"
   "hpp","tree-sitter-cpp","class Runner {};","class","Runner"
+  "php","tree-sitter-php","<?php function run() {}","function","run"
 adapter_precedence[7]{path_class,path,absent,cargo_manifest,cargo_lock,vue,powershell,built_in,fallback,unknown}:
   "cargo-manifest","Cargo.toml","cargo-manifest","cargo-manifest","cargo-lock","vue","powershell","built-in","fallback","fallback"
   "cargo-lock","Cargo.lock","cargo-lock","cargo-manifest","cargo-lock","vue","powershell","built-in","fallback","fallback"
