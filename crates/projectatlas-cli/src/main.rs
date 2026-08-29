@@ -1235,53 +1235,20 @@ enum Command {
         #[arg(long)]
         text_index_max_bytes: Option<u64>,
     },
-    /// Report structural health findings.
+    /// Report structural health findings (the `health-check` compatibility command).
     HealthCheck {
-        /// Pagination start index after filters are applied.
-        #[arg(long, default_value_t = 0)]
-        start_index: usize,
-        /// Maximum findings to return.
-        #[arg(long, default_value_t = DEFAULT_HEALTH_LIMIT)]
-        limit: usize,
-        /// Optional finding category filter.
-        #[arg(long)]
-        category: Option<String>,
-        /// Optional severity filter.
-        #[arg(long, value_enum)]
-        severity: Option<HealthSeverityArg>,
-        /// Optional repository-relative primary or related path prefix.
-        #[arg(long)]
-        path_prefix: Option<String>,
-        /// Return counts and paging metadata without finding rows.
-        #[arg(long)]
-        summary_only: bool,
-        /// Restrict findings to source files and folders that contain source files.
-        #[arg(long)]
-        source_only: bool,
-        /// Opt in to bounded current coverage discovery instead of structural findings.
-        #[arg(long)]
-        coverage: bool,
-        /// Optional source parser coverage filter.
-        #[arg(long, requires = "coverage")]
-        parser: Option<String>,
-        /// Optional derived-fact provider coverage filter.
-        #[arg(long, requires = "coverage")]
-        provider: Option<String>,
-        /// Optional relationship-family coverage filter.
-        #[arg(long, requires = "coverage")]
-        relation: Option<String>,
-        /// Optional complete, `no_candidates`, partial, failed, ignored, oversized, quarantined, or stale filter.
-        #[arg(long, requires = "coverage")]
-        coverage_state: Option<String>,
-        /// Optional exact coverage reason filter.
-        #[arg(long, requires = "coverage")]
-        reason: Option<String>,
+        /// Read-only health report filters.
+        #[command(flatten)]
+        report: HealthReportArgs,
     },
-    /// Resolve a deterministic health finding with agent rationale.
+    /// Report health findings or resolve one with agent rationale.
     Health {
+        /// Read-only health report filters when no administrative subcommand is selected.
+        #[command(flatten)]
+        report: HealthReportArgs,
         /// Health subcommand to run.
         #[command(subcommand)]
-        command: HealthCommand,
+        command: Option<HealthCommand>,
     },
     /// Validate database purpose metadata, untracked files, and structure drift.
     Lint {
@@ -1574,6 +1541,50 @@ enum HealthCommand {
     },
 }
 
+/// Read-only health report filters shared by `health` and `health-check`.
+#[derive(Debug, Args)]
+struct HealthReportArgs {
+    /// Pagination start index after filters are applied.
+    #[arg(long, default_value_t = 0)]
+    start_index: usize,
+    /// Maximum findings to return.
+    #[arg(long, default_value_t = DEFAULT_HEALTH_LIMIT)]
+    limit: usize,
+    /// Optional finding category filter.
+    #[arg(long)]
+    category: Option<String>,
+    /// Optional severity filter.
+    #[arg(long, value_enum)]
+    severity: Option<HealthSeverityArg>,
+    /// Optional repository-relative primary or related path prefix.
+    #[arg(long)]
+    path_prefix: Option<String>,
+    /// Return counts and paging metadata without finding rows.
+    #[arg(long)]
+    summary_only: bool,
+    /// Restrict findings to source files and folders that contain source files.
+    #[arg(long)]
+    source_only: bool,
+    /// Opt in to bounded current coverage discovery instead of structural findings.
+    #[arg(long)]
+    coverage: bool,
+    /// Optional source parser coverage filter.
+    #[arg(long, requires = "coverage")]
+    parser: Option<String>,
+    /// Optional derived-fact provider coverage filter.
+    #[arg(long, requires = "coverage")]
+    provider: Option<String>,
+    /// Optional relationship-family coverage filter.
+    #[arg(long, requires = "coverage")]
+    relation: Option<String>,
+    /// Optional complete, `no_candidates`, partial, failed, ignored, oversized, quarantined, or stale filter.
+    #[arg(long, requires = "coverage")]
+    coverage_state: Option<String>,
+    /// Optional exact coverage reason filter.
+    #[arg(long, requires = "coverage")]
+    reason: Option<String>,
+}
+
 /// Symbol graph subcommands.
 #[derive(Debug, Subcommand)]
 enum SymbolsCommand {
@@ -1667,6 +1678,74 @@ fn load_cli_atlas_config(cli: &Cli) -> Result<AtlasMapConfig, CliError> {
         return Ok(config.with_database_path(&cli.db));
     }
     Ok(config)
+}
+
+/// Execute the read-only health report shared by `health` and `health-check`.
+fn run_health_report(
+    cli: &Cli,
+    report: &HealthReportArgs,
+    usage_instance: Option<UsageRuntimeInstance>,
+    command_name: &str,
+) -> Result<(), CliError> {
+    let store = open_index_for_read(cli)?;
+    if report.coverage {
+        let query = coverage_query_from_cli(
+            report.start_index,
+            report.limit,
+            &CoverageCliFilters {
+                path_prefix: report.path_prefix.as_deref(),
+                parser: report.parser.as_deref(),
+                provider: report.provider.as_deref(),
+                relation: report.relation.as_deref(),
+                state: report.coverage_state.as_deref(),
+                reason: report.reason.as_deref(),
+            },
+        )?;
+        let mut coverage_report = load_coverage_discovery(&store, query)?;
+        let toon = finalize_coverage_output(cli.format, &mut coverage_report)?;
+        print_tracked_directory_output_estimate(
+            cli.format,
+            &store,
+            usage_instance,
+            &cli.session,
+            command_name,
+            None,
+            None,
+            || estimated_source_tokens_for_indexed_files(&store, None, None),
+            &toon,
+            &coverage_report,
+        )?;
+        return Ok(());
+    }
+
+    let query = health_query_from_cli(
+        report.start_index,
+        report.limit,
+        report.category.as_deref(),
+        report.severity,
+        report.path_prefix.as_deref(),
+        report.summary_only,
+        if report.source_only {
+            HealthScope::source_only()
+        } else {
+            HealthScope::all()
+        },
+    );
+    let page = store.unresolved_health_findings_page_current(&query)?;
+    let toon = render_health_page(&page, &query);
+    print_tracked_directory_output_estimate(
+        cli.format,
+        &store,
+        usage_instance,
+        &cli.session,
+        command_name,
+        None,
+        None,
+        || estimated_source_tokens_for_indexed_files(&store, None, None),
+        &toon,
+        &page,
+    )?;
+    Ok(())
 }
 
 /// Execute the selected CLI command.
@@ -2650,87 +2729,17 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 &report,
             )?;
         }
-        Command::HealthCheck {
-            start_index,
-            limit,
-            category,
-            severity,
-            path_prefix,
-            summary_only,
-            source_only,
-            coverage,
-            parser,
-            provider,
-            relation,
-            coverage_state,
-            reason,
-        } => {
-            let store = open_index_for_read(cli)?;
-            if *coverage {
-                let query = coverage_query_from_cli(
-                    *start_index,
-                    *limit,
-                    &CoverageCliFilters {
-                        path_prefix: path_prefix.as_deref(),
-                        parser: parser.as_deref(),
-                        provider: provider.as_deref(),
-                        relation: relation.as_deref(),
-                        state: coverage_state.as_deref(),
-                        reason: reason.as_deref(),
-                    },
-                )?;
-                let mut report = load_coverage_discovery(&store, query)?;
-                let toon = finalize_coverage_output(cli.format, &mut report)?;
-                print_tracked_directory_output_estimate(
-                    cli.format,
-                    &store,
-                    usage_instance,
-                    &cli.session,
-                    "health-check",
-                    None,
-                    None,
-                    || estimated_source_tokens_for_indexed_files(&store, None, None),
-                    &toon,
-                    &report,
-                )?;
-                return Ok(());
-            }
-            let query = health_query_from_cli(
-                *start_index,
-                *limit,
-                category.as_deref(),
-                *severity,
-                path_prefix.as_deref(),
-                *summary_only,
-                if *source_only {
-                    HealthScope::source_only()
-                } else {
-                    HealthScope::all()
-                },
-            );
-            let page = store.unresolved_health_findings_page_current(&query)?;
-            let toon = render_health_page(&page, &query);
-            print_tracked_directory_output_estimate(
-                cli.format,
-                &store,
-                usage_instance,
-                &cli.session,
-                "health-check",
-                None,
-                None,
-                || estimated_source_tokens_for_indexed_files(&store, None, None),
-                &toon,
-                &page,
-            )?;
+        Command::HealthCheck { report } => {
+            run_health_report(cli, report, usage_instance, "health-check")?;
         }
-        Command::Health { command } => match command {
-            HealthCommand::Resolve {
+        Command::Health { report, command } => match command {
+            Some(HealthCommand::Resolve {
                 finding_id,
                 category,
                 path,
                 related_path,
                 rationale,
-            } => {
+            }) => {
                 let store = open_index_for_mutation(cli)?;
                 let resolution = HealthResolution {
                     finding_id: finding_id.clone(),
@@ -2746,6 +2755,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     &resolution,
                 )?;
             }
+            None => run_health_report(cli, report, usage_instance, "health")?,
         },
         Command::Lint {
             strict_folders,
@@ -4604,28 +4614,45 @@ impl RequiredCliCommand {
                 text_index_max_bytes: None,
             },
             Self::HealthCheck => Command::HealthCheck {
-                start_index: 0,
-                limit: 1,
-                category: None,
-                severity: None,
-                path_prefix: None,
-                summary_only: true,
-                source_only: false,
-                coverage: false,
-                parser: None,
-                provider: None,
-                relation: None,
-                coverage_state: None,
-                reason: None,
+                report: HealthReportArgs {
+                    start_index: 0,
+                    limit: 1,
+                    category: None,
+                    severity: None,
+                    path_prefix: None,
+                    summary_only: true,
+                    source_only: false,
+                    coverage: false,
+                    parser: None,
+                    provider: None,
+                    relation: None,
+                    coverage_state: None,
+                    reason: None,
+                },
             },
             Self::Health => Command::Health {
-                command: HealthCommand::Resolve {
+                report: HealthReportArgs {
+                    start_index: 0,
+                    limit: 1,
+                    category: None,
+                    severity: None,
+                    path_prefix: None,
+                    summary_only: true,
+                    source_only: false,
+                    coverage: false,
+                    parser: None,
+                    provider: None,
+                    relation: None,
+                    coverage_state: None,
+                    reason: None,
+                },
+                command: Some(HealthCommand::Resolve {
                     finding_id: String::new(),
                     category: String::new(),
                     path: String::new(),
                     related_path: None,
                     rationale: String::new(),
-                },
+                }),
             },
             Self::Lint => Command::Lint {
                 strict_folders: false,

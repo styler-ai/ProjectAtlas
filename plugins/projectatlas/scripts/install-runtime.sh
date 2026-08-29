@@ -7,6 +7,11 @@ projectatlas_version=${PROJECTATLAS_VERSION:-}
 release_base_url=${PROJECTATLAS_RELEASE_BASE_URL:-https://github.com/styler-ai/ProjectAtlas/releases/download}
 release_binary_only=${PROJECTATLAS_RELEASE_BINARY_ONLY:-}
 runtime_override=${PROJECTATLAS_RUNTIME_PATH:-}
+uninstall=0
+if [ "${1:-}" = "--uninstall" ]; then
+  uninstall=1
+  shift
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 plugin_root=$(cd "$script_dir/.." && pwd -P)
@@ -112,10 +117,115 @@ runtime_version() {
 }
 
 known_projectatlas_shim_paths() {
+  printf '%s\n' "$HOME/.local/bin/projectatlas"
   printf '%s\n' "$HOME/.cargo/bin/projectatlas"
   printf '%s\n' "$HOME/.npm/bin/projectatlas"
   printf '%s\n' "$HOME/.npm-global/bin/projectatlas"
   printf '%s\n' "$HOME/.local/share/npm/bin/projectatlas"
+}
+
+atlas_forwarder_path() {
+  runtime=$1
+  printf '%s/atlas\n' "$(dirname -- "$runtime")"
+}
+
+shell_quote() {
+  value=$1
+  value=$(printf '%s' "$value" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "$value"
+}
+
+is_managed_atlas_forwarder() {
+  candidate=$1
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  [ "$(sed -n '1p' "$candidate" 2>/dev/null || true)" = '# ProjectAtlas managed atlas forwarder.' ] || return 1
+  case "$(sed -n '2p' "$candidate" 2>/dev/null || true)" in
+    '# target: '*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_atlas_forwarder_collision_free() {
+  forwarder=$1
+  if [ -e "$forwarder" ] || [ -L "$forwarder" ]; then
+    if ! is_managed_atlas_forwarder "$forwarder"; then
+      printf '%s\n' "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $forwarder" >&2
+      return 1
+    fi
+  fi
+  existing=$(command -v atlas 2>/dev/null || true)
+  if [ -n "$existing" ] && [ "$(canonical_file "$existing")" != "$(canonical_file "$forwarder")" ]; then
+    if ! is_managed_atlas_forwarder "$existing"; then
+      printf '%s\n' "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $existing" >&2
+      return 1
+    fi
+  fi
+}
+
+write_atlas_forwarder() {
+  verified=$1
+  forwarder=$(atlas_forwarder_path "$verified")
+  ensure_atlas_forwarder_collision_free "$forwarder" || return 1
+  runtime_dir=$(dirname -- "$verified")
+  temporary=$(mktemp "$runtime_dir/.atlas-forwarder.XXXXXX") || {
+    printf '%s\n' "ProjectAtlas could not stage the atlas forwarder beside the verified runtime: $forwarder" >&2
+    return 1
+  }
+  target_quoted=$(shell_quote "$verified")
+  if ! {
+    printf '%s\n' '# ProjectAtlas managed atlas forwarder.'
+    printf '%s\n' "# target: $verified"
+    printf 'exec %s "$@"\n' "$target_quoted"
+  } >"$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  chmod 755 "$temporary" || {
+    rm -f "$temporary"
+    return 1
+  }
+  if ! ensure_atlas_forwarder_collision_free "$forwarder" || ! mv -f "$temporary" "$forwarder"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  printf 'ProjectAtlas atlas forwarder installed and verified: %s -> %s\n' "$forwarder" "$verified"
+}
+
+remove_atlas_forwarder() {
+  forwarder=$1
+  if [ ! -e "$forwarder" ] && [ ! -L "$forwarder" ]; then
+    return 0
+  fi
+  if ! is_managed_atlas_forwarder "$forwarder"; then
+    printf '%s\n' "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $forwarder" >&2
+    return 1
+  fi
+  rm -f -- "$forwarder" || return 1
+  printf 'ProjectAtlas atlas forwarder removed: %s\n' "$forwarder"
+}
+
+uninstall_atlas_forwarders() {
+  if [ -n "$runtime_override" ]; then
+    runtime_dir=$(CDPATH= cd -- "$(dirname -- "$runtime_override")" 2>/dev/null && pwd -P) || {
+      printf '%s\n' "ProjectAtlas runtime directory was not found for atlas uninstall: $runtime_override" >&2
+      return 1
+    }
+    forwarder="$runtime_dir/atlas"
+    remove_atlas_forwarder "$forwarder" || return 1
+    return 0
+  fi
+  for known_runtime in \
+    "$HOME/.local/bin/projectatlas" \
+    "$HOME/.cargo/bin/projectatlas" \
+    "$HOME/.npm/bin/projectatlas" \
+    "$HOME/.npm-global/bin/projectatlas" \
+    "$HOME/.local/share/npm/bin/projectatlas"; do
+    remove_atlas_forwarder "$(dirname -- "$known_runtime")/atlas" || return 1
+  done
+  projectatlas_command=$(command -v projectatlas 2>/dev/null || true)
+  if [ -n "$projectatlas_command" ]; then
+    remove_atlas_forwarder "$(dirname -- "$projectatlas_command")/atlas" || return 1
+  fi
 }
 
 canonical_file() {
@@ -1449,6 +1559,11 @@ verify_release_checksum() {
   fi
 }
 
+if [ "$uninstall" -eq 1 ]; then
+  uninstall_atlas_forwarders
+  exit 0
+fi
+
 install_release_binary() {
   if [ -z "$projectatlas_version" ]; then
     return 1
@@ -1538,6 +1653,7 @@ else
   fi
 fi
 
+write_atlas_forwarder "$projectatlas_bin"
 prepend_projectatlas_process_path "$projectatlas_bin"
 "$projectatlas_bin" --format json runtime-info >/dev/null
 confirm_bare_projectatlas_resolution "$projectatlas_bin"

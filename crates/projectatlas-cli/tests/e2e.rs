@@ -54,6 +54,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::error::Error;
 #[cfg(any(windows, feature = "optional-parser-supervisor"))]
 use std::ffi::OsStr;
@@ -177,6 +178,14 @@ const WINDOWS_POWERSHELL_VERSION_DIR: &str = "v1.0";
 const WINDOWS_POWERSHELL_EXECUTABLE: &str = "powershell.exe";
 #[cfg(windows)]
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn require(condition: bool, message: impl Into<String>) -> Result<(), Box<dyn Error>> {
+    if condition {
+        Ok(())
+    } else {
+        Err(io::Error::other(message.into()).into())
+    }
+}
 
 #[cfg(windows)]
 const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -10255,6 +10264,313 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
         "opencode cwd",
     )?;
 
+    Ok(())
+}
+
+#[test]
+fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo with spaces");
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let runtime_dir = temp.path().join("runtime with spaces");
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join(if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    });
+    fs::copy(mcp_contract_executable(), &runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime, permissions)?;
+    }
+    let home = temp.path().join("isolated home");
+    fs::create_dir_all(&home)?;
+    let workspace_root = workspace_root()?;
+    let installer = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join(if cfg!(windows) {
+            "install-runtime.ps1"
+        } else {
+            "install-runtime.sh"
+        });
+    let run_install = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1");
+        Ok(command.output()?)
+    };
+
+    let first_output = run_install()?;
+    require(
+        first_output.status.success(),
+        format!(
+            "installer failed to create the managed atlas forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&first_output.stdout),
+            String::from_utf8_lossy(&first_output.stderr)
+        ),
+    )?;
+    let forwarder = runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+        .join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let forwarder_text = fs::read_to_string(&forwarder)?;
+    require(
+        forwarder_text.contains(if cfg!(windows) {
+            "rem ProjectAtlas managed atlas forwarder."
+        } else {
+            "# ProjectAtlas managed atlas forwarder."
+        }) && forwarder_text.contains(runtime.to_string_lossy().as_ref()),
+        format!(
+            "installer did not publish a managed forwarder to the exact runtime: {}",
+            forwarder.display()
+        ),
+    )?;
+
+    let direct_database = temp.path().join("direct database with spaces.db");
+    let alias_database = temp.path().join("alias database with spaces.db");
+    let arguments = [
+        "--require-version",
+        env!("CARGO_PKG_VERSION"),
+        "--format",
+        "json",
+        "--db",
+    ];
+    let run_direct = |database: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+        Ok(StdCommand::new(&runtime)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(arguments)
+            .arg(database)
+            .arg("init")
+            .output()?)
+    };
+    let direct_output = run_direct(&direct_database)?;
+    let alias_output = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["/D", "/C", "call"])
+            .arg(&forwarder)
+            .args(arguments)
+            .arg(&alias_database)
+            .arg("init")
+            .output()?
+    } else {
+        StdCommand::new(&forwarder)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(arguments)
+            .arg(&alias_database)
+            .arg("init")
+            .output()?
+    };
+    require(
+        direct_output.status.success()
+            && alias_output.status.success()
+            && direct_database.is_file()
+            && alias_database.is_file(),
+        format!(
+            "atlas did not preserve the complete quoted argument vector:\ndirect={} {}\nalias={} {}",
+            direct_output.status,
+            String::from_utf8_lossy(&direct_output.stderr),
+            alias_output.status,
+            String::from_utf8_lossy(&alias_output.stderr)
+        ),
+    )?;
+    let direct_health = StdCommand::new(&runtime)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(arguments)
+        .arg(&direct_database)
+        .args(["health", "--summary-only"])
+        .output()?;
+    let alias_health = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["/D", "/C", "call"])
+            .arg(&forwarder)
+            .args(arguments)
+            .arg(&direct_database)
+            .args(["health", "--summary-only"])
+            .output()?
+    } else {
+        StdCommand::new(&forwarder)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(arguments)
+            .arg(&direct_database)
+            .args(["health", "--summary-only"])
+            .output()?
+    };
+    require(
+        direct_health.status == alias_health.status
+            && direct_health.stdout == alias_health.stdout
+            && direct_health.stderr == alias_health.stderr,
+        format!(
+            "atlas health report diverged from projectatlas:\ndirect={} {}\nalias={} {}",
+            direct_health.status,
+            String::from_utf8_lossy(&direct_health.stderr),
+            alias_health.status,
+            String::from_utf8_lossy(&alias_health.stderr)
+        ),
+    )?;
+    let direct_info = StdCommand::new(&runtime)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let alias_info = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .args(["/D", "/C", "call"])
+            .arg(&forwarder)
+            .args(["--format", "toon", "runtime-info"])
+            .output()?
+    } else {
+        StdCommand::new(&forwarder)
+            .args(["--format", "toon", "runtime-info"])
+            .output()?
+    };
+    require(
+        direct_info.status == alias_info.status
+            && direct_info.stdout == alias_info.stdout
+            && direct_info.stderr == alias_info.stderr,
+        "atlas and projectatlas runtime-info streams diverged",
+    )?;
+
+    let second_output = run_install()?;
+    require(
+        second_output.status.success() && forwarder.is_file(),
+        format!(
+            "installer repair/update did not preserve the owned forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&second_output.stdout),
+            String::from_utf8_lossy(&second_output.stderr)
+        ),
+    )?;
+
+    let effective_collision_dir = temp.path().join("effective atlas collision");
+    fs::create_dir_all(&effective_collision_dir)?;
+    let effective_collision_path =
+        effective_collision_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    fs::write(&effective_collision_path, "user-owned atlas command\n")?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let effective_collision_environment = env::join_paths(
+        std::iter::once(effective_collision_dir).chain(env::split_paths(&inherited_path)),
+    )?;
+    let managed_forwarder_before_path_collision = fs::read(&forwarder)?;
+    let mut effective_collision_command =
+        projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            Some(&home),
+        )?;
+    effective_collision_command
+        .env("PATH", effective_collision_environment)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    let effective_collision_output = effective_collision_command.output()?;
+    let effective_collision_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&effective_collision_output.stdout),
+        String::from_utf8_lossy(&effective_collision_output.stderr)
+    );
+    require(
+        !effective_collision_output.status.success()
+            && effective_collision_text.contains("atlas command collision")
+            && fs::read(&forwarder)? == managed_forwarder_before_path_collision,
+        format!(
+            "installer shadowed an effective PATH atlas collision:\n{effective_collision_text}"
+        ),
+    )?;
+    fs::remove_file(&effective_collision_path)?;
+
+    let unmanaged_contents = "user-owned atlas command\n";
+    fs::write(&forwarder, unmanaged_contents)?;
+    let collision_output = run_install()?;
+    let collision_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&collision_output.stdout),
+        String::from_utf8_lossy(&collision_output.stderr)
+    );
+    require(
+        !collision_output.status.success() && collision_text.contains("atlas command collision"),
+        format!("installer accepted an unmanaged atlas collision:\n{collision_text}"),
+    )?;
+    require(
+        fs::read_to_string(&forwarder)? == unmanaged_contents,
+        "installer overwrote an unmanaged atlas collision",
+    )?;
+    fs::remove_file(&forwarder)?;
+    require(
+        run_install()?.status.success(),
+        "installer could not repair the removed managed atlas forwarder",
+    )?;
+
+    let mut uninstall = if cfg!(windows) {
+        let mut command = StdCommand::new("powershell");
+        command
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-RuntimePath")
+            .arg(&runtime)
+            .arg("-Uninstall");
+        command
+    } else {
+        let mut command = StdCommand::new("bash");
+        command
+            .arg(&installer)
+            .arg("--uninstall")
+            .arg(&repo)
+            .env("PROJECTATLAS_RUNTIME_PATH", &runtime);
+        command
+    };
+    uninstall
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("APPDATA", home.join("AppData/Roaming"))
+        .env("LOCALAPPDATA", home.join("AppData/Local"))
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    fs::create_dir_all(home.join("AppData/Roaming"))?;
+    fs::create_dir_all(home.join("AppData/Local"))?;
+    let uninstall_output = uninstall.output()?;
+    require(
+        uninstall_output.status.success() && !forwarder.exists() && runtime.is_file(),
+        format!(
+            "installer uninstall did not remove only the owned forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&uninstall_output.stdout),
+            String::from_utf8_lossy(&uninstall_output.stderr)
+        ),
+    )?;
+    require(
+        atlas_dir.join("config.toml").is_file()
+            && direct_database.is_file()
+            && alias_database.is_file(),
+        "atlas uninstall removed selected project state",
+    )?;
     Ok(())
 }
 

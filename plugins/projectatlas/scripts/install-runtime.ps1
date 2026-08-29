@@ -6,7 +6,8 @@ param(
     [string]$ProjectAtlasVersion,
     [string]$ReleaseBaseUrl = "https://github.com/styler-ai/ProjectAtlas/releases/download",
     [string]$RuntimePath,
-    [switch]$ReleaseBinaryOnly
+    [switch]$ReleaseBinaryOnly,
+    [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -1853,6 +1854,10 @@ function Get-KnownProjectAtlasShimPaths {
             (Join-Path $npmBin "projectatlas")
         )
     }
+    if ($env:LOCALAPPDATA) {
+        $localAppDataBin = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin"
+        $paths += Join-Path $localAppDataBin "projectatlas.exe"
+    }
     return @($paths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
@@ -2042,6 +2047,136 @@ function Confirm-ProjectAtlasBareCommandResolution {
     }
     $commandVersion = Get-ProjectAtlasRuntimeVersion $commandPath
     Write-Warning "Active process still resolves bare 'projectatlas' to $commandPath version '$commandVersion', not the verified runtime $VerifiedPath. Generated MCP configs use the absolute runtime; restart Codex or the shell, put $(Split-Path -Parent $VerifiedPath) first on PATH, or remove the obsolete shim before relying on bare projectatlas."
+}
+
+function Get-ProjectAtlasAtlasForwarderPath {
+    param(
+        [string]$VerifiedPath
+    )
+    return Join-Path (Split-Path -Parent $VerifiedPath) "atlas.cmd"
+}
+
+function Test-ProjectAtlasManagedAtlasForwarder {
+    param(
+        [string]$FilePath
+    )
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $lines = @(Get-Content -LiteralPath $FilePath -TotalCount 4)
+        return $lines.Count -ge 4 `
+            -and $lines[0] -eq "@echo off" `
+            -and $lines[1] -eq "rem ProjectAtlas managed atlas forwarder." `
+            -and $lines[2].StartsWith("rem target: ", [System.StringComparison]::Ordinal) `
+            -and $lines[3].StartsWith('"', [System.StringComparison]::Ordinal) `
+            -and $lines[3].EndsWith('" %*', [System.StringComparison]::Ordinal)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-ProjectAtlasAtlasForwarderCollisionFree {
+    param(
+        [string]$VerifiedPath
+    )
+    $forwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
+    $forwarderNormalized = Get-NormalizedPathEntry $forwarder
+    foreach ($candidate in @(
+            $forwarder,
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.exe"),
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.bat"),
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.ps1"),
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.com")
+        )) {
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+        if ((Get-NormalizedPathEntry $candidate) -ieq $forwarderNormalized `
+            -and (Test-ProjectAtlasManagedAtlasForwarder $candidate)) {
+            continue
+        }
+        throw "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $candidate"
+    }
+    $command = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) {
+        $commandPath = if ($command.Path) { $command.Path } elseif ($command.Source) { $command.Source } else { $null }
+        if ([string]::IsNullOrWhiteSpace($commandPath) -or (Get-NormalizedPathEntry $commandPath) -ine $forwarderNormalized) {
+            $observed = if ($commandPath) { $commandPath } else { $command.Name }
+            if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Test-ProjectAtlasManagedAtlasForwarder $commandPath)) {
+                throw "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $observed"
+            }
+        }
+    }
+    return $forwarder
+}
+
+function Write-ProjectAtlasAtlasForwarder {
+    param(
+        [string]$VerifiedPath
+    )
+    $forwarder = Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath
+    $runtimeDirectory = Split-Path -Parent $VerifiedPath
+    $temporary = Join-Path $runtimeDirectory (".atlas-forwarder-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $targetForBatch = $VerifiedPath.Replace("%", "%%")
+    $content = "@echo off`r`nrem ProjectAtlas managed atlas forwarder.`r`nrem target: $VerifiedPath`r`n`"$targetForBatch`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+    try {
+        [System.IO.File]::WriteAllText($temporary, $content, $utf8NoBom)
+        Assert-ProjectAtlasDirectFilePath $temporary "ProjectAtlas atlas forwarder staging file"
+        Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath | Out-Null
+        Move-Item -LiteralPath $temporary -Destination $forwarder -Force
+    }
+    finally {
+        if ([System.IO.File]::Exists($temporary)) {
+            [System.IO.File]::Delete($temporary)
+        }
+    }
+    if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder)) {
+        throw "ProjectAtlas atlas forwarder failed final verification: $forwarder"
+    }
+    Write-Output "ProjectAtlas atlas forwarder installed and verified: $forwarder -> $VerifiedPath"
+    return $forwarder
+}
+
+function Remove-ProjectAtlasAtlasForwarders {
+    param(
+        [string]$RuntimePath
+    )
+    $candidates = @()
+    if ($RuntimePath) {
+        $candidates += Get-ProjectAtlasAtlasForwarderPath $RuntimePath
+    }
+    else {
+        foreach ($knownPath in (Get-KnownProjectAtlasShimPaths)) {
+            $candidates += Join-Path (Split-Path -Parent $knownPath) "atlas.cmd"
+        }
+        $command = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($command) {
+            $commandPath = if ($command.Path) { $command.Path } else { $command.Source }
+            if ($commandPath) {
+                $candidates += Join-Path (Split-Path -Parent $commandPath) "atlas.cmd"
+            }
+        }
+    }
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        $normalized = Get-NormalizedPathEntry $candidate
+        if ($seen.ContainsKey($normalized)) {
+            continue
+        }
+        $seen[$normalized] = $true
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+        if (-not (Test-ProjectAtlasManagedAtlasForwarder $candidate)) {
+            throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
+        }
+        Assert-ProjectAtlasDirectFilePath $candidate "ProjectAtlas atlas forwarder"
+        Remove-Item -LiteralPath $candidate -Force
+        Write-Output "ProjectAtlas atlas forwarder removed: $candidate"
+    }
 }
 
 function Sync-ProjectAtlasRuntimeToLocalAppData {
@@ -3777,6 +3912,15 @@ function Install-ReleaseBinary {
     }
 }
 
+if (-not $RuntimePath -and $env:PROJECTATLAS_RUNTIME_PATH) {
+    $RuntimePath = $env:PROJECTATLAS_RUNTIME_PATH
+}
+
+if ($Uninstall) {
+    Remove-ProjectAtlasAtlasForwarders $RuntimePath
+    exit 0
+}
+
 if (-not $ProjectRoot) {
     $ProjectRoot = Resolve-DefaultProjectRoot
 }
@@ -3788,10 +3932,6 @@ if (-not $ProjectAtlasVersion) {
     else {
         $ProjectAtlasVersion = Resolve-PluginReleaseVersion
     }
-}
-
-if (-not $RuntimePath -and $env:PROJECTATLAS_RUNTIME_PATH) {
-    $RuntimePath = $env:PROJECTATLAS_RUNTIME_PATH
 }
 
 $releaseBinaryOnly = $ReleaseBinaryOnly -or (Test-Truthy $env:PROJECTATLAS_RELEASE_BINARY_ONLY)
@@ -3809,6 +3949,7 @@ if ($RuntimePath) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
+    Write-ProjectAtlasAtlasForwarder $projectAtlas | Out-Null
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
 else {
@@ -3844,6 +3985,7 @@ else {
         throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
     }
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
+    Write-ProjectAtlasAtlasForwarder $projectAtlas | Out-Null
 
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
