@@ -843,34 +843,37 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
             },
         );
     }
-    let key = |path: &str| {
+    let key = |path: &str| -> Result<String, io::Error> {
         nodes
             .values()
             .find(|node| entity_path(&node.entity) == Some(path))
             .map(|node| node.entity.key().canonical_identity().to_string())
-            .expect("planted node key")
+            .ok_or_else(|| io::Error::other(format!("planted node key missing for {path}")))
     };
-    let edge = |source: &str, target: &str, kind: GraphRelationKind| LocalEdge {
-        source: key(source),
-        target: key(target),
-        kind,
-        complete: true,
-    };
+    let edge =
+        |source: &str, target: &str, kind: GraphRelationKind| -> Result<LocalEdge, io::Error> {
+            Ok(LocalEdge {
+                source: key(source)?,
+                target: key(target)?,
+                kind,
+                complete: true,
+            })
+        };
     let calls = GraphRelationKind::Legacy(RelationKind::Calls);
     let references = GraphRelationKind::Extended(ExtendedRelationKind::References);
     let edges = vec![
-        edge("group-a/0.rs", "group-a/1.rs", calls),
-        edge("group-a/1.rs", "group-a/2.rs", calls),
-        edge("group-a/2.rs", "group-a/0.rs", calls),
-        edge("group-b/0.rs", "group-b/1.rs", calls),
-        edge("group-b/1.rs", "group-b/2.rs", calls),
-        edge("group-b/2.rs", "group-b/0.rs", calls),
-        edge("group-a/2.rs", "group-b/0.rs", references),
+        edge("group-a/0.rs", "group-a/1.rs", calls)?,
+        edge("group-a/1.rs", "group-a/2.rs", calls)?,
+        edge("group-a/2.rs", "group-a/0.rs", calls)?,
+        edge("group-b/0.rs", "group-b/1.rs", calls)?,
+        edge("group-b/1.rs", "group-b/2.rs", calls)?,
+        edge("group-b/2.rs", "group-b/0.rs", calls)?,
+        edge("group-a/2.rs", "group-b/0.rs", references)?,
         edge(
             "group-a/0.rs",
             "group-a/2.rs",
             GraphRelationKind::Legacy(RelationKind::Contains),
-        ),
+        )?,
     ];
     let query = analysis_query(RelationAnalysisMode::Architecture)?;
     let first = community_findings(&nodes, &edges, true, &query, None)?;

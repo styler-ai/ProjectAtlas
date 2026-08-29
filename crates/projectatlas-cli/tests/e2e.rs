@@ -36814,7 +36814,7 @@ fn run_json_analysis_to_completion(
             args.pop();
             args.pop();
         }
-        args.extend(["--cursor".to_string(), cursor.to_string()]);
+        args.extend(["--cursor".to_string(), cursor]);
     }
     Err(io::Error::other("JSON analysis continuation exceeded its test bound").into())
 }
