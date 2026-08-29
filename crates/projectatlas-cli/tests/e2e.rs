@@ -178,6 +178,18 @@ const WINDOWS_POWERSHELL_EXECUTABLE: &str = "powershell.exe";
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(windows)]
+const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+const CODEX_OWNER_DELAYED_PUBLICATION: Duration = Duration::from_secs(6);
+#[cfg(windows)]
+const CODEX_OWNER_PUBLICATION_DELAY_ENV: &str =
+    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_DELAY_MS";
+#[cfg(windows)]
+const CODEX_OWNER_PUBLICATION_MODE_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE";
+#[cfg(windows)]
+const OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME: &str = "obsolete-projectatlas.cs";
+
+#[cfg(windows)]
 const CODEX_MCP_OWNER_FIXTURE_SOURCE: &str = r#"using System;
 using System.Diagnostics;
 using System.IO;
@@ -212,13 +224,43 @@ public static class Program
             {
                 string identityPath = arguments[0];
                 string temporaryIdentityPath = identityPath + ".tmp";
-                File.WriteAllLines(temporaryIdentityPath, new[]
+                string publicationMode = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE"
+                );
+                if (publicationMode == "early-exit")
+                    return 3;
+                string publicationDelay = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_DELAY_MS"
+                );
+                int delayMilliseconds;
+                if (!String.IsNullOrWhiteSpace(publicationDelay)
+                    && Int32.TryParse(publicationDelay, out delayMilliseconds)
+                    && delayMilliseconds > 0)
                 {
-                    child.Id.ToString(),
-                    child.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(),
-                    childPath
-                });
-                File.Move(temporaryIdentityPath, identityPath);
+                    Thread.Sleep(delayMilliseconds);
+                }
+                if (publicationMode != "timeout")
+                {
+                    string creationTime = child.StartTime.ToUniversalTime()
+                        .ToFileTimeUtc()
+                        .ToString();
+                    if (publicationMode == "malformed")
+                    {
+                        File.WriteAllText(temporaryIdentityPath, "not-an-identity");
+                    }
+                    else
+                    {
+                        if (publicationMode == "mismatched")
+                            creationTime = (Int64.Parse(creationTime) + 1).ToString();
+                        File.WriteAllLines(temporaryIdentityPath, new[]
+                        {
+                            child.Id.ToString(),
+                            creationTime,
+                            childPath
+                        });
+                    }
+                    File.Move(temporaryIdentityPath, identityPath);
+                }
                 while (!child.WaitForExit(25))
                 {
                     if (File.Exists(identityPath + ".stop"))
@@ -229,6 +271,7 @@ public static class Program
                     }
                 }
                 Thread.Sleep(Timeout.Infinite);
+                return 0;
             }
             finally
             {
@@ -239,7 +282,6 @@ public static class Program
                 }
             }
         }
-        return 0;
     }
 }
 "#;
@@ -11258,7 +11300,9 @@ fn windows_installer_obsolete_mcp_handoff_retires_only_exact_child_and_reports_r
             .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
     )?;
 
-    let fixture_source = temp.path().join("obsolete-projectatlas.cs");
+    let fixture_source = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME);
     fs::write(
         &fixture_source,
         r#"using System;
@@ -11502,17 +11546,29 @@ public static class Program
             .output()
     };
 
+    let readiness_started = Instant::now();
     let (mut codex_owner, obsolete_mcp_pid) = spawn_codex_owned_obsolete_mcp(
         &codex_owner_fixture,
         &stable_runtime,
         &db,
         Some(&atlas_dir.join("config.toml")),
         &child_pid_file,
+        Some(CODEX_OWNER_DELAYED_PUBLICATION),
+        None,
     )?;
+    let readiness_elapsed = readiness_started.elapsed();
+    let delayed_publication_crossed_former_budget = readiness_elapsed > Duration::from_secs(5)
+        && readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT;
     let mut second_codex_owner = None;
     let mut second_obsolete_mcp_pid = None;
     let mut non_codex_child = None;
     let test_result = (|| -> Result<(), Box<dyn Error>> {
+        if !delayed_publication_crossed_former_budget {
+            return Err(io::Error::other(format!(
+                "delayed Codex owner publication did not cross the former five-second boundary within the readiness budget: elapsed={readiness_elapsed:?} budget={CODEX_OWNER_READINESS_TIMEOUT:?}"
+            ))
+            .into());
+        }
         let unsigned_output = run_production_installer()?;
         let unsigned_text = format!(
             "{}\n{}",
@@ -11661,6 +11717,8 @@ public static class Program
             &db,
             Some(&atlas_dir.join("config.toml")),
             &temp.path().join("retry-obsolete-mcp.pid"),
+            None,
+            None,
         )?;
         second_codex_owner = Some(owner);
         second_obsolete_mcp_pid = Some(child_pid.clone());
@@ -12219,6 +12277,8 @@ public static class Program
         &db,
         Some(&atlas_dir.join("config.toml")),
         &first_child_pid_file,
+        None,
+        None,
     )?;
     let mut second_owner = None;
     let mut second_obsolete_mcp_pid = None;
@@ -12486,6 +12546,8 @@ public static class Program
             &db,
             Some(&atlas_dir.join("config.toml")),
             &temp.path().join("second-obsolete-mcp.pid"),
+            None,
+            None,
         )?;
         second_owner = Some(owner);
         second_obsolete_mcp_pid = Some(process_id);
@@ -36089,14 +36151,24 @@ fn read_codex_owner_child_identity(
 #[cfg(windows)]
 fn codex_owner_spawn_error(
     parent: &mut Child,
+    codex_fixture: &Path,
     child_identity_file: &Path,
     stable_runtime: &Path,
     error: impl std::fmt::Display,
 ) -> Box<dyn Error> {
     match stop_codex_owner_after_spawn_failure(parent, child_identity_file, stable_runtime) {
-        Ok(()) => io::Error::other(error.to_string()).into(),
+        Ok(()) => io::Error::other(format!(
+            "{error}; owner={}; identity_file={}; expected_runtime={}",
+            codex_fixture.display(),
+            child_identity_file.display(),
+            stable_runtime.display()
+        ))
+        .into(),
         Err(cleanup_error) => io::Error::other(format!(
-            "{error}; fixture cleanup also failed: {cleanup_error}"
+            "{error}; owner={}; identity_file={}; expected_runtime={}; fixture cleanup also failed: {cleanup_error}",
+            codex_fixture.display(),
+            child_identity_file.display(),
+            stable_runtime.display()
         ))
         .into(),
     }
@@ -36109,6 +36181,8 @@ fn spawn_codex_owned_obsolete_mcp(
     db: &Path,
     config: Option<&Path>,
     child_pid_file: &Path,
+    publication_delay: Option<Duration>,
+    publication_mode: Option<&str>,
 ) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
     let mut command = StdCommand::new(codex_fixture);
     command
@@ -36121,13 +36195,24 @@ fn spawn_codex_owned_obsolete_mcp(
     if let Some(config) = config {
         command.arg(config).arg("--config").arg("model=\"o3\"");
     }
+    if let Some(delay) = publication_delay {
+        command.env(
+            CODEX_OWNER_PUBLICATION_DELAY_ENV,
+            delay.as_millis().to_string(),
+        );
+    }
+    if let Some(mode) = publication_mode {
+        command.env(CODEX_OWNER_PUBLICATION_MODE_ENV, mode);
+    }
     let mut parent = command.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let started = Instant::now();
+    let deadline = started + CODEX_OWNER_READINESS_TIMEOUT;
     loop {
         match parent.try_wait() {
             Ok(Some(status)) => {
                 return Err(codex_owner_spawn_error(
                     &mut parent,
+                    codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!(
@@ -36139,6 +36224,7 @@ fn spawn_codex_owned_obsolete_mcp(
             Err(error) => {
                 return Err(codex_owner_spawn_error(
                     &mut parent,
+                    codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!("failed to inspect Codex MCP owner fixture: {error}"),
@@ -36151,23 +36237,154 @@ fn spawn_codex_owned_obsolete_mcp(
                 Err(error) => {
                     return Err(codex_owner_spawn_error(
                         &mut parent,
+                        codex_fixture,
                         child_pid_file,
                         stable_runtime,
-                        error,
+                        format!("failed to validate published child identity: {error}"),
                     ));
                 }
             }
         }
         if Instant::now() >= deadline {
+            let elapsed = started.elapsed();
             return Err(codex_owner_spawn_error(
                 &mut parent,
+                codex_fixture,
                 child_pid_file,
                 stable_runtime,
-                "Codex MCP owner fixture did not publish its child PID",
+                format!(
+                    "Codex MCP owner fixture did not publish its child PID within {CODEX_OWNER_READINESS_TIMEOUT:?} (elapsed={elapsed:?})"
+                ),
             ));
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let db = atlas_dir.join("projectatlas.db");
+    let runtime = temp.path().join("obsolete-projectatlas.exe");
+    let runtime_source = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME);
+    fs::write(
+        &runtime_source,
+        r#"using System;
+using System.Threading;
+
+public static class Program
+{
+    public static int Main(string[] arguments)
+    {
+        if (Array.IndexOf(arguments, "mcp") >= 0)
+        {
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
+        return 2;
+    }
+}
+"#,
+    )?;
+    let compile_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(
+            "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+        )
+        .env("PROJECTATLAS_FIXTURE_SOURCE", &runtime_source)
+        .env("PROJECTATLAS_FIXTURE_RUNTIME", &runtime)
+        .output()?;
+    if !compile_output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to compile obsolete ProjectAtlas fixture runtime:\n{}",
+            String::from_utf8_lossy(&compile_output.stderr)
+        ))
+        .into());
+    }
+    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_codex_mcp_owner_fixture(&codex_fixture)?;
+
+    for (index, (mode, expected)) in [
+        ("early-exit", "exited before publishing"),
+        ("malformed", "failed to validate published child identity"),
+        ("mismatched", "owner-published child identity differed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let identity_file = temp.path().join(format!("{mode}-{index}.pid"));
+        let result = spawn_codex_owned_obsolete_mcp(
+            &codex_fixture,
+            &runtime,
+            &db,
+            Some(&atlas_dir.join("config.toml")),
+            &identity_file,
+            None,
+            Some(mode),
+        );
+        let Err(error) = result else {
+            return Err(
+                io::Error::other(format!("{mode} owner fixture publication was accepted")).into(),
+            );
+        };
+        let text = error.to_string();
+        if !text.contains(expected)
+            || !text.contains(&format!("owner={}", codex_fixture.display()))
+            || !text.contains(&format!("identity_file={}", identity_file.display()))
+            || !text.contains(&format!("expected_runtime={}", runtime.display()))
+            || text.contains("fixture cleanup also failed")
+        {
+            return Err(io::Error::other(format!(
+                "{mode} owner fixture failure was not bounded and diagnostic:\n{text}"
+            ))
+            .into());
+        }
+    }
+
+    let identity_file = temp.path().join("timeout.pid");
+    let timeout_started = Instant::now();
+    let result = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &identity_file,
+        None,
+        Some("timeout"),
+    );
+    let Err(error) = result else {
+        return Err(io::Error::other("owner fixture without publication was accepted").into());
+    };
+    let timeout_elapsed = timeout_started.elapsed();
+    let text = error.to_string();
+    if timeout_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || !text.contains("did not publish its child PID within 30s")
+        || !text.contains("elapsed=")
+        || !text.contains(&format!("owner={}", codex_fixture.display()))
+        || !text.contains(&format!("identity_file={}", identity_file.display()))
+        || !text.contains(&format!("expected_runtime={}", runtime.display()))
+        || text.contains("fixture cleanup also failed")
+    {
+        return Err(io::Error::other(format!(
+            "true owner fixture timeout was not bounded and diagnostic: elapsed={timeout_elapsed:?}\n{text}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
