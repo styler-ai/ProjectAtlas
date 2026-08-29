@@ -128,6 +128,7 @@
     "connect-classified-documentation-graph": 440,
     "delegate-bulk-purpose-curation": 301,
     "drain-mcp-test-responses-before-eof": 416,
+    "enforce-issue-acceptance-review-tasks": 517,
     "enforce-rust-test-quality-gates": 309,
     "expose-concrete-codex-tool-schemas": 386,
     "expose-mcp-capabilities-settings": 293,
