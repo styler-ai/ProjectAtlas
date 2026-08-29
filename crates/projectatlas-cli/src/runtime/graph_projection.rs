@@ -156,7 +156,7 @@ fn symbol_parser_fact_index(graph: &SymbolGraph, symbol_index: usize) -> u64 {
 }
 
 /// Bounded source span attached to one rejected parser identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct IdentitySpan {
     /// One-based first line containing the parser fact.
     start_line: usize,
@@ -168,6 +168,29 @@ struct IdentitySpan {
     end_column: usize,
 }
 
+/// Internal identity for one observed parser fact, independent of retained
+/// detail rows. The detail vector is deliberately capped, but omission
+/// counts must still deduplicate repeated projections after that cap.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct IdentityFactKey {
+    /// Exact bounded source span of the parser fact.
+    span: IdentitySpan,
+    /// Stable local discriminator for the parser strategy.
+    parser: u8,
+    /// Internal parser-fact ordinal.
+    fact_index: u64,
+}
+
+/// Map parser strategy to a compact local fact-key discriminator.
+fn parser_fact_kind(parser: ParserKind) -> u8 {
+    match parser {
+        ParserKind::TreeSitter => 0,
+        ParserKind::Manifest => 1,
+        ParserKind::Structural => 2,
+        ParserKind::Fallback => 3,
+    }
+}
+
 /// Bounded admission report shared by entity, relation, and key projection.
 #[derive(Clone, Debug, Default)]
 pub(super) struct GraphIdentityAdmission {
@@ -177,6 +200,9 @@ pub(super) struct GraphIdentityAdmission {
     rejections: Vec<GraphIdentityRejection>,
     /// Number of parser facts rejected per source path.
     rejected_facts_by_path: BTreeMap<String, u64>,
+    /// Every observed rejected parser fact, retained independently of detail
+    /// rows so the global detail ceiling cannot make replays overcount.
+    observed_facts: BTreeMap<String, BTreeSet<IdentityFactKey>>,
     /// Original parser relation ordinal for each admitted relation after
     /// source-identity filtering. This remains private because it is only
     /// needed to keep derived rejection facts tied to parser observations.
@@ -203,6 +229,7 @@ impl GraphIdentityAdmission {
         fields: &[(GraphIdentityField, GraphIdentityRejectionReason)],
     ) -> Result<(), CliError> {
         let path = RepositoryNodePath::new(Path::new(path)).map_err(invalid_graph_contract)?;
+        let fact_span = span;
         let span = SourceSpan::new(
             u32::try_from(span.start_line).map_err(|error| {
                 CliError::InvalidInput(format!("identity rejection start line overflowed: {error}"))
@@ -220,13 +247,17 @@ impl GraphIdentityAdmission {
             })?,
         )
         .map_err(invalid_graph_contract)?;
-        let fact_already_recorded = self.rejections.iter().any(|existing| {
-            existing.path == path
-                && existing.span == span
-                && existing.parser == parser
-                && existing.fact_index == fact_index
-        });
-        if !fact_already_recorded {
+        let fact_key = IdentityFactKey {
+            span: fact_span,
+            parser: parser_fact_kind(parser),
+            fact_index,
+        };
+        if self
+            .observed_facts
+            .entry(path.as_str().to_owned())
+            .or_default()
+            .insert(fact_key)
+        {
             let count = self
                 .rejected_facts_by_path
                 .entry(path.as_str().to_owned())
@@ -307,6 +338,9 @@ impl GraphIdentityAdmission {
             let entry = self.rejected_facts_by_path.entry(path).or_default();
             *entry = entry.saturating_add(count);
         }
+        for (path, facts) in other.observed_facts {
+            self.observed_facts.entry(path).or_default().extend(facts);
+        }
         for (path, indices) in other.relation_fact_indices {
             if let Some(existing) = self.relation_fact_indices.get(&path) {
                 if existing != &indices {
@@ -358,6 +392,12 @@ impl GraphIdentityAdmission {
                 .iter()
                 .filter(|(path, _count)| paths.contains(path.as_str()))
                 .map(|(path, count)| (path.clone(), *count))
+                .collect(),
+            observed_facts: self
+                .observed_facts
+                .iter()
+                .filter(|(path, _facts)| paths.contains(*path))
+                .map(|(path, facts)| (path.clone(), facts.clone()))
                 .collect(),
             relation_fact_indices: self
                 .relation_fact_indices
@@ -665,7 +705,6 @@ pub(super) fn stage_full_repository_graph(
     hydrate_reused_identity_admission(
         store,
         project,
-        &graphs,
         &reused_paths,
         &mut identity_admission,
         control,
@@ -949,6 +988,13 @@ fn stage_incremental_repository_graph_with_limit(
         complete_symbol_graphs(store, &newly_affected_graph_paths, symbols, control)?;
     let (newly_affected_graphs, mut affected_identity_admission) =
         admit_symbol_graphs(loaded_affected_graphs, control)?;
+    hydrate_reused_identity_admission(
+        store,
+        project,
+        &newly_affected_graph_paths,
+        &mut affected_identity_admission,
+        control,
+    )?;
     let admitted_graphs = direct_graphs
         .iter()
         .map(Cow::as_ref)
@@ -4184,7 +4230,6 @@ fn relation_completeness(parser: ParserKind) -> Completeness {
 fn hydrate_reused_identity_admission(
     store: &AtlasStore,
     project: ProjectInstanceId,
-    graphs: &[impl Borrow<SymbolGraph>],
     reused_paths: &BTreeSet<String>,
     report: &mut GraphIdentityAdmission,
     control: &IndexWorkControl,
@@ -4242,10 +4287,6 @@ fn hydrate_reused_identity_admission(
             }
         }
     }
-    let persisted_paths_with_rejections = persisted_rejections
-        .iter()
-        .map(|rejection| rejection.path.as_str().to_owned())
-        .collect::<BTreeSet<_>>();
     let rederived_namespaces = [
         DERIVED_RELATION_FACT_INDEX_NAMESPACE,
         MARKDOWN_FACT_INDEX_NAMESPACE,
@@ -4270,21 +4311,11 @@ fn hydrate_reused_identity_admission(
             &[(rejection.field, rejection.reason)],
         )?;
     }
-    let graph_parsers = graphs
-        .iter()
-        .map(|graph| {
-            let graph = graph.borrow();
-            (graph.path.as_str(), graph.parser)
-        })
-        .collect::<BTreeMap<_, _>>();
     for (path, omitted) in persisted_coverage {
-        let is_parser_omission = matches!(
-            graph_parsers.get(path.as_str()),
-            Some(ParserKind::Structural | ParserKind::Fallback)
-        ) && !persisted_paths_with_rejections.contains(&path);
-        if !is_parser_omission {
-            report.reused_rejection_counts.insert(path, omitted);
-        }
+        // Persisted path coverage is authoritative for safely reused graphs,
+        // including structural/fallback rows whose typed details were evicted
+        // by the global rejection-detail ceiling.
+        report.reused_rejection_counts.insert(path, omitted);
     }
     report.restore_reused_rejection_counts();
     Ok(())
@@ -5364,13 +5395,13 @@ mod tests {
         SymbolParseSuccess, SymbolProjectionChange,
     };
     use projectatlas_core::graph::{
-        CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageScope, CoverageState,
-        DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector, ExtendedRelationKind,
-        GraphEntity, GraphIdentityField, GraphIdentityRejectionReason, GraphIdentityText,
-        GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation, MAX_GRAPH_IDENTITY_BYTES,
-        PackageSelector, ProjectInstanceId, RelationDependencyKey, RelationResolution,
-        RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, ReusableTargetSelector,
-        SymbolSelector,
+        CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
+        CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
+        ExtendedRelationKind, GraphEntity, GraphIdentityField, GraphIdentityRejectionReason,
+        GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation,
+        MAX_GRAPH_IDENTITY_BYTES, PackageSelector, ProjectInstanceId, RelationDependencyKey,
+        RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain,
+        ReusableTargetSelector, SymbolSelector,
     };
     use projectatlas_core::relation_capabilities::{
         RELATION_FAMILY_CAPABILITIES, RelationFamilyState,
@@ -5453,6 +5484,78 @@ mod tests {
         require(
             admission.rejections[0].fact_index != admission.rejections[1].fact_index,
             "same-span distinct facts shared an internal identity",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn admission_deduplicates_replayed_facts_after_detail_ceiling() -> Result<(), Box<dyn Error>> {
+        let mut admission = GraphIdentityAdmission::default();
+        let span = super::IdentitySpan {
+            start_line: 7,
+            start_column: 0,
+            end_line: 7,
+            end_column: 0,
+        };
+        let failure = [(
+            GraphIdentityField::RelationTarget,
+            GraphIdentityRejectionReason::Empty,
+        )];
+        for fact_index in 0..super::MAX_GRAPH_IDENTITY_REJECTIONS {
+            admission.record(
+                "src/capped.ts",
+                span,
+                ParserKind::TreeSitter,
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, fact_index),
+                &failure,
+            )?;
+        }
+        require_eq(
+            &admission.rejected_facts_for("src/capped.ts"),
+            &u64::try_from(super::MAX_GRAPH_IDENTITY_REJECTIONS)?,
+            "capped distinct rejection count",
+        )?;
+        require_eq(
+            &admission.rejections.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "capped typed detail count",
+        )?;
+        admission.record(
+            "src/capped.ts",
+            span,
+            ParserKind::TreeSitter,
+            super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, 0),
+            &failure,
+        )?;
+        require_eq(
+            &admission.rejected_facts_for("src/capped.ts"),
+            &u64::try_from(super::MAX_GRAPH_IDENTITY_REJECTIONS)?,
+            "replayed capped rejection count",
+        )?;
+        require_eq(
+            &admission.rejections.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "replayed capped typed detail count",
+        )?;
+        admission.record(
+            "src/capped.ts",
+            span,
+            ParserKind::TreeSitter,
+            super::parser_fact_index(
+                super::RELATION_FACT_INDEX_NAMESPACE,
+                super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            ),
+            &failure,
+        )?;
+        require_eq(
+            &admission.rejected_facts_for("src/capped.ts"),
+            &u64::try_from(super::MAX_GRAPH_IDENTITY_REJECTIONS + 1)?,
+            "new capped rejection count",
+        )?;
+        require_eq(
+            &admission.rejections.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "new capped typed detail count",
         )?;
         Ok(())
     }
@@ -11351,6 +11454,298 @@ mod tests {
                 .repository_graph_identity_rejections(project, &persisted_paths, 16, None)?
                 .is_empty(),
             "full reuse repaired graph retained stale rejection detail",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_stage_reuse_preserves_capped_fallback_omission_count_without_details()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("full-reuse-fallback-identity-admission");
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(
+            root.join("src/reused.rs"),
+            "pub fn caller() { helper(); }\nfn helper() {}\n",
+        )?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("fallback reuse project identity is missing")?;
+        let path = "src/reused.rs";
+        let nodes = vec![test_file_node(path, "rust")];
+        let mut graph = identity_sibling_graph(path, GraphIdentityField::RelationTarget);
+        graph.parser = ParserKind::Fallback;
+        for symbol in &mut graph.symbols {
+            symbol.parser = ParserKind::Fallback;
+        }
+        for relation in &mut graph.relations {
+            relation.parser = ParserKind::Fallback;
+        }
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let mut symbols = symbol_build_stage_for_graphs(vec![graph]);
+        symbols.identity_admission = super::admit_symbol_build_stage(&mut symbols, &control)?;
+        let persisted_graph = symbols
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                SymbolProjectionChange::Parsed(parsed) => Some(parsed.graph.clone()),
+                SymbolProjectionChange::Clear { .. } => None,
+            })
+            .ok_or("fallback sanitized graph is missing")?;
+        let mut stage = stage_full_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &policy,
+            &symbols,
+            &control,
+        )?;
+        require_eq(
+            &stage.identity_rejections.len(),
+            &1,
+            "fallback initial typed rejection detail count",
+        )?;
+        let coverage = stage
+            .coverage
+            .iter_mut()
+            .find(|coverage| {
+                matches!(
+                    coverage.scope(),
+                    CoverageScope::Path { path: coverage_path } if coverage_path.as_str() == path
+                ) && coverage.relation().is_none()
+            })
+            .ok_or("fallback initial coverage row is missing")?;
+        let scope = coverage.scope().clone();
+        let state = coverage.state();
+        let covered = coverage.covered();
+        let generation = coverage.generation();
+        let reason = coverage.reason().cloned();
+        let reached_limit = coverage.reached_limit();
+        *coverage = CoverageRecord::new(
+            scope,
+            None,
+            state,
+            covered,
+            2,
+            generation,
+            reason,
+            reached_limit,
+        )?;
+        // Simulate a capped publication: the persisted coverage count remains
+        // authoritative even when no typed detail row survived the ceiling.
+        stage.identity_rejections.clear();
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &stage,
+            &control,
+            "fallback-reuse-initial",
+        )?;
+        store.replace_symbol_graph(&persisted_graph)?;
+        let base_generation = store
+            .index_publication()?
+            .ok_or("fallback initial publication is missing")?
+            .generation;
+        let persisted_paths = vec![RepositoryNodePath::new(Path::new(path))?];
+        require(
+            store
+                .repository_graph_identity_rejections(project, &persisted_paths, 16, None)?
+                .is_empty(),
+            "fallback capped publication retained an unexpected detail row",
+        )?;
+
+        let reuse_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let reuse_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &reuse_control)?;
+        let reused = stage_full_repository_graph(
+            &store,
+            &root,
+            base_generation,
+            &nodes,
+            &reuse_policy,
+            &empty_symbol_build_stage(),
+            &reuse_control,
+        )?;
+        require(
+            reused.identity_rejections.is_empty(),
+            "fallback reuse fabricated a detail row after cap",
+        )?;
+        let reused_coverage = reused
+            .coverage
+            .iter()
+            .find(|coverage| {
+                matches!(
+                    coverage.scope(),
+                    CoverageScope::Path { path: coverage_path } if coverage_path.as_str() == path
+                ) && coverage.relation().is_none()
+            })
+            .ok_or("fallback reused coverage row is missing")?;
+        require_eq(
+            &reused_coverage.omitted(),
+            &2,
+            "fallback reused persisted omission count",
+        )?;
+        require_eq(
+            &reused_coverage.state(),
+            &CoverageState::Partial,
+            "fallback reused coverage state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_reuse_hydrates_unchanged_affected_dependent_rejections()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp
+            .path()
+            .join("incremental-reuse-dependent-identity-admission");
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/provider.rs"), "pub fn changed() {}\n")?;
+        fs::write(
+            root.join("src/consumer.rs"),
+            "pub fn caller() { changed(); }\n",
+        )?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("incremental dependent project identity is missing")?;
+        let provider_path = "src/provider.rs";
+        let consumer_path = "src/consumer.rs";
+        let nodes = vec![
+            test_file_node(provider_path, "rust"),
+            test_file_node(consumer_path, "rust"),
+        ];
+        let provider = extract_symbol_graph(provider_path, Some("rust"), "pub fn changed() {}\n");
+        let mut consumer = extract_symbol_graph(
+            consumer_path,
+            Some("rust"),
+            "pub fn caller() { changed(); }\n",
+        );
+        consumer.relations.push(SymbolRelation {
+            path: consumer_path.to_string(),
+            source_name: "caller".to_string(),
+            target_name: "bad\0target".to_string(),
+            kind: RelationKind::Calls,
+            line: 3,
+            context: "incremental unchanged dependent fixture".to_string(),
+            parser: ParserKind::TreeSitter,
+        });
+        let mut initial_symbols = symbol_build_stage_for_graphs(vec![provider, consumer]);
+        let initial_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        initial_symbols.identity_admission =
+            super::admit_symbol_build_stage(&mut initial_symbols, &initial_control)?;
+        let persisted_graphs = initial_symbols
+            .changes
+            .iter()
+            .filter_map(|change| match change {
+                SymbolProjectionChange::Parsed(parsed) => Some(parsed.graph.clone()),
+                SymbolProjectionChange::Clear { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &initial_control)?;
+        let initial_stage = stage_full_repository_graph(
+            &store,
+            &root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &policy,
+            &initial_symbols,
+            &initial_control,
+        )?;
+        require(
+            initial_stage
+                .identity_rejections
+                .iter()
+                .any(|rejection| rejection.path.as_str() == consumer_path),
+            "initial dependent rejection was not admitted",
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &initial_stage,
+            &initial_control,
+            "incremental-dependent-initial",
+        )?;
+        for graph in &persisted_graphs {
+            store.replace_symbol_graph(graph)?;
+        }
+        let base_generation = store
+            .index_publication()?
+            .ok_or("incremental dependent initial publication is missing")?
+            .generation;
+        let consumer_key = RepositoryNodePath::new(Path::new(consumer_path))?;
+        let initial_rows = store.repository_graph_identity_rejections(
+            project,
+            std::slice::from_ref(&consumer_key),
+            16,
+            None,
+        )?;
+        require_eq(
+            &initial_rows.len(),
+            &1,
+            "initial unchanged dependent rejection rows",
+        )?;
+
+        let replacement =
+            extract_symbol_graph(provider_path, Some("rust"), "pub fn replacement() {}\n");
+        let replacement_symbols = symbol_build_stage_for_graphs(vec![replacement]);
+        let incremental_control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let incremental_policy =
+            RootScanPolicy::discover(&root, &ScanOptions::default(), &incremental_control)?;
+        let incremental_stage = stage_incremental_repository_graph(
+            &store,
+            &root,
+            base_generation,
+            &nodes,
+            std::slice::from_ref(&provider_path.to_string()),
+            &incremental_policy,
+            &replacement_symbols,
+            &incremental_control,
+        )?;
+        require(
+            incremental_stage
+                .identity_rejections
+                .iter()
+                .any(|rejection| rejection.path.as_str() == consumer_path),
+            "incremental affected dependent did not hydrate rejection details",
+        )?;
+        let staged_coverage = incremental_stage
+            .coverage
+            .iter()
+            .find(|coverage| {
+                matches!(
+                    coverage.scope(),
+                    CoverageScope::Path { path } if path.as_str() == consumer_path
+                ) && coverage.relation().is_none()
+            })
+            .ok_or("incremental affected dependent coverage is missing")?;
+        require_eq(
+            &staged_coverage.omitted(),
+            &1,
+            "incremental affected dependent omission count",
+        )?;
+        {
+            let mut publication = store.begin_index_publication("incremental-dependent-reuse")?;
+            incremental_stage.apply(&mut publication, &incremental_control)?;
+            publication.complete()?;
+        }
+        require_eq(
+            &store.repository_graph_identity_rejections(
+                project,
+                std::slice::from_ref(&consumer_key),
+                16,
+                None,
+            )?,
+            &initial_rows,
+            "incremental affected dependent persisted rejection rows",
         )?;
         Ok(())
     }
