@@ -14,7 +14,7 @@
         "456": { "blocked_by": [358, 465, 477, 484] },
         "464": { "blocked_by": [] },
         "465": { "blocked_by": [476, 480, 488] },
-        "476": { "blocked_by": [481] },
+        "476": { "blocked_by": [481, 518] },
         "477": { "blocked_by": [] },
         "480": { "blocked_by": [482] },
         "481": { "blocked_by": [482] },
@@ -23,14 +23,15 @@
         "484": { "blocked_by": [476, 481] },
         "485": { "blocked_by": [484, 486] },
         "486": { "blocked_by": [482, 483] },
-        "487": { "blocked_by": [] },
+        "487": { "blocked_by": [518] },
         "488": { "blocked_by": [] },
         "489": { "blocked_by": [] },
         "490": { "blocked_by": [339, 342, 358, 384, 464, 465, 489] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517] },
+        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518] },
         "495": { "blocked_by": [] },
-        "517": { "blocked_by": [] }
+        "517": { "blocked_by": [] },
+        "518": { "blocked_by": [] }
       }
     },
     "v0.6.0-00": {
@@ -185,6 +186,7 @@
     "serialize-lint-reports": 472,
     "simplify-token-tui-dashboard": 296,
     "stabilize-hostile-parser-fixture-admission": 397,
+    "stabilize-windows-mcp-owner-fixture-readiness": 518,
     "stabilize-parser-recovery-harness": 391
   }
 }
