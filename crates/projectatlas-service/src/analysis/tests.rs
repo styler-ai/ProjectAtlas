@@ -1705,6 +1705,112 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
 }
 
 #[test]
+fn zero_remaining_community_allowance_preserves_report_truth() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Architecture)?;
+    query.include_communities = true;
+    query.include_cycles = false;
+    query.relations.resolution = RelationResolutionFilter::Resolved;
+    let minimum_budget = 64 * 1024;
+    let maximum_budget = minimum_budget + 2_048;
+    let mut report_at = |budget| {
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            None,
+            None,
+            None,
+            None,
+            Some(budget),
+            None,
+        )?;
+        Ok::<_, ServiceError>(load_relation_analysis(&store, &query, None)?.report)
+    };
+    let mut lower_bound = minimum_budget;
+    let mut upper_bound = None;
+    for budget in (minimum_budget..=maximum_budget).step_by(16) {
+        let report = report_at(budget)?;
+        let has_community = report
+            .findings
+            .iter()
+            .any(|finding| finding.community.is_some());
+        if !has_community {
+            upper_bound = Some(budget);
+            break;
+        }
+        lower_bound = budget.saturating_add(1);
+    }
+    let upper_bound = upper_bound.ok_or("community truncation boundary was not reached")?;
+    let lower_bound = upper_bound.saturating_sub(15).max(lower_bound);
+    let mut boundary = None;
+    for budget in lower_bound..=upper_bound {
+        let report = report_at(budget)?;
+        if !report
+            .findings
+            .iter()
+            .any(|finding| finding.community.is_some())
+        {
+            boundary = Some((budget, report));
+            break;
+        }
+    }
+    let (budget, report) = boundary.ok_or("exact community truncation boundary was not found")?;
+    if budget > minimum_budget {
+        let previous = report_at(budget - 1)?;
+        require(
+            previous
+                .findings
+                .iter()
+                .any(|finding| finding.community.is_some()),
+            "boundary predecessor did not retain the typed community truncation marker",
+        )?;
+    }
+    let gap_count = report
+        .findings
+        .iter()
+        .take_while(|finding| finding.kind == AnalysisFindingKind::ResolutionGap)
+        .count();
+    let gap_bytes = serialized_bytes_controlled(&report.findings[..gap_count], None)?;
+    let architecture = &report.findings[gap_count..];
+    let architecture_bytes = serialized_bytes_controlled(architecture, None)?;
+    let finding_bytes = serialized_bytes_controlled(&report.findings, None)?;
+    let topology_bytes = report
+        .work
+        .retained_composition_bytes
+        .saturating_sub(finding_bytes);
+    let projection_allowance = budget
+        .saturating_sub(report.work.relations.intermediate_bytes)
+        .saturating_sub(report.work.closure_decoded_bytes);
+    let symbol_byte_budget = projection_allowance
+        .saturating_sub(topology_bytes)
+        .saturating_sub(gap_bytes);
+    let existing_append_bytes =
+        serialized_findings_append_bytes(architecture_bytes, architecture.len(), gap_count);
+    // The exact boundary leaves only the two bytes owned by the enclosing
+    // findings array; no community finding can be appended to that envelope.
+    let community_allowance = symbol_byte_budget
+        .saturating_sub(existing_append_bytes)
+        .saturating_sub(JSON_ARRAY_FRAMING_BYTES);
+    require(
+        !architecture.is_empty()
+            && symbol_byte_budget == existing_append_bytes.saturating_add(JSON_ARRAY_FRAMING_BYTES)
+            && community_allowance == 0
+            && report.work.retained_composition_bytes <= projection_allowance
+            && report.truncated
+            && report
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && report.work.composition_truncated
+            && matches!(report.total, RelationTotalState::AtLeast(_))
+            && !matches!(report.total, RelationTotalState::Exact(_))
+            && report
+                .findings
+                .iter()
+                .all(|finding| finding.community.is_none()),
+        "zero remaining community allowance did not preserve report truncation truth",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn closure_preserves_late_resolution_gaps_and_symbol_findings() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store()?;
     let mut late_gap = analysis_query(RelationAnalysisMode::Architecture)?;
