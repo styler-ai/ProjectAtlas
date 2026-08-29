@@ -1473,7 +1473,31 @@ fn symbol_parent(node: Node<'_>, content: &str) -> Option<String> {
     } else {
         node.parent()
     };
-    enclosing_symbol_name(parent, content)
+    enclosing_symbol_name(parent, content).or_else(|| php_semicolon_namespace_parent(node, content))
+}
+
+/// Return the active PHP namespace for a top-level declaration in a semicolon namespace.
+fn php_semicolon_namespace_parent(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "namespace_definition"
+        || node
+            .parent()
+            .is_none_or(|parent| parent.kind() != "program")
+    {
+        return None;
+    }
+    let mut previous = node.prev_named_sibling();
+    while let Some(candidate) = previous {
+        if candidate.kind() == "namespace_definition" {
+            if candidate.has_error() || candidate.child_by_field_name("body").is_some() {
+                return None;
+            }
+            return candidate
+                .child_by_field_name("name")
+                .and_then(|name| named_text(name, content));
+        }
+        previous = candidate.prev_named_sibling();
+    }
+    None
 }
 
 /// Map tree-sitter node kinds to `ProjectAtlas` symbol kinds.
@@ -1582,7 +1606,16 @@ fn is_php_language(language: Option<&str>) -> bool {
 
 /// Return a static PHP include target, omitting dynamic or ambiguous expressions.
 fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
-    let expression = first_named_child(node)?;
+    let mut expression = first_named_child(node)?;
+    if expression.kind() == "parenthesized_expression" {
+        let mut cursor = expression.walk();
+        let mut children = expression.named_children(&mut cursor);
+        let inner = children.next()?;
+        if children.next().is_some() {
+            return None;
+        }
+        expression = inner;
+    }
     let target = match expression.kind() {
         "string" | "encapsed_string" => php_static_string_target(expression, content)?,
         "qualified_name" | "relative_name" | "name" => {
@@ -4580,15 +4613,15 @@ function helper(string $value): void {}
             );
         }
         for (name, kind, parent) in [
-            ("Contract", SymbolKind::Interface, None),
-            ("Auditable", SymbolKind::Trait, None),
-            ("State", SymbolKind::Enum, None),
+            ("Contract", SymbolKind::Interface, Some("Atlas\\Domain")),
+            ("Auditable", SymbolKind::Trait, Some("Atlas\\Domain")),
+            ("State", SymbolKind::Enum, Some("Atlas\\Domain")),
             ("Ready", SymbolKind::Value, Some("State")),
-            ("Service", SymbolKind::Class, None),
+            ("Service", SymbolKind::Class, Some("Atlas\\Domain")),
             ("VERSION", SymbolKind::Value, Some("Service")),
             ("name", SymbolKind::Value, Some("Service")),
             ("run", SymbolKind::Method, Some("Service")),
-            ("helper", SymbolKind::Function, None),
+            ("helper", SymbolKind::Function, Some("Atlas\\Domain")),
         ] {
             assert!(
                 graph.symbols.iter().any(|symbol| {
@@ -4911,6 +4944,126 @@ function run(): void {
                 && !relation.context.contains("$object->save(...)")
                 && relation.target_name != "$dynamic"
                 && relation.target_name != "$name"
+        }));
+    }
+
+    #[test]
+    fn php_parenthesized_static_include_targets_stay_precise() {
+        let source = r#"<?php
+require('parenthesized.php');
+include_once("parent-config.php");
+require(('nested.php'));
+require("malformed.php" + );
+require("boot/$name.php");
+require($dynamic);
+require [];
+"#;
+        let graph = extract_symbol_graph("src/Includes.php", Some("php"), source);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        for (target, line) in [("parenthesized.php", 2), ("parent-config.php", 3)] {
+            let matches = imports
+                .iter()
+                .filter(|relation| relation.target_name == target)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "missing exact static include {target}: {imports:?}"
+            );
+            let relation = matches[0];
+            assert_eq!(relation.path, "src/Includes.php");
+            assert_eq!(relation.line, line);
+            assert_eq!(relation.context, target);
+        }
+        assert!(imports.iter().all(|relation| {
+            !matches!(
+                relation.target_name.as_str(),
+                "nested.php" | "malformed.php" | "boot/$name.php" | "$dynamic" | "[]"
+            )
+        }));
+    }
+
+    #[test]
+    fn php_namespace_context_preserves_semicolon_and_braced_ownership() {
+        let source = r"<?php
+namespace First;
+class FirstService {}
+function first_helper(): void {}
+namespace Second;
+class SecondService {}
+function second_helper(): void {}
+namespace Third { class BracedService {} }
+namespace Fourth;
+class FourthService {}
+namespace { class GlobalService {} }
+";
+        let graph = extract_symbol_graph("src/Namespaces.php", Some("php"), source);
+
+        for (name, parent) in [
+            ("FirstService", "First"),
+            ("first_helper", "First"),
+            ("SecondService", "Second"),
+            ("second_helper", "Second"),
+            ("BracedService", "Third"),
+            ("FourthService", "Fourth"),
+        ] {
+            let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
+            assert!(
+                symbol.is_some(),
+                "missing PHP symbol {name}: {:?}",
+                graph.symbols
+            );
+            let Some(symbol) = symbol else { return };
+            assert_eq!(
+                symbol.parent.as_deref(),
+                Some(parent),
+                "wrong parent for {name}"
+            );
+            assert!(graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Contains
+                    && relation.source_name == parent
+                    && relation.target_name == name
+            }));
+        }
+
+        let global_symbol = graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "GlobalService");
+        assert!(
+            global_symbol.is_some(),
+            "missing global PHP symbol: {:?}",
+            graph.symbols
+        );
+        let Some(global_symbol) = global_symbol else {
+            return;
+        };
+        assert!(global_symbol.parent.is_none());
+        assert!(!graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Contains && relation.target_name == "GlobalService"
+        }));
+
+        let malformed = extract_symbol_graph(
+            "src/MalformedNamespace.php",
+            Some("php"),
+            "<?php\nnamespace Before;\nclass BeforeService {}\nnamespace Broken\\;\nclass AfterMalformed {}\n",
+        );
+        assert!(malformed.symbols.iter().any(|symbol| {
+            symbol.name == "BeforeService" && symbol.parent.as_deref() == Some("Before")
+        }));
+        assert!(
+            malformed
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.name == "AfterMalformed" && symbol.parent.is_none() })
+        );
+        assert!(!malformed.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Contains && relation.target_name == "AfterMalformed"
         }));
     }
 
