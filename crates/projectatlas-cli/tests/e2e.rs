@@ -22361,16 +22361,22 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"edge_limit":1,"output_bytes":65536,"include_communities":true}}}"#.to_string(),
     ];
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
-    let stdout = run_mcp_stdio(
-        &executable,
-        &repo,
-        &[
-            "--db".to_string(),
-            db.display().to_string(),
-            "mcp".to_string(),
-        ],
-        &messages,
-    )?;
+    let args = [
+        "--db".to_string(),
+        db.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let run_phase = |phase: &[String]| run_mcp_stdio(&executable, &repo, &args, phase);
+    // RMCP dispatches requests concurrently.  Keep the original request order,
+    // but finish initialization/scan before the later analysis phase can read
+    // the graph, then reopen the same database for the analysis requests.
+    let mut stdout = run_phase(&messages[..4])?;
+    let mut navigation_messages = vec![messages[0].clone(), messages[1].clone()];
+    navigation_messages.extend(messages[4..21].iter().cloned());
+    stdout.push_str(&run_phase(&navigation_messages)?);
+    let mut analysis_messages = vec![messages[0].clone(), messages[1].clone()];
+    analysis_messages.extend(messages[21..].iter().cloned());
+    stdout.push_str(&run_phase(&analysis_messages)?);
     assert_frozen_mcp_surfaces_compatible(&stdout)?;
     let session_brief_text = mcp_tool_text(&stdout, 19)?;
     let analysis_text = mcp_tool_text(&stdout, 23)?;
