@@ -431,6 +431,8 @@ const CLI_E2E_WORKFLOW_PATHS: &[&str] = &[
     ".github/workflows/optional-parser-pack.yml",
 ];
 
+const CLI_E2E_SELECTOR_PREFIXES: &[&str] = &["--test e2e", "--test=e2e"];
+
 /// Return one `SQLite` sidecar path for exact no-mutation assertions.
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
@@ -813,7 +815,7 @@ fn discover_cli_e2e_source_paths(
             continue;
         };
         if path.extension().and_then(|extension| extension.to_str()) == Some("rs")
-            && file_name.starts_with("e2e_")
+            && (file_name == "e2e.rs" || file_name.starts_with("e2e_"))
         {
             paths.insert(format!("crates/projectatlas-cli/tests/{file_name}"));
         }
@@ -822,12 +824,14 @@ fn discover_cli_e2e_source_paths(
 }
 
 fn is_cli_e2e_selector(line: &str) -> bool {
-    line.match_indices("--test e2e").any(|(index, _)| {
-        let suffix = &line[index + "--test e2e".len()..];
-        suffix
-            .chars()
-            .next()
-            .is_none_or(|character| character == '_' || character.is_whitespace())
+    CLI_E2E_SELECTOR_PREFIXES.iter().any(|prefix| {
+        line.match_indices(prefix).any(|(index, _)| {
+            let suffix = &line[index + prefix.len()..];
+            suffix
+                .chars()
+                .next()
+                .is_none_or(|character| character == '_' || character.is_whitespace())
+        })
     })
 }
 
@@ -885,6 +889,14 @@ fn cli_e2e_inventory_contract_rejects_source_and_selector_drift() -> Result<(), 
     copy_cli_e2e_contract_fixture(&workspace_root, fixture.path())?;
     assert_cli_e2e_inventory_contract(fixture.path())?;
 
+    let legacy_path = fixture.path().join("crates/projectatlas-cli/tests/e2e.rs");
+    fs::write(&legacy_path, "#[test]\nfn legacy_monolith() {}\n")?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "integration binaries drifted",
+    )?;
+    fs::remove_file(&legacy_path)?;
+
     let delivery_path = fixture.path().join(CLI_E2E_SOURCE_PATHS[0]);
     let delivery_source = fs::read_to_string(&delivery_path)?;
     let weakened_source = delivery_source.replacen("assert!(", "assert!(false && ", 1);
@@ -920,6 +932,22 @@ fn cli_e2e_inventory_contract_rejects_source_and_selector_drift() -> Result<(), 
         return Err(io::Error::other("selector tamper fixture did not change workflow").into());
     }
     fs::write(&ci_path, selector_source)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "workflow selector drift",
+    )?;
+    fs::write(&ci_path, &ci_source)?;
+
+    let legacy_selector_source = format!("{ci_source}\n    cargo test --test=e2e\n");
+    fs::write(&ci_path, legacy_selector_source)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "workflow selector drift",
+    )?;
+    fs::write(&ci_path, &ci_source)?;
+
+    let unknown_selector_source = format!("{ci_source}\n    cargo test --test=e2e_extra\n");
+    fs::write(&ci_path, unknown_selector_source)?;
     require_cli_e2e_contract_rejection(
         assert_cli_e2e_inventory_contract(fixture.path()),
         "workflow selector drift",
