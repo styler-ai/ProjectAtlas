@@ -36655,14 +36655,16 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
     let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
     compile_codex_mcp_owner_fixture(&codex_fixture)?;
 
-    // Exercise the production readiness helper when publication is observed before the
+    // Exercise the production readiness helper when publication is observed well before the
     // deadline but bounded identity validation finishes just after it.  The dedicated
     // capture allowance must accept the valid identity; using the old remaining-time
-    // allowance rejects this same causal path.
+    // allowance rejects this same causal path.  Keep fixture startup at the existing six-second
+    // delay, then use the production helper's observation seam to wake the polling loop near the
+    // deadline so startup is not the constrained portion of this regression.
     let deadline_validation_identity_file = temp.path().join("deadline-validation.pid");
-    let deadline_validation_publication_delay = CODEX_OWNER_READINESS_TIMEOUT
-        .saturating_sub(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY)
-        + Duration::from_secs(1);
+    let deadline_validation_publication_delay = CODEX_OWNER_DELAYED_PUBLICATION;
+    let deadline_validation_observation_delay =
+        CODEX_OWNER_READINESS_TIMEOUT.saturating_sub(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE);
     let deadline_validation_started = Instant::now();
     let (deadline_validation_parent, deadline_validation_identity) =
         spawn_codex_owned_obsolete_mcp_with_test_delays(
@@ -36674,7 +36676,7 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
             Some(deadline_validation_publication_delay),
             None,
             Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
-            None,
+            Some(deadline_validation_observation_delay),
         )?;
     let deadline_validation_elapsed = deadline_validation_started.elapsed();
     if deadline_validation_elapsed < CODEX_OWNER_READINESS_TIMEOUT
@@ -36688,7 +36690,7 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
             &deadline_validation_identity,
         );
         return Err(io::Error::other(format!(
-            "deadline-observed publication did not use its bounded identity allowance: elapsed={deadline_validation_elapsed:?} publication_delay={deadline_validation_publication_delay:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} identity_capture_budget={CODEX_OWNER_IDENTITY_CAPTURE_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup={cleanup_result:?}"
+            "deadline-observed publication did not use its bounded identity allowance: elapsed={deadline_validation_elapsed:?} publication_delay={deadline_validation_publication_delay:?} observation_delay={deadline_validation_observation_delay:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} identity_capture_budget={CODEX_OWNER_IDENTITY_CAPTURE_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup={cleanup_result:?}"
         ))
         .into());
     }
