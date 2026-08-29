@@ -118,6 +118,10 @@ const COMMUNITY_WORKING_SET_MULTIPLIER: u64 = 8;
 const COMMUNITY_WORKING_SET_ENTRY_BYTES: u64 = 256;
 /// Conservative fixed map, vector, and propagation-state overhead.
 const COMMUNITY_WORKING_SET_FIXED_BYTES: u64 = 32 * 1024;
+/// Fixed JSON array framing already retained by the analysis composition.
+const JSON_ARRAY_FRAMING_BYTES: u64 = 2;
+/// Fixed JSON array separator inserted before an appended finding.
+const JSON_ARRAY_SEPARATOR_BYTES: u64 = 1;
 
 /// Closed analysis projection selected on the existing relation route.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -927,6 +931,7 @@ fn load_relation_analysis_with_closure_deadline(
         }]
     };
     let initial_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+    let initial_finding_count = findings.len();
     let symbol_byte_budget = projection_allowance
         .saturating_sub(topology_bytes)
         .saturating_sub(initial_finding_bytes);
@@ -940,6 +945,7 @@ fn load_relation_analysis_with_closure_deadline(
                 community_evidence_complete,
                 query,
                 symbol_byte_budget,
+                initial_finding_count,
                 &mut supplemental_work,
                 control,
             )?,
@@ -1727,6 +1733,7 @@ fn architecture_findings(
     community_complete: bool,
     query: &RelationAnalysisQuery,
     symbol_byte_budget: u64,
+    preceding_finding_count: usize,
     supplemental_work: &mut SupplementalWork,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<Vec<AnalysisFinding>> {
@@ -1767,52 +1774,68 @@ fn architecture_findings(
     }
     if query.include_communities {
         let mut existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
-        if existing_finding_bytes > symbol_byte_budget {
+        let mut existing_finding_append_bytes = serialized_findings_append_bytes(
+            existing_finding_bytes,
+            findings.len(),
+            preceding_finding_count,
+        );
+        if existing_finding_append_bytes > symbol_byte_budget {
             supplemental_work.composition_truncated = true;
             push_limit(
                 &mut supplemental_work.reached_limits,
                 GraphLimitKind::IntermediateBytes,
             );
-            while existing_finding_bytes > symbol_byte_budget && findings.len() > 1 {
+            while existing_finding_append_bytes > symbol_byte_budget && findings.len() > 1 {
                 check_control(control)?;
                 findings.pop();
                 existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+                existing_finding_append_bytes = serialized_findings_append_bytes(
+                    existing_finding_bytes,
+                    findings.len(),
+                    preceding_finding_count,
+                );
             }
-            if existing_finding_bytes > symbol_byte_budget {
+            if existing_finding_append_bytes > symbol_byte_budget {
                 findings.clear();
                 existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+                existing_finding_append_bytes = serialized_findings_append_bytes(
+                    existing_finding_bytes,
+                    findings.len(),
+                    preceding_finding_count,
+                );
             }
         }
-        let community_budget = symbol_byte_budget.saturating_sub(existing_finding_bytes);
-        if community_budget > 0 {
-            let (community_findings, community_working_set_bytes, community_limits) =
-                community_findings_with_budget(
-                    nodes,
-                    edges,
-                    community_complete,
-                    query,
-                    community_budget,
-                    control,
-                )?;
-            supplemental_work.community_working_set_bytes = supplemental_work
-                .community_working_set_bytes
-                .max(community_working_set_bytes);
-            let community_truncated = !community_limits.is_empty();
-            for limit in community_limits {
-                push_limit(&mut supplemental_work.reached_limits, limit);
-            }
-            if community_truncated
-                || community_findings.iter().any(|finding| {
-                    finding
-                        .community
-                        .as_ref()
-                        .is_some_and(|community| community.truncated)
-                })
-            {
-                supplemental_work.composition_truncated = true;
-            }
-            findings.extend(community_findings);
+        let community_budget = symbol_byte_budget.saturating_sub(existing_finding_append_bytes);
+        let existing_community_finding_count =
+            preceding_finding_count.saturating_add(findings.len());
+        let (community_findings, community_working_set_bytes, community_limits) =
+            community_findings_with_budget(
+                nodes,
+                edges,
+                community_complete,
+                query,
+                community_budget,
+                existing_community_finding_count,
+                control,
+            )?;
+        supplemental_work.community_working_set_bytes = supplemental_work
+            .community_working_set_bytes
+            .max(community_working_set_bytes);
+        let community_truncated = !community_limits.is_empty();
+        for limit in community_limits {
+            push_limit(&mut supplemental_work.reached_limits, limit);
         }
+        if community_truncated
+            || community_findings.iter().any(|finding| {
+                finding
+                    .community
+                    .as_ref()
+                    .is_some_and(|community| community.truncated)
+            })
+        {
+            supplemental_work.composition_truncated = true;
+        }
+        findings.extend(community_findings);
     }
     if query.include_cycles {
         let dependency_edges = edges
@@ -2272,6 +2295,38 @@ fn serialized_bytes_controlled<T: Serialize + ?Sized>(
     Ok(counter.bytes)
 }
 
+/// Charge one finding as an append to an already retained JSON findings array.
+///
+/// The enclosing array's `[]` framing is charged by the composition owner. An
+/// append therefore adds only the finding bytes and, after the first finding,
+/// the fixed comma separator.
+const fn serialized_finding_append_bytes(
+    finding_bytes: u64,
+    preceding_finding_count: usize,
+) -> u64 {
+    finding_bytes.saturating_add(if preceding_finding_count == 0 {
+        0
+    } else {
+        JSON_ARRAY_SEPARATOR_BYTES
+    })
+}
+
+/// Charge a serialized findings vector appended to an existing JSON array.
+const fn serialized_findings_append_bytes(
+    findings_bytes: u64,
+    finding_count: usize,
+    preceding_finding_count: usize,
+) -> u64 {
+    if finding_count == 0 {
+        return 0;
+    }
+    findings_bytes.saturating_sub(if preceding_finding_count == 0 {
+        JSON_ARRAY_FRAMING_BYTES
+    } else {
+        JSON_ARRAY_SEPARATOR_BYTES
+    })
+}
+
 /// Find one node-simple static relation path to an exact target.
 fn trace_findings(
     report: &DetailedRelationReport,
@@ -2402,6 +2457,7 @@ fn community_findings(
         complete,
         query,
         query.relations.budget.intermediate_bytes(),
+        0,
         control,
     )?
     .0)
@@ -2414,6 +2470,7 @@ fn community_findings_with_budget(
     complete: bool,
     query: &RelationAnalysisQuery,
     intermediate_bytes: u64,
+    preceding_finding_count: usize,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<(Vec<AnalysisFinding>, u64, Vec<GraphLimitKind>)> {
     check_control(control)?;
@@ -2439,9 +2496,11 @@ fn community_findings_with_budget(
     };
     let truncation_marker = community_truncation_finding(&weights, parameters, 0, marker_coverage);
     let truncation_marker_bytes = serialized_bytes_controlled(&truncation_marker, control)?;
+    let truncation_marker_append_bytes =
+        serialized_finding_append_bytes(truncation_marker_bytes, preceding_finding_count);
     let working_set_bytes = community_working_set_upper_bound(nodes, edges, control)?;
-    if working_set_bytes.saturating_add(truncation_marker_bytes) > intermediate_bytes {
-        let findings = if truncation_marker_bytes <= intermediate_bytes {
+    if working_set_bytes.saturating_add(truncation_marker_append_bytes) > intermediate_bytes {
+        let findings = if truncation_marker_append_bytes <= intermediate_bytes {
             vec![truncation_marker]
         } else {
             Vec::new()
@@ -2457,9 +2516,10 @@ fn community_findings_with_budget(
         if resource_truncated {
             evidence.truncate(parameters.edge_limit as usize);
         }
-        let metadata_fits =
-            community_finding_upper_bound(nodes, &keys, &evidence, &weights, parameters, control)?
-                <= construction_bytes;
+        let metadata_fits = serialized_finding_append_bytes(
+            community_finding_upper_bound(nodes, &keys, &evidence, &weights, parameters, control)?,
+            preceding_finding_count,
+        ) <= construction_bytes;
         let metadata_keys = if metadata_fits { keys.as_slice() } else { &[] };
         let metadata_evidence = if metadata_fits {
             evidence.as_slice()
@@ -2516,7 +2576,9 @@ fn community_findings_with_budget(
             &weights,
             parameters,
             control,
-        )? <= construction_bytes;
+        )?;
+        let metadata_fits = serialized_finding_append_bytes(metadata_fits, preceding_finding_count)
+            <= construction_bytes;
         let metadata_keys = if metadata_fits { keys.as_slice() } else { &[] };
         let metadata_evidence = if metadata_fits {
             admitted_edges.as_slice()
@@ -2565,7 +2627,8 @@ fn community_findings_with_budget(
         iteration,
         convergence,
         control,
-        construction_bytes.saturating_sub(truncation_marker_bytes),
+        preceding_finding_count,
+        construction_bytes,
     )?;
     Ok((findings, working_set_bytes, truncation_limits))
 }
@@ -2721,6 +2784,7 @@ fn community_candidate_findings(
     iteration: u32,
     convergence: CommunityConvergence,
     control: Option<&IndexWorkControl>,
+    preceding_finding_count: usize,
     intermediate_bytes: u64,
 ) -> ServiceResult<(Vec<AnalysisFinding>, Vec<GraphLimitKind>)> {
     let mut groups = BTreeMap::<String, Vec<String>>::new();
@@ -2730,7 +2794,7 @@ fn community_candidate_findings(
         groups.entry(label).or_default().push(key.clone());
     }
     let mut findings = Vec::new();
-    let mut retained_bytes = 0_u64;
+    let mut retained_append_bytes = 0_u64;
     let mut truncated = false;
     for members in groups.values() {
         check_control(control)?;
@@ -2742,7 +2806,11 @@ fn community_candidate_findings(
             parameters,
             control,
         )?;
-        if retained_bytes.saturating_add(candidate_bound) > intermediate_bytes {
+        let candidate_append_bytes = serialized_finding_append_bytes(
+            candidate_bound,
+            preceding_finding_count.saturating_add(findings.len()),
+        );
+        if retained_append_bytes.saturating_add(candidate_append_bytes) > intermediate_bytes {
             truncated = true;
             break;
         }
@@ -2780,11 +2848,15 @@ fn community_candidate_findings(
             community: Some(metadata),
         };
         let finding_bytes = serialized_bytes_controlled(&finding, control)?;
-        if retained_bytes.saturating_add(finding_bytes) > intermediate_bytes {
+        let finding_append_bytes = serialized_finding_append_bytes(
+            finding_bytes,
+            preceding_finding_count.saturating_add(findings.len()),
+        );
+        if retained_append_bytes.saturating_add(finding_append_bytes) > intermediate_bytes {
             truncated = true;
             break;
         }
-        retained_bytes = retained_bytes.saturating_add(finding_bytes);
+        retained_append_bytes = retained_append_bytes.saturating_add(finding_append_bytes);
         findings.push(finding);
     }
     if truncated {
@@ -2796,7 +2868,11 @@ fn community_candidate_findings(
             CommunityCoverage::Complete,
         );
         let marker_bytes = serialized_bytes_controlled(&marker, control)?;
-        if retained_bytes.saturating_add(marker_bytes) > intermediate_bytes {
+        let marker_append_bytes = serialized_finding_append_bytes(
+            marker_bytes,
+            preceding_finding_count.saturating_add(findings.len()),
+        );
+        if retained_append_bytes.saturating_add(marker_append_bytes) > intermediate_bytes {
             findings.clear();
         } else {
             findings.push(marker);

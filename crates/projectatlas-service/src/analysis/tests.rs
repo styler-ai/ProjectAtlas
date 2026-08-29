@@ -1149,6 +1149,7 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         true,
         &node_limited_query,
         node_limited_query.relations.budget.intermediate_bytes(),
+        0,
         None,
     )?;
     require(
@@ -1166,6 +1167,7 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         true,
         &edge_limited_query,
         edge_limited_query.relations.budget.intermediate_bytes(),
+        0,
         None,
     )?;
     require(
@@ -1201,6 +1203,7 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         true,
         &query,
         query.relations.budget.intermediate_bytes(),
+        0,
         None,
     )?;
     require(
@@ -1343,6 +1346,7 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         true,
         &dense_budget_query,
         dense_budget_query.relations.budget.intermediate_bytes(),
+        0,
         None,
     )?;
     let dense_budgeted_bytes = serde_json::to_vec(&dense_budgeted)?;
@@ -1399,13 +1403,21 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         CommunityCoverage::Complete,
     );
     let marker_bytes = serialized_bytes_controlled(&marker, None)?;
+    let marker_vec_bytes = serialized_bytes_controlled(&vec![marker], None)?;
+    let first_append_bytes = serialized_findings_append_bytes(marker_vec_bytes, 1, 0);
+    let subsequent_append_bytes = serialized_findings_append_bytes(marker_vec_bytes, 1, 1);
+    require(
+        first_append_bytes == marker_bytes
+            && subsequent_append_bytes == marker_bytes.saturating_add(1),
+        "community marker append accounting lost JSON framing or separator bytes",
+    )?;
     let working_set_bytes = community_working_set_upper_bound(&nodes, &[], None)?;
     require(
-        marker_bytes <= working_set_bytes,
+        first_append_bytes <= working_set_bytes,
         "community marker unexpectedly exceeded the fixed working-set charge",
     )?;
     let (fitted_marker, _, fitted_limits) =
-        community_findings_with_budget(&nodes, &[], true, &query, working_set_bytes, None)?;
+        community_findings_with_budget(&nodes, &[], true, &query, working_set_bytes, 0, None)?;
     let fitted_marker_bytes = serde_json::to_vec(&fitted_marker)?;
     require(
         fitted_limits == vec![GraphLimitKind::IntermediateBytes]
@@ -1423,7 +1435,37 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         &[],
         true,
         &query,
-        marker_bytes.saturating_sub(1),
+        first_append_bytes.saturating_sub(1),
+        0,
+        None,
+    )?;
+    let (equal_marker, _, equal_limits) =
+        community_findings_with_budget(&nodes, &[], true, &query, first_append_bytes, 0, None)?;
+    let (plus_marker, _, plus_limits) = community_findings_with_budget(
+        &nodes,
+        &[],
+        true,
+        &query,
+        first_append_bytes.saturating_add(1),
+        0,
+        None,
+    )?;
+    let (existing_marker, _, existing_limits) = community_findings_with_budget(
+        &nodes,
+        &[],
+        true,
+        &query,
+        subsequent_append_bytes,
+        1,
+        None,
+    )?;
+    let (existing_omitted_marker, _, existing_omitted_limits) = community_findings_with_budget(
+        &nodes,
+        &[],
+        true,
+        &query,
+        subsequent_append_bytes.saturating_sub(1),
+        1,
         None,
     )?;
     let (omitted_marker_repeat, _, _) = community_findings_with_budget(
@@ -1431,15 +1473,37 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         &[],
         true,
         &query,
-        marker_bytes.saturating_sub(1),
+        first_append_bytes.saturating_sub(1),
+        0,
         None,
     )?;
     require(
         omitted_limits == vec![GraphLimitKind::IntermediateBytes]
             && omitted_marker.is_empty()
             && serde_json::to_vec(&omitted_marker)? == serde_json::to_vec(&omitted_marker_repeat)?
-            && marker_bytes > marker_bytes.saturating_sub(1),
+            && first_append_bytes > first_append_bytes.saturating_sub(1),
         "an oversized community truncation marker was retained",
+    )?;
+    require(
+        equal_limits == vec![GraphLimitKind::IntermediateBytes]
+            && plus_limits == vec![GraphLimitKind::IntermediateBytes]
+            && existing_limits == vec![GraphLimitKind::IntermediateBytes]
+            && existing_omitted_limits == vec![GraphLimitKind::IntermediateBytes]
+            && equal_marker.len() == 1
+            && plus_marker.len() == 1
+            && existing_marker.len() == 1
+            && existing_omitted_marker.is_empty()
+            && serialized_findings_append_bytes(
+                serialized_bytes_controlled(&equal_marker, None)?,
+                equal_marker.len(),
+                0,
+            ) <= first_append_bytes
+            && serialized_findings_append_bytes(
+                serialized_bytes_controlled(&plus_marker, None)?,
+                plus_marker.len(),
+                0,
+            ) <= first_append_bytes.saturating_add(1),
+        "preflight marker boundary did not retain only fitting actual JSON bytes",
     )?;
     let mut marker_query = query.clone();
     marker_query.include_cycles = false;
@@ -1451,7 +1515,8 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         true,
         true,
         &marker_query,
-        marker_bytes.saturating_sub(1),
+        first_append_bytes.saturating_sub(1),
+        0,
         &mut marker_work,
         None,
     )?;
@@ -1462,6 +1527,49 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
                 .reached_limits
                 .contains(&GraphLimitKind::IntermediateBytes),
         "report composition lost the typed limit when a community marker did not fit",
+    )?;
+    let mut composed_work = SupplementalWork::default();
+    let composed_findings = architecture_findings(
+        &store,
+        &BTreeMap::new(),
+        &[],
+        true,
+        true,
+        &marker_query,
+        subsequent_append_bytes,
+        1,
+        &mut composed_work,
+        None,
+    )?;
+    require(
+        composed_findings.len() == 1
+            && composed_findings[0].community.is_some()
+            && composed_work.composition_truncated
+            && composed_work
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes),
+        "community marker did not compose after an existing non-community finding",
+    )?;
+    let mut zero_budget_work = SupplementalWork::default();
+    let zero_budget_findings = architecture_findings(
+        &store,
+        &BTreeMap::new(),
+        &[],
+        true,
+        true,
+        &marker_query,
+        0,
+        1,
+        &mut zero_budget_work,
+        None,
+    )?;
+    require(
+        zero_budget_findings.is_empty()
+            && zero_budget_work.composition_truncated
+            && zero_budget_work
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes),
+        "zero remaining community allowance lost typed truncation truth",
     )?;
     let candidate_key = nodes
         .keys()
@@ -1492,8 +1600,62 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         0,
         CommunityConvergence::Converged,
         None,
-        marker_bytes,
+        0,
+        first_append_bytes,
     )?;
+    let (candidate_equal, candidate_equal_limits) = community_candidate_findings(
+        &nodes,
+        &candidate_keys,
+        &[],
+        &candidate_labels,
+        &marker_weights,
+        marker_parameters,
+        0,
+        CommunityConvergence::Converged,
+        None,
+        0,
+        first_append_bytes,
+    )?;
+    let (candidate_plus, candidate_plus_limits) = community_candidate_findings(
+        &nodes,
+        &candidate_keys,
+        &[],
+        &candidate_labels,
+        &marker_weights,
+        marker_parameters,
+        0,
+        CommunityConvergence::Converged,
+        None,
+        0,
+        first_append_bytes.saturating_add(1),
+    )?;
+    let (candidate_existing, candidate_existing_limits) = community_candidate_findings(
+        &nodes,
+        &candidate_keys,
+        &[],
+        &candidate_labels,
+        &marker_weights,
+        marker_parameters,
+        0,
+        CommunityConvergence::Converged,
+        None,
+        1,
+        subsequent_append_bytes,
+    )?;
+    let (candidate_existing_omitted, candidate_existing_omitted_limits) =
+        community_candidate_findings(
+            &nodes,
+            &candidate_keys,
+            &[],
+            &candidate_labels,
+            &marker_weights,
+            marker_parameters,
+            0,
+            CommunityConvergence::Converged,
+            None,
+            1,
+            subsequent_append_bytes.saturating_sub(1),
+        )?;
     let (candidate_omitted, candidate_omitted_limits) = community_candidate_findings(
         &nodes,
         &candidate_keys,
@@ -1504,12 +1666,21 @@ fn communities_are_deterministic_and_partition_a_planted_weak_component()
         0,
         CommunityConvergence::Converged,
         None,
-        marker_bytes.saturating_sub(1),
+        0,
+        first_append_bytes.saturating_sub(1),
     )?;
     require(
         candidate_limits == vec![GraphLimitKind::IntermediateBytes]
             && candidate_marker.len() == 1
             && candidate_marker[0].community.is_some()
+            && candidate_equal_limits == vec![GraphLimitKind::IntermediateBytes]
+            && candidate_equal.len() == 1
+            && candidate_plus_limits == vec![GraphLimitKind::IntermediateBytes]
+            && candidate_plus.len() == 1
+            && candidate_existing_limits == vec![GraphLimitKind::IntermediateBytes]
+            && candidate_existing.len() == 1
+            && candidate_existing_omitted_limits == vec![GraphLimitKind::IntermediateBytes]
+            && candidate_existing_omitted.is_empty()
             && candidate_omitted_limits == vec![GraphLimitKind::IntermediateBytes]
             && candidate_omitted.is_empty(),
         "candidate truncation did not honor the remaining marker budget",
