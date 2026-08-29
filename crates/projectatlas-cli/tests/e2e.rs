@@ -36064,51 +36064,21 @@ fn codex_owner_retained_identity_path(child_identity_file: &Path) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn stop_codex_owner_after_spawn_failure(
+fn cleanup_codex_owner_processes_after_spawn_failure(
     parent: &mut Child,
     child_identity_file: &Path,
     stable_runtime: &Path,
+    mut failures: Vec<String>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut stop_file = child_identity_file.as_os_str().to_os_string();
-    stop_file.push(".stop");
-    let stop_result = fs::write(PathBuf::from(stop_file), b"stop");
-    let deadline = Instant::now() + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
-    if stop_result.is_ok() {
-        loop {
-            match parent.try_wait() {
-                Ok(Some(_)) => return Ok(()),
-                Ok(None) => {}
-                Err(error) => {
-                    drop(parent.kill());
-                    drop(parent.wait());
-                    return Err(io::Error::other(format!(
-                        "failed to observe Codex owner fixture cleanup: {error}"
-                    ))
-                    .into());
-                }
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-    }
-
     let retained_identity_file = codex_owner_retained_identity_path(child_identity_file);
     let child_cleanup_result = read_codex_owner_child_identity(child_identity_file, stable_runtime)
         .or_else(|_| read_codex_owner_child_identity(&retained_identity_file, stable_runtime))
         .and_then(|identity| stop_windows_fixture_process(&identity));
-    let kill_result = parent.kill();
-    let wait_result = parent.wait();
-    let mut failures = Vec::new();
-    if let Err(error) = stop_result {
-        failures.push(format!("could not signal the owner fixture: {error}"));
-    } else {
-        failures.push("owner fixture did not stop within five seconds".to_string());
-    }
     if let Err(error) = child_cleanup_result {
         failures.push(format!("could not retire its owned child safely: {error}"));
     }
+    let kill_result = parent.kill();
+    let wait_result = parent.wait();
     if let Err(error) = kill_result
         && error.kind() != io::ErrorKind::InvalidInput
     {
@@ -36119,11 +36089,83 @@ fn stop_codex_owner_after_spawn_failure(
     if let Err(error) = wait_result {
         failures.push(format!("could not reap the held owner process: {error}"));
     }
-    Err(io::Error::other(format!(
-        "Codex owner fixture cleanup failed: {}",
-        failures.join("; ")
-    ))
-    .into())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "Codex owner fixture cleanup failed: {}",
+            failures.join("; ")
+        ))
+        .into())
+    }
+}
+
+#[cfg(windows)]
+fn codex_owner_observation_failure(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    error: impl std::fmt::Display,
+) -> Result<(), Box<dyn Error>> {
+    match cleanup_codex_owner_processes_after_spawn_failure(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        Vec::new(),
+    ) {
+        Ok(()) => Ok(()),
+        Err(cleanup_error) => Err(io::Error::other(format!(
+            "failed to preserve child-first cleanup after owner observation error ({error}): {cleanup_error}"
+        ))
+        .into()),
+    }
+}
+
+#[cfg(windows)]
+fn stop_codex_owner_after_spawn_failure(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut stop_file = child_identity_file.as_os_str().to_os_string();
+    stop_file.push(".stop");
+    let stop_result = fs::write(PathBuf::from(stop_file), b"stop");
+    let deadline = Instant::now() + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
+    let mut observation_error = None;
+    if stop_result.is_ok() {
+        loop {
+            match parent.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    observation_error = Some(error);
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    if let Some(error) = observation_error {
+        codex_owner_observation_failure(parent, child_identity_file, stable_runtime, error)?;
+        return Ok(());
+    }
+
+    let mut failures = Vec::new();
+    if let Err(error) = stop_result {
+        failures.push(format!("could not signal the owner fixture: {error}"));
+    } else {
+        failures.push("owner fixture did not stop within five seconds".to_string());
+    }
+    cleanup_codex_owner_processes_after_spawn_failure(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        failures,
+    )
 }
 
 #[cfg(windows)]
@@ -36476,6 +36518,34 @@ public static class Program
     {
         return Err(io::Error::other(format!(
             "unexpectedly accepted negative owner fixture did not clean up its owned processes: {unexpected_error}"
+        ))
+        .into());
+    }
+
+    let observation_identity_file = temp.path().join("observation-failure.pid");
+    let (mut observation_parent, observation_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &observation_identity_file,
+        None,
+        None,
+    )?;
+    // Inject only the observation decision while exercising the same child-first cleanup path;
+    // the production caller retains the actual observation error in its spawn diagnostic.
+    let observation_cleanup_result = codex_owner_observation_failure(
+        &mut observation_parent,
+        &observation_identity_file,
+        &runtime,
+        "synthetic parent observation failure",
+    );
+    if observation_parent.try_wait()?.is_none()
+        || windows_process_is_alive(&observation_identity)?
+        || observation_cleanup_result.is_err()
+    {
+        return Err(io::Error::other(format!(
+            "parent observation failure did not preserve exact child-first cleanup: {observation_cleanup_result:?}"
         ))
         .into());
     }
