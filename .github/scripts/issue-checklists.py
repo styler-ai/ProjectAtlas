@@ -657,6 +657,44 @@ def check_open_issue_complexity(repo: str) -> list[str]:
     return failures
 
 
+def check_issue_complexity(repo: str, number: int) -> list[str]:
+    """Validate complexity for one issue selected by a scoped dispatch."""
+
+    issue = issue_payload(repo, number)
+    return [
+        f"#{number} issue contract {failure}"
+        for failure in complexity_label_failures(issue)
+    ]
+
+
+def check_complexity_for_dispatch(
+    repo: str,
+    *,
+    pull_request: int | None,
+    planned_issue: int | None,
+    pull_request_owner: int | None = None,
+    pull_request_owner_error: str | None = None,
+) -> list[str]:
+    """Keep complexity validation aligned with the active IssueOps boundary."""
+
+    if pull_request is not None:
+        if pull_request_owner_error is not None:
+            return []
+        if pull_request_owner is not None:
+            return check_issue_complexity(repo, pull_request_owner)
+        try:
+            owner_issue = pull_request_owner_issue(
+                pull_request_payload(repo, pull_request)
+            )
+        except SystemExit:
+            # The PR checker reports the fail-closed ownership error itself.
+            return []
+        return check_issue_complexity(repo, owner_issue)
+    if planned_issue is not None:
+        return check_issue_complexity(repo, planned_issue)
+    return check_open_issue_complexity(repo)
+
+
 def issue_task_headings(
     issue: dict[str, object],
 ) -> tuple[str, list[re.Match[str]], list[re.Match[str]], list[re.Match[str]]]:
@@ -1347,15 +1385,21 @@ def check_pull_request_tasks(
     issue_map: dict[str, tuple[Owner, ...]],
     pull_request: int,
     base_ref: str,
+    *,
+    owner_issue: int | None = None,
+    owner_error: str | None = None,
 ) -> list[str]:
     """Check one PR owner against live state and unrelated slices against its base."""
 
-    try:
-        owner_issue = pull_request_owner_issue(
-            pull_request_payload(repo, pull_request)
-        )
-    except SystemExit as error:
-        return [f"pull request ownership {error}"]
+    if owner_error is not None:
+        return [f"pull request ownership {owner_error}"]
+    if owner_issue is None:
+        try:
+            owner_issue = pull_request_owner_issue(
+                pull_request_payload(repo, pull_request)
+            )
+        except SystemExit as error:
+            return [f"pull request ownership {error}"]
     mapped = [
         (change, owner)
         for change, owners in issue_map.items()
@@ -1715,6 +1759,79 @@ Mitigations:
     assert complexity_label_failures(
         {"state": "CLOSED", "labels": [{"name": "complexity:unknown"}]}
     ) == []
+    saved_complexity_dispatch_helpers = {
+        name: globals()[name]
+        for name in (
+            "issue_payload",
+            "pull_request_payload",
+            "open_issue_payloads",
+            "load_issue_map",
+            "check_pull_request_tasks",
+            "check_openspec_tasks",
+            "planned_issue_failures",
+            "check_milestone_complete",
+        )
+    }
+    complexity_payloads = {
+        1: {"state": "OPEN", "labels": [{"name": "complexity:invalid"}]},
+        2: {"state": "OPEN", "labels": [{"name": "complexity:high"}]},
+    }
+    complexity_fetches: list[int] = []
+    pull_request_fetches: list[int] = []
+    global_complexity_fetches: list[str] = []
+    try:
+        globals()["issue_payload"] = lambda _repo, number: (
+            complexity_fetches.append(number) or complexity_payloads[number]
+        )
+        globals()["pull_request_payload"] = lambda _repo, number: (
+            pull_request_fetches.append(number)
+            or {"title": "Work for #2", "body": ""}
+        )
+        globals()["open_issue_payloads"] = lambda _repo: [
+            global_complexity_fetches.append("global")
+            or {"number": number, **payload}
+            for number, payload in complexity_payloads.items()
+        ]
+        globals()["load_issue_map"] = lambda _path: {}
+        globals()["check_pull_request_tasks"] = lambda *_args, **_kwargs: []
+        globals()["check_openspec_tasks"] = lambda *_args, **_kwargs: []
+        globals()["planned_issue_failures"] = lambda *_args, **_kwargs: []
+        globals()["check_milestone_complete"] = lambda *_args, **_kwargs: []
+        saved_argv = sys.argv[:]
+        sys.argv = [
+            "issue-checklists.py",
+            "--repo",
+            "owner/repo",
+            "--pull-request",
+            "7",
+            "--base",
+            "accepted-base",
+        ]
+        main()
+        assert complexity_fetches == [2]
+        assert pull_request_fetches == [7]
+        complexity_fetches.clear()
+        sys.argv = [
+            "issue-checklists.py",
+            "--repo",
+            "owner/repo",
+            "--planned-issue",
+            "2",
+        ]
+        main()
+        assert complexity_fetches == [2, 2]
+        sys.argv = ["issue-checklists.py", "--repo", "owner/repo"]
+        try:
+            main()
+        except SystemExit as error:
+            assert error.code == 1
+        else:
+            raise AssertionError("global complexity validation accepted invalid issue")
+        assert global_complexity_fetches == ["global"] * len(complexity_payloads)
+    finally:
+        sys.argv = saved_argv
+        for name, helper in saved_complexity_dispatch_helpers.items():
+            globals()[name] = helper
     assert acceptance_review_tasks({"state": "OPEN", "body": issue_contract}) == [
         (False, task) for task in ACCEPTANCE_REVIEW_TASKS
     ]
@@ -2588,11 +2705,34 @@ def main() -> None:
         raise SystemExit("--base is required with --pull-request")
     if args.pull_request is None and args.base:
         raise SystemExit("--base requires --pull-request")
-    failures.extend(check_open_issue_complexity(args.repo))
+    pull_request_owner = None
+    pull_request_owner_error = None
+    if args.pull_request is not None:
+        try:
+            pull_request_owner = pull_request_owner_issue(
+                pull_request_payload(args.repo, args.pull_request)
+            )
+        except SystemExit as error:
+            pull_request_owner_error = str(error)
+    failures.extend(
+        check_complexity_for_dispatch(
+            args.repo,
+            pull_request=args.pull_request,
+            planned_issue=args.planned_issue,
+            pull_request_owner=pull_request_owner,
+            pull_request_owner_error=pull_request_owner_error,
+        )
+    )
     if args.pull_request is not None:
         failures.extend(
             check_pull_request_tasks(
-                args.repo, root, issue_map, args.pull_request, args.base
+                args.repo,
+                root,
+                issue_map,
+                args.pull_request,
+                args.base,
+                owner_issue=pull_request_owner,
+                owner_error=pull_request_owner_error,
             )
         )
     elif not args.skip_openspec:
