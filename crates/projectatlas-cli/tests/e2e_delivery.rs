@@ -353,84 +353,8 @@ const CLI_E2E_ATTRIBUTES_FACETS_DIGEST: &str =
 const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
 
-const CLI_E2E_SUPPORT_FUNCTION_DIGESTS: &[(&str, &str)] = &[
-    (
-        "run_mcp_stdio",
-        "3ec25297b4c4d6d4de77f10fe77894e5e76f1b14a1b84156a15352f438ec382b",
-    ),
-    (
-        "run_mcp_stdio_with_env",
-        "2c5f7fedb1acca1beef43c8f1d5186df46d0b608e778c4c5d1d531c1159daaed",
-    ),
-    (
-        "mcp_tool_text",
-        "48d7ad7d82fbc7a9e690b5e1e03caa4ee26baa0148b17ead4dc872322c1f425e",
-    ),
-    (
-        "sqlite_table_digests",
-        "86edce386cc43ea4b49ce82bd8b7b6eb61c1374c3cd1f45515820e44e3e29d66",
-    ),
-    (
-        "mcp_database_snapshot",
-        "ffb57f16567b4102818d436d784c7cf9948431f8ba543e74fc24ae7963c69b1e",
-    ),
-    (
-        "require_json_string",
-        "a6b1592c1511d27ae87706f43422be9baa409baab7f19bf6169753ab76c561ab",
-    ),
-    (
-        "require_json_contains",
-        "6887763fb3907308fedadd5b705c08a8d935b0d1997209602d1b8b4fd00216f7",
-    ),
-    (
-        "require_json_usize",
-        "dd15d0f9557b459a7b9ab287aae0e73c6ce862bddda20a352c331f65799b9cc5",
-    ),
-    (
-        "require_json_usize_at_least",
-        "61f0b0c4948557a4bf21be1063bab94ff676b9e2cdb179637f623d11afdf0ede",
-    ),
-    (
-        "require_json_usize_greater_than",
-        "0069f458a74c051120836ab9e2da36fb6e77c59b159f146e2b240ff2241a5c8b",
-    ),
-    (
-        "require_json_array_len",
-        "46f96f13c6a06bc979f8ae902ded96628d7f16c4cba72248d24d98ca3cbb6cfc",
-    ),
-    (
-        "require_json_bool",
-        "07db4c0162aa34da888a8e999069d721d4ac548577cdec1f3598785ad5648916",
-    ),
-    (
-        "sha256_hex",
-        "9c6bea79718ab673d0922fa377ec538b19bf95ce5ac3996a1866be3fabfaed5a",
-    ),
-    (
-        "json_at",
-        "69d489b24b797448236158093b3b0fb05981e3b523e0d7c1d399128598a7670b",
-    ),
-    (
-        "mcp_contract_executable",
-        "fe8d21098610880896eaedb698708010b12cc15d39016a8868b83fc30f843735",
-    ),
-    (
-        "json_summary_command",
-        "b14d8700a35b8b20fde3a298ca23d0fdcc82b264aacf3e0a1bd1db682e76094d",
-    ),
-    (
-        "git_command_for_root",
-        "ebe25d59ffc9aa6d822e99d32865404399cbb8d5b64334586e9850ab89339d3f",
-    ),
-    (
-        "workspace_root",
-        "35f0c72afa5bb9ce7a646b59f16684825845a4651b7bdc1132fb11fb5950b6fe",
-    ),
-    (
-        "complete_mcp_test_after_shutdown",
-        "d0dbb9ab956678a455f82e0cddfb8fd601f047cec04c3ad9d47bb2f75874d8fc",
-    ),
-];
+const CLI_E2E_SUPPORT_SHA256: &str =
+    "2e581b2d9810f7f1adb1b09ea8296a1e5229e434d65a05453cba8fb151b6d079";
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
     "crates/projectatlas-cli/tests/e2e_delivery.rs",
@@ -643,27 +567,6 @@ fn scan_cli_e2e_symbols(source: &str) -> Vec<ObservedCliE2eSymbol> {
         }
     }
     symbols
-}
-
-fn support_function_fingerprint(source: &str, name: &str) -> Option<String> {
-    let start = source.find(&format!("pub(super) fn {name}"))?;
-    let opening_brace = source[start..].find('{')? + start;
-    let mut depth = 0usize;
-    let mut end = None;
-    for (offset, character) in source[opening_brace..].char_indices() {
-        match character {
-            '{' => depth = depth.checked_add(1)?,
-            '}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    end = Some(opening_brace + offset + character.len_utf8());
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    Some(sha256_text(&source[start..end?]))
 }
 
 fn inventory_symbol_digest(symbols: &[CliE2eInventorySymbol]) -> String {
@@ -1115,19 +1018,8 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
     let support_source = normalize_cli_e2e_text(&fs::read_to_string(
         workspace_root.join(CLI_E2E_SUPPORT_PATH),
     )?);
-    for (name, expected_digest) in CLI_E2E_SUPPORT_FUNCTION_DIGESTS {
-        let observed_digest =
-            support_function_fingerprint(&support_source, name).ok_or_else(|| {
-                io::Error::other(format!(
-                    "CLI E2E shared support function is missing: {name}"
-                ))
-            })?;
-        if observed_digest != *expected_digest {
-            return Err(io::Error::other(format!(
-                "CLI E2E shared support function drifted: {name}"
-            ))
-            .into());
-        }
+    if sha256_text(&support_source) != CLI_E2E_SUPPORT_SHA256 {
+        return Err(io::Error::other("CLI E2E shared support source digest drifted").into());
     }
     let observed_binary_symbols = observed_symbols_by_owner
         .iter()
@@ -1591,12 +1483,14 @@ fn cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift()
     let fixture = tempfile::tempdir()?;
     copy_cli_e2e_contract_fixture(&workspace_root, fixture.path())?;
     let support_path = fixture.path().join(CLI_E2E_SUPPORT_PATH);
-    let support_source = fs::read_to_string(&support_path)?;
-    let drifted_source = support_source.replacen(
-        "let input = format!(",
-        "let input = String::new();\n    let input = format!(",
-        1,
-    );
+    let support_source = normalize_cli_e2e_text(&fs::read_to_string(&support_path)?);
+    let drifted_source = support_source.replacen("    \"GIT_CONFIG\",\n", "", 1);
+    if drifted_source == support_source {
+        return Err(io::Error::other(
+            "Git scrub-list tamper fixture did not change support source",
+        )
+        .into());
+    }
     fs::write(support_path, drifted_source)?;
     let inventory_path = fixture.path().join(CLI_E2E_INVENTORY_FILE);
     let mut inventory: Value = serde_json::from_str(&fs::read_to_string(&inventory_path)?)?;
@@ -1607,7 +1501,7 @@ fn cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift()
     fs::write(inventory_path, serde_json::to_string_pretty(&inventory)?)?;
     require_cli_e2e_contract_rejection(
         assert_cli_e2e_inventory_contract(fixture.path()),
-        "shared support function drifted",
+        "shared support source digest drifted",
     )?;
 
     let fixture = tempfile::tempdir()?;
@@ -1616,10 +1510,13 @@ fn cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift()
     let support_source = fs::read_to_string(&support_path)?;
     let missing_helper_source =
         support_source.replacen("pub(super) fn mcp_tool_text", "fn mcp_tool_text", 1);
+    if missing_helper_source == support_source {
+        return Err(io::Error::other("support helper tamper fixture did not change source").into());
+    }
     fs::write(support_path, missing_helper_source)?;
     require_cli_e2e_contract_rejection(
         assert_cli_e2e_inventory_contract(fixture.path()),
-        "shared support function is missing",
+        "shared support source digest drifted",
     )?;
     Ok(())
 }
