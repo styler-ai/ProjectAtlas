@@ -30893,6 +30893,44 @@ fn agent_purpose_and_health_resolution_gate_flow() -> Result<(), Box<dyn Error>>
         .success()
         .stdout(predicate::str::contains("missing_purposes: 0"));
 
+    let run_health_report = |command: &str, format: &str| -> Result<_, Box<dyn Error>> {
+        Ok(Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .args(["--format", format, "--db"])
+            .arg(&db)
+            .arg(command)
+            .output()?)
+    };
+    for format in ["toon", "json"] {
+        let health = run_health_report("health", format)?;
+        let health_check = run_health_report("health-check", format)?;
+        require(
+            health.status == health_check.status
+                && health.stdout == health_check.stdout
+                && health.stderr == health_check.stderr,
+            format!(
+                "health report diverged from health-check in {format}:\nhealth={} {}\nhealth-check={} {}",
+                health.status,
+                String::from_utf8_lossy(&health.stderr),
+                health_check.status,
+                String::from_utf8_lossy(&health_check.stderr)
+            ),
+        )?;
+        if format == "json" {
+            let _: Value = serde_json::from_slice(&health.stdout)?;
+        }
+    }
+    for (command, expected) in [("health", "resolve"), ("health-check", "--summary-only")] {
+        let help = Command::cargo_bin("projectatlas")?
+            .arg(command)
+            .arg("--help")
+            .output()?;
+        require(
+            help.status.success() && String::from_utf8_lossy(&help.stdout).contains(expected),
+            format!("{command} help omitted {expected}"),
+        )?;
+    }
+
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
