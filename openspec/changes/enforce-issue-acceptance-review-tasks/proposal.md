@@ -12,8 +12,8 @@ ProjectAtlas IssueOps currently treats the OpenSpec implementation checklist as 
 - Preserve the complete existing issue packet—`Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Non-Goals`, and `Pre-Mortem`—and retain every existing diagram, mitigation, relationship, publication, and release gate.
 - Require all implementation and acceptance/review tasks to be checked before issue closure or milestone completion; ordinary in-progress pull requests may retain unchecked tasks.
 - Make pull-request validation branch-aware so immediate live task progress on one issue cannot fail an unrelated concurrent branch: compare the owning issue's candidate task slice with live state, require unrelated task slices to remain unchanged from the pull-request base, and keep `main` and release validation global and fail-closed.
-- Migrate every open mapped issue before activating the new gate. Preserve closed historical issue bodies and keep their legacy task headings readable for historical validation.
-- Record the only legacy-contract exceptions as per-issue `legacy_closed_issues` provenance in `openspec/issue-map.json`; mapped issues outside that explicit repository-controlled set use the new contract. Initial pull-request introduction validates every derived/listed exception as mapped, CLOSED, legacy-only, an exact local owner-slice mirror, and complete, then freezes the set against the accepted base.
+- Make the current two-list contract authoritative for every open mapped issue. Already closed mapped issues are inert historical state: global and release checks require their native closed state but do not migrate, parse, or repeatedly validate their bodies; reopening an old issue makes it an open mapped issue that must be migrated before work proceeds.
+- Keep branch-aware pull-request authority narrow: validate the one open owner against live state, compare unrelated open mapped slices with the accepted base, and exclude closed unrelated history without a registry, cutoff, timestamp, issue-number heuristic, cache, or provenance manifest.
 - Update issue templates, repository workflow guidance, pull-request guidance, and behavior-focused contract tests to describe and enforce the same two-list model.
 
 ## Capabilities
@@ -42,6 +42,6 @@ This change is ready for implementation after its issue packet, design, specific
 - Treating issue complexity as priority, duration, story points, or changed-line count, or asking IssueOps to infer whether the selected complexity is semantically correct.
 - Replacing issue-specific product intent with generic review boilerplate or weakening any current issue section, OpenSpec requirement, architecture view, test obligation, or release proof.
 - Creating task receipts, SHA evidence ledgers, one test per checkbox, automated semantic scoring, or an LLM CI gate.
-- Rewriting closed issue history or requiring completed historical issues to adopt the new headings.
+- Rewriting closed issue history or requiring completed historical issues to adopt the new headings; reopening an issue is explicitly in scope for the current open contract.
 - Making every open pull request wait for final issue acceptance when the owning issue intentionally spans additional delivery work.
 - Accepting unrelated task-list edits in a pull request or weakening complete live validation on `main` and release gates.

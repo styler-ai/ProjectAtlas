@@ -7,22 +7,18 @@ Each mapped v0.5.0 issue owns one focused view below. The release graph in `open
 ```mermaid
 flowchart LR
     LocalTasks[(Mapped local tasks.md)] --> OwnerSlice{Issue-map owner slice}
-    IssueState[Authenticated mapped issue state] --> Provenance{Per-issue contract provenance}
-    Initial[Initial authenticated derivation] --> Freeze[Accepted-base immutable freeze]
-    AcceptedBase[Accepted PR base] --> Freeze
-    Freeze --> Provenance
     OwnerSlice --> Implementation[Exactly one visible Implementation Tasks section]
     IssuePacket[Complete issue packet] --> Acceptance[Exactly one canonical Acceptance and Review Tasks section]
-    Provenance -->|mapped CLOSED exception| Legacy[Legacy parser + closed-task validation]
-    Provenance -->|all other mapped issues| New[New two-list contract]
-    Legacy --> Contract[IssueOps structural contract]
-    New --> Contract
     Implementation --> Sync[Exact text, order, ownership, and state mirror]
     Acceptance --> Gates[Five ordered review gates]
     Sync --> Contract
     Gates --> Contract
-    PR[PR candidate branch] --> Branch[Owner live slice + unrelated accepted-base slices]
-    Branch --> Contract
+    PR[PR candidate branch] --> Owner[One open owner against live state]
+    PR --> Base[Unrelated open slices against accepted PR base]
+    Owner --> Contract
+    Base --> Contract
+    Closed[Already CLOSED mapped issue] --> Inert[Native closed state only; no body migration or validation]
+    Reopened[Reopened mapped issue] --> Implementation
     Hidden[Hidden, duplicate, or legacy open fields] --> Reject[Fail closed]
     Contract --> Ready[Truthful incremental or closure-ready state]
 ```

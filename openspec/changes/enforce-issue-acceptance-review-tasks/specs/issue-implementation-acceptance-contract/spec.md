@@ -34,7 +34,7 @@ The `Acceptance and Review Tasks` section SHALL contain exactly five ordered out
 - **AND** the issue cannot substitute implementation steps, evidence receipts, or generic completion claims for the canonical review gates.
 
 ### Requirement: Acceptance follows complete implementation
-IssueOps SHALL enforce acceptance as a final ordered state transition. No acceptance task may be checked while any implementation task is unchecked; acceptance checks SHALL form a prefix in canonical order; and closed mapped issues plus release completion SHALL require every implementation and acceptance task checked.
+IssueOps SHALL enforce acceptance as a final ordered state transition for active mapped issues. No acceptance task may be checked while any implementation task is unchecked; acceptance checks SHALL form a prefix in canonical order; and an active issue plus release completion SHALL require every implementation and acceptance task checked. A mapped issue already in native CLOSED state is inert for body/task validation; closure and release still require the repository-native closed state.
 
 #### Scenario: Implementation remains incomplete
 - **WHEN** any implementation task is unchecked
@@ -47,9 +47,9 @@ IssueOps SHALL enforce acceptance as a final ordered state transition. No accept
 - **AND** it rejects any checked task after an unchecked acceptance task.
 
 #### Scenario: Issue closes or release completes
-- **WHEN** a mapped issue is closed or its milestone is evaluated for release completion
-- **THEN** IssueOps requires both authoritative task lists to be fully checked
-- **AND** no unresolved implementation or acceptance state can be hidden in another section.
+- **WHEN** a release milestone is evaluated, or an active mapped issue is being prepared for closure
+- **THEN** IssueOps requires each active issue's authoritative task lists to be fully checked and each mapped issue to be natively CLOSED for release completion
+- **AND** an already CLOSED mapped issue is accepted as inert history without revalidating its body.
 
 #### Scenario: Incremental pull request remains in progress
 - **WHEN** an ordinary pull request contributes part of an issue whose implementation and acceptance tasks remain unchecked
@@ -73,44 +73,26 @@ IssueOps SHALL require every open issue to carry exactly one label from `complex
 - **THEN** IssueOps still requires exactly one valid complexity label
 - **AND** it does not require `Implementation Tasks` or `Acceptance and Review Tasks` until a real mapping supplies task authority.
 
-### Requirement: Existing issue strength and historical truth are preserved
-The migration SHALL preserve every existing open mapped issue section, substantive byte, link, task, checked state, mitigation owner ID, milestone fact, and native relationship except the specified task-heading, mitigation-terminology, acceptance-checklist, and complexity-label additions. Closed mapped issues SHALL retain historical bodies and remain readable through their legacy OpenSpec task headings.
+### Requirement: Existing issue strength and closed history are preserved
+The migration SHALL preserve every existing open mapped issue section, substantive byte, link, task, checked state, mitigation owner ID, milestone fact, and native relationship except the specified task-heading, mitigation-terminology, acceptance-checklist, and complexity-label additions. Already closed mapped issues remain untouched and inert; their native repository state is authoritative and their historical body is not repeatedly parsed or migrated.
 
 #### Scenario: Open issue migration
 - **WHEN** an open mapped issue is migrated
 - **THEN** its `OpenSpec Tasks` heading becomes `Implementation Tasks`, its mitigation references become `Implementation tasks`, the canonical acceptance checklist is added, and one specification-owned complexity label is applied
 - **AND** every other issue fact remains unchanged.
 
-#### Scenario: Closed historical issue
-- **WHEN** IssueOps validates a closed mapped issue created under the prior contract
-- **THEN** it accepts exactly one legacy `OpenSpec Tasks` or `OpenSpec Task Checklist` section for implementation history
-- **AND** it does not require new acceptance fields or complexity labels retroactively
-- **AND** it still rejects unchecked historical implementation tasks.
+#### Scenario: Closed mapped issue is inert
+- **WHEN** IssueOps encounters a mapped issue whose authenticated native state is CLOSED
+- **THEN** global and release checks use that state for closure/release gating without parsing, migrating, or validating its body or historical task heading
+- **AND** malformed or unchecked historical text does not re-enter active task validation.
 
-### Requirement: Contract provenance is repository-controlled
-IssueOps SHALL select the issue contract from the repository-controlled `legacy_closed_issues` list in `openspec/issue-map.json`, not from mutable issue headings. Every mapped issue outside that explicit set SHALL use the new contract. Each listed issue SHALL be mapped, CLOSED, contain exactly one visible legacy task heading with no `Implementation Tasks` or `Acceptance and Review Tasks` heading, mirror its exact local owner task slice, and contain no unchecked historical task. Pull-request validation SHALL require the candidate provenance list to equal the accepted base once the accepted base contains the field; an accepted base that predates the field permits only the initial introduction of a list validated against that complete contract using the authenticated payloads already fetched for the boundary.
-
-#### Scenario: Closed new-contract issue is downgraded
-- **WHEN** a mapped issue outside `legacy_closed_issues` is CLOSED after replacing `Implementation Tasks` with a legacy heading and removing acceptance
-- **THEN** issue-event, global, milestone, and release validation reject it as a malformed new-contract issue
-- **AND** headings cannot silently change its contract classification.
-
-#### Scenario: Explicit closed legacy issue remains compatible
-- **WHEN** a mapped CLOSED issue appears in `legacy_closed_issues` and retains exactly one legacy task heading without new task fields
-- **THEN** IssueOps validates its historical implementation tasks without requiring acceptance or complexity
-- **AND** unchecked historical tasks remain a closure failure.
-
-#### Scenario: Incomplete initial legacy provenance is rejected
-- **WHEN** the initial pull-request introduction lists or derives a mapped CLOSED legacy issue whose visible task list differs from its local owner slice or still has an unchecked task
-- **THEN** pull-request validation rejects the provenance introduction with the closed/unchecked or exact-slice diagnostic before accepting the field
-
-#### Scenario: Provenance is frozen at the accepted pull-request base
-- **WHEN** a pull request changes `legacy_closed_issues` after the accepted base already declares it
-- **THEN** pull-request validation rejects the candidate even if its mutable issue headings appear compatible
-- **AND** a missing, open, unmapped, or mixed-heading grandfather entry fails closed.
+#### Scenario: Reopened historical issue uses the current contract
+- **WHEN** an issue with a prior `OpenSpec Tasks` or `OpenSpec Task Checklist` body is reopened
+- **THEN** IssueOps treats it as an open mapped issue and rejects the legacy heading until it is migrated to exactly one current `Implementation Tasks` and `Acceptance and Review Tasks` section
+- **AND** after migration it must mirror its local owner slice and follow the active acceptance state rules.
 
 ### Requirement: Activation fails closed across live state
-The new contract SHALL become authoritative only after the accepted checker, every open mapped live issue body, and every open issue complexity label converge. The migration SHALL validate exact live readback and provide restoration of prior bodies, #517 milestone/status, and native relationships before merge. The independently authorized complexity classification SHALL remain intact across checker/body rollback.
+The current contract SHALL become authoritative for open mapped issues only after the accepted checker, every open mapped live issue body, and every open issue complexity label converge. Already closed mapped issues are not part of that body migration. The migration SHALL validate exact live readback and provide restoration of prior bodies, #517 milestone/status, and native relationships before merge. The independently authorized complexity classification SHALL remain intact across checker/body rollback.
 
 #### Scenario: Complete activation
 - **WHEN** the accepted implementation is ready to publish
@@ -125,7 +107,7 @@ The new contract SHALL become authoritative only after the accepted checker, eve
 - **AND** the independently authorized complexity labels remain intact.
 
 ### Requirement: Pull-request validation isolates mutable issue progress
-Pull-request IssueOps SHALL validate the owning issue's candidate-local implementation task slice against live issue state while requiring every unrelated mapped issue task slice to remain identical to the accepted pull-request base. Missing or ambiguous owning-issue identity, unreadable base authority, or an unrelated task-slice edit SHALL fail closed. Pushes to `main`, milestone completion, and release validation SHALL retain complete global live-state validation, while ordinary issue events SHALL retain their existing affected-issue `--planned-issue` scope.
+Pull-request IssueOps SHALL validate the open owning issue's candidate-local implementation task slice against live issue state while requiring every unrelated open mapped issue task slice to remain identical to the accepted pull-request base. Closed unrelated history SHALL not participate. Missing or ambiguous owning-issue identity, unreadable base authority, or an unrelated task-slice edit SHALL fail closed. Pushes to `main`, milestone completion, and release validation SHALL retain complete active live-state validation plus native closed-state gating, while ordinary issue events SHALL retain their existing affected-issue `--planned-issue` scope.
 
 #### Scenario: Unrelated issue advances while a pull request is open
 - **WHEN** issue A's implementation tasks advance immediately in live GitHub state while an independent pull request for issue B retains issue A's accepted base task slice
@@ -145,8 +127,8 @@ Pull-request IssueOps SHALL validate the owning issue's candidate-local implemen
 
 #### Scenario: Accepted branch reaches a global boundary
 - **WHEN** IssueOps runs for a push to `main`, milestone completion, or release validation
-- **THEN** it validates every mapped local task slice against complete live issue state
-- **AND** branch isolation cannot hide repository-wide drift at the convergence boundary.
+- **THEN** it validates every open mapped local task slice against complete live issue state and requires every mapped issue to be natively CLOSED for milestone/release completion
+- **AND** already closed bodies and unrelated closed history remain outside task validation while branch isolation cannot hide repository-wide drift at the convergence boundary.
 
 #### Scenario: An issue event targets one planned issue
 - **WHEN** IssueOps runs for an ordinary issue event
