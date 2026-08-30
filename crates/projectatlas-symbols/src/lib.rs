@@ -1040,6 +1040,7 @@ fn parse_php_tree<E>(
     let has_opening_tag = tree_contains_php_tag_outside_literals(
         mixed.root_node(),
         php_only.root_node(),
+        content,
         check,
         &mut examined_nodes,
     )?;
@@ -1126,6 +1127,7 @@ fn first_php_tag_start<E>(
 fn tree_contains_php_tag_outside_literals<E>(
     mixed: Node<'_>,
     php_only: Node<'_>,
+    content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
     examined_nodes: &mut usize,
 ) -> Result<bool, E> {
@@ -1136,6 +1138,7 @@ fn tree_contains_php_tag_outside_literals<E>(
         mixed,
         &opaque_ranges,
         &mut next_opaque,
+        content,
         check,
         examined_nodes,
     )
@@ -1166,6 +1169,7 @@ fn tree_contains_php_tag_outside_ranges<E>(
     node: Node<'_>,
     opaque_ranges: &[(usize, usize)],
     next_opaque: &mut usize,
+    content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
     examined_nodes: &mut usize,
 ) -> Result<bool, E> {
@@ -1177,7 +1181,12 @@ fn tree_contains_php_tag_outside_ranges<E>(
         {
             *next_opaque += 1;
         }
-        if *next_opaque >= opaque_ranges.len() || opaque_ranges[*next_opaque].0 >= node.end_byte() {
+        let outside_opaque_range = opaque_ranges.get(*next_opaque).is_none_or(|&(start, end)| {
+            start >= node.end_byte()
+                || end <= node.start_byte()
+                || is_php_pre_tag_inline_opening(node, content, start)
+        });
+        if outside_opaque_range {
             return Ok(true);
         }
     }
@@ -1187,6 +1196,7 @@ fn tree_contains_php_tag_outside_ranges<E>(
             child,
             opaque_ranges,
             next_opaque,
+            content,
             check,
             examined_nodes,
         )? {
@@ -1194,6 +1204,18 @@ fn tree_contains_php_tag_outside_ranges<E>(
         }
     }
     Ok(false)
+}
+
+/// Return whether a long PHP opening tag follows pre-tag line-comment output.
+fn is_php_pre_tag_inline_opening(node: Node<'_>, content: &str, range_start: usize) -> bool {
+    if node.kind() != "php_tag"
+        || !node_text(node, content).is_some_and(|tag| tag == "<?php" || tag == "<?=")
+    {
+        return false;
+    }
+    content
+        .get(range_start..node.start_byte())
+        .is_some_and(|prefix| prefix.starts_with("//") || prefix.starts_with('#'))
 }
 
 /// Return whether the PHP-only parse node is opaque to mixed-grammar tags.
@@ -5800,6 +5822,7 @@ class Owner {
             "// <?\nfunction marker(): string { return 'marker'; }",
             "# <?\nfunction marker(): string { return 'marker'; }",
             "/* <? */ function marker(): string { return 'marker'; }",
+            "/* <?php */ function marker(): string { return 'marker'; }",
             r"function marker(): string { return <<<TEXT
 <?
 TEXT;
@@ -5842,6 +5865,8 @@ TEXT;
                 "/* <? ?> */<?php function reopened_block(): void {} ?>",
                 "reopened_block",
             ),
+            ("// <?php function boot() {}", "boot"),
+            ("# <?php function hash_boot() {}", "hash_boot"),
         ] {
             assert!(
                 super::contains_php_opening_tag(source),
@@ -5856,6 +5881,24 @@ TEXT;
                 "mixed PHP symbol disappeared after opening-tag classification: {source:?}"
             );
         }
+    }
+
+    #[test]
+    fn php_pre_tag_inline_output_keeps_exact_symbol_identity() {
+        let source = "// <?php function boot() {}";
+        let graph = extract_symbol_graph("src/boot.php", Some("php"), source);
+        let Some(symbol) = graph.symbols.iter().find(|symbol| symbol.name == "boot") else {
+            return;
+        };
+        let Some(selector) = symbol.source_selector else {
+            return;
+        };
+        assert_eq!(
+            &source[selector.byte_start..selector.byte_end],
+            "function boot() {}"
+        );
+        assert_eq!(selector.column_start, 9);
+        assert_eq!(selector.column_end, 27);
     }
 
     #[test]
@@ -5968,6 +6011,7 @@ TEXT;
             tree.root_node(),
             &[(0, 6)],
             &mut next_opaque,
+            &source,
             &mut || {
                 checks += 1;
                 Err::<(), _>("cancelled")
