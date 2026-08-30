@@ -5,8 +5,8 @@
 
 ## 2. Causal Output-Bound Proof
 
-- [ ] 2.1 Add one optional private test-observation sink at the existing Windows bounded-runtime-probe helper so output-limit and timeout decisions are distinguishable while every production caller retains the same nullable payload, five-second timeout, one-MiB ceiling, strict validation, and exact cleanup.
-- [ ] 2.2 Replace the pre-launch four-second proxy with causal owned fixtures for delayed startup plus finite over-ceiling output and for true timeout; prove explicit disposition, rejected payload, exact process-tree reaping, probe-file cleanup, and normal valid-runtime compatibility without retry, serialization, global locks, or resource-bound changes.
+- [x] 2.1 Add one optional private test-observation sink at the existing Windows bounded-runtime-probe helper so output-limit and timeout decisions are distinguishable while every production caller retains the same nullable payload, five-second timeout, one-MiB ceiling, strict validation, and exact cleanup.
+- [x] 2.2 Replace the pre-launch four-second proxy with causal owned fixtures for delayed startup plus finite over-ceiling output and for true timeout; prove explicit disposition, rejected payload, exact process-tree reaping, probe-file cleanup, and normal valid-runtime compatibility without retry, serialization, global locks, or resource-bound changes.
 
 ## 3. Verification And Delivery
 
