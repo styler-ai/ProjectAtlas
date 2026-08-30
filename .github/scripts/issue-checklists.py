@@ -131,6 +131,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
         number
         state
         labels(first: 100) {
+          totalCount
           nodes {
             name
           }
@@ -707,12 +708,18 @@ def issue_state_payloads(repo: str) -> list[dict[str, object]]:
                 raise SystemExit("GitHub GraphQL issue page returned a non-object issue")
             labels = issue.get("labels")
             label_nodes = labels.get("nodes") if isinstance(labels, dict) else None
-            milestone = issue.get("milestone")
+            total_count = labels.get("totalCount") if isinstance(labels, dict) else None
             if (
                 not isinstance(label_nodes, list)
                 or not all(isinstance(label, dict) for label in label_nodes)
-                or (milestone is not None and not isinstance(milestone, dict))
+                or not isinstance(total_count, int)
+                or isinstance(total_count, bool)
+                or total_count < 0
+                or total_count != len(label_nodes)
             ):
+                raise SystemExit("GitHub GraphQL issue labels were incomplete")
+            milestone = issue.get("milestone")
+            if milestone is not None and not isinstance(milestone, dict):
                 raise SystemExit("GitHub GraphQL issue metadata had an invalid shape")
             issues.append(
                 {
@@ -3248,51 +3255,71 @@ Mitigations:
     saved_gh_api_json = gh_api_json
     saved_issue_payload = issue_payload
     saved_issue_checklist_tasks = issue_checklist_tasks
+    saved_pull_request_payload = pull_request_payload
     paginated_issue_api_calls: list[list[str]] = []
     first_page_issue = {
         "number": 1,
         "state": "OPEN",
-        "labels": {"nodes": [{"name": "complexity:high"}]},
+        "labels": {
+            "totalCount": 1,
+            "nodes": [{"name": "complexity:high"}],
+        },
         "milestone": {"title": "v1.0.0-00"},
+    }
+    four_label_issue = {
+        "number": 2,
+        "state": "OPEN",
+        "labels": {
+            "totalCount": 4,
+            "nodes": [
+                {"name": "complexity:high"},
+                {"name": "status:ready"},
+                {"name": "type:feature"},
+                {"name": "priority:normal"},
+            ],
+        },
+        "milestone": None,
     }
     later_page_issue = {
         "number": 517,
         "state": "CLOSED",
         "body": "## OpenSpec Tasks\n- [ ] Historical task.\n",
-        "labels": {"nodes": []},
+        "labels": {"totalCount": 0, "nodes": []},
         "milestone": None,
     }
+    normal_graphql_pages = [
+        {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [first_page_issue, four_label_issue],
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "cursor-1",
+                        },
+                    }
+                }
+            }
+        },
+        {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [later_page_issue],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": "cursor-2",
+                        },
+                    }
+                }
+            }
+        },
+    ]
+    graphql_pages = normal_graphql_pages
     try:
         globals()["gh_api_json"] = lambda args: (
             paginated_issue_api_calls.append(args)
-            or [
-                {
-                    "data": {
-                        "repository": {
-                            "issues": {
-                                "nodes": [first_page_issue],
-                                "pageInfo": {
-                                    "hasNextPage": True,
-                                    "endCursor": "cursor-1",
-                                },
-                            }
-                        }
-                    }
-                },
-                {
-                    "data": {
-                        "repository": {
-                            "issues": {
-                                "nodes": [later_page_issue],
-                                "pageInfo": {
-                                    "hasNextPage": False,
-                                    "endCursor": "cursor-2",
-                                },
-                            }
-                        }
-                    }
-                },
-            ]
+            or graphql_pages
         )
         def unexpected_issue_payload(*_args, **_kwargs):
             raise AssertionError("closed issue body was fetched")
@@ -3308,6 +3335,17 @@ Mitigations:
                 "state": "OPEN",
                 "labels": [{"name": "complexity:high"}],
                 "milestone": {"title": "v1.0.0-00"},
+            },
+            {
+                "number": 2,
+                "state": "OPEN",
+                "labels": [
+                    {"name": "complexity:high"},
+                    {"name": "status:ready"},
+                    {"name": "type:feature"},
+                    {"name": "priority:normal"},
+                ],
+                "milestone": None,
             },
             {
                 "number": 517,
@@ -3354,11 +3392,67 @@ Mitigations:
         assert "$endCursor" in ISSUE_STATE_QUERY
         assert "pullRequest" not in ISSUE_STATE_QUERY
         assert "pullRequests" not in ISSUE_STATE_QUERY
+        assert "totalCount" in ISSUE_STATE_QUERY
         assert "body" not in ISSUE_STATE_QUERY.lower()
+
+        incomplete_labels = [{"name": f"label-{index}"} for index in range(100)]
+        graphql_pages = [
+            {
+                "data": {
+                    "repository": {
+                        "issues": {
+                            "nodes": [
+                                {
+                                    "number": 517,
+                                    "state": "OPEN",
+                                    "labels": {
+                                        "totalCount": 101,
+                                        "nodes": incomplete_labels,
+                                    },
+                                    "milestone": None,
+                                }
+                            ],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": "cursor-incomplete",
+                            },
+                        }
+                    }
+                }
+            }
+        ]
+        try:
+            issue_state_payloads("owner/repo")
+        except SystemExit as error:
+            assert str(error) == "GitHub GraphQL issue labels were incomplete"
+        else:
+            raise AssertionError("incomplete GraphQL labels were accepted")
+        globals()["pull_request_payload"] = lambda _repo, _number: {
+            "title": "Work for #517",
+            "body": "",
+        }
+        global_failures = check_openspec_tasks(
+            "owner/repo", self_test_root, {"legacy-change": (Owner(517),)}
+        )
+        assert global_failures == [
+            "issue state GitHub GraphQL issue labels were incomplete"
+        ]
+        pull_request_failures = check_pull_request_tasks(
+            "owner/repo",
+            self_test_root,
+            {"legacy-change": (Owner(517),)},
+            7,
+            "accepted-base",
+        )
+        assert pull_request_failures == [
+            "pull request issue state GitHub GraphQL issue labels were incomplete"
+        ]
+        assert not task_parsing_calls
     finally:
         globals()["gh_api_json"] = saved_gh_api_json
         globals()["issue_payload"] = saved_issue_payload
         globals()["issue_checklist_tasks"] = saved_issue_checklist_tasks
+        globals()["pull_request_payload"] = saved_pull_request_payload
     assert mapped_issue_numbers({"one": (Owner(1),), "two": (Owner(2),)}) == {
         1,
         2,
