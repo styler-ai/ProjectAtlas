@@ -178,6 +178,67 @@ const WINDOWS_POWERSHELL_EXECUTABLE: &str = "powershell.exe";
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(windows)]
+const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+// The failure path gives the owner this bounded window to observe the stop marker and exit.
+const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+// Retained identity capture runs after owner observation and before exact child stop.
+const CODEX_OWNER_IDENTITY_CAPTURE_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+// The exact child-stop helper allows its owned process up to this wait budget to exit.
+const CODEX_OWNER_CHILD_STOP_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+// Keep the complete cleanup envelope truthful when one bounded phase is delayed by suite load.
+const CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+// Allow normal scheduling variance without allowing a late readiness retry to hide.
+const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+const CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(windows)]
+const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+// Delay the polling caller, not the child operation, so a completed helper is observed late.
+const CODEX_OWNER_LATE_COMPLETION_TEST_DELAY: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+// Delay the outer owner observer past its deadline after the fixture has received stop.
+const CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(6);
+#[cfg(windows)]
+// Delay the readiness poll past the deadline after the fixture has published, without
+// changing process-global state, proving the admission guard through the real helper.
+const CODEX_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(31);
+#[cfg(windows)]
+const CODEX_OWNER_COMPOSED_STOP_DELAY: Duration = Duration::from_secs(3);
+#[cfg(windows)]
+const CODEX_OWNER_STOP_HELPER_TEST_DELAY: Duration = Duration::from_secs(6);
+#[cfg(windows)]
+// Early owner exit must be observed before readiness expires; this bound allows only
+// the same scheduler margin as the bounded publication contract.
+fn codex_owner_early_exit_max_elapsed() -> Duration {
+    CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+}
+#[cfg(windows)]
+const CODEX_OWNER_DELAYED_PUBLICATION: Duration = Duration::from_secs(6);
+#[cfg(windows)]
+const CODEX_OWNER_PUBLICATION_DELAY_ENV: &str =
+    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_DELAY_MS";
+#[cfg(windows)]
+const CODEX_OWNER_PUBLICATION_MODE_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE";
+#[cfg(windows)]
+const CODEX_OWNER_RETAINED_IDENTITY_DELAY_ENV: &str =
+    "PROJECTATLAS_TEST_CODEX_OWNER_RETAINED_IDENTITY_DELAY_MS";
+#[cfg(windows)]
+const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
+    "PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS";
+#[cfg(windows)]
+const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS";
+#[cfg(windows)]
+const OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME: &str = "obsolete-projectatlas.cs";
+#[cfg(windows)]
+const OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME: &str = "obsolete-projectatlas.exe";
+
+#[cfg(windows)]
 const CODEX_MCP_OWNER_FIXTURE_SOURCE: &str = r#"using System;
 using System.Diagnostics;
 using System.IO;
@@ -212,16 +273,68 @@ public static class Program
             {
                 string identityPath = arguments[0];
                 string temporaryIdentityPath = identityPath + ".tmp";
-                File.WriteAllLines(temporaryIdentityPath, new[]
+                string retainedIdentityPath = identityPath + ".owner";
+                string retainedIdentityTemporaryPath = retainedIdentityPath + ".tmp";
+                // Retain exact fixture ownership even when normal publication is withheld.
+                string retainedIdentityDelay = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_RETAINED_IDENTITY_DELAY_MS"
+                );
+                int retainedIdentityDelayMilliseconds;
+                if (!String.IsNullOrWhiteSpace(retainedIdentityDelay)
+                    && Int32.TryParse(retainedIdentityDelay, out retainedIdentityDelayMilliseconds)
+                    && retainedIdentityDelayMilliseconds > 0)
+                {
+                    Thread.Sleep(retainedIdentityDelayMilliseconds);
+                }
+                string creationTime = child.StartTime.ToUniversalTime()
+                    .ToFileTimeUtc()
+                    .ToString();
+                File.WriteAllLines(retainedIdentityTemporaryPath, new[]
                 {
                     child.Id.ToString(),
-                    child.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(),
+                    creationTime,
                     childPath
                 });
-                File.Move(temporaryIdentityPath, identityPath);
+                File.Move(retainedIdentityTemporaryPath, retainedIdentityPath);
+                string publicationMode = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE"
+                );
+                if (publicationMode == "early-exit")
+                    return 3;
+                string publicationDelay = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_DELAY_MS"
+                );
+                int delayMilliseconds;
+                if (!String.IsNullOrWhiteSpace(publicationDelay)
+                    && Int32.TryParse(publicationDelay, out delayMilliseconds)
+                    && delayMilliseconds > 0)
+                {
+                    Thread.Sleep(delayMilliseconds);
+                }
+                if (publicationMode != "timeout"
+                    && publicationMode != "timeout-ignore-stop")
+                {
+                    if (publicationMode == "malformed")
+                    {
+                        File.WriteAllText(temporaryIdentityPath, "not-an-identity");
+                    }
+                    else
+                    {
+                        if (publicationMode == "mismatched")
+                            creationTime = (Int64.Parse(creationTime) + 1).ToString();
+                        File.WriteAllLines(temporaryIdentityPath, new[]
+                        {
+                            child.Id.ToString(),
+                            creationTime,
+                            childPath
+                        });
+                    }
+                    File.Move(temporaryIdentityPath, identityPath);
+                }
                 while (!child.WaitForExit(25))
                 {
-                    if (File.Exists(identityPath + ".stop"))
+                    if (publicationMode != "timeout-ignore-stop"
+                        && File.Exists(identityPath + ".stop"))
                     {
                         child.Kill();
                         child.WaitForExit();
@@ -229,6 +342,7 @@ public static class Program
                     }
                 }
                 Thread.Sleep(Timeout.Infinite);
+                return 0;
             }
             finally
             {
@@ -239,7 +353,6 @@ public static class Program
                 }
             }
         }
-        return 0;
     }
 }
 "#;
@@ -11258,7 +11371,9 @@ fn windows_installer_obsolete_mcp_handoff_retires_only_exact_child_and_reports_r
             .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
     )?;
 
-    let fixture_source = temp.path().join("obsolete-projectatlas.cs");
+    let fixture_source = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME);
     fs::write(
         &fixture_source,
         r#"using System;
@@ -11502,17 +11617,32 @@ public static class Program
             .output()
     };
 
+    let readiness_started = Instant::now();
     let (mut codex_owner, obsolete_mcp_pid) = spawn_codex_owned_obsolete_mcp(
         &codex_owner_fixture,
         &stable_runtime,
         &db,
         Some(&atlas_dir.join("config.toml")),
         &child_pid_file,
+        Some(CODEX_OWNER_DELAYED_PUBLICATION),
+        None,
     )?;
+    let readiness_elapsed = readiness_started.elapsed();
+    let delayed_publication_max_elapsed = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let delayed_publication_crossed_former_budget = readiness_elapsed > Duration::from_secs(5)
+        && readiness_elapsed < delayed_publication_max_elapsed;
     let mut second_codex_owner = None;
     let mut second_obsolete_mcp_pid = None;
     let mut non_codex_child = None;
     let test_result = (|| -> Result<(), Box<dyn Error>> {
+        if !delayed_publication_crossed_former_budget {
+            return Err(io::Error::other(format!(
+                "delayed Codex owner publication did not cross the former five-second boundary within the bounded readiness/capture envelope: elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} identity_capture={CODEX_OWNER_IDENTITY_CAPTURE_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} max_elapsed={delayed_publication_max_elapsed:?}"
+            ))
+            .into());
+        }
         let unsigned_output = run_production_installer()?;
         let unsigned_text = format!(
             "{}\n{}",
@@ -11661,6 +11791,8 @@ public static class Program
             &db,
             Some(&atlas_dir.join("config.toml")),
             &temp.path().join("retry-obsolete-mcp.pid"),
+            None,
+            None,
         )?;
         second_codex_owner = Some(owner);
         second_obsolete_mcp_pid = Some(child_pid.clone());
@@ -12219,6 +12351,8 @@ public static class Program
         &db,
         Some(&atlas_dir.join("config.toml")),
         &first_child_pid_file,
+        None,
+        None,
     )?;
     let mut second_owner = None;
     let mut second_obsolete_mcp_pid = None;
@@ -12486,6 +12620,8 @@ public static class Program
             &db,
             Some(&atlas_dir.join("config.toml")),
             &temp.path().join("second-obsolete-mcp.pid"),
+            None,
+            None,
         )?;
         second_owner = Some(owner);
         second_obsolete_mcp_pid = Some(process_id);
@@ -35851,6 +35987,49 @@ fn compile_codex_mcp_owner_fixture(output: &Path) -> Result<(), Box<dyn Error>> 
 }
 
 #[cfg(windows)]
+fn compile_obsolete_projectatlas_fixture(output: &Path) -> Result<(), Box<dyn Error>> {
+    let source = output.with_extension("cs");
+    fs::write(
+        &source,
+        r#"using System;
+using System.Threading;
+
+public static class Program
+{
+    public static int Main(string[] arguments)
+    {
+        if (Array.IndexOf(arguments, "mcp") >= 0)
+        {
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
+        return 2;
+    }
+}
+"#,
+    )?;
+    let compile_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(
+            "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+        )
+        .env("PROJECTATLAS_FIXTURE_SOURCE", &source)
+        .env("PROJECTATLAS_FIXTURE_RUNTIME", output)
+        .output()?;
+    if !compile_output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to compile obsolete ProjectAtlas fixture runtime:\n{}",
+            String::from_utf8_lossy(&compile_output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn write_installer_with_test_codex_identity_seam(
     installer: &Path,
     output: &Path,
@@ -35974,49 +36153,243 @@ fn windows_test_process_id_allowlist(process_ids: &[u32]) -> io::Result<String> 
 }
 
 #[cfg(windows)]
+/// Derive the fixture-private identity record used when normal publication is absent.
+fn codex_owner_retained_identity_path(child_identity_file: &Path) -> PathBuf {
+    let mut retained_identity = child_identity_file.as_os_str().to_os_string();
+    retained_identity.push(".owner");
+    PathBuf::from(retained_identity)
+}
+
+#[cfg(windows)]
+fn codex_owner_cleanup_deadline(started: Instant) -> Instant {
+    started
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+}
+
+#[cfg(windows)]
+fn codex_owner_identity_capture_deadline(cleanup_deadline: Instant) -> Instant {
+    let now = Instant::now();
+    let capture_budget = cleanup_deadline
+        .saturating_duration_since(now)
+        .saturating_sub(CODEX_OWNER_CHILD_STOP_BUDGET)
+        .min(CODEX_OWNER_IDENTITY_CAPTURE_BUDGET);
+    now + capture_budget
+}
+
+#[cfg(windows)]
+fn cleanup_codex_owner_processes_after_spawn_failure(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    mut failures: Vec<String>,
+    cleanup_deadline: Instant,
+    identity_capture_delay: Option<Duration>,
+    child_stop_delay: Option<Duration>,
+) -> Result<(), Box<dyn Error>> {
+    let retained_identity_file = codex_owner_retained_identity_path(child_identity_file);
+    let capture_deadline = codex_owner_identity_capture_deadline(cleanup_deadline);
+    let mut capture_failures = Vec::new();
+    let child_identity = match read_codex_owner_child_identity_with_test_delay(
+        child_identity_file,
+        stable_runtime,
+        capture_deadline.saturating_duration_since(Instant::now()),
+        identity_capture_delay,
+    ) {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            capture_failures.push(format!("normal child identity capture failed: {error}"));
+            match read_codex_owner_child_identity_with_test_delay(
+                &retained_identity_file,
+                stable_runtime,
+                capture_deadline.saturating_duration_since(Instant::now()),
+                identity_capture_delay,
+            ) {
+                Ok(identity) => Some(identity),
+                Err(error) => {
+                    capture_failures
+                        .push(format!("retained child identity capture failed: {error}"));
+                    None
+                }
+            }
+        }
+    };
+    let child_cleanup_result = match child_identity {
+        Some(identity) => {
+            stop_windows_fixture_process_until(&identity, cleanup_deadline, child_stop_delay, None)
+        }
+        None => match read_codex_owner_identity_record(&retained_identity_file) {
+            Ok(identity) => stop_windows_fixture_process_until(
+                &identity,
+                cleanup_deadline,
+                child_stop_delay,
+                None,
+            ),
+            Err(error) => Err(io::Error::other(format!(
+                "no retained child identity was available after capture failure ({}): {error}",
+                capture_failures.join("; ")
+            ))
+            .into()),
+        },
+    };
+    if let Err(error) = child_cleanup_result {
+        failures.push(format!("could not retire its owned child safely: {error}"));
+    }
+    let kill_result = parent.kill();
+    let wait_result = parent.wait();
+    if let Err(error) = kill_result
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        failures.push(format!(
+            "could not terminate the held owner process: {error}"
+        ));
+    }
+    if let Err(error) = wait_result {
+        failures.push(format!("could not reap the held owner process: {error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "Codex owner fixture cleanup failed: {}",
+            failures.join("; ")
+        ))
+        .into())
+    }
+}
+
+#[cfg(windows)]
+fn codex_owner_observation_failure(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    error: impl std::fmt::Display,
+    cleanup_deadline: Instant,
+) -> Result<(), Box<dyn Error>> {
+    match cleanup_codex_owner_processes_after_spawn_failure(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        Vec::new(),
+        cleanup_deadline,
+        None,
+        None,
+    ) {
+        Ok(()) => Ok(()),
+        Err(cleanup_error) => Err(io::Error::other(format!(
+            "failed to preserve child-first cleanup after owner observation error ({error}): {cleanup_error}"
+        ))
+        .into()),
+    }
+}
+
+#[cfg(windows)]
 fn stop_codex_owner_after_spawn_failure(
     parent: &mut Child,
     child_identity_file: &Path,
     stable_runtime: &Path,
 ) -> Result<(), Box<dyn Error>> {
+    stop_codex_owner_after_spawn_failure_with_test_delays(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        None,
+        None,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn stop_codex_owner_after_spawn_failure_with_test_delays(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    identity_capture_delay: Option<Duration>,
+    child_stop_delay: Option<Duration>,
+    owner_observation_delay: Option<Duration>,
+) -> Result<(), Box<dyn Error>> {
     let mut stop_file = child_identity_file.as_os_str().to_os_string();
     stop_file.push(".stop");
     let stop_result = fs::write(PathBuf::from(stop_file), b"stop");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let cleanup_started = Instant::now();
+    let cleanup_deadline = codex_owner_cleanup_deadline(cleanup_started);
+    let observation_deadline = cleanup_started + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
+    let mut observation_error = None;
+    let mut failures = Vec::new();
     if stop_result.is_ok() {
+        if let Some(delay) = owner_observation_delay {
+            thread::sleep(delay);
+        }
         loop {
             match parent.try_wait() {
-                Ok(Some(_)) => return Ok(()),
+                Ok(Some(status)) => {
+                    if Instant::now() >= observation_deadline {
+                        failures.push(format!(
+                            "owner fixture exited after observation deadline: {status} (owner_observation_elapsed_ms={})",
+                            cleanup_started.elapsed().as_millis()
+                        ));
+                        break;
+                    }
+                    return Ok(());
+                }
                 Ok(None) => {}
                 Err(error) => {
-                    drop(parent.kill());
-                    drop(parent.wait());
-                    return Err(io::Error::other(format!(
-                        "failed to observe Codex owner fixture cleanup: {error}"
-                    ))
-                    .into());
+                    observation_error = Some(error);
+                    break;
                 }
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= observation_deadline {
                 break;
             }
-            thread::sleep(Duration::from_millis(25));
+            let remaining = observation_deadline.saturating_duration_since(Instant::now());
+            thread::sleep(remaining.min(Duration::from_millis(25)));
         }
     }
 
-    let child_cleanup_result = read_codex_owner_child_identity(child_identity_file, stable_runtime)
-        .and_then(|identity| stop_windows_fixture_process(&identity));
-    let kill_result = parent.kill();
-    let wait_result = parent.wait();
-    let mut failures = Vec::new();
+    if let Some(error) = observation_error {
+        codex_owner_observation_failure(
+            parent,
+            child_identity_file,
+            stable_runtime,
+            error,
+            cleanup_deadline,
+        )?;
+        return Ok(());
+    }
+
     if let Err(error) = stop_result {
         failures.push(format!("could not signal the owner fixture: {error}"));
     } else {
         failures.push("owner fixture did not stop within five seconds".to_string());
     }
+    cleanup_codex_owner_processes_after_spawn_failure(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        failures,
+        cleanup_deadline,
+        identity_capture_delay,
+        child_stop_delay,
+    )
+}
+
+#[cfg(windows)]
+/// Retire the exact published child, then kill and reap its owned parent.
+fn cleanup_codex_owner_processes(
+    mut parent: Child,
+    child_identity: &WindowsProcessIdentity,
+) -> Result<(), Box<dyn Error>> {
+    let cleanup_deadline = codex_owner_cleanup_deadline(Instant::now());
+    let child_cleanup_result =
+        stop_windows_fixture_process_until(child_identity, cleanup_deadline, None, None);
+    let kill_result = parent.kill();
+    let wait_result = parent.wait();
+    let mut failures = Vec::new();
     if let Err(error) = child_cleanup_result {
         failures.push(format!(
-            "could not retire its published child safely: {error}"
+            "could not retire the published child safely: {error}"
         ));
     }
     if let Err(error) = kill_result
@@ -36029,17 +36402,77 @@ fn stop_codex_owner_after_spawn_failure(
     if let Err(error) = wait_result {
         failures.push(format!("could not reap the held owner process: {error}"));
     }
-    Err(io::Error::other(format!(
-        "Codex owner fixture cleanup failed: {}",
-        failures.join("; ")
-    ))
-    .into())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(failures.join("; ")).into())
+    }
 }
 
 #[cfg(windows)]
-fn read_codex_owner_child_identity(
+/// Preserve a negative assertion while cleaning up an unexpectedly accepted owner.
+fn codex_owner_unexpected_acceptance_error(
+    mode: &str,
+    parent: Child,
+    child_identity: &WindowsProcessIdentity,
+) -> Box<dyn Error> {
+    let cleanup_result = cleanup_codex_owner_processes(parent, child_identity);
+    let mut message = format!("{mode} owner fixture publication was accepted");
+    if let Err(error) = cleanup_result {
+        message.push_str("; fixture cleanup also failed: ");
+        message.push_str(&error.to_string());
+    }
+    io::Error::other(message).into()
+}
+
+#[cfg(windows)]
+fn read_codex_owner_child_identity_with_test_delay(
     child_identity_file: &Path,
     stable_runtime: &Path,
+    capture_timeout: Duration,
+    test_delay: Option<Duration>,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    let published = read_codex_owner_identity_record(child_identity_file)?;
+    let captured = capture_windows_process_identity_with_timeout(
+        published.process_id,
+        capture_timeout,
+        test_delay,
+        None,
+    )?;
+    if captured.process_id != published.process_id
+        || captured.creation_file_time_utc != published.creation_file_time_utc
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child identity differed: published_pid={} captured_pid={} published_creation={} captured_creation={}",
+            published.process_id,
+            captured.process_id,
+            published.creation_file_time_utc,
+            captured.creation_file_time_utc
+        ))
+        .into());
+    }
+    let owner_canonical =
+        normalize_native_path_display(fs::canonicalize(&published.executable_path)?);
+    let captured_canonical =
+        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
+    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
+    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
+        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
+            published.executable_path.display(),
+            captured.executable_path.display(),
+            stable_runtime.display()
+        ))
+        .into());
+    }
+    Ok(captured)
+}
+
+#[cfg(windows)]
+fn read_codex_owner_identity_record(
+    child_identity_file: &Path,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
     let identity_text = fs::read_to_string(child_identity_file)?;
     let mut identity_lines = identity_text.lines();
@@ -36057,46 +36490,34 @@ fn read_codex_owner_child_identity(
             .filter(|path| !path.is_empty())
             .ok_or_else(|| io::Error::other("owner fixture omitted child executable path"))?,
     );
-    let captured = capture_windows_process_identity(process_id)?;
-    if captured.process_id != process_id
-        || captured.creation_file_time_utc != owner_creation_file_time_utc
-    {
-        return Err(io::Error::other(format!(
-            "owner-published child identity differed: published_pid={process_id} captured_pid={} published_creation={owner_creation_file_time_utc} captured_creation={}",
-            captured.process_id,
-            captured.creation_file_time_utc
-        ))
-        .into());
-    }
-    let owner_canonical = normalize_native_path_display(fs::canonicalize(&owner_executable_path)?);
-    let captured_canonical =
-        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
-    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
-    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
-        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
-    {
-        return Err(io::Error::other(format!(
-            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
-            owner_executable_path.display(),
-            captured.executable_path.display(),
-            stable_runtime.display()
-        ))
-        .into());
-    }
-    Ok(captured)
+    Ok(WindowsProcessIdentity {
+        process_id,
+        creation_file_time_utc: owner_creation_file_time_utc,
+        executable_path: owner_executable_path,
+    })
 }
 
 #[cfg(windows)]
 fn codex_owner_spawn_error(
     parent: &mut Child,
+    codex_fixture: &Path,
     child_identity_file: &Path,
     stable_runtime: &Path,
     error: impl std::fmt::Display,
 ) -> Box<dyn Error> {
     match stop_codex_owner_after_spawn_failure(parent, child_identity_file, stable_runtime) {
-        Ok(()) => io::Error::other(error.to_string()).into(),
+        Ok(()) => io::Error::other(format!(
+            "{error}; owner={}; identity_file={}; expected_runtime={}",
+            codex_fixture.display(),
+            child_identity_file.display(),
+            stable_runtime.display()
+        ))
+        .into(),
         Err(cleanup_error) => io::Error::other(format!(
-            "{error}; fixture cleanup also failed: {cleanup_error}"
+            "{error}; owner={}; identity_file={}; expected_runtime={}; fixture cleanup also failed: {cleanup_error}",
+            codex_fixture.display(),
+            child_identity_file.display(),
+            stable_runtime.display()
         ))
         .into(),
     }
@@ -36109,6 +36530,33 @@ fn spawn_codex_owned_obsolete_mcp(
     db: &Path,
     config: Option<&Path>,
     child_pid_file: &Path,
+    publication_delay: Option<Duration>,
+    publication_mode: Option<&str>,
+) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
+    spawn_codex_owned_obsolete_mcp_with_test_delays(
+        codex_fixture,
+        stable_runtime,
+        db,
+        config,
+        child_pid_file,
+        publication_delay,
+        publication_mode,
+        None,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn spawn_codex_owned_obsolete_mcp_with_test_delays(
+    codex_fixture: &Path,
+    stable_runtime: &Path,
+    db: &Path,
+    config: Option<&Path>,
+    child_pid_file: &Path,
+    publication_delay: Option<Duration>,
+    publication_mode: Option<&str>,
+    identity_capture_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
 ) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
     let mut command = StdCommand::new(codex_fixture);
     command
@@ -36121,17 +36569,33 @@ fn spawn_codex_owned_obsolete_mcp(
     if let Some(config) = config {
         command.arg(config).arg("--config").arg("model=\"o3\"");
     }
+    if let Some(delay) = publication_delay {
+        command.env(
+            CODEX_OWNER_PUBLICATION_DELAY_ENV,
+            delay.as_millis().to_string(),
+        );
+    }
+    if let Some(mode) = publication_mode {
+        command.env(CODEX_OWNER_PUBLICATION_MODE_ENV, mode);
+    }
     let mut parent = command.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let started = Instant::now();
+    let deadline = started + CODEX_OWNER_READINESS_TIMEOUT;
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
     loop {
         match parent.try_wait() {
             Ok(Some(status)) => {
+                let observation_elapsed = started.elapsed();
                 return Err(codex_owner_spawn_error(
                     &mut parent,
+                    codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!(
-                        "Codex MCP owner fixture exited before publishing its child PID: {status}"
+                        "Codex MCP owner fixture exited before publishing its child PID: {status} (owner_observation_elapsed_ms={})",
+                        observation_elapsed.as_millis()
                     ),
                 ));
             }
@@ -36139,6 +36603,7 @@ fn spawn_codex_owned_obsolete_mcp(
             Err(error) => {
                 return Err(codex_owner_spawn_error(
                     &mut parent,
+                    codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!("failed to inspect Codex MCP owner fixture: {error}"),
@@ -36146,28 +36611,451 @@ fn spawn_codex_owned_obsolete_mcp(
             }
         }
         if child_pid_file.is_file() {
-            match read_codex_owner_child_identity(child_pid_file, stable_runtime) {
+            let observed_at = Instant::now();
+            if observed_at >= deadline {
+                let elapsed = started.elapsed();
+                return Err(codex_owner_spawn_error(
+                    &mut parent,
+                    codex_fixture,
+                    child_pid_file,
+                    stable_runtime,
+                    format!(
+                        "Codex MCP owner fixture published its child PID after the readiness deadline (readiness_elapsed_ms={})",
+                        elapsed.as_millis()
+                    ),
+                ));
+            }
+            // Publication must be observed inside readiness. Once observed, give exact
+            // identity validation its own bounded allowance.
+            match read_codex_owner_child_identity_with_test_delay(
+                child_pid_file,
+                stable_runtime,
+                CODEX_OWNER_IDENTITY_CAPTURE_BUDGET,
+                identity_capture_delay,
+            ) {
                 Ok(captured) => return Ok((parent, captured)),
                 Err(error) => {
                     return Err(codex_owner_spawn_error(
                         &mut parent,
+                        codex_fixture,
                         child_pid_file,
                         stable_runtime,
-                        error,
+                        format!("failed to validate published child identity: {error}"),
                     ));
                 }
             }
         }
         if Instant::now() >= deadline {
+            let elapsed = started.elapsed();
             return Err(codex_owner_spawn_error(
                 &mut parent,
+                codex_fixture,
                 child_pid_file,
                 stable_runtime,
-                "Codex MCP owner fixture did not publish its child PID",
+                format!(
+                    "Codex MCP owner fixture did not publish its child PID within {CODEX_OWNER_READINESS_TIMEOUT:?} (elapsed={elapsed:?} readiness_elapsed_ms={})",
+                    elapsed.as_millis()
+                ),
             ));
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let db = atlas_dir.join("projectatlas.db");
+    let runtime = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_obsolete_projectatlas_fixture(&runtime)?;
+    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_codex_mcp_owner_fixture(&codex_fixture)?;
+
+    // Exercise the production readiness helper when publication is observed well before the
+    // deadline but bounded identity validation finishes just after it.  The dedicated
+    // capture allowance must accept the valid identity; using the old remaining-time
+    // allowance rejects this same causal path.  Keep fixture startup at the existing six-second
+    // delay, then use the production helper's observation seam to wake the polling loop near the
+    // deadline so startup is not the constrained portion of this regression.
+    let deadline_validation_identity_file = temp.path().join("deadline-validation.pid");
+    let deadline_validation_publication_delay = CODEX_OWNER_DELAYED_PUBLICATION;
+    let deadline_validation_observation_delay =
+        CODEX_OWNER_READINESS_TIMEOUT.saturating_sub(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE);
+    let deadline_validation_started = Instant::now();
+    let (deadline_validation_parent, deadline_validation_identity) =
+        spawn_codex_owned_obsolete_mcp_with_test_delays(
+            &codex_fixture,
+            &runtime,
+            &db,
+            None,
+            &deadline_validation_identity_file,
+            Some(deadline_validation_publication_delay),
+            None,
+            Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+            Some(deadline_validation_observation_delay),
+        )?;
+    let deadline_validation_elapsed = deadline_validation_started.elapsed();
+    if deadline_validation_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || deadline_validation_elapsed
+            > CODEX_OWNER_READINESS_TIMEOUT
+                + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+    {
+        let cleanup_result = cleanup_codex_owner_processes(
+            deadline_validation_parent,
+            &deadline_validation_identity,
+        );
+        return Err(io::Error::other(format!(
+            "deadline-observed publication did not use its bounded identity allowance: elapsed={deadline_validation_elapsed:?} publication_delay={deadline_validation_publication_delay:?} observation_delay={deadline_validation_observation_delay:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} identity_capture_budget={CODEX_OWNER_IDENTITY_CAPTURE_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup={cleanup_result:?}"
+        ))
+        .into());
+    }
+    let deadline_validation_cleanup =
+        cleanup_codex_owner_processes(deadline_validation_parent, &deadline_validation_identity);
+    if deadline_validation_cleanup.is_err()
+        || windows_process_is_alive(&deadline_validation_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "deadline-observed publication did not clean up its accepted child: {deadline_validation_cleanup:?}"
+        ))
+        .into());
+    }
+
+    for (index, (mode, expected)) in [
+        ("early-exit", "exited before publishing"),
+        ("malformed", "failed to validate published child identity"),
+        ("mismatched", "owner-published child identity differed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let identity_file = temp.path().join(format!("{mode}-{index}.pid"));
+        let started = Instant::now();
+        let result = spawn_codex_owned_obsolete_mcp(
+            &codex_fixture,
+            &runtime,
+            &db,
+            Some(&atlas_dir.join("config.toml")),
+            &identity_file,
+            None,
+            Some(mode),
+        );
+        let error = match result {
+            Ok((parent, child_identity)) => {
+                return Err(codex_owner_unexpected_acceptance_error(
+                    mode,
+                    parent,
+                    &child_identity,
+                ));
+            }
+            Err(error) => error,
+        };
+        let elapsed = started.elapsed();
+        let text = error.to_string();
+        let early_exit_observation_elapsed = if mode == "early-exit" {
+            Some(
+                text.split("owner_observation_elapsed_ms=")
+                    .nth(1)
+                    .and_then(|value| value.split(')').next())
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "early-exit owner fixture omitted its observation elapsed diagnostic:\n{text}"
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        if !text.contains(expected)
+            || !text.contains(&format!("owner={}", codex_fixture.display()))
+            || !text.contains(&format!("identity_file={}", identity_file.display()))
+            || !text.contains(&format!("expected_runtime={}", runtime.display()))
+            || (mode == "early-exit" && elapsed > codex_owner_early_exit_max_elapsed())
+            || early_exit_observation_elapsed
+                .as_ref()
+                .is_some_and(|observed| *observed >= CODEX_OWNER_READINESS_TIMEOUT)
+            || text.contains("fixture cleanup also failed")
+        {
+            return Err(io::Error::other(format!(
+                "{mode} owner fixture failure was not bounded and diagnostic: elapsed={elapsed:?} observed={early_exit_observation_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} max_early_exit={:?}\n{text}",
+                codex_owner_early_exit_max_elapsed()
+            ))
+            .into());
+        }
+    }
+
+    // Exercise the same branch a negative fixture would take if validation regressed.
+    let accepted_identity_file = temp.path().join("unexpected-acceptance.pid");
+    let accepted = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &accepted_identity_file,
+        None,
+        None,
+    )?;
+    let accepted_identity = accepted.1.clone();
+    let unexpected_error =
+        codex_owner_unexpected_acceptance_error("mismatched", accepted.0, &accepted_identity);
+    let unexpected_error_text = unexpected_error.to_string();
+    if windows_process_is_alive(&accepted_identity)?
+        || !unexpected_error_text.contains("mismatched owner fixture publication was accepted")
+        || unexpected_error_text.contains("fixture cleanup also failed")
+    {
+        return Err(io::Error::other(format!(
+            "unexpectedly accepted negative owner fixture did not clean up its owned processes: {unexpected_error}"
+        ))
+        .into());
+    }
+
+    let observation_identity_file = temp.path().join("observation-failure.pid");
+    let (mut observation_parent, observation_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &observation_identity_file,
+        None,
+        None,
+    )?;
+    // Inject only the observation decision while exercising the same child-first cleanup path;
+    // the production caller retains the actual observation error in its spawn diagnostic.
+    let observation_cleanup_deadline =
+        Instant::now() + CODEX_OWNER_FAILURE_CLEANUP_BUDGET + CODEX_OWNER_CHILD_STOP_BUDGET;
+    let observation_cleanup_result = codex_owner_observation_failure(
+        &mut observation_parent,
+        &observation_identity_file,
+        &runtime,
+        "synthetic parent observation failure",
+        observation_cleanup_deadline,
+    );
+    if observation_parent.try_wait()?.is_none()
+        || windows_process_is_alive(&observation_identity)?
+        || observation_cleanup_result.is_err()
+    {
+        return Err(io::Error::other(format!(
+            "parent observation failure did not preserve exact child-first cleanup: {observation_cleanup_result:?}"
+        ))
+        .into());
+    }
+
+    // A promptly stopped owner can be observed after the five-second owner-observation
+    // deadline when the polling caller is descheduled.  The late completion is a failure
+    // classification, but it must still use the retained-identity child-first cleanup path.
+    let late_observation_identity_file = temp.path().join("late-owner-observation.pid");
+    let (mut late_observation_parent, late_observation_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &late_observation_identity_file,
+        None,
+        None,
+    )?;
+    // Remove normal publication so cleanup must use the fixture-retained identity record.
+    fs::remove_file(&late_observation_identity_file)?;
+    let late_observation_result = stop_codex_owner_after_spawn_failure_with_test_delays(
+        &mut late_observation_parent,
+        &late_observation_identity_file,
+        &runtime,
+        None,
+        None,
+        Some(CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY),
+    );
+    let late_observation_text = late_observation_result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let late_observation_elapsed = late_observation_text
+        .split("owner_observation_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "late owner observation omitted its elapsed diagnostic: {late_observation_text}"
+            ))
+        })?;
+    if late_observation_result.is_ok()
+        || !late_observation_text.contains("owner fixture exited after observation deadline")
+        || late_observation_elapsed < CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY
+        || late_observation_elapsed
+            > CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY
+                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+        || late_observation_parent.try_wait()?.is_none()
+        || windows_process_is_alive(&late_observation_identity)?
+        || late_observation_text.contains("could not retire its owned child safely")
+    {
+        return Err(io::Error::other(format!(
+            "late owner observation did not fail closed through exact child-first cleanup: result={late_observation_result:?} child_alive={}\n{late_observation_text}",
+            windows_process_is_alive(&late_observation_identity)?
+        ))
+        .into());
+    }
+
+    // Exercise the complete bounded cleanup sequence: owner observation, retained identity
+    // capture, and exact child stop each consume real scheduler-visible time.
+    let composed_identity_file = temp.path().join("composed-timeout.pid");
+    let mut composed_command = StdCommand::new(&codex_fixture);
+    composed_command
+        .arg(&composed_identity_file)
+        .arg(&runtime)
+        .arg(&db)
+        .env(CODEX_OWNER_PUBLICATION_MODE_ENV, "timeout-ignore-stop")
+        .env(
+            CODEX_OWNER_RETAINED_IDENTITY_DELAY_ENV,
+            CODEX_OWNER_DELAYED_PUBLICATION.as_millis().to_string(),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut composed_parent = composed_command.spawn()?;
+    let composed_retained_identity_file =
+        codex_owner_retained_identity_path(&composed_identity_file);
+    let retained_started = Instant::now();
+    let retained_deadline = retained_started + CODEX_OWNER_READINESS_TIMEOUT;
+    while !composed_retained_identity_file.is_file() && Instant::now() < retained_deadline {
+        if let Some(status) = composed_parent.try_wait()? {
+            return Err(io::Error::other(format!(
+                "composed timeout owner exited before retaining child identity: {status}"
+            ))
+            .into());
+        }
+        let remaining = retained_deadline.saturating_duration_since(Instant::now());
+        thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+    if !composed_retained_identity_file.is_file() {
+        let cleanup_result = stop_codex_owner_after_spawn_failure(
+            &mut composed_parent,
+            &composed_identity_file,
+            &runtime,
+        );
+        return Err(io::Error::other(
+            format!(
+                "composed timeout owner did not publish retained child identity within {CODEX_OWNER_READINESS_TIMEOUT:?}; cleanup={cleanup_result:?}"
+            ),
+        )
+        .into());
+    }
+    let retained_elapsed = retained_started.elapsed();
+    if retained_elapsed < CODEX_OWNER_DELAYED_PUBLICATION
+        || retained_elapsed
+            > CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+    {
+        let cleanup_result = stop_codex_owner_after_spawn_failure(
+            &mut composed_parent,
+            &composed_identity_file,
+            &runtime,
+        );
+        return Err(io::Error::other(format!(
+            "composed timeout owner retained identity did not exercise delayed startup: elapsed={retained_elapsed:?} delay={CODEX_OWNER_DELAYED_PUBLICATION:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup={cleanup_result:?}"
+        ))
+        .into());
+    }
+    let composed_result = stop_codex_owner_after_spawn_failure_with_test_delays(
+        &mut composed_parent,
+        &composed_identity_file,
+        &runtime,
+        Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+        Some(CODEX_OWNER_COMPOSED_STOP_DELAY),
+        None,
+    );
+    let composed_text = composed_result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let composed_identity = read_codex_owner_identity_record(&composed_retained_identity_file)?;
+    if composed_result.is_ok()
+        || composed_text.contains("could not retire its owned child safely")
+        || composed_parent.try_wait()?.is_none()
+        || windows_process_is_alive(&composed_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "composed owner cleanup did not reserve bounded capture and exact child-stop time: {composed_text}"
+        ))
+        .into());
+    }
+
+    let identity_file = temp.path().join("timeout.pid");
+    let timeout_started = Instant::now();
+    let result = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &identity_file,
+        None,
+        Some("timeout-ignore-stop"),
+    );
+    let error = match result {
+        Ok((parent, child_identity)) => {
+            return Err(codex_owner_unexpected_acceptance_error(
+                "timeout",
+                parent,
+                &child_identity,
+            ));
+        }
+        Err(error) => error,
+    };
+    let timeout_elapsed = timeout_started.elapsed();
+    let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let text = error.to_string();
+    let timeout_readiness_elapsed = text
+        .split("readiness_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "true owner fixture timeout omitted its pre-cleanup readiness elapsed diagnostic:\n{text}"
+            ))
+        })?;
+    let timeout_readiness_upper_bound =
+        CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let timeout_child_identity =
+        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
+    if timeout_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || timeout_elapsed > timeout_upper_bound
+        || timeout_readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || timeout_readiness_elapsed > timeout_readiness_upper_bound
+        || !text.contains("did not publish its child PID within 30s")
+        || !text.contains("elapsed=")
+        || !text.contains(&format!("owner={}", codex_fixture.display()))
+        || !text.contains(&format!("identity_file={}", identity_file.display()))
+        || !text.contains(&format!("expected_runtime={}", runtime.display()))
+        || !text.contains("owner fixture did not stop within five seconds")
+        || !text.contains("fixture cleanup also failed")
+        || windows_process_is_alive(&timeout_child_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} owner_observation_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} identity_capture_budget={CODEX_OWNER_IDENTITY_CAPTURE_BUDGET:?} child_stop_budget={CODEX_OWNER_CHILD_STOP_BUDGET:?} cleanup_scheduler_tolerance={CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -36182,15 +37070,104 @@ struct WindowsProcessIdentity {
 fn capture_windows_process_identity(
     process_id: u32,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
-    let output = StdCommand::new("powershell")
+    capture_windows_process_identity_with_timeout(
+        process_id,
+        CODEX_OWNER_FAILURE_CLEANUP_BUDGET,
+        None,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn capture_windows_process_identity_with_timeout(
+    process_id: u32,
+    timeout: Duration,
+    test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    if timeout.is_zero() {
+        return Err(io::Error::other(format!(
+            "Windows fixture identity capture budget expired before probing process {process_id}"
+        ))
+        .into());
+    }
+    let mut command = StdCommand::new("powershell");
+    command
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
         .arg(
-            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction Stop; [pscustomobject]@{ process_id = [uint32]$process.Id; creation_file_time_utc = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); executable_path = [System.IO.Path]::GetFullPath($process.Path) } | ConvertTo-Json -Compress",
+            "$delay = 0; if ($env:PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS) { $delay = [int]$env:PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS }; if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }; $process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction Stop; [pscustomobject]@{ process_id = [uint32]$process.Id; creation_file_time_utc = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); executable_path = [System.IO.Path]::GetFullPath($process.Path) } | ConvertTo-Json -Compress",
         )
         .env("PROJECTATLAS_FIXTURE_PID", process_id.to_string())
-        .output()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(delay) = test_delay {
+        command.env(
+            CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV,
+            delay.as_millis().to_string(),
+        );
+    }
+    let mut capture = command.spawn()?;
+    let started = Instant::now();
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
+    let output = loop {
+        match capture.try_wait() {
+            Ok(Some(_)) => {
+                let observed_elapsed = started.elapsed();
+                let output = capture.wait_with_output()?;
+                if observed_elapsed >= timeout {
+                    return Err(io::Error::other(format!(
+                        "Windows fixture identity capture completed after {timeout:?} deadline (observed after {observed_elapsed:?})"
+                    ))
+                    .into());
+                }
+                break output;
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let kill_result = capture.kill();
+                let wait_result = capture.wait();
+                let mut cleanup = Vec::new();
+                if let Err(error) = kill_result
+                    && error.kind() != io::ErrorKind::InvalidInput
+                {
+                    cleanup.push(format!("could not terminate identity capture: {error}"));
+                }
+                if let Err(error) = wait_result {
+                    cleanup.push(format!("could not reap identity capture: {error}"));
+                }
+                let cleanup_detail = if cleanup.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {}", cleanup.join("; "))
+                };
+                return Err(io::Error::other(format!(
+                    "timed out capturing Windows fixture process identity {process_id} after {timeout:?}{cleanup_detail}"
+                ))
+                .into());
+            }
+            Ok(None) => {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => {
+                let kill_result = capture.kill();
+                let wait_result = capture.wait();
+                let cleanup_detail = match (kill_result, wait_result) {
+                    (Ok(()), Ok(_)) => String::new(),
+                    (kill, wait) => {
+                        format!("; identity-capture cleanup kill={kill:?} wait={wait:?}")
+                    }
+                };
+                return Err(io::Error::other(format!(
+                    "failed to observe Windows fixture identity capture {process_id}: {error}{cleanup_detail}"
+                ))
+                .into());
+            }
+        }
+    };
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "failed to capture Windows fixture process identity {process_id}:\n{}",
@@ -36242,12 +37219,24 @@ fn windows_process_is_alive(identity: &WindowsProcessIdentity) -> Result<bool, B
 
 #[cfg(windows)]
 fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(), Box<dyn Error>> {
-    let status = StdCommand::new("powershell")
+    let deadline = Instant::now() + CODEX_OWNER_CHILD_STOP_BUDGET;
+    stop_windows_fixture_process_until(identity, deadline, None, None)
+}
+
+#[cfg(windows)]
+fn stop_windows_fixture_process_until(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+    test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+) -> Result<(), Box<dyn Error>> {
+    let mut command = StdCommand::new("powershell");
+    command
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
         .arg(
-            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result",
+            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { $process.Kill(); if ($env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) }; if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result",
         )
         .env(
             "PROJECTATLAS_FIXTURE_PID",
@@ -36258,11 +37247,340 @@ fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(),
             identity.creation_file_time_utc.to_string(),
         )
         .env("PROJECTATLAS_FIXTURE_PATH", &identity.executable_path)
-        .status()?;
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(delay) = test_delay {
+        command.env(CODEX_OWNER_STOP_DELAY_ENV, delay.as_millis().to_string());
+    }
+    let mut stop = command.spawn()?;
+    let started = Instant::now();
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
+    let status = loop {
+        match stop.try_wait() {
+            Ok(Some(status)) => {
+                let observed_elapsed = started.elapsed();
+                if Instant::now() >= deadline {
+                    let wait_result = stop.wait();
+                    let reap_detail = wait_result
+                        .err()
+                        .map(|error| format!("; late stop-helper reap failed: {error}"))
+                        .unwrap_or_default();
+                    return Err(io::Error::other(format!(
+                        "timed out stopping Windows fixture process {} after {:?}; stop helper completed after deadline (observed after {observed_elapsed:?}){reap_detail}",
+                        identity.process_id,
+                        observed_elapsed
+                    ))
+                    .into());
+                }
+                break status;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let kill_result = stop.kill();
+                let wait_result = stop.wait();
+                let cleanup_detail = match (kill_result, wait_result) {
+                    (Ok(()), Ok(_)) => String::new(),
+                    (kill, wait) => {
+                        format!("; stop-helper cleanup kill={kill:?} wait={wait:?}")
+                    }
+                };
+                return Err(io::Error::other(format!(
+                    "timed out stopping Windows fixture process {} after {:?}{cleanup_detail}",
+                    identity.process_id,
+                    started.elapsed()
+                ))
+                .into());
+            }
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => {
+                let kill_result = stop.kill();
+                let wait_result = stop.wait();
+                return Err(io::Error::other(format!(
+                    "failed to observe Windows fixture stop helper for {}: {error}; cleanup kill={kill_result:?} wait={wait_result:?}",
+                    identity.process_id
+                ))
+                .into());
+            }
+        }
+    };
     if !status.success() {
         return Err(io::Error::other(format!(
             "refused to stop Windows fixture process {} without its exact captured identity",
             identity.process_id
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let started = Instant::now();
+    let result = capture_windows_process_identity_with_timeout(
+        identity.process_id,
+        CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
+        Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+        None,
+    );
+    let elapsed = started.elapsed();
+    let cleanup_result = if windows_process_is_alive(&identity)? {
+        stop_windows_fixture_process(&identity)
+    } else {
+        Ok(())
+    };
+    process.wait()?;
+    cleanup_result?;
+    if result.is_ok()
+        || elapsed
+            > CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+    {
+        return Err(io::Error::other(format!(
+            "stalled Windows fixture identity capture was not bounded: elapsed={elapsed:?} timeout={CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} result={result:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_identity_capture_rejects_late_completion() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let result = capture_windows_process_identity_with_timeout(
+        identity.process_id,
+        CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
+        None,
+        Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
+    );
+    let child_alive = windows_process_is_alive(&identity)?;
+    let cleanup_result = if child_alive {
+        stop_windows_fixture_process(&identity)
+    } else {
+        Ok(())
+    };
+    process.wait()?;
+    cleanup_result?;
+    let Err(error) = result else {
+        return Err(io::Error::other("late identity capture completion was accepted").into());
+    };
+    if !error.to_string().contains("completed after") {
+        return Err(io::Error::other(format!(
+            "late identity capture did not exercise the completion-after-deadline branch: {error}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let started = Instant::now();
+    let deadline = started + CODEX_OWNER_CHILD_STOP_BUDGET;
+    let result = stop_windows_fixture_process_until(
+        &identity,
+        deadline,
+        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        None,
+    );
+    let elapsed = started.elapsed();
+    let child_alive = windows_process_is_alive(&identity)?;
+    let wait_result = if child_alive {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        wait_result
+    } else {
+        process.wait()
+    };
+    if result.is_ok()
+        || child_alive
+        || elapsed > CODEX_OWNER_CHILD_STOP_BUDGET + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+    {
+        return Err(io::Error::other(format!(
+            "stalled Windows fixture stop helper was not bounded or left its child alive: elapsed={elapsed:?} timeout={CODEX_OWNER_CHILD_STOP_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} child_alive={child_alive} result={result:?}"
+        ))
+        .into());
+    }
+    wait_result?;
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_rejects_late_completion() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let deadline = Instant::now() + CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT;
+    let result = stop_windows_fixture_process_until(
+        &identity,
+        deadline,
+        None,
+        Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
+    );
+    let child_alive = windows_process_is_alive(&identity)?;
+    if child_alive {
+        drop(process.kill());
+    }
+    process.wait()?;
+    if child_alive
+        || result.as_ref().is_ok()
+        || !result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("completed after deadline"))
+    {
+        return Err(io::Error::other(format!(
+            "late stop-helper completion did not fail closed or clean its child: child_alive={child_alive} result={result:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_identity_observed_after_readiness_is_rejected() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
+    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    let db = temp.path().join("projectatlas.db");
+    let identity_file = temp.path().join("late-publication.pid");
+    compile_obsolete_projectatlas_fixture(&runtime)?;
+    compile_codex_mcp_owner_fixture(&codex_fixture)?;
+
+    let started = Instant::now();
+    let result = spawn_codex_owned_obsolete_mcp_with_test_delays(
+        &codex_fixture,
+        &runtime,
+        &db,
+        None,
+        &identity_file,
+        Some(CODEX_OWNER_DELAYED_PUBLICATION),
+        Some("late-publication"),
+        None,
+        Some(CODEX_OWNER_OBSERVATION_TEST_DELAY),
+    );
+    let elapsed = started.elapsed();
+    let error = match result {
+        Ok((parent, child_identity)) => {
+            return Err(codex_owner_unexpected_acceptance_error(
+                "late-publication",
+                parent,
+                &child_identity,
+            ));
+        }
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    let retained_identity =
+        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
+    let total_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let readiness_elapsed = text
+        .split("readiness_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "late-observed identity timeout omitted its readiness elapsed diagnostic: {text}"
+            ))
+        })?;
+    if elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || elapsed > total_upper_bound
+        || readiness_elapsed <= CODEX_OWNER_READINESS_TIMEOUT
+        || readiness_elapsed
+            > CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+        || !text.contains("published its child PID after the readiness deadline")
+        || !text.contains(&format!("owner={}", codex_fixture.display()))
+        || !text.contains(&format!("identity_file={}", identity_file.display()))
+        || !text.contains(&format!("expected_runtime={}", runtime.display()))
+        || windows_process_is_alive(&retained_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "late-observed identity was accepted or not bounded: elapsed={elapsed:?} readiness_elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} readiness_scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_deadline={total_upper_bound:?}\n{text}"
         ))
         .into());
     }
