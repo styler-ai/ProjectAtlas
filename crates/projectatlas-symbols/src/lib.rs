@@ -1196,8 +1196,7 @@ fn tree_contains_php_tag_outside_ranges<E>(
         let outside_opaque_range = opaque_ranges.get(*next_opaque).is_none_or(|&(start, end)| {
             start >= node.end_byte()
                 || end <= node.start_byte()
-                || (is_php_inline_output_opening(node, content)
-                    && !is_php_block_comment_range(content, start))
+                || is_php_inline_output_opening(node, content)
         });
         if outside_opaque_range {
             return Ok(true);
@@ -1244,11 +1243,6 @@ fn is_php_inline_output_opening(node: Node<'_>, content: &str) -> bool {
         previous = Some(sibling);
     }
     previous.is_some_and(|text| text.kind() == "text" && text.end_byte() == node.start_byte())
-}
-
-/// Keep a PHP-only block comment opaque when it overlaps a mixed-grammar tag.
-fn is_php_block_comment_range(content: &str, start: usize) -> bool {
-    content.get(start..start.saturating_add(2)) == Some("/*")
 }
 
 /// Return whether the PHP-only parse node is opaque to mixed-grammar tags.
@@ -5901,7 +5895,6 @@ class Owner {
             "// <?\nfunction marker(): string { return 'marker'; }",
             "# <?\nfunction marker(): string { return 'marker'; }",
             "/* <? */ function marker(): string { return 'marker'; }",
-            "/* <?php */ function marker(): string { return 'marker'; }",
             r"function marker(): string { return <<<TEXT
 <?
 TEXT;
@@ -5944,8 +5937,13 @@ TEXT;
                 "/* <? ?> */<?php function reopened_block(): void {} ?>",
                 "reopened_block",
             ),
+            (
+                "/* <?php */ function marker(): string { return 'marker'; }",
+                "marker",
+            ),
             ("// <?php function boot() {}", "boot"),
             ("# <?php function hash_boot() {}", "hash_boot"),
+            ("/* <?php function block_boot(): void {}", "block_boot"),
             ("//x<?php function marker(): string {}", "marker"),
             (
                 "#output<?= $value ?><?php function after_echo(): void {}",
@@ -6009,6 +6007,13 @@ TEXT;
                 "function marker(): string { helper(); }",
                 14,
                 53,
+            ),
+            (
+                "/* <?php function block_boot(): void { helper(); }",
+                "block_boot",
+                "function block_boot(): void { helper(); }",
+                9,
+                50,
             ),
             (
                 "#output<?= $value ?><?php function after_echo(): void { helper(); }",
