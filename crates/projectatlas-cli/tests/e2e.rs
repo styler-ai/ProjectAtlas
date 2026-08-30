@@ -199,6 +199,9 @@ const CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT: Duration = Duration::from_secs(
 #[cfg(windows)]
 const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(4);
 #[cfg(windows)]
+// Delay the polling caller, not the child operation, so a completed helper is observed late.
+const CODEX_OWNER_LATE_COMPLETION_TEST_DELAY: Duration = Duration::from_secs(2);
+#[cfg(windows)]
 // Delay the readiness poll past the deadline after the fixture has published, without
 // changing process-global state, proving the admission guard through the real helper.
 const CODEX_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(31);
@@ -36209,12 +36212,15 @@ fn cleanup_codex_owner_processes_after_spawn_failure(
     };
     let child_cleanup_result = match child_identity {
         Some(identity) => {
-            stop_windows_fixture_process_until(&identity, cleanup_deadline, child_stop_delay)
+            stop_windows_fixture_process_until(&identity, cleanup_deadline, child_stop_delay, None)
         }
         None => match read_codex_owner_identity_record(&retained_identity_file) {
-            Ok(identity) => {
-                stop_windows_fixture_process_until(&identity, cleanup_deadline, child_stop_delay)
-            }
+            Ok(identity) => stop_windows_fixture_process_until(
+                &identity,
+                cleanup_deadline,
+                child_stop_delay,
+                None,
+            ),
             Err(error) => Err(io::Error::other(format!(
                 "no retained child identity was available after capture failure ({}): {error}",
                 capture_failures.join("; ")
@@ -36357,7 +36363,7 @@ fn cleanup_codex_owner_processes(
 ) -> Result<(), Box<dyn Error>> {
     let cleanup_deadline = codex_owner_cleanup_deadline(Instant::now());
     let child_cleanup_result =
-        stop_windows_fixture_process_until(child_identity, cleanup_deadline, None);
+        stop_windows_fixture_process_until(child_identity, cleanup_deadline, None, None);
     let kill_result = parent.kill();
     let wait_result = parent.wait();
     let mut failures = Vec::new();
@@ -36411,6 +36417,7 @@ fn read_codex_owner_child_identity_with_test_delay(
         published.process_id,
         capture_timeout,
         test_delay,
+        None,
     )?;
     if captured.process_id != published.process_id
         || captured.creation_file_time_utc != published.creation_file_time_utc
@@ -36990,6 +36997,7 @@ fn capture_windows_process_identity(
         process_id,
         CODEX_OWNER_FAILURE_CLEANUP_BUDGET,
         None,
+        None,
     )
 }
 
@@ -36998,6 +37006,7 @@ fn capture_windows_process_identity_with_timeout(
     process_id: u32,
     timeout: Duration,
     test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
     if timeout.is_zero() {
         return Err(io::Error::other(format!(
@@ -37024,9 +37033,22 @@ fn capture_windows_process_identity_with_timeout(
     }
     let mut capture = command.spawn()?;
     let started = Instant::now();
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
     let output = loop {
         match capture.try_wait() {
-            Ok(Some(_)) => break capture.wait_with_output()?,
+            Ok(Some(_)) => {
+                let observed_elapsed = started.elapsed();
+                let output = capture.wait_with_output()?;
+                if observed_elapsed >= timeout {
+                    return Err(io::Error::other(format!(
+                        "Windows fixture identity capture completed after {timeout:?} deadline (observed after {observed_elapsed:?})"
+                    ))
+                    .into());
+                }
+                break output;
+            }
             Ok(None) if started.elapsed() >= timeout => {
                 let kill_result = capture.kill();
                 let wait_result = capture.wait();
@@ -37121,7 +37143,7 @@ fn windows_process_is_alive(identity: &WindowsProcessIdentity) -> Result<bool, B
 #[cfg(windows)]
 fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(), Box<dyn Error>> {
     let deadline = Instant::now() + CODEX_OWNER_CHILD_STOP_BUDGET;
-    stop_windows_fixture_process_until(identity, deadline, None)
+    stop_windows_fixture_process_until(identity, deadline, None, None)
 }
 
 #[cfg(windows)]
@@ -37129,6 +37151,7 @@ fn stop_windows_fixture_process_until(
     identity: &WindowsProcessIdentity,
     deadline: Instant,
     test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
 ) -> Result<(), Box<dyn Error>> {
     let mut command = StdCommand::new("powershell");
     command
@@ -37154,9 +37177,28 @@ fn stop_windows_fixture_process_until(
     }
     let mut stop = command.spawn()?;
     let started = Instant::now();
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
     let status = loop {
         match stop.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => {
+                let observed_elapsed = started.elapsed();
+                if Instant::now() >= deadline {
+                    let wait_result = stop.wait();
+                    let reap_detail = wait_result
+                        .err()
+                        .map(|error| format!("; late stop-helper reap failed: {error}"))
+                        .unwrap_or_default();
+                    return Err(io::Error::other(format!(
+                        "timed out stopping Windows fixture process {} after {:?}; stop helper completed after deadline (observed after {observed_elapsed:?}){reap_detail}",
+                        identity.process_id,
+                        observed_elapsed
+                    ))
+                    .into());
+                }
+                break status;
+            }
             Ok(None) if Instant::now() >= deadline => {
                 let kill_result = stop.kill();
                 let wait_result = stop.wait();
@@ -37223,6 +37265,7 @@ fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
         identity.process_id,
         CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
         Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+        None,
     );
     let elapsed = started.elapsed();
     let cleanup_result = if windows_process_is_alive(&identity)? {
@@ -37238,6 +37281,52 @@ fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
     {
         return Err(io::Error::other(format!(
             "stalled Windows fixture identity capture was not bounded: elapsed={elapsed:?} timeout={CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} result={result:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_identity_capture_rejects_late_completion() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let result = capture_windows_process_identity_with_timeout(
+        identity.process_id,
+        CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
+        None,
+        Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
+    );
+    let child_alive = windows_process_is_alive(&identity)?;
+    let cleanup_result = if child_alive {
+        stop_windows_fixture_process(&identity)
+    } else {
+        Ok(())
+    };
+    process.wait()?;
+    cleanup_result?;
+    let Err(error) = result else {
+        return Err(io::Error::other("late identity capture completion was accepted").into());
+    };
+    if !error.to_string().contains("completed after") {
+        return Err(io::Error::other(format!(
+            "late identity capture did not exercise the completion-after-deadline branch: {error}"
         ))
         .into());
     }
@@ -37270,6 +37359,7 @@ fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn
         &identity,
         deadline,
         Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        None,
     );
     let elapsed = started.elapsed();
     let child_alive = windows_process_is_alive(&identity)?;
@@ -37295,6 +37385,53 @@ fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn
         .into());
     }
     wait_result?;
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_rejects_late_completion() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let deadline = Instant::now() + CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT;
+    let result = stop_windows_fixture_process_until(
+        &identity,
+        deadline,
+        None,
+        Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
+    );
+    let child_alive = windows_process_is_alive(&identity)?;
+    if child_alive {
+        drop(process.kill());
+    }
+    process.wait()?;
+    if child_alive
+        || result.as_ref().is_ok()
+        || !result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("completed after deadline"))
+    {
+        return Err(io::Error::other(format!(
+            "late stop-helper completion did not fail closed or clean its child: child_alive={child_alive} result={result:?}"
+        ))
+        .into());
+    }
     Ok(())
 }
 
