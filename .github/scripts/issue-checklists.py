@@ -1106,6 +1106,18 @@ def acceptance_state_failures(
     return failures
 
 
+def closed_task_failures(
+    issue: dict[str, object], expected_tasks: list[tuple[bool, str]]
+) -> list[str]:
+    """Reject closed issues that still expose incomplete implementation tasks."""
+
+    if str(issue.get("state", "")).upper() == "CLOSED" and any(
+        not checked for checked, _ in expected_tasks
+    ):
+        return ["is closed but still has unchecked tasks"]
+    return []
+
+
 def issue_contract_failures(
     issue: dict[str, object],
     expected_tasks: list[tuple[bool, str]],
@@ -1117,13 +1129,13 @@ def issue_contract_failures(
     state = str(issue.get("state", "")).upper()
     if state != "OPEN":
         if not issue_uses_new_contract(issue):
-            return []
+            return closed_task_failures(issue, expected_tasks)
         try:
             implementation = issue_checklist_tasks(issue)
             acceptance = acceptance_review_tasks(issue)
         except SystemExit as error:
             return [str(error)]
-        failures = []
+        failures = closed_task_failures(issue, expected_tasks)
         if implementation != expected_tasks:
             failures.append(
                 f"implementation section does not mirror expected tasks: "
@@ -1506,10 +1518,6 @@ def check_openspec_tasks(
                 )
             for failure in issue_contract_failures(payload, expected, repo, root):
                 failures.append(f"#{owner.issue} issue contract {failure}")
-            if payload.get("state") == "CLOSED" and any(
-                not checked for checked, _ in remote
-            ):
-                failures.append(f"#{owner.issue} is closed but still has unchecked tasks")
     return failures
 
 
@@ -2242,7 +2250,10 @@ Mitigations:
         "unknown or foreign" in failure
         for failure in contract_failures({"state": "OPEN", "body": unknown_task}, expected)
     )
-    assert contract_failures({"state": "CLOSED", "body": ""}, expected) == []
+    assert contract_failures(
+        {"state": "CLOSED", "body": ""},
+        [(True, task) for _, task in expected],
+    ) == []
     wrong_final = [expected[0], (False, "2.1 Finish ordinary tests.")]
     assert not any(
         "final OpenSpec task must be the architecture acceptance task" in failure
@@ -2533,6 +2544,53 @@ Mitigations:
             assert checked_numbers == [1, 2]
         finally:
             for name, helper in saved_branch_helpers.items():
+                globals()[name] = helper
+    with tempfile.TemporaryDirectory() as temporary:
+        branch_root = Path(temporary)
+        task_path = branch_root / "openspec" / "changes" / "legacy-change" / "tasks.md"
+        task_path.parent.mkdir(parents=True)
+        legacy_tasks = "- [ ] 1.1 Historical implementation.\n"
+        task_path.write_text(legacy_tasks, encoding="utf-8")
+        saved_legacy_helpers = {
+            name: globals()[name]
+            for name in ("pull_request_payload", "issue_payload")
+        }
+        try:
+            globals()["pull_request_payload"] = lambda _repo, _number: {
+                "title": "Maintenance for #517",
+                "body": "",
+            }
+            globals()["issue_payload"] = lambda _repo, _number: {
+                "state": "CLOSED",
+                "body": "## OpenSpec Tasks\n" + legacy_tasks,
+            }
+            failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {"legacy-change": (Owner(517),)},
+                9,
+                "accepted-base",
+            )
+            assert any(
+                "closed but still has unchecked tasks" in failure
+                for failure in failures
+            )
+
+            completed_tasks = "- [x] 1.1 Historical implementation.\n"
+            task_path.write_text(completed_tasks, encoding="utf-8")
+            globals()["issue_payload"] = lambda _repo, _number: {
+                "state": "CLOSED",
+                "body": "## OpenSpec Tasks\n" + completed_tasks,
+            }
+            assert check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {"legacy-change": (Owner(517),)},
+                9,
+                "accepted-base",
+            ) == []
+        finally:
+            for name, helper in saved_legacy_helpers.items():
                 globals()[name] = helper
     assert repo_parts("owner/repo") == ("owner", "repo")
     assert flatten_paginated_response([[{"number": 1}], [{"number": 2}]]) == [
