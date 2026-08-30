@@ -135,27 +135,39 @@ shell_quote() {
   printf "'%s'" "$value"
 }
 
+atlas_forwarder_content() {
+  verified=$1
+  canonical_verified=$(canonical_file "$verified") || return 1
+  target_quoted=$(shell_quote "$canonical_verified") || return 1
+  printf '%s\n' '# ProjectAtlas managed atlas forwarder.'
+  printf '%s\n' "# target: $canonical_verified"
+  printf 'exec %s "$@"\n' "$target_quoted"
+}
+
 is_managed_atlas_forwarder() {
   candidate=$1
+  verified=$2
   [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
-  [ "$(sed -n '1p' "$candidate" 2>/dev/null || true)" = '# ProjectAtlas managed atlas forwarder.' ] || return 1
-  case "$(sed -n '2p' "$candidate" 2>/dev/null || true)" in
-    '# target: '*) return 0 ;;
-    *) return 1 ;;
-  esac
+  [ -n "$verified" ] || return 1
+  expected_forwarder=$(atlas_forwarder_path "$(canonical_file "$verified")") || return 1
+  [ "$(canonical_file "$candidate")" = "$(canonical_file "$expected_forwarder")" ] || return 1
+  expected_content=$(atlas_forwarder_content "$verified") || return 1
+  actual_content=$(cat "$candidate" 2>/dev/null || true)
+  [ "$actual_content" = "$expected_content" ]
 }
 
 ensure_atlas_forwarder_collision_free() {
   forwarder=$1
+  verified=$2
   if [ -e "$forwarder" ] || [ -L "$forwarder" ]; then
-    if ! is_managed_atlas_forwarder "$forwarder"; then
+    if ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
       printf '%s\n' "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $forwarder" >&2
       return 1
     fi
   fi
   existing=$(command -v atlas 2>/dev/null || true)
   if [ -n "$existing" ] && [ "$(canonical_file "$existing")" != "$(canonical_file "$forwarder")" ]; then
-    if ! is_managed_atlas_forwarder "$existing"; then
+    if ! is_managed_atlas_forwarder "$existing" "$verified"; then
       printf '%s\n' "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $existing" >&2
       return 1
     fi
@@ -163,20 +175,15 @@ ensure_atlas_forwarder_collision_free() {
 }
 
 write_atlas_forwarder() {
-  verified=$1
+  verified=$(canonical_file "$1") || return 1
   forwarder=$(atlas_forwarder_path "$verified")
-  ensure_atlas_forwarder_collision_free "$forwarder" || return 1
+  ensure_atlas_forwarder_collision_free "$forwarder" "$verified" || return 1
   runtime_dir=$(dirname -- "$verified")
   temporary=$(mktemp "$runtime_dir/.atlas-forwarder.XXXXXX") || {
     printf '%s\n' "ProjectAtlas could not stage the atlas forwarder beside the verified runtime: $forwarder" >&2
     return 1
   }
-  target_quoted=$(shell_quote "$verified")
-  if ! {
-    printf '%s\n' '# ProjectAtlas managed atlas forwarder.'
-    printf '%s\n' "# target: $verified"
-    printf 'exec %s "$@"\n' "$target_quoted"
-  } >"$temporary"; then
+  if ! atlas_forwarder_content "$verified" >"$temporary"; then
     rm -f "$temporary"
     return 1
   fi
@@ -184,7 +191,7 @@ write_atlas_forwarder() {
     rm -f "$temporary"
     return 1
   }
-  if ! ensure_atlas_forwarder_collision_free "$forwarder" || ! mv -f "$temporary" "$forwarder"; then
+  if ! ensure_atlas_forwarder_collision_free "$forwarder" "$verified" || ! mv -f "$temporary" "$forwarder"; then
     rm -f "$temporary"
     return 1
   fi
@@ -193,10 +200,11 @@ write_atlas_forwarder() {
 
 remove_atlas_forwarder() {
   forwarder=$1
+  verified=$2
   if [ ! -e "$forwarder" ] && [ ! -L "$forwarder" ]; then
     return 0
   fi
-  if ! is_managed_atlas_forwarder "$forwarder"; then
+  if ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
     printf '%s\n' "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $forwarder" >&2
     return 1
   fi
@@ -211,7 +219,7 @@ uninstall_atlas_forwarders() {
       return 1
     }
     forwarder="$runtime_dir/atlas"
-    remove_atlas_forwarder "$forwarder" || return 1
+    remove_atlas_forwarder "$forwarder" "$runtime_override" || return 1
     return 0
   fi
   for known_runtime in \
@@ -220,11 +228,11 @@ uninstall_atlas_forwarders() {
     "$HOME/.npm/bin/projectatlas" \
     "$HOME/.npm-global/bin/projectatlas" \
     "$HOME/.local/share/npm/bin/projectatlas"; do
-    remove_atlas_forwarder "$(dirname -- "$known_runtime")/atlas" || return 1
+    remove_atlas_forwarder "$(dirname -- "$known_runtime")/atlas" "$known_runtime" || return 1
   done
   projectatlas_command=$(command -v projectatlas 2>/dev/null || true)
   if [ -n "$projectatlas_command" ]; then
-    remove_atlas_forwarder "$(dirname -- "$projectatlas_command")/atlas" || return 1
+    remove_atlas_forwarder "$(dirname -- "$projectatlas_command")/atlas" "$projectatlas_command" || return 1
   fi
 }
 

@@ -2058,23 +2058,47 @@ function Get-ProjectAtlasAtlasForwarderPath {
 
 function Test-ProjectAtlasManagedAtlasForwarder {
     param(
-        [string]$FilePath
+        [string]$FilePath,
+        [string]$VerifiedPath
     )
-    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+    $item = Get-Item -Force -LiteralPath $FilePath -ErrorAction SilentlyContinue
+    if (-not $item -or -not ($item -is [System.IO.FileInfo]) `
+        -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
         return $false
     }
     try {
-        $lines = @(Get-Content -LiteralPath $FilePath -TotalCount 4)
-        return $lines.Count -ge 4 `
-            -and $lines[0] -eq "@echo off" `
-            -and $lines[1] -eq "rem ProjectAtlas managed atlas forwarder." `
-            -and $lines[2].StartsWith("rem target: ", [System.StringComparison]::Ordinal) `
-            -and $lines[3].StartsWith('"', [System.StringComparison]::Ordinal) `
-            -and $lines[3].EndsWith('" %*', [System.StringComparison]::Ordinal)
+        if ([string]::IsNullOrWhiteSpace($VerifiedPath)) {
+            return $false
+        }
+        $expectedForwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
+        if ((Get-NormalizedPathEntry $FilePath) -ine (Get-NormalizedPathEntry $expectedForwarder)) {
+            return $false
+        }
+        $actualContent = [System.IO.File]::ReadAllText($FilePath)
+        return $actualContent -ceq (Get-ProjectAtlasAtlasForwarderContent $VerifiedPath) `
+            -or $actualContent -ceq (Get-ProjectAtlasLegacyAtlasForwarderContent $VerifiedPath)
     }
     catch {
         return $false
     }
+}
+
+function Get-ProjectAtlasAtlasForwarderContent {
+    param(
+        [string]$VerifiedPath
+    )
+    $canonicalVerifiedPath = Get-NormalizedPathEntry $VerifiedPath
+    $targetForBatch = $canonicalVerifiedPath.Replace("%", "%%")
+    return "@echo off`r`nsetlocal DisableDelayedExpansion`r`nrem ProjectAtlas managed atlas forwarder.`r`nrem target: $canonicalVerifiedPath`r`n`"$targetForBatch`" %*`r`nset `"exit_code=%ERRORLEVEL%`"`r`nendlocal & exit /b %exit_code%`r`n"
+}
+
+function Get-ProjectAtlasLegacyAtlasForwarderContent {
+    param(
+        [string]$VerifiedPath
+    )
+    $canonicalVerifiedPath = Get-NormalizedPathEntry $VerifiedPath
+    $targetForBatch = $canonicalVerifiedPath.Replace("%", "%%")
+    return "@echo off`r`nrem ProjectAtlas managed atlas forwarder.`r`nrem target: $canonicalVerifiedPath`r`n`"$targetForBatch`" %*`r`nexit /b %ERRORLEVEL%`r`n"
 }
 
 function Assert-ProjectAtlasAtlasForwarderCollisionFree {
@@ -2094,7 +2118,7 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
             continue
         }
         if ((Get-NormalizedPathEntry $candidate) -ieq $forwarderNormalized `
-            -and (Test-ProjectAtlasManagedAtlasForwarder $candidate)) {
+            -and (Test-ProjectAtlasManagedAtlasForwarder $candidate $VerifiedPath)) {
             continue
         }
         throw "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $candidate"
@@ -2104,7 +2128,7 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
         $commandPath = if ($command.Path) { $command.Path } elseif ($command.Source) { $command.Source } else { $null }
         if ([string]::IsNullOrWhiteSpace($commandPath) -or (Get-NormalizedPathEntry $commandPath) -ine $forwarderNormalized) {
             $observed = if ($commandPath) { $commandPath } else { $command.Name }
-            if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Test-ProjectAtlasManagedAtlasForwarder $commandPath)) {
+            if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Test-ProjectAtlasManagedAtlasForwarder $commandPath $VerifiedPath)) {
                 throw "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $observed"
             }
         }
@@ -2119,8 +2143,7 @@ function Write-ProjectAtlasAtlasForwarder {
     $forwarder = Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath
     $runtimeDirectory = Split-Path -Parent $VerifiedPath
     $temporary = Join-Path $runtimeDirectory (".atlas-forwarder-" + [guid]::NewGuid().ToString("N") + ".tmp")
-    $targetForBatch = $VerifiedPath.Replace("%", "%%")
-    $content = "@echo off`r`nrem ProjectAtlas managed atlas forwarder.`r`nrem target: $VerifiedPath`r`n`"$targetForBatch`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    $content = Get-ProjectAtlasAtlasForwarderContent $VerifiedPath
     $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
     try {
         [System.IO.File]::WriteAllText($temporary, $content, $utf8NoBom)
@@ -2133,7 +2156,7 @@ function Write-ProjectAtlasAtlasForwarder {
             [System.IO.File]::Delete($temporary)
         }
     }
-    if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder)) {
+    if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath)) {
         throw "ProjectAtlas atlas forwarder failed final verification: $forwarder"
     }
     Write-Output "ProjectAtlas atlas forwarder installed and verified: $forwarder -> $VerifiedPath"
@@ -2170,7 +2193,13 @@ function Remove-ProjectAtlasAtlasForwarders {
         if (-not (Test-Path -LiteralPath $candidate)) {
             continue
         }
-        if (-not (Test-ProjectAtlasManagedAtlasForwarder $candidate)) {
+        $verifiedPath = if ($RuntimePath) {
+            $RuntimePath
+        }
+        else {
+            $candidate -replace "\\atlas\.cmd$", "\\projectatlas.exe"
+        }
+        if (-not (Test-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath)) {
             throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
         }
         Assert-ProjectAtlasDirectFilePath $candidate "ProjectAtlas atlas forwarder"

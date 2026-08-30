@@ -1242,6 +1242,7 @@ enum Command {
         report: HealthReportArgs,
     },
     /// Report health findings or resolve one with agent rationale.
+    #[command(args_conflicts_with_subcommands = true)]
     Health {
         /// Read-only health report filters when no administrative subcommand is selected.
         #[command(flatten)]
@@ -4646,13 +4647,7 @@ impl RequiredCliCommand {
                     coverage_state: None,
                     reason: None,
                 },
-                command: Some(HealthCommand::Resolve {
-                    finding_id: String::new(),
-                    category: String::new(),
-                    path: String::new(),
-                    related_path: None,
-                    rationale: String::new(),
-                }),
+                command: None,
             },
             Self::Lint => Command::Lint {
                 strict_folders: false,
@@ -5450,11 +5445,11 @@ mod tests {
         watch_path_requires_full_scan, watcher_status_report,
     };
     use super::{
-        Cli, CliError, Command, GraphRelationKind, OutputFormat,
-        SCHEMA_MIGRATION_REQUIRED_RECOVERY, SCHEMA_VERSION_MISMATCH_RECOVERY, SearchRetrievalMode,
-        SearchRetrievalModeArg, ServiceError, build_runtime_info, controlled_named_output,
-        load_token_atlas_preview, load_token_atlas_relations, render_cli_error,
-        render_token_dashboard, render_token_dashboard_with_atlas_at_width,
+        Cli, CliError, Command, DEFAULT_HEALTH_LIMIT, GraphRelationKind, HealthCommand,
+        OutputFormat, SCHEMA_MIGRATION_REQUIRED_RECOVERY, SCHEMA_VERSION_MISMATCH_RECOVERY,
+        SearchRetrievalMode, SearchRetrievalModeArg, ServiceError, build_runtime_info,
+        controlled_named_output, load_token_atlas_preview, load_token_atlas_relations,
+        render_cli_error, render_token_dashboard, render_token_dashboard_with_atlas_at_width,
         schema_migration_required_payload, schema_version_mismatch_payload, serialized_output,
         token_atlas_network_relation, truthy_env,
     };
@@ -6466,6 +6461,88 @@ mod tests {
                 && toon.contains("not-installed")
                 && toon.contains("compatible semantic"),
             "CLI TOON lost typed semantic capability state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn health_report_and_resolve_are_structurally_exclusive() -> Result<(), Box<dyn Error>> {
+        let default = Cli::try_parse_from(["projectatlas", "health"])?;
+        require_condition(
+            matches!(
+                default.command.as_ref(),
+                Command::Health {
+                    report,
+                    command: None,
+                } if report.start_index == 0
+                    && report.limit == DEFAULT_HEALTH_LIMIT
+                    && !report.summary_only
+            ),
+            "health without a subcommand did not select the read-only report",
+        )?;
+
+        let resolve = Cli::try_parse_from([
+            "projectatlas",
+            "health",
+            "resolve",
+            "finding-id",
+            "category",
+            "src/lib.rs",
+            "--rationale",
+            "fixed",
+        ])?;
+        require_condition(
+            matches!(
+                resolve.command.as_ref(),
+                Command::Health {
+                    report,
+                    command: Some(HealthCommand::Resolve { finding_id, .. }),
+                } if finding_id == "finding-id"
+                    && report.start_index == 0
+                    && report.limit == DEFAULT_HEALTH_LIMIT
+            ),
+            "health resolve did not remain an administrative subcommand",
+        )?;
+
+        let Err(mixed) = Cli::try_parse_from([
+            "projectatlas",
+            "health",
+            "--summary-only",
+            "resolve",
+            "finding-id",
+            "category",
+            "src/lib.rs",
+            "--rationale",
+            "fixed",
+        ]) else {
+            return Err(io::Error::other(
+                "report flags must conflict with health resolve at parse time",
+            )
+            .into());
+        };
+        require_condition(
+            mixed.to_string().contains("cannot be used with")
+                && mixed.to_string().contains("resolve"),
+            "health mixed report/resolve parse error did not identify the boundary",
+        )?;
+
+        let health_check = Cli::try_parse_from([
+            "projectatlas",
+            "--format",
+            "json",
+            "health-check",
+            "--coverage",
+            "--parser",
+            "tree-sitter",
+        ])?;
+        require_condition(
+            matches!(
+                health_check.command.as_ref(),
+                Command::HealthCheck { report }
+                    if report.coverage
+                        && report.parser.as_deref() == Some("tree-sitter")
+            ),
+            "health-check compatibility parsing lost report filters",
         )?;
         Ok(())
     }

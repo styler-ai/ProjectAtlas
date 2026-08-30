@@ -10294,6 +10294,22 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     }
     let home = temp.path().join("isolated home");
     fs::create_dir_all(&home)?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let run_path = env::join_paths(
+        std::iter::once(
+            runtime
+                .parent()
+                .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+                .to_path_buf(),
+        )
+        .chain(env::split_paths(&inherited_path).filter(|entry| {
+            !entry
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .replace('/', "\\")
+                .contains("\\target\\debug")
+        })),
+    )?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
         .join("plugins")
@@ -10314,6 +10330,39 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         )?;
         command
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &run_path);
+        Ok(command.output()?)
+    };
+    let run_uninstall = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = if cfg!(windows) {
+            let mut command = StdCommand::new("powershell");
+            command
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(&installer)
+                .arg("-ProjectRoot")
+                .arg(&repo)
+                .arg("-RuntimePath")
+                .arg(&runtime)
+                .arg("-Uninstall");
+            command
+        } else {
+            let mut command = StdCommand::new("bash");
+            command
+                .arg(&installer)
+                .arg("--uninstall")
+                .arg(&repo)
+                .env("PROJECTATLAS_RUNTIME_PATH", &runtime);
+            command
+        };
+        command
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("APPDATA", home.join("AppData/Roaming"))
+            .env("LOCALAPPDATA", home.join("AppData/Local"))
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
             .env("PROJECTATLAS_NO_TELEMETRY", "1");
         Ok(command.output()?)
     };
@@ -10332,14 +10381,20 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
         .join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
     let forwarder_text = fs::read_to_string(&forwarder)?;
-    require(
-        forwarder_text.contains(if cfg!(windows) {
-            "rem ProjectAtlas managed atlas forwarder."
-        } else {
-            "# ProjectAtlas managed atlas forwarder."
-        }) && forwarder_text.contains(runtime.to_string_lossy().as_ref()),
+    let canonical_runtime = runtime.to_string_lossy();
+    let expected_forwarder_text = if cfg!(windows) {
         format!(
-            "installer did not publish a managed forwarder to the exact runtime: {}",
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{canonical_runtime}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n"
+        )
+    } else {
+        format!(
+            "# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
+        )
+    };
+    require(
+        forwarder_text == expected_forwarder_text,
+        format!(
+            "installer did not publish the exact managed forwarder body to the canonical runtime: {}\nactual={forwarder_text:?}\nexpected={expected_forwarder_text:?}",
             forwarder.display()
         ),
     )?;
@@ -10455,6 +10510,58 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         "atlas and projectatlas runtime-info streams diverged",
     )?;
 
+    let delayed_expansion_version = format!("{}!argv!", env!("CARGO_PKG_VERSION"));
+    let direct_delayed_expansion = StdCommand::new(&runtime)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--require-version",
+            delayed_expansion_version.as_str(),
+            "--format",
+            "toon",
+            "runtime-info",
+        ])
+        .output()?;
+    let alias_delayed_expansion = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["/V:ON", "/D", "/C", "call"])
+            .arg(&forwarder)
+            .args([
+                "--require-version",
+                delayed_expansion_version.as_str(),
+                "--format",
+                "toon",
+                "runtime-info",
+            ])
+            .output()?
+    } else {
+        StdCommand::new(&forwarder)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args([
+                "--require-version",
+                delayed_expansion_version.as_str(),
+                "--format",
+                "toon",
+                "runtime-info",
+            ])
+            .output()?
+    };
+    require(
+        !direct_delayed_expansion.status.success()
+            && direct_delayed_expansion.status == alias_delayed_expansion.status
+            && direct_delayed_expansion.stdout == alias_delayed_expansion.stdout
+            && direct_delayed_expansion.stderr == alias_delayed_expansion.stderr
+            && String::from_utf8_lossy(&alias_delayed_expansion.stderr)
+                .contains(&delayed_expansion_version),
+        format!(
+            "atlas did not preserve delayed-expansion-sensitive arguments:\ndirect={} {}\nalias={} {}",
+            direct_delayed_expansion.status,
+            String::from_utf8_lossy(&direct_delayed_expansion.stderr),
+            alias_delayed_expansion.status,
+            String::from_utf8_lossy(&alias_delayed_expansion.stderr)
+        ),
+    )?;
+
     let second_output = run_install()?;
     require(
         second_output.status.success() && forwarder.is_file(),
@@ -10469,8 +10576,25 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     fs::create_dir_all(&effective_collision_dir)?;
     let effective_collision_path =
         effective_collision_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
-    fs::write(&effective_collision_path, "user-owned atlas command\n")?;
-    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let foreign_target = temp.path().join("foreign runtime").join(if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    });
+    let foreign_forwarder = if cfg!(windows) {
+        format!(
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
+            foreign_target.display(),
+            foreign_target.display()
+        )
+    } else {
+        format!(
+            "# ProjectAtlas managed atlas forwarder.\n# target: {}\nexec '{}' \"$@\"\n",
+            foreign_target.display(),
+            foreign_target.display().to_string().replace('\'', "'\\''")
+        )
+    };
+    fs::write(&effective_collision_path, &foreign_forwarder)?;
     let effective_collision_environment = env::join_paths(
         std::iter::once(effective_collision_dir).chain(env::split_paths(&inherited_path)),
     )?;
@@ -10503,8 +10627,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     fs::remove_file(&effective_collision_path)?;
 
-    let unmanaged_contents = "user-owned atlas command\n";
-    fs::write(&forwarder, unmanaged_contents)?;
+    fs::write(&forwarder, &foreign_forwarder)?;
     let collision_output = run_install()?;
     let collision_text = format!(
         "{}\n{}",
@@ -10516,8 +10639,22 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         format!("installer accepted an unmanaged atlas collision:\n{collision_text}"),
     )?;
     require(
-        fs::read_to_string(&forwarder)? == unmanaged_contents,
+        fs::read_to_string(&forwarder)? == foreign_forwarder,
         "installer overwrote an unmanaged atlas collision",
+    )?;
+    let rejected_uninstall = run_uninstall()?;
+    let rejected_uninstall_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&rejected_uninstall.stdout),
+        String::from_utf8_lossy(&rejected_uninstall.stderr)
+    );
+    require(
+        !rejected_uninstall.status.success()
+            && rejected_uninstall_text.contains("unmanaged")
+            && fs::read_to_string(&forwarder)? == foreign_forwarder,
+        format!(
+            "installer uninstall accepted a foreign marker forwarder:\n{rejected_uninstall_text}"
+        ),
     )?;
     fs::remove_file(&forwarder)?;
     require(
@@ -10525,38 +10662,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         "installer could not repair the removed managed atlas forwarder",
     )?;
 
-    let mut uninstall = if cfg!(windows) {
-        let mut command = StdCommand::new("powershell");
-        command
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-            .arg(&installer)
-            .arg("-ProjectRoot")
-            .arg(&repo)
-            .arg("-RuntimePath")
-            .arg(&runtime)
-            .arg("-Uninstall");
-        command
-    } else {
-        let mut command = StdCommand::new("bash");
-        command
-            .arg(&installer)
-            .arg("--uninstall")
-            .arg(&repo)
-            .env("PROJECTATLAS_RUNTIME_PATH", &runtime);
-        command
-    };
-    uninstall
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .env("APPDATA", home.join("AppData/Roaming"))
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
-        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
-        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
-        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
-        .env("PROJECTATLAS_NO_TELEMETRY", "1");
     fs::create_dir_all(home.join("AppData/Roaming"))?;
     fs::create_dir_all(home.join("AppData/Local"))?;
-    let uninstall_output = uninstall.output()?;
+    let uninstall_output = run_uninstall()?;
     require(
         uninstall_output.status.success() && !forwarder.exists() && runtime.is_file(),
         format!(
@@ -10814,10 +10922,14 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     let stable_runtime_dir = stable_runtime
         .parent()
         .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
-    let parent_path = std::env::join_paths(
-        std::iter::once(stable_runtime_dir.to_path_buf())
-            .chain(std::env::split_paths(&inherited_path)),
-    )?;
+    let parent_path =
+        std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
+            std::env::split_paths(&inherited_path).filter(|entry| {
+                !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                    .iter()
+                    .any(|candidate| entry.join(candidate).exists())
+            }),
+        ))?;
 
     let db = atlas_dir.join("projectatlas.db");
     let versioned_runtime = local_app_data
@@ -11807,6 +11919,11 @@ public static class Program
                 "projectatlas.cmd",
                 "projectatlas.bat",
                 "projectatlas.ps1",
+                "atlas",
+                "atlas.cmd",
+                "atlas.bat",
+                "atlas.ps1",
+                "atlas.com",
             ]
             .iter()
             .any(|candidate| entry.join(candidate).exists())
@@ -12512,10 +12629,14 @@ public static class Program
         .parent()
         .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-    let parent_path = std::env::join_paths(
-        std::iter::once(stable_runtime_dir.to_path_buf())
-            .chain(std::env::split_paths(&inherited_path)),
-    )?;
+    let parent_path =
+        std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
+            std::env::split_paths(&inherited_path).filter(|entry| {
+                !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                    .iter()
+                    .any(|candidate| entry.join(candidate).exists())
+            }),
+        ))?;
     let production_installer = workspace_root()?
         .join("plugins")
         .join("projectatlas")
@@ -17756,10 +17877,14 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
     let stable_runtime_dir = stable_runtime
         .parent()
         .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
-    let parent_path = std::env::join_paths(
-        std::iter::once(stable_runtime_dir.to_path_buf())
-            .chain(std::env::split_paths(&inherited_path)),
-    )?;
+    let parent_path =
+        std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
+            std::env::split_paths(&inherited_path).filter(|entry| {
+                !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                    .iter()
+                    .any(|candidate| entry.join(candidate).exists())
+            }),
+        ))?;
 
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
@@ -17954,9 +18079,13 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         &stale_parent_runtime,
         "@echo off\r\necho {\"version\":\"0.3.26\"}\r\nexit /b 0\r\n",
     )?;
-    let stale_parent_path = std::env::join_paths(
-        std::iter::once(stale_parent_bin).chain(std::env::split_paths(&inherited_path)),
-    )?;
+    let stale_parent_path = std::env::join_paths(std::iter::once(stale_parent_bin).chain(
+        std::env::split_paths(&inherited_path).filter(|entry| {
+            !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                .iter()
+                .any(|candidate| entry.join(candidate).exists())
+        }),
+    ))?;
     let stale_parent_install = StdCommand::new("powershell")
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
