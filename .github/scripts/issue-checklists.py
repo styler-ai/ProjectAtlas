@@ -1468,10 +1468,21 @@ def check_pull_request_tasks(
                     f"pull-request base slice"
                 )
         elif candidate_owners != accepted_owners:
-            failures.append(
-                f"{change} changes mapped OpenSpec owners from accepted pull-request base "
-                f"{base_ref}: expected {accepted_owners!r}, found {candidate_owners!r}"
+            candidate_by_issue = {owner.issue: owner for owner in candidate_owners}
+            accepted_by_issue = {owner.issue: owner for owner in accepted_owners}
+            owner_only_range_change = (
+                candidate_by_issue.keys() == accepted_by_issue.keys()
+                and all(
+                    issue == owner_issue
+                    or candidate_by_issue[issue] == accepted_by_issue[issue]
+                    for issue in candidate_by_issue
+                )
             )
+            if not owner_only_range_change:
+                failures.append(
+                    f"{change} changes mapped OpenSpec owners from accepted pull-request base "
+                    f"{base_ref}: expected {accepted_owners!r}, found {candidate_owners!r}"
+                )
     for change, owners in sorted(issue_map.items()):
         path, candidate_tasks = local_tasks(root, change)
         try:
@@ -2531,6 +2542,137 @@ Mitigations:
             ) == []
             assert live_checked == [2], "unrelated live progress must not be fetched"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            shared_change = branch_root / "openspec" / "changes" / "shared-change"
+            shared_change.mkdir(parents=True)
+            shared_tasks = (
+                "- [x] 1.1 Anchored task\n"
+                "- [ ] 2.1 Finish ordinary implementation.\n"
+            )
+            extended_tasks = shared_tasks + "- [ ] 3.1 Extend the owner range.\n"
+            shared_task_path = shared_change / "tasks.md"
+            shared_task_path.write_text(extended_tasks, encoding="utf-8")
+            shared_relative_path = shared_task_path.relative_to(branch_root).as_posix()
+            base_texts[shared_relative_path] = shared_tasks
+            shared_base_map = json.dumps(
+                {
+                    "schema_version": 2,
+                    "changes": {
+                        "shared-change": {
+                            "contract": "checklist-v1",
+                            "primary_issue": 1,
+                            "owners": [
+                                {"issue": 1, "first_task": "1.1", "last_task": "1.1"},
+                                {"issue": 2, "first_task": "2.1", "last_task": "2.1"},
+                            ],
+                        }
+                    },
+                }
+            )
+            shared_issue_contract = issue_contract.replace(
+                "## Acceptance and Review Tasks",
+                "## 3. Extension\n"
+                "- [ ] 3.1 Extend the owner range.\n"
+                "## Acceptance and Review Tasks",
+            ).replace("## 1. Review\n", "").replace(
+                "- [x] 1.1 Anchored task\n", ""
+            )
+            base_issue_map_text = shared_base_map
+            live_payloads[2] = {
+                "state": "OPEN",
+                "body": shared_issue_contract,
+            }
+            shared_issue_map = {
+                "shared-change": (
+                    Owner(1, "1.1", "1.1"),
+                    Owner(2, "2.1", "3.1"),
+                )
+            }
+            base_reads.clear()
+            live_checked.clear()
+            assert (
+                check_pull_request_tasks(
+                    "owner/repo", branch_root, shared_issue_map, 7, "accepted-base"
+                )
+                == []
+            )
+            assert live_checked == [2], "only the changed owner may use live state"
+            assert base_reads == [shared_relative_path]
+
+            shared_task_path.write_text(shared_tasks, encoding="utf-8")
+            contracted_issue_contract = shared_issue_contract.replace(
+                "- [ ] 3.1 Extend the owner range.\n", ""
+            )
+            base_texts[shared_relative_path] = extended_tasks
+            base_issue_map_text = json.dumps(
+                {
+                    "schema_version": 2,
+                    "changes": {
+                        "shared-change": {
+                            "contract": "checklist-v1",
+                            "primary_issue": 1,
+                            "owners": [
+                                {"issue": 1, "first_task": "1.1", "last_task": "1.1"},
+                                {"issue": 2, "first_task": "2.1", "last_task": "3.1"},
+                            ],
+                        }
+                    },
+                }
+            )
+            live_payloads[2] = {
+                "state": "OPEN",
+                "body": contracted_issue_contract,
+            }
+            contracted_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {
+                    "shared-change": (
+                        Owner(1, "1.1", "1.1"),
+                        Owner(2, "2.1", "2.1"),
+                    )
+                },
+                7,
+                "accepted-base",
+            )
+            assert contracted_failures == []
+
+            shared_task_path.write_text(extended_tasks, encoding="utf-8")
+            overlap_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {
+                    "shared-change": (
+                        Owner(1, "1.1", "1.1"),
+                        Owner(2, "1.1", "3.1"),
+                    )
+                },
+                7,
+                "accepted-base",
+            )
+            assert any("ordered, disjoint, and gap-free" in failure for failure in overlap_failures)
+
+            unrelated_range_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {
+                    "shared-change": (
+                        Owner(1, "1.1", "2.1"),
+                        Owner(2, "3.1", "3.1"),
+                    )
+                },
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "changes mapped OpenSpec owners" in failure
+                for failure in unrelated_range_failures
+            )
+
+            base_issue_map_text = json.dumps(
+                {"schema_version": 2, "changes": {"change-a": 1}}
+            )
+            live_payloads[2] = {"state": "OPEN", "body": issue_contract}
 
             deleted_change_failures = check_pull_request_tasks(
                 "owner/repo",
