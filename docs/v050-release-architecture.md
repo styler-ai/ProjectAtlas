@@ -430,10 +430,13 @@ flowchart TB
   installer[Installer] --> identity[Canonical verified runtime identity]
   identity --> collision{Existing atlas command?}
   collision -->|unmanaged| reject[Typed collision; no overwrite]
-  collision -->|owned current| shim[Atomic managed shim install]
-  collision -->|owned prior target| migrate[Verify marker and prior runtime; retire old shim]
-  migrate --> shim
-  shim --> discover[PATH discovery]
+  collision -->|owned current| stage[Stage shim plus independent provenance]
+  collision -->|owned prior target| stage
+  stage --> publish{No-clobber publish succeeds?}
+  publish -->|no| preserve[Preserve old owned shim and provenance]
+  publish -->|yes| shim[Publish verified managed shim]
+  shim --> migrate[Retire prior owned shim after replacement verification]
+  migrate --> discover[PATH discovery]
   discover --> aliases[atlas top-level command aliases]
   aliases --> canonical[Canonical projectatlas command handlers]
   aliases --> resolve[atlas health resolve]

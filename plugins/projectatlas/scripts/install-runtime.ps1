@@ -2056,6 +2056,43 @@ function Get-ProjectAtlasAtlasForwarderPath {
     return Join-Path (Split-Path -Parent $VerifiedPath) "atlas.cmd"
 }
 
+function Get-ProjectAtlasAtlasForwarderProvenancePath {
+    param(
+        [string]$ForwarderPath
+    )
+    return Join-Path (Split-Path -Parent $ForwarderPath) ".atlas-forwarder.provenance"
+}
+
+function Get-ProjectAtlasAtlasForwarderProvenanceContent {
+    param(
+        [string]$ForwarderPath,
+        [string]$VerifiedPath
+    )
+    $canonicalForwarderPath = Get-NormalizedPathEntry $ForwarderPath
+    $canonicalVerifiedPath = Get-NormalizedPathEntry $VerifiedPath
+    return "# ProjectAtlas atlas forwarder provenance v1`r`nforwarder: $canonicalForwarderPath`r`nruntime: $canonicalVerifiedPath`r`n"
+}
+
+function Test-ProjectAtlasAtlasForwarderProvenance {
+    param(
+        [string]$ProvenancePath,
+        [string]$ForwarderPath,
+        [string]$VerifiedPath
+    )
+    try {
+        Assert-ProjectAtlasDirectFilePath $ProvenancePath "ProjectAtlas atlas forwarder provenance"
+        $item = Get-Item -Force -LiteralPath $ProvenancePath -ErrorAction SilentlyContinue
+        if (-not $item -or ($item.PSObject.Properties.Name -contains "LinkType" `
+                -and [string]::Equals($item.LinkType, "HardLink", [System.StringComparison]::OrdinalIgnoreCase))) {
+            return $false
+        }
+        return [System.IO.File]::ReadAllText($ProvenancePath) -ceq (Get-ProjectAtlasAtlasForwarderProvenanceContent $ForwarderPath $VerifiedPath)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-ProjectAtlasManagedAtlasForwarderTarget {
     param(
         [string]$FilePath
@@ -2083,6 +2120,10 @@ function Get-ProjectAtlasManagedAtlasForwarderTarget {
         if ((Get-NormalizedPathEntry $FilePath) -ine (Get-NormalizedPathEntry $expectedForwarder)) {
             return $null
         }
+        $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $FilePath
+        if (-not (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $FilePath $target)) {
+            return $null
+        }
         if ($actualContent -cne (Get-ProjectAtlasAtlasForwarderContent $target) `
             -and $actualContent -cne (Get-ProjectAtlasLegacyAtlasForwarderContent $target)) {
             return $null
@@ -2106,6 +2147,13 @@ function Test-ProjectAtlasManagedAtlasForwarder {
     return $target -and (Get-NormalizedPathEntry $target) -ieq (Get-NormalizedPathEntry $VerifiedPath)
 }
 
+function Test-ProjectAtlasOwnedAtlasForwarder {
+    param(
+        [string]$FilePath
+    )
+    return [bool](Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath)
+}
+
 function Move-ProjectAtlasManagedAtlasForwarder {
     param(
         [string]$FilePath,
@@ -2119,7 +2167,9 @@ function Move-ProjectAtlasManagedAtlasForwarder {
         return $false
     }
     Assert-ProjectAtlasDirectFilePath $FilePath "ProjectAtlas atlas forwarder"
+    $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $FilePath
     Remove-Item -LiteralPath $FilePath -Force
+    Remove-Item -LiteralPath $provenancePath -Force
     Write-Output "Migrated ProjectAtlas atlas forwarder: $FilePath -> $(Get-ProjectAtlasAtlasForwarderPath $VerifiedPath)"
     return $true
 }
@@ -2142,6 +2192,54 @@ function Get-ProjectAtlasLegacyAtlasForwarderContent {
     return "@echo off`r`nrem ProjectAtlas managed atlas forwarder.`r`nrem target: $canonicalVerifiedPath`r`n`"$targetForBatch`" %*`r`nexit /b %ERRORLEVEL%`r`n"
 }
 
+function Publish-ProjectAtlasFileNoClobber {
+    param(
+        [string]$SourcePath,
+        [string]$DestinationPath
+    )
+    Assert-ProjectAtlasDirectFilePath $SourcePath "ProjectAtlas staged file"
+    $source = $null
+    $destination = $null
+    try {
+        $source = [System.IO.File]::OpenRead($SourcePath)
+        $destination = [System.IO.File]::Open(
+            $DestinationPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None)
+        $source.CopyTo($destination)
+        $destination.Flush($true)
+    }
+    finally {
+        if ($destination) {
+            $destination.Dispose()
+        }
+        if ($source) {
+            $source.Dispose()
+        }
+    }
+    Assert-ProjectAtlasDirectFilePath $DestinationPath "ProjectAtlas published file"
+}
+
+function Invoke-ProjectAtlasAtlasForwarderPublicationRace {
+    param(
+        [string]$ForwarderPath
+    )
+    if ([string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH)) {
+        return
+    }
+    if ((Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH) -ine (Get-NormalizedPathEntry $ForwarderPath)) {
+        return
+    }
+    if (Test-Path -LiteralPath $ForwarderPath) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        $ForwarderPath,
+        "# foreign publication race collision`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Assert-ProjectAtlasAtlasForwarderCollisionFree {
     param(
         [string]$VerifiedPath
@@ -2162,10 +2260,6 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
             -and (Test-ProjectAtlasManagedAtlasForwarder $candidate $VerifiedPath)) {
             continue
         }
-        if ((Get-NormalizedPathEntry $candidate) -ieq $forwarderNormalized `
-            -and (Move-ProjectAtlasManagedAtlasForwarder $candidate $VerifiedPath)) {
-            continue
-        }
         throw "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $candidate"
     }
     $command = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -2173,10 +2267,8 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
         $commandPath = if ($command.Path) { $command.Path } elseif ($command.Source) { $command.Source } else { $null }
         if ([string]::IsNullOrWhiteSpace($commandPath) -or (Get-NormalizedPathEntry $commandPath) -ine $forwarderNormalized) {
             $observed = if ($commandPath) { $commandPath } else { $command.Name }
-            if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Test-ProjectAtlasManagedAtlasForwarder $commandPath $VerifiedPath)) {
-                if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Move-ProjectAtlasManagedAtlasForwarder $commandPath $VerifiedPath)) {
-                    throw "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $observed"
-                }
+            if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Test-ProjectAtlasOwnedAtlasForwarder $commandPath)) {
+                throw "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $observed"
             }
         }
     }
@@ -2187,24 +2279,73 @@ function Write-ProjectAtlasAtlasForwarder {
     param(
         [string]$VerifiedPath
     )
+    $previousCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+    $previousPath = if ($previousCommand) {
+        if ($previousCommand.Path) { $previousCommand.Path } else { $previousCommand.Source }
+    }
     $forwarder = Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath
+    $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $forwarder
     $runtimeDirectory = Split-Path -Parent $VerifiedPath
     $temporary = Join-Path $runtimeDirectory (".atlas-forwarder-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $temporaryProvenance = Join-Path $runtimeDirectory (".atlas-forwarder-provenance-" + [guid]::NewGuid().ToString("N") + ".tmp")
     $content = Get-ProjectAtlasAtlasForwarderContent $VerifiedPath
+    $provenanceContent = Get-ProjectAtlasAtlasForwarderProvenanceContent $forwarder $VerifiedPath
     $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+    $provenancePublished = $false
+    $forwarderPublished = $false
     try {
         [System.IO.File]::WriteAllText($temporary, $content, $utf8NoBom)
+        [System.IO.File]::WriteAllText($temporaryProvenance, $provenanceContent, $utf8NoBom)
         Assert-ProjectAtlasDirectFilePath $temporary "ProjectAtlas atlas forwarder staging file"
+        Assert-ProjectAtlasDirectFilePath $temporaryProvenance "ProjectAtlas atlas forwarder provenance staging file"
+        if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_STAGE_FAILURE)) {
+            throw "ProjectAtlas atlas forwarder staging was intentionally failed for lifecycle proof."
+        }
+        if (Test-Path -LiteralPath $provenancePath) {
+            if (-not (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath)) {
+                throw "ProjectAtlas atlas forwarder provenance collision; refusing to overwrite: $provenancePath"
+            }
+        }
+        else {
+            Publish-ProjectAtlasFileNoClobber $temporaryProvenance $provenancePath
+            $provenancePublished = $true
+        }
         Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath | Out-Null
-        Move-Item -LiteralPath $temporary -Destination $forwarder -Force
+        if (-not (Test-Path -LiteralPath $forwarder)) {
+            Invoke-ProjectAtlasAtlasForwarderPublicationRace $forwarder
+            try {
+                Publish-ProjectAtlasFileNoClobber $temporary $forwarder
+            }
+            catch {
+                throw "ProjectAtlas atlas forwarder publication collided; refusing to overwrite: $forwarder. $($_.Exception.Message)"
+            }
+            $forwarderPublished = $true
+        }
+        if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath)) {
+            throw "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder"
+        }
+        if ($previousPath `
+            -and (Get-NormalizedPathEntry $previousPath) -ine (Get-NormalizedPathEntry $forwarder) `
+            -and (Test-ProjectAtlasOwnedAtlasForwarder $previousPath)) {
+            if (-not (Move-ProjectAtlasManagedAtlasForwarder $previousPath $VerifiedPath)) {
+                throw "ProjectAtlas atlas forwarder migration failed after publishing the replacement: $previousPath"
+            }
+        }
+    }
+    catch {
+        if ($provenancePublished -and -not $forwarderPublished `
+            -and (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath)) {
+            Remove-Item -LiteralPath $provenancePath -Force -ErrorAction SilentlyContinue
+        }
+        throw
     }
     finally {
         if ([System.IO.File]::Exists($temporary)) {
             [System.IO.File]::Delete($temporary)
         }
-    }
-    if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath)) {
-        throw "ProjectAtlas atlas forwarder failed final verification: $forwarder"
+        if ([System.IO.File]::Exists($temporaryProvenance)) {
+            [System.IO.File]::Delete($temporaryProvenance)
+        }
     }
     Write-Output "ProjectAtlas atlas forwarder installed and verified: $forwarder -> $VerifiedPath"
     return $forwarder
@@ -2250,7 +2391,9 @@ function Remove-ProjectAtlasAtlasForwarders {
             throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
         }
         Assert-ProjectAtlasDirectFilePath $candidate "ProjectAtlas atlas forwarder"
+        $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $candidate
         Remove-Item -LiteralPath $candidate -Force
+        Remove-Item -LiteralPath $provenancePath -Force
         Write-Output "ProjectAtlas atlas forwarder removed: $candidate"
     }
 }

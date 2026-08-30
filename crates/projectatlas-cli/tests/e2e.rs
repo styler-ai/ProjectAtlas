@@ -10371,6 +10371,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         .parent()
         .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
         .join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let provenance = runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+        .join(".atlas-forwarder.provenance");
     let unmanaged_collision = b"unmanaged atlas collision\n";
     fs::write(&forwarder, unmanaged_collision)?;
     let project_state_before_collision = repository_filesystem_snapshot(&repo)?;
@@ -10422,6 +10426,23 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             "installer did not publish the exact managed forwarder body to the canonical runtime: {}\nactual={forwarder_text:?}\nexpected={expected_forwarder_text:?}",
             forwarder.display()
         ),
+    )?;
+    let expected_provenance = if cfg!(windows) {
+        format!(
+            "# ProjectAtlas atlas forwarder provenance v1\r\nforwarder: {}\r\nruntime: {}\r\n",
+            forwarder.display(),
+            runtime.display()
+        )
+    } else {
+        format!(
+            "# ProjectAtlas atlas forwarder provenance v1\nforwarder: {}\nruntime: {}\n",
+            forwarder.display(),
+            runtime.display()
+        )
+    };
+    require(
+        provenance.is_file() && fs::read_to_string(&provenance)? == expected_provenance,
+        "installer did not publish the independent atlas forwarder provenance authority",
     )?;
 
     let direct_database = temp.path().join("direct database with spaces.db");
@@ -10597,6 +10618,63 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         ),
     )?;
 
+    let hardlink_source = temp.path().join(if cfg!(windows) {
+        "atlas-hardlink-source.cmd"
+    } else {
+        "atlas-hardlink-source"
+    });
+    fs::copy(&forwarder, &hardlink_source)?;
+    fs::remove_file(&forwarder)?;
+    fs::hard_link(&hardlink_source, &forwarder)?;
+    let hardlink_output = run_install()?;
+    let hardlink_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&hardlink_output.stdout),
+        String::from_utf8_lossy(&hardlink_output.stderr)
+    );
+    require(
+        !hardlink_output.status.success()
+            && hardlink_text.contains("atlas command collision")
+            && fs::read_to_string(&forwarder)? == forwarder_text
+            && fs::read_to_string(&provenance)? == expected_provenance,
+        format!("installer accepted or modified a hard-linked atlas forwarder:\n{hardlink_text}"),
+    )?;
+    fs::remove_file(&forwarder)?;
+    fs::remove_file(&hardlink_source)?;
+    require(
+        run_install()?.status.success() && forwarder.is_file() && provenance.is_file(),
+        "installer could not repair the hard-link collision without losing provenance",
+    )?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let symlink_source = temp.path().join("atlas-symlink-source");
+        fs::copy(&forwarder, &symlink_source)?;
+        fs::remove_file(&forwarder)?;
+        symlink(&symlink_source, &forwarder)?;
+        let symlink_output = run_install()?;
+        let symlink_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&symlink_output.stdout),
+            String::from_utf8_lossy(&symlink_output.stderr)
+        );
+        require(
+            !symlink_output.status.success()
+                && symlink_text.contains("atlas command collision")
+                && fs::read(&symlink_source)? == fs::read(&forwarder)?
+                && fs::read_to_string(&provenance)? == expected_provenance,
+            format!("installer accepted or modified a symlinked atlas forwarder:\n{symlink_text}"),
+        )?;
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&symlink_source)?;
+        require(
+            run_install()?.status.success() && forwarder.is_file() && provenance.is_file(),
+            "installer could not repair the symlink collision without losing provenance",
+        )?;
+    }
+
     let effective_collision_dir = temp.path().join("effective atlas collision");
     fs::create_dir_all(&effective_collision_dir)?;
     let effective_collision_path =
@@ -10652,7 +10730,22 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     fs::remove_file(&effective_collision_path)?;
 
-    fs::write(&forwarder, &foreign_forwarder)?;
+    fs::remove_file(&forwarder)?;
+    fs::remove_file(&provenance)?;
+    let valid_foreign_forwarder = if cfg!(windows) {
+        format!(
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
+            runtime.display(),
+            runtime.display()
+        )
+    } else {
+        format!(
+            "# ProjectAtlas managed atlas forwarder.\n# target: {}\nexec '{}' \"$@\"\n",
+            runtime.display(),
+            runtime.display().to_string().replace('\'', "'\\''")
+        )
+    };
+    fs::write(&forwarder, &valid_foreign_forwarder)?;
     let collision_output = run_install()?;
     let collision_text = format!(
         "{}\n{}",
@@ -10664,8 +10757,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         format!("installer accepted an unmanaged atlas collision:\n{collision_text}"),
     )?;
     require(
-        fs::read_to_string(&forwarder)? == foreign_forwarder,
-        "installer overwrote an unmanaged atlas collision",
+        fs::read_to_string(&forwarder)? == valid_foreign_forwarder && !provenance.exists(),
+        "installer overwrote a crafted exact-body atlas collision beside a valid runtime",
     )?;
     let rejected_uninstall = run_uninstall()?;
     let rejected_uninstall_text = format!(
@@ -10676,7 +10769,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     require(
         !rejected_uninstall.status.success()
             && rejected_uninstall_text.contains("unmanaged")
-            && fs::read_to_string(&forwarder)? == foreign_forwarder,
+            && fs::read_to_string(&forwarder)? == valid_foreign_forwarder
+            && !provenance.exists(),
         format!(
             "installer uninstall accepted a foreign marker forwarder:\n{rejected_uninstall_text}"
         ),
@@ -10771,6 +10865,22 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
             .env("PATH", &installer_path);
         Ok(command.output()?)
     };
+    let run_install_with_env =
+        |runtime: &Path, key: &str, value: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &installer_path)
+                .env(key, value);
+            Ok(command.output()?)
+        };
 
     let first_output = run_install(&first_runtime)?;
     require(
@@ -10788,6 +10898,56 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
         first_forwarder.is_file(),
         "first managed atlas forwarder was not installed",
     )?;
+    let first_provenance = first_runtime_dir.join(".atlas-forwarder.provenance");
+    let second_provenance = second_runtime_dir.join(".atlas-forwarder.provenance");
+    let first_forwarder_before_failure = fs::read(&first_forwarder)?;
+    let first_provenance_before_failure = fs::read(&first_provenance)?;
+
+    let staging_failure = run_install_with_env(
+        &second_runtime,
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_STAGE_FAILURE",
+        Path::new("1"),
+    )?;
+    require(
+        !staging_failure.status.success()
+            && fs::read(&first_forwarder)? == first_forwarder_before_failure
+            && fs::read(&first_provenance)? == first_provenance_before_failure
+            && !second_forwarder.exists()
+            && !second_provenance.exists(),
+        format!(
+            "staging failure did not preserve the old atlas forwarder and provenance:\n{}\n{}",
+            String::from_utf8_lossy(&staging_failure.stdout),
+            String::from_utf8_lossy(&staging_failure.stderr)
+        ),
+    )?;
+
+    let publication_race = run_install_with_env(
+        &second_runtime,
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH",
+        &second_forwarder,
+    )?;
+    let publication_race_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&publication_race.stdout),
+        String::from_utf8_lossy(&publication_race.stderr)
+    );
+    require(
+        !publication_race.status.success()
+            && publication_race_text.contains("publication")
+            && fs::read(&first_forwarder)? == first_forwarder_before_failure
+            && fs::read(&first_provenance)? == first_provenance_before_failure
+            && fs::read_to_string(&second_forwarder)?
+                == if cfg!(windows) {
+                    "# foreign publication race collision\r\n"
+                } else {
+                    "# foreign publication race collision\n"
+                }
+            && !second_provenance.exists(),
+        format!(
+            "publication race overwrote a foreign destination or retired the old command:\n{publication_race_text}"
+        ),
+    )?;
+    fs::remove_file(&second_forwarder)?;
 
     let second_output = run_install(&second_runtime)?;
     let second_output_text = format!(
@@ -10796,7 +10956,11 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
         String::from_utf8_lossy(&second_output.stderr)
     );
     require(
-        second_output.status.success() && !first_forwarder.exists() && second_forwarder.is_file(),
+        second_output.status.success()
+            && !first_forwarder.exists()
+            && !first_provenance.exists()
+            && second_forwarder.is_file()
+            && second_provenance.is_file(),
         format!(
             "installer did not migrate the owned forwarder from the old PATH location:\n{second_output_text}"
         ),
