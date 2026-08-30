@@ -202,6 +202,9 @@ const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(4)
 // Delay the polling caller, not the child operation, so a completed helper is observed late.
 const CODEX_OWNER_LATE_COMPLETION_TEST_DELAY: Duration = Duration::from_secs(2);
 #[cfg(windows)]
+// Delay the outer owner observer past its deadline after the fixture has received stop.
+const CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(6);
+#[cfg(windows)]
 // Delay the readiness poll past the deadline after the fixture has published, without
 // changing process-global state, proving the admission guard through the real helper.
 const CODEX_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(31);
@@ -36291,6 +36294,7 @@ fn stop_codex_owner_after_spawn_failure(
         stable_runtime,
         None,
         None,
+        None,
     )
 }
 
@@ -36301,6 +36305,7 @@ fn stop_codex_owner_after_spawn_failure_with_test_delays(
     stable_runtime: &Path,
     identity_capture_delay: Option<Duration>,
     child_stop_delay: Option<Duration>,
+    owner_observation_delay: Option<Duration>,
 ) -> Result<(), Box<dyn Error>> {
     let mut stop_file = child_identity_file.as_os_str().to_os_string();
     stop_file.push(".stop");
@@ -36309,10 +36314,23 @@ fn stop_codex_owner_after_spawn_failure_with_test_delays(
     let cleanup_deadline = codex_owner_cleanup_deadline(cleanup_started);
     let observation_deadline = cleanup_started + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
     let mut observation_error = None;
+    let mut failures = Vec::new();
     if stop_result.is_ok() {
+        if let Some(delay) = owner_observation_delay {
+            thread::sleep(delay);
+        }
         loop {
             match parent.try_wait() {
-                Ok(Some(_)) => return Ok(()),
+                Ok(Some(status)) => {
+                    if Instant::now() >= observation_deadline {
+                        failures.push(format!(
+                            "owner fixture exited after observation deadline: {status} (owner_observation_elapsed_ms={})",
+                            cleanup_started.elapsed().as_millis()
+                        ));
+                        break;
+                    }
+                    return Ok(());
+                }
                 Ok(None) => {}
                 Err(error) => {
                     observation_error = Some(error);
@@ -36338,7 +36356,6 @@ fn stop_codex_owner_after_spawn_failure_with_test_delays(
         return Ok(());
     }
 
-    let mut failures = Vec::new();
     if let Err(error) = stop_result {
         failures.push(format!("could not signal the owner fixture: {error}"));
     } else {
@@ -36833,6 +36850,62 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         .into());
     }
 
+    // A promptly stopped owner can be observed after the five-second owner-observation
+    // deadline when the polling caller is descheduled.  The late completion is a failure
+    // classification, but it must still use the retained-identity child-first cleanup path.
+    let late_observation_identity_file = temp.path().join("late-owner-observation.pid");
+    let (mut late_observation_parent, late_observation_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &late_observation_identity_file,
+        None,
+        None,
+    )?;
+    // Remove normal publication so cleanup must use the fixture-retained identity record.
+    fs::remove_file(&late_observation_identity_file)?;
+    let late_observation_result = stop_codex_owner_after_spawn_failure_with_test_delays(
+        &mut late_observation_parent,
+        &late_observation_identity_file,
+        &runtime,
+        None,
+        None,
+        Some(CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY),
+    );
+    let late_observation_text = late_observation_result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let late_observation_elapsed = late_observation_text
+        .split("owner_observation_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "late owner observation omitted its elapsed diagnostic: {late_observation_text}"
+            ))
+        })?;
+    if late_observation_result.is_ok()
+        || !late_observation_text.contains("owner fixture exited after observation deadline")
+        || late_observation_elapsed < CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY
+        || late_observation_elapsed
+            > CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY
+                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+        || late_observation_parent.try_wait()?.is_none()
+        || windows_process_is_alive(&late_observation_identity)?
+        || late_observation_text.contains("could not retire its owned child safely")
+    {
+        return Err(io::Error::other(format!(
+            "late owner observation did not fail closed through exact child-first cleanup: result={late_observation_result:?} child_alive={}\n{late_observation_text}",
+            windows_process_is_alive(&late_observation_identity)?
+        ))
+        .into());
+    }
+
     // Exercise the complete bounded cleanup sequence: owner observation, retained identity
     // capture, and exact child stop each consume real scheduler-visible time.
     let composed_identity_file = temp.path().join("composed-timeout.pid");
@@ -36898,6 +36971,7 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         &runtime,
         Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
         Some(CODEX_OWNER_COMPOSED_STOP_DELAY),
+        None,
     );
     let composed_text = composed_result
         .as_ref()
