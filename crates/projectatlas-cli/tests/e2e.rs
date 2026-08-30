@@ -9287,6 +9287,48 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary IssueOps step is missing"))?;
+    let mermaid_setup_step = ci
+        .split("- name: Install Mermaid parser")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("CI Mermaid setup step is missing"))?;
+    if ci.matches("- name: Install Mermaid parser").count() != 1 {
+        return Err(io::Error::other("CI must install the Mermaid parser exactly once").into());
+    }
+    let first_cargo_test = ci
+        .find("cargo test")
+        .ok_or_else(|| io::Error::other("CI omitted cargo tests"))?;
+    let mermaid_setup_position = ci
+        .find("- name: Install Mermaid parser")
+        .ok_or_else(|| io::Error::other("CI Mermaid setup step is missing"))?;
+    if mermaid_setup_position > first_cargo_test {
+        return Err(io::Error::other("CI Mermaid setup must precede its first cargo test").into());
+    }
+    if mermaid_setup_step.contains("\n        if:") {
+        return Err(io::Error::other("CI Mermaid setup must be unconditional").into());
+    }
+    for event in ["pull_request_review:", "pull_request_review_comment:"] {
+        if !ci.contains(event) {
+            return Err(io::Error::other(format!(
+                "CI must retain review-event coverage for {event:?}"
+            ))
+            .into());
+        }
+    }
+    for gate in [
+        "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+        "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+    ] {
+        if !mermaid_setup_step.contains(gate) {
+            return Err(io::Error::other(format!("CI Mermaid setup omitted gate {gate:?}")).into());
+        }
+        if checklist_step.contains(gate) {
+            return Err(io::Error::other(format!(
+                "CI IssueOps step must not own Mermaid setup gate {gate:?}"
+            ))
+            .into());
+        }
+    }
     if checklist_step.contains("--milestone") {
         return Err(io::Error::other(
             "ordinary pull requests must not require full milestone completion",

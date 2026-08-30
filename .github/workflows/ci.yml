@@ -63,6 +63,11 @@ jobs:
             exit 1
           fi
 
+      - name: Install Mermaid parser
+        run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+
       - name: Issue checklist check
         if: github.event_name == 'pull_request' || github.event_name == 'push'
         env:
@@ -70,8 +75,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          npm ci --ignore-scripts --prefix .github/mermaid-parser
-          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
           python3 .github/scripts/issue-checklists.py --self-test
           python3 .github/scripts/test-optional-parser-proof-inputs.py
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
