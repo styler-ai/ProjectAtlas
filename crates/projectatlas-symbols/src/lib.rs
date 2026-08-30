@@ -883,8 +883,11 @@ fn extract_tree_sitter_graph<E>(
         }));
     }
     let had_errors = root.has_error() && has_php_opening_tag != Some(false);
-    let mut php_namespace_context = (has_php_opening_tag == Some(true))
-        .then(|| PhpNamespaceContext::from_program(root, content));
+    let mut php_namespace_context = if has_php_opening_tag == Some(true) {
+        Some(PhpNamespaceContext::from_program(root, content, check)?)
+    } else {
+        None
+    };
     visit_node(
         root,
         content,
@@ -904,6 +907,12 @@ struct PhpNamespaceContext {
     ranges: Vec<PhpNamespaceRange>,
     /// Next range to inspect while declarations are visited in source order.
     next_range: usize,
+    /// Number of program children examined while building the ranges.
+    #[cfg(test)]
+    examined_children: usize,
+    /// Number of source-order lookups made while visiting top-level nodes.
+    #[cfg(test)]
+    parent_lookups: usize,
 }
 
 /// One semicolon namespace's source-order ownership range.
@@ -918,14 +927,27 @@ struct PhpNamespaceRange {
 
 impl PhpNamespaceContext {
     /// Build namespace ranges in one forward pass over the program children.
-    fn from_program(root: Node<'_>, content: &str) -> Self {
+    fn from_program<E>(
+        root: Node<'_>,
+        content: &str,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, E> {
         let mut context = Self {
             ranges: Vec::new(),
             next_range: 0,
+            #[cfg(test)]
+            examined_children: 0,
+            #[cfg(test)]
+            parent_lookups: 0,
         };
         let mut active = None;
         let mut cursor = root.walk();
         for child in root.named_children(&mut cursor) {
+            check()?;
+            #[cfg(test)]
+            {
+                context.examined_children += 1;
+            }
             if child.kind() != "namespace_definition" {
                 continue;
             }
@@ -952,11 +974,15 @@ impl PhpNamespaceContext {
                 name,
             });
         }
-        context
+        Ok(context)
     }
 
     /// Return the active namespace for the next source-order top-level node.
     fn parent_for(&mut self, node: Node<'_>) -> Option<String> {
+        #[cfg(test)]
+        {
+            self.parent_lookups += 1;
+        }
         while self
             .ranges
             .get(self.next_range)
@@ -2978,11 +3004,11 @@ fn is_snippet_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, QUALIFIED_SYMBOL_SCOPE_PREFIX,
-        compact_symbol_identity, content_without_leading_purpose_header, empty_graph,
-        extract_cargo_manifest_graph_checked, extract_fallback_graph,
-        extract_fallback_graph_checked, extract_powershell_graph_checked, extract_symbol_graph,
-        extract_symbol_graph_checked, extract_symbol_graph_controlled,
+        MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, PhpNamespaceContext,
+        QUALIFIED_SYMBOL_SCOPE_PREFIX, compact_symbol_identity,
+        content_without_leading_purpose_header, empty_graph, extract_cargo_manifest_graph_checked,
+        extract_fallback_graph, extract_fallback_graph_checked, extract_powershell_graph_checked,
+        extract_symbol_graph, extract_symbol_graph_checked, extract_symbol_graph_controlled,
         extract_vue_sfc_graph_checked, languages, specialized_languages,
     };
     use projectatlas_core::symbols::{
@@ -2991,8 +3017,8 @@ mod tests {
     use projectatlas_core::{
         IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
     };
+    use std::convert::Infallible;
     use std::fmt::Write as _;
-    use std::time::{Duration, Instant};
 
     fn tree_symbol<'a>(
         graph: &'a SymbolGraph,
@@ -3008,6 +3034,16 @@ mod tests {
                 && symbol.parent.as_deref() == parent
                 && symbol.signature.contains(signature_fragment)
         })
+    }
+
+    fn large_semicolon_namespace_source(declaration_count: usize) -> String {
+        let mut source = String::from(
+            "<?php\nnamespace Prefix;\nfunction prefix(): void {}\nnamespace Scale;\n",
+        );
+        for index in 0..(declaration_count - 1) {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        source
     }
 
     #[test]
@@ -5395,20 +5431,71 @@ class OutsideGlobal {}
         );
         assert!(malformed.symbols.len() <= MAX_SYMBOLS_PER_FILE);
         assert!(malformed.relations.len() <= 8_000);
+    }
 
-        let mut large = String::from("<?php\n");
-        for index in 0..(MAX_SYMBOLS_PER_FILE + 50) {
-            assert!(writeln!(large, "function function_{index}(): void {{}}").is_ok());
+    #[test]
+    fn php_namespace_context_builds_one_forward_cursor_at_intended_scale() {
+        let declaration_count = 8_050;
+        let source = large_semicolon_namespace_source(declaration_count);
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let parsed = super::parse_php_tree(&source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(parsed.is_some(), "large PHP source should have a tree");
+        let Some(parsed) = parsed else { return };
+        let root = parsed.tree.root_node();
+        let named_child_count = root.named_child_count();
+        let mut context_check = || Ok::<(), Infallible>(());
+        let mut context = PhpNamespaceContext::from_program(root, &source, &mut context_check)
+            .expect("namespace context should build");
+        let mut cursor = root.walk();
+        let mut declaration_lookups = 0;
+        for child in root.named_children(&mut cursor) {
+            if matches!(child.kind(), "namespace_definition" | "php_tag") {
+                continue;
+            }
+            declaration_lookups += 1;
+            let expected_parent = if declaration_lookups == 1 {
+                "Prefix"
+            } else {
+                "Scale"
+            };
+            assert_eq!(context.parent_for(child).as_deref(), Some(expected_parent));
         }
-        let started = Instant::now();
-        let bounded = extract_symbol_graph("src/large.php", Some("php"), &large);
-        let elapsed = started.elapsed();
+        assert_eq!(named_child_count, declaration_count + 3);
+        assert_eq!(context.examined_children, named_child_count);
+        assert_eq!(context.parent_lookups, declaration_lookups);
+        assert_eq!(declaration_lookups, declaration_count);
+        assert_eq!(context.next_range, context.ranges.len() - 1);
+
+        let bounded = extract_symbol_graph("src/large.php", Some("php"), &source);
         assert_eq!(bounded.parser, ParserKind::TreeSitter);
         assert_eq!(bounded.symbols.len(), MAX_SYMBOLS_PER_FILE);
-        assert!(
-            elapsed < Duration::from_secs(60),
-            "large PHP source regressed to a sibling-rescanning parse: {elapsed:?}"
-        );
+    }
+
+    #[test]
+    fn php_namespace_prepass_honors_cancellation_at_intended_scale() {
+        let source = large_semicolon_namespace_source(8_050);
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let parsed = super::parse_php_tree(&source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(parsed.is_some(), "large PHP source should have a tree");
+        let Some(parsed) = parsed else { return };
+        assert!(parsed.tree.root_node().named_child_count() > 8_000);
+
+        let mut checks = 0;
+        let result =
+            PhpNamespaceContext::from_program(parsed.tree.root_node(), &source, &mut || {
+                checks += 1;
+                if checks > 128 {
+                    Err("cancelled")
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(matches!(result, Err("cancelled")));
+        assert_eq!(checks, 129);
     }
 
     #[test]
