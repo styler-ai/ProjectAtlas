@@ -123,8 +123,10 @@ fn extract_symbol_graph_checked<E>(
         }
         SymbolParserOwner::TreeSitter(_) | SymbolParserOwner::Fallback => {}
     }
-    if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
+    if let Some(mut parsed) =
+        extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
     {
+        restore_php_selector_columns(&mut parsed.graph, content);
         if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
             check()?;
             return Ok(parsed.graph);
@@ -1035,8 +1037,12 @@ fn parse_php_tree<E>(
             has_opening_tag: true,
         }));
     };
-    let has_opening_tag =
-        tree_contains_php_tag_outside_literals(mixed.root_node(), php_only.root_node());
+    let has_opening_tag = tree_contains_php_tag_outside_literals(
+        mixed.root_node(),
+        php_only.root_node(),
+        check,
+        &mut examined_nodes,
+    )?;
     Ok(Some(PhpParse {
         tree: mixed,
         has_opening_tag,
@@ -1117,30 +1123,54 @@ fn first_php_tag_start<E>(
 }
 
 /// Return whether a mixed parse contains a tag outside a PHP literal or comment.
-fn tree_contains_php_tag_outside_literals(mixed: Node<'_>, php_only: Node<'_>) -> bool {
+fn tree_contains_php_tag_outside_literals<E>(
+    mixed: Node<'_>,
+    php_only: Node<'_>,
+    check: &mut impl FnMut() -> Result<(), E>,
+    examined_nodes: &mut usize,
+) -> Result<bool, E> {
     let mut opaque_ranges = Vec::new();
-    collect_php_only_opaque_ranges(php_only, &mut opaque_ranges);
+    collect_php_only_opaque_ranges(php_only, &mut opaque_ranges, check, examined_nodes)?;
     let mut next_opaque = 0;
-    tree_contains_php_tag_outside_ranges(mixed, &opaque_ranges, &mut next_opaque)
+    tree_contains_php_tag_outside_ranges(
+        mixed,
+        &opaque_ranges,
+        &mut next_opaque,
+        check,
+        examined_nodes,
+    )
 }
 
 /// Collect top-level literal/comment ranges from the PHP-only parse in source order.
-fn collect_php_only_opaque_ranges(node: Node<'_>, ranges: &mut Vec<(usize, usize)>) {
+fn collect_php_only_opaque_ranges<E>(
+    node: Node<'_>,
+    ranges: &mut Vec<(usize, usize)>,
+    check: &mut impl FnMut() -> Result<(), E>,
+    examined_nodes: &mut usize,
+) -> Result<(), E> {
+    *examined_nodes += 1;
+    check_parser_iteration(*examined_nodes, check)?;
     if is_php_opaque_node(node.kind()) {
         ranges.push((node.start_byte(), node.end_byte()));
-        return;
+        return Ok(());
     }
     let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .for_each(|child| collect_php_only_opaque_ranges(child, ranges));
+    for child in node.children(&mut cursor) {
+        collect_php_only_opaque_ranges(child, ranges, check, examined_nodes)?;
+    }
+    Ok(())
 }
 
 /// Return whether a mixed parse contains a tag outside the sorted opaque ranges.
-fn tree_contains_php_tag_outside_ranges(
+fn tree_contains_php_tag_outside_ranges<E>(
     node: Node<'_>,
     opaque_ranges: &[(usize, usize)],
     next_opaque: &mut usize,
-) -> bool {
+    check: &mut impl FnMut() -> Result<(), E>,
+    examined_nodes: &mut usize,
+) -> Result<bool, E> {
+    *examined_nodes += 1;
+    check_parser_iteration(*examined_nodes, check)?;
     if node.kind() == "php_tag" {
         while *next_opaque < opaque_ranges.len()
             && opaque_ranges[*next_opaque].1 <= node.start_byte()
@@ -1148,12 +1178,22 @@ fn tree_contains_php_tag_outside_ranges(
             *next_opaque += 1;
         }
         if *next_opaque >= opaque_ranges.len() || opaque_ranges[*next_opaque].0 >= node.end_byte() {
-            return true;
+            return Ok(true);
         }
     }
     let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .any(|child| tree_contains_php_tag_outside_ranges(child, opaque_ranges, next_opaque))
+    for child in node.children(&mut cursor) {
+        if tree_contains_php_tag_outside_ranges(
+            child,
+            opaque_ranges,
+            next_opaque,
+            check,
+            examined_nodes,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Return whether the PHP-only parse node is opaque to mixed-grammar tags.
@@ -1542,6 +1582,21 @@ fn tree_source_selector(node: Node<'_>, content: &str) -> SymbolSourceSelector {
         byte_end: node.end_byte(),
         column_start: tree_source_column(node.start_byte(), start.column, content),
         column_end: tree_source_column(node.end_byte(), end.column, content),
+    }
+}
+
+/// Recompute PHP selector columns against the unmasked source bytes.
+fn restore_php_selector_columns(graph: &mut SymbolGraph, source: &str) {
+    if !is_php_language(graph.language.as_deref()) {
+        return;
+    }
+    for symbol in &mut graph.symbols {
+        let Some(selector) = symbol.source_selector.as_mut() else {
+            continue;
+        };
+        selector.column_start =
+            tree_source_column(selector.byte_start, selector.column_start, source);
+        selector.column_end = tree_source_column(selector.byte_end, selector.column_end, source);
     }
 }
 
@@ -5048,6 +5103,37 @@ function helper(string $value): void {}
     }
 
     #[test]
+    fn php_selectors_use_original_columns_after_multibyte_purpose_header() {
+        let source = "/* Purpose: café */<?php function run(): void {}";
+        let graph = extract_symbol_graph("src/Service.php", Some("php"), source);
+        let function_start = source.find("function run");
+        assert!(function_start.is_some(), "PHP function should be present");
+        let Some(function_start) = function_start else {
+            return;
+        };
+        let function_symbol = graph.symbols.iter().find(|symbol| symbol.name == "run");
+        assert!(
+            function_symbol.is_some(),
+            "PHP function should be indexed: {graph:?}"
+        );
+        let Some(function_symbol) = function_symbol else {
+            return;
+        };
+        let selector = function_symbol.source_selector;
+        assert!(
+            selector.is_some(),
+            "PHP function selector should be present: {function_symbol:?}"
+        );
+        let Some(selector) = selector else { return };
+        assert_eq!(selector.byte_start, function_start);
+        assert_eq!(
+            selector.column_start,
+            source[..function_start].chars().count(),
+            "selector column must use Unicode scalars from the original source"
+        );
+    }
+
+    #[test]
     fn php_constructor_promoted_properties_are_class_members() {
         let source = r"<?php
 class Account {
@@ -5816,6 +5902,69 @@ TEXT;
         let mut checks = 0;
         let result = super::first_php_tag_start(
             tree.root_node(),
+            &mut || {
+                checks += 1;
+                Err::<(), _>("cancelled")
+            },
+            &mut examined_nodes,
+        );
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(checks, 1);
+        assert!(examined_nodes >= super::PARSER_CONTROL_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn php_opaque_range_walk_checks_cancellation_on_large_tree() {
+        let mut source = String::new();
+        for index in 0..512 {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let language = super::tree_sitter_language("php");
+        assert!(language.is_some(), "PHP grammar should be registered");
+        let Some(language) = language else { return };
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let tree = super::parse_tree_sitter_language(&language, &source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(tree.is_some(), "PHP-only source should produce a tree");
+        let Some(tree) = tree else { return };
+        let mut ranges = Vec::new();
+        let mut examined_nodes = 0;
+        let mut checks = 0;
+        let result = super::collect_php_only_opaque_ranges(
+            tree.root_node(),
+            &mut ranges,
+            &mut || {
+                checks += 1;
+                Err::<(), _>("cancelled")
+            },
+            &mut examined_nodes,
+        );
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(checks, 1);
+        assert!(examined_nodes >= super::PARSER_CONTROL_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn php_mixed_tag_walk_checks_cancellation_on_large_tree() {
+        let mut source = String::from("<?php\n");
+        for index in 0..512 {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let language = tree_sitter_php::LANGUAGE_PHP.into();
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let tree = super::parse_tree_sitter_language(&language, &source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(tree.is_some(), "mixed PHP source should produce a tree");
+        let Some(tree) = tree else { return };
+        let mut next_opaque = 0;
+        let mut examined_nodes = 0;
+        let mut checks = 0;
+        let result = super::tree_contains_php_tag_outside_ranges(
+            tree.root_node(),
+            &[(0, 6)],
+            &mut next_opaque,
             &mut || {
                 checks += 1;
                 Err::<(), _>("cancelled")
