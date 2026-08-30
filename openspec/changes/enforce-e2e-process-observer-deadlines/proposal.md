@@ -22,7 +22,7 @@ None.
 
 - Affects only generic process-observer helpers and their tests in `crates/projectatlas-cli/tests/e2e.rs`.
 - Adds no product CLI/MCP behavior, public schema, crate, dependency, workflow, database, migration, or persistent state.
-- The change is ready for implementation after its issue/OpenSpec packet is accepted, but its shared-file implementation lane must not overlap the active #518 amendment.
+- The #518 shared-file baseline is accepted on `main`, so this change has no remaining implementation prerequisite.
 
 ## Non-Goals
 
