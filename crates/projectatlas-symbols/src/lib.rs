@@ -838,6 +838,14 @@ struct TreeSitterParse {
     had_errors: bool,
 }
 
+/// PHP mixed-grammar result with its grammar-owned opening-tag classification.
+struct PhpParse {
+    /// Parsed full-file PHP/mixed tree.
+    tree: Tree,
+    /// Whether a PHP opening tag occurs outside PHP literals or comments.
+    has_opening_tag: bool,
+}
+
 /// Extract a graph through tree-sitter when the language has a grammar.
 fn extract_tree_sitter_graph<E>(
     path: &str,
@@ -851,21 +859,30 @@ fn extract_tree_sitter_graph<E>(
     let Some(grammar) = tree_sitter_grammar(language_name) else {
         return Ok(None);
     };
-    let tree = if grammar == TreeSitterGrammar::Php {
-        parse_php_tree(content, check)?
+    let (tree, has_php_opening_tag) = if grammar == TreeSitterGrammar::Php {
+        let Some(parsed) = parse_php_tree(content, check)? else {
+            return Ok(None);
+        };
+        (parsed.tree, Some(parsed.has_opening_tag))
     } else {
         let Some(parser_language) = tree_sitter_language(language_name) else {
             return Ok(None);
         };
-        parse_tree_sitter_language(&parser_language, content, check)?
-    };
-    let Some(tree) = tree else {
-        return Ok(None);
+        let Some(tree) = parse_tree_sitter_language(&parser_language, content, check)? else {
+            return Ok(None);
+        };
+        (tree, None)
     };
     check()?;
     let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
     let root = tree.root_node();
-    let had_errors = root.has_error();
+    if has_php_opening_tag == Some(false) {
+        return Ok(Some(TreeSitterParse {
+            graph,
+            had_errors: false,
+        }));
+    }
+    let had_errors = root.has_error() && has_php_opening_tag != Some(false);
     visit_node(root, content, &mut graph, check)?;
     check()?;
     languages::augment_language_graph(&mut graph, content, check)?;
@@ -877,29 +894,42 @@ fn extract_tree_sitter_graph<E>(
 fn parse_php_tree<E>(
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
-) -> Result<Option<Tree>, E> {
-    let php_only_language: Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-    let php_only = parse_tree_sitter_language(&php_only_language, content, check)?;
-    let needs_mixed_probe = php_only.as_ref().is_some_and(|tree| {
-        tree.root_node().has_error() || tree_contains_php_tag(tree.root_node())
-    });
-    if !needs_mixed_probe {
-        return Ok(php_only);
+) -> Result<Option<PhpParse>, E> {
+    let mixed_language: Language = tree_sitter_php::LANGUAGE_PHP.into();
+    let Some(mixed) = parse_tree_sitter_language(&mixed_language, content, check)? else {
+        return Ok(None);
+    };
+    let Some(first_tag_start) = first_php_tag_start(mixed.root_node()) else {
+        return Ok(Some(PhpParse {
+            tree: mixed,
+            has_opening_tag: false,
+        }));
+    };
+    let first_content_start = content.find(|character: char| !character.is_whitespace());
+    if !mixed.root_node().has_error() && first_content_start == Some(first_tag_start) {
+        return Ok(Some(PhpParse {
+            tree: mixed,
+            has_opening_tag: true,
+        }));
     }
 
-    let mixed_language: Language = tree_sitter_php::LANGUAGE_PHP.into();
-    let mixed = parse_tree_sitter_language(&mixed_language, content, check)?;
-    if mixed
-        .as_ref()
-        .zip(php_only.as_ref())
-        .is_some_and(|(mixed, php_only)| {
-            tree_contains_php_tag_outside_literals(mixed.root_node(), php_only.root_node())
-        })
-    {
-        Ok(mixed)
-    } else {
-        Ok(php_only)
-    }
+    // The PHP-only grammar is only a bounded probe for opening tags that the
+    // mixed grammar can see inside a literal or comment. The full-file result
+    // remains the mixed grammar so tagless `.php` source is represented as
+    // inline text instead of executable PHP.
+    let php_only_language: Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
+    let Some(php_only) = parse_tree_sitter_language(&php_only_language, content, check)? else {
+        return Ok(Some(PhpParse {
+            tree: mixed,
+            has_opening_tag: true,
+        }));
+    };
+    let has_opening_tag =
+        tree_contains_php_tag_outside_literals(mixed.root_node(), php_only.root_node());
+    Ok(Some(PhpParse {
+        tree: mixed,
+        has_opening_tag,
+    }))
 }
 
 /// Return a tree-sitter language for supported source families.
@@ -955,13 +985,15 @@ fn parse_tree_sitter_language<E>(
     Ok(tree)
 }
 
-/// Return whether a tree contains an opening-tag node.
-fn tree_contains_php_tag(node: Node<'_>) -> bool {
+/// Return the first opening-tag byte offset in a mixed PHP parse.
+fn first_php_tag_start(node: Node<'_>) -> Option<usize> {
     if node.kind() == "php_tag" {
-        return true;
+        return Some(node.start_byte());
     }
     let mut cursor = node.walk();
-    node.children(&mut cursor).any(tree_contains_php_tag)
+    node.children(&mut cursor)
+        .filter_map(first_php_tag_start)
+        .min()
 }
 
 /// Return whether a mixed parse contains a tag outside a PHP literal or comment.
@@ -1024,7 +1056,7 @@ fn contains_php_opening_tag(content: &str) -> bool {
     parse_php_tree(content, &mut check)
         .ok()
         .flatten()
-        .is_some_and(|tree| tree_contains_php_tag(tree.root_node()))
+        .is_some_and(|parsed| parsed.has_opening_tag)
 }
 
 /// Recursively inspect one tree-sitter node.
@@ -1457,6 +1489,11 @@ fn symbol_parent(node: Node<'_>, content: &str) -> Option<String> {
     if let Some(owner) = object_literal_method_owner(node, content) {
         return Some(owner.name);
     }
+    if node.kind() == "property_promotion_parameter"
+        && let Some(class) = nearest_ancestor_kind(node.parent(), "class_declaration")
+    {
+        return node_name(class, content);
+    }
     if node.kind() == "function_item"
         && let Some(impl_node) = nearest_ancestor_kind(node.parent(), "impl_item")
     {
@@ -1541,6 +1578,7 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         | "short_var_declaration"
         | "property_declaration"
         | "property_element"
+        | "property_promotion_parameter"
         | "const_element"
         | "enum_case" => Some(SymbolKind::Value),
         "use_declaration"
@@ -1984,6 +2022,7 @@ fn declaration_specific_name(node: Node<'_>, content: &str) -> Option<String> {
             .and_then(|name| named_text(name, content)),
         "property_declaration"
         | "property_element"
+        | "property_promotion_parameter"
         | "const_declaration"
         | "const_element"
         | "enum_case" => php_declaration_name(node, content),
@@ -4756,6 +4795,41 @@ function helper(string $value): void {}
     }
 
     #[test]
+    fn php_constructor_promoted_properties_are_class_members() {
+        let source = r"<?php
+class Account {
+    public function __construct(
+        public readonly string $name,
+        private int $id = 0,
+    ) {}
+}
+";
+        let graph = extract_symbol_graph("src/Account.php", Some("php"), source);
+
+        for (name, exported, signature) in [
+            ("name", true, "public readonly string"),
+            ("id", false, "private int"),
+        ] {
+            let symbol = graph
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name && symbol.kind == SymbolKind::Value);
+            assert!(
+                symbol.is_some(),
+                "missing promoted property {name}: {graph:?}"
+            );
+            let Some(symbol) = symbol else { continue };
+            assert_eq!(symbol.parent.as_deref(), Some("Account"));
+            assert_eq!(symbol.exported, exported);
+            assert!(symbol.signature.contains(signature));
+            assert!(symbol.source_selector.is_some());
+        }
+        assert!(!graph.symbols.iter().any(|symbol| {
+            symbol.name == "name" && symbol.parent.as_deref() == Some("__construct")
+        }));
+    }
+
+    #[test]
     fn php_visibility_modifiers_control_exported_symbol_queries() {
         let source = r"<?php
 class Service {
@@ -5018,6 +5092,8 @@ require("malformed.php" + );
 require("boot/$name.php");
 require($dynamic);
 require [];
+require(BOOTSTRAP);
+include_once(Vendor\BOOTSTRAP);
 "#;
         let graph = extract_symbol_graph("src/Includes.php", Some("php"), source);
         let imports = graph
@@ -5044,8 +5120,8 @@ require [];
         assert!(imports.iter().all(|relation| {
             !matches!(
                 relation.target_name.as_str(),
-                "nested.php" | "malformed.php" | "boot/$name.php" | "$dynamic" | "[]"
-            )
+                "nested.php" | "malformed.php" | "boot/$name.php" | "$dynamic" | "[]" | "BOOTSTRAP"
+            ) && !relation.target_name.contains("Vendor")
         }));
     }
 
@@ -5053,6 +5129,7 @@ require [];
     fn php_namespace_context_preserves_semicolon_and_braced_ownership() {
         let source = r"<?php
 namespace First;
+use Vendor\First as FirstAlias;
 class FirstService {}
 function first_helper(): void {}
 namespace Second;
@@ -5062,10 +5139,12 @@ namespace Third { class BracedService {} }
 namespace Fourth;
 class FourthService {}
 namespace { class GlobalService {} }
+class OutsideGlobal {}
 ";
         let graph = extract_symbol_graph("src/Namespaces.php", Some("php"), source);
 
         for (name, parent) in [
+            ("Vendor\\First", "First"),
             ("FirstService", "First"),
             ("first_helper", "First"),
             ("SecondService", "Second"),
@@ -5109,6 +5188,15 @@ namespace { class GlobalService {} }
             relation.kind == RelationKind::Contains && relation.target_name == "GlobalService"
         }));
 
+        let outside_global = graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "OutsideGlobal");
+        assert_eq!(
+            outside_global.and_then(|symbol| symbol.parent.as_deref()),
+            None
+        );
+
         let malformed = extract_symbol_graph(
             "src/MalformedNamespace.php",
             Some("php"),
@@ -5144,7 +5232,10 @@ namespace { class GlobalService {} }
             "function pure(): void { return; }",
         );
         assert_eq!(pure.parser, ParserKind::TreeSitter);
-        assert!(pure.symbols.iter().any(|symbol| symbol.name == "pure"));
+        assert!(
+            pure.symbols.is_empty(),
+            "tagless PHP files are inline text, not PHP-only fragments: {pure:?}"
+        );
 
         let dynamic = extract_symbol_graph(
             "src/dynamic.php",
@@ -5205,8 +5296,8 @@ TEXT;
             );
             let graph = extract_symbol_graph("src/marker.php", Some("php"), source);
             assert!(
-                graph.symbols.iter().any(|symbol| symbol.name == "marker"),
-                "PHP-only marker disappeared after opening-tag classification: {graph:?}"
+                graph.symbols.is_empty(),
+                "tagless PHP source must remain inline text: {graph:?}"
             );
         }
 

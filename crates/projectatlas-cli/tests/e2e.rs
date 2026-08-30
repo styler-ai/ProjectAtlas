@@ -41837,11 +41837,14 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
 
 #[test]
 fn composer_shaped_php_cli_mcp_and_incremental_refresh_agree() -> Result<(), Box<dyn Error>> {
+    const PHP_NAMESPACE_DIR: &str = "Atlas";
+    const COMPOSER_VENDOR_DIR: &str = "vendor";
+
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    fs::create_dir_all(repo.join(SRC_DIR_NAME).join("Atlas"))?;
-    fs::create_dir_all(repo.join("vendor"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join(PHP_NAMESPACE_DIR))?;
+    fs::create_dir_all(repo.join(COMPOSER_VENDOR_DIR))?;
     fs::write(
         repo.join("composer.json"),
         r#"{
@@ -41850,9 +41853,15 @@ fn composer_shaped_php_cli_mcp_and_incremental_refresh_agree() -> Result<(), Box
 }
 "#,
     )?;
-    fs::write(repo.join("vendor").join("autoload.php"), "<?php\n")?;
-    fs::write(repo.join("vendor").join("bootstrap.php"), "<?php\n")?;
-    fs::write(repo.join("vendor").join("config.php"), "<?php\n")?;
+    fs::write(
+        repo.join(COMPOSER_VENDOR_DIR).join("autoload.php"),
+        "<?php\n",
+    )?;
+    fs::write(
+        repo.join(COMPOSER_VENDOR_DIR).join("bootstrap.php"),
+        "<?php\n",
+    )?;
+    fs::write(repo.join(COMPOSER_VENDOR_DIR).join("config.php"), "<?php\n")?;
     let source = r#"<?php
 namespace Atlas\Package;
 
@@ -41878,7 +41887,10 @@ final class Service implements ServiceContract {
 
 function helper(): void {}
 "#;
-    let source_path = repo.join(SRC_DIR_NAME).join("Atlas").join("Service.php");
+    let source_path = repo
+        .join(SRC_DIR_NAME)
+        .join(PHP_NAMESPACE_DIR)
+        .join("Service.php");
     fs::write(&source_path, source)?;
     let db = temp.path().join("composer-php.db");
     let executable = mcp_contract_executable();
