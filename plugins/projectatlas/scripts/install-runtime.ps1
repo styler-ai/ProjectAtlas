@@ -3977,6 +3977,7 @@ if ($RuntimePath) {
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
+    Assert-ProjectAtlasAtlasForwarderCollisionFree $projectAtlas | Out-Null
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
     Write-ProjectAtlasAtlasForwarder $projectAtlas | Out-Null
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
@@ -4013,6 +4014,7 @@ else {
     if (-not $projectAtlas) {
         throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
     }
+    Assert-ProjectAtlasAtlasForwarderCollisionFree $projectAtlas | Out-Null
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
     Write-ProjectAtlasAtlasForwarder $projectAtlas | Out-Null
 

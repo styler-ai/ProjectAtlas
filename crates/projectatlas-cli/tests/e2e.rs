@@ -10367,6 +10367,35 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         Ok(command.output()?)
     };
 
+    let forwarder = runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+        .join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let unmanaged_collision = b"unmanaged atlas collision\n";
+    fs::write(&forwarder, unmanaged_collision)?;
+    let project_state_before_collision = repository_filesystem_snapshot(&repo)?;
+    let project_database = atlas_dir.join("projectatlas.db");
+    let mirror_dir = home.join("AppData/Local/ProjectAtlas/bin");
+    let collision_output = run_install()?;
+    let collision_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&collision_output.stdout),
+        String::from_utf8_lossy(&collision_output.stderr)
+    );
+    require(
+        !collision_output.status.success()
+            && collision_text.contains("atlas command collision")
+            && fs::read(&forwarder)? == unmanaged_collision
+            && repository_filesystem_snapshot(&repo)? == project_state_before_collision
+            && !project_database.exists()
+            && !mirror_dir.exists()
+            && env::var_os("PATH") == Some(inherited_path.clone()),
+        format!(
+            "unmanaged atlas collision was not rejected before installer mutation:\n{collision_text}"
+        ),
+    )?;
+    fs::remove_file(&forwarder)?;
+
     let first_output = run_install()?;
     require(
         first_output.status.success(),
@@ -10376,10 +10405,6 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             String::from_utf8_lossy(&first_output.stderr)
         ),
     )?;
-    let forwarder = runtime
-        .parent()
-        .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
-        .join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
     let forwarder_text = fs::read_to_string(&forwarder)?;
     let canonical_runtime = runtime.to_string_lossy();
     let expected_forwarder_text = if cfg!(windows) {
@@ -41019,10 +41044,17 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
         .env("PROJECTATLAS_RUNTIME_PATH", runtime)
         .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let inherited_path =
+        std::env::join_paths(std::env::split_paths(&current_path).filter(|entry| {
+            !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                .iter()
+                .any(|candidate| entry.join(candidate).exists())
+        }))?;
     if let Some(path_shadow) = path_shadow {
-        let current_path = std::env::var_os("PATH").unwrap_or_default();
         let shadowed_path = std::env::join_paths(
-            std::iter::once(path_shadow.to_path_buf()).chain(std::env::split_paths(&current_path)),
+            std::iter::once(path_shadow.to_path_buf())
+                .chain(std::env::split_paths(&inherited_path)),
         )?;
         command.env("PATH", shadowed_path);
         let fake_codex = path_shadow.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
@@ -41032,6 +41064,8 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
                 .env_remove("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE")
                 .env_remove("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE");
         }
+    } else {
+        command.env("PATH", inherited_path);
     }
     if let Some(home) = home {
         let app_data = home.join("AppData").join("Roaming");
