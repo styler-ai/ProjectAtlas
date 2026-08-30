@@ -9112,9 +9112,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "label: Acceptance criteria",
         "label: Non-Goals",
         "label: Pre-Mortem",
-        "label: Acceptance and Review Tasks",
         "Implementation tasks:",
-        "required: false",
+        "label: OpenSpec plan and task checklist",
+        "Maintainers add the mapped OpenSpec change",
     ] {
         for (name, content) in [
             ("bug", bug_issue_template.as_str()),
@@ -9124,6 +9124,24 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             if !content.contains(required) {
                 return Err(io::Error::other(format!(
                     "{name} issue form is missing v0.3.26 issue contract field {required:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    for (name, content) in [
+        ("bug", bug_issue_template.as_str()),
+        ("chore", chore_issue_template.as_str()),
+        ("improvement", improvement_issue_template.as_str()),
+    ] {
+        for forbidden in [
+            "id: acceptance_review_tasks",
+            "label: Acceptance and Review Tasks",
+            "## Implementation Tasks",
+        ] {
+            if content.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "{name} issue form must not fabricate authoritative task field {forbidden:?}"
                 ))
                 .into());
             }

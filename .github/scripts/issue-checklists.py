@@ -474,7 +474,13 @@ def parse_section_tasks(
             is_owned_subsection = heading_is_task_subsection(
                 next_heading.group(2)
             ) and heading_owns_matching_tasks(text, headings, next_index)
-            if is_boundary_level and not is_owned_subsection:
+            is_acceptance_boundary = heading_matches_acceptance_tasks(
+                next_heading.group(2)
+            )
+            if (
+                (is_boundary_level or is_acceptance_boundary)
+                and not is_owned_subsection
+            ):
                 end = next_heading.start()
                 break
         tasks.extend(parse_tasks(text[heading.end() : end]))
@@ -1798,6 +1804,57 @@ Mitigations:
 - [ ] Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.
 """
     self_test_root = Path(__file__).resolve().parents[2]
+
+    rendered_issue_form = "\n".join(
+        [
+            "### OpenSpec plan and task checklist",
+            "OpenSpec change: _to be assigned_",
+            "",
+            "## Implementation Tasks",
+            "- [ ] 1.1 Placeholder implementation task.",
+            "### Acceptance and Review Tasks",
+            *[f"- [ ] {task}" for task in ACCEPTANCE_REVIEW_TASKS],
+            "### Privacy check",
+            "- [ ] I removed secrets and private paths.",
+        ]
+    )
+    assert parse_section_tasks(
+        rendered_issue_form, heading_matches_implementation_tasks
+    ) == [(False, "1.1 Placeholder implementation task.")]
+    assert acceptance_review_tasks({"state": "OPEN", "body": rendered_issue_form}) == [
+        (False, task) for task in ACCEPTANCE_REVIEW_TASKS
+    ]
+
+    form_created_backlog = "\n".join(
+        [
+            "### Why",
+            "A backlog request.",
+            "### OpenSpec plan and task checklist",
+            "",
+            "### Privacy check",
+            "- [x] I removed secrets and private paths.",
+        ]
+    )
+    backlog_issue = {
+        "state": "OPEN",
+        "number": 466,
+        "body": form_created_backlog,
+        "labels": [{"name": "complexity:medium"}],
+    }
+    assert not issue_uses_new_contract(backlog_issue)
+    assert complexity_label_failures(backlog_issue) == []
+    assert planned_issue_failures(backlog_issue, {}, self_test_root) == []
+    for template_name in (
+        "bug_report.yml",
+        "chore.yml",
+        "improvement_request.yml",
+    ):
+        template = (
+            self_test_root / ".github" / "ISSUE_TEMPLATE" / template_name
+        ).read_text(encoding="utf-8")
+        assert "id: acceptance_review_tasks" not in template
+        assert "label: Acceptance and Review Tasks" not in template
+        assert "## Implementation Tasks" not in template
 
     def contract_failures(
         issue: dict[str, object], tasks: list[tuple[bool, str]]

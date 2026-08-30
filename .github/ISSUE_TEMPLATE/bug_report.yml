@@ -126,29 +126,8 @@ body:
     id: openspec
     attributes:
       label: OpenSpec plan and task checklist
-      description: Maintainers or agents should fill this before planned implementation. Mirror the linked `openspec/changes/<id>/tasks.md` checklist exactly under an `Implementation Tasks` heading; check each implementation row immediately after its behavior and required task-level proof pass, and reopen it with acceptance rows reset when review finds partial work before closing or releasing.
-      value: |
-        OpenSpec change: _to be assigned_
-
-        ## Implementation Tasks
-
-        <!-- Mirror tasks from `openspec/changes/<id>/tasks.md` here before implementation. -->
-  - type: checkboxes
-    id: acceptance_review_tasks
-    attributes:
-      label: Acceptance and Review Tasks
-      description: Keep these five canonical review gates in order; they remain unchecked until implementation is complete and then advance as a checked prefix. Reset every row if implementation reopens after partial review.
-      options:
-        - label: "Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary."
-          required: false
-        - label: "Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding."
-          required: false
-        - label: "Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed."
-          required: false
-        - label: "Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes."
-          required: false
-        - label: "Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial."
-          required: false
+      description: Maintainers add the mapped OpenSpec change and implementation checklist after this issue receives a real mapping; unmapped backlog issues do not carry authoritative task fields.
+      placeholder: Maintainers add the mapped change and implementation checklist after assignment.
   - type: checkboxes
     id: privacy
     attributes:
