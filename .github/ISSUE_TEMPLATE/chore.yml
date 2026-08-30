@@ -5,6 +5,7 @@ labels:
   - type:chore
   - priority:medium
   - status:ready
+  - complexity:medium
 body:
   - type: markdown
     attributes:
@@ -89,20 +90,15 @@ body:
         - The workflow accepts stale task state.
 
         Mitigations:
-        - [ ] Compare local and issue task state exactly. (OpenSpec tasks: 1.2)
+        - [ ] Compare local and issue task state exactly. (Implementation tasks: 1.2)
     validations:
       required: true
   - type: textarea
     id: openspec
     attributes:
       label: OpenSpec plan and task checklist
-      description: Maintainers or agents should fill this before planned implementation. Mirror the linked `openspec/changes/<id>/tasks.md` checklist under an `OpenSpec Tasks` heading before closing or releasing.
-      value: |
-        OpenSpec change: _to be assigned_
-
-        ## OpenSpec Tasks
-
-        <!-- Mirror tasks from `openspec/changes/<id>/tasks.md` here before implementation. -->
+      description: Maintainers add the mapped OpenSpec change and implementation checklist after this issue receives a real mapping; unmapped backlog issues do not carry authoritative task fields.
+      placeholder: Maintainers add the mapped change and implementation checklist after assignment.
   - type: checkboxes
     id: privacy
     attributes:

@@ -28,8 +28,9 @@
         "489": { "blocked_by": [] },
         "490": { "blocked_by": [339, 342, 358, 384, 464, 465, 489] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495] },
-        "495": { "blocked_by": [] }
+        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517] },
+        "495": { "blocked_by": [] },
+        "517": { "blocked_by": [] }
       }
     },
     "v0.6.0-00": {
@@ -128,6 +129,7 @@
     "connect-classified-documentation-graph": 440,
     "delegate-bulk-purpose-curation": 301,
     "drain-mcp-test-responses-before-eof": 416,
+    "enforce-issue-acceptance-review-tasks": 517,
     "enforce-rust-test-quality-gates": 309,
     "expose-concrete-codex-tool-schemas": 386,
     "expose-mcp-capabilities-settings": 293,

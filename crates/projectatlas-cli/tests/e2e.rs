@@ -8931,6 +8931,19 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
     let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let issueops_self_test = StdCommand::new(python)
+        .current_dir(&workspace_root)
+        .args([".github/scripts/issue-checklists.py", "--self-test"])
+        .output()?;
+    if !issueops_self_test.status.success() {
+        return Err(io::Error::other(format!(
+            "IssueOps behavior self-test failed: {}{}",
+            String::from_utf8_lossy(&issueops_self_test.stdout),
+            String::from_utf8_lossy(&issueops_self_test.stderr)
+        ))
+        .into());
+    }
     let mermaid_parser = github.join("mermaid-parser");
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
@@ -9000,6 +9013,25 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
+    for (name, workflow) in [("release", release.as_str()), ("pre-push", hook.as_str())] {
+        let first_cargo_test = workflow
+            .find("cargo test")
+            .ok_or_else(|| io::Error::other(format!("{name} omitted cargo tests")))?;
+        for gate in [
+            "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+        ] {
+            let gate_position = workflow
+                .find(gate)
+                .ok_or_else(|| io::Error::other(format!("{name} omitted Mermaid gate {gate:?}")))?;
+            if gate_position > first_cargo_test {
+                return Err(io::Error::other(format!(
+                    "{name} Mermaid gate {gate:?} must precede its first cargo test"
+                ))
+                .into());
+            }
+        }
+    }
 
     for required in [
         "validate_unique_issue_ownership",
@@ -9013,13 +9045,40 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "mermaid_syntax_is_valid",
         "mermaid-parser",
         "len(meaningful) > 1",
-        "ARCHITECTURE_ACCEPTANCE_TASK",
+        "ACCEPTANCE_REVIEW_TASKS",
         "planned_issue_failures",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
         "planned_issue=args.planned_issue",
         "MITIGATION_RE",
         "issue_contract_failures",
+        "IMPLEMENTATION_TASK_HEADING",
+        "acceptance_task_failures",
+        "acceptance_state_failures",
+        "complexity_label_failures",
+        "check_open_issue_complexity",
+        "ISSUE_STATE_QUERY",
+        "issue_state_payloads",
+        "\"graphql\"",
+        "\"--paginate\"",
+        "\"--slurp\"",
+        "issues(first: 100, after: $endCursor, states: [OPEN, CLOSED])",
+        "pageInfo",
+        "totalCount",
+        "total_count != len(label_nodes)",
+        "isinstance(total_count, int)",
+        "isinstance(total_count, bool)",
+        "GitHub GraphQL issue labels were incomplete",
+        "\"body\" not in ISSUE_STATE_QUERY.lower()",
+        "closed issue body is inert",
+        "must be OPEN",
+        "ISSUE_REFERENCE_RE",
+        "pull_request_owner_issue",
+        "configured_issue_map_path",
+        "base_issue_map(",
+        "base_local_tasks",
+        "check_pull_request_tasks",
+        "issue_map_path=args.issue_map",
     ] {
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
@@ -9089,6 +9148,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     if !issue_map.contains(r#""schema_version": 2"#)
+        || issue_map.contains(r#""legacy_closed_issues": ["#)
         || !issue_map.contains(r#""enforce-rust-test-quality-gates": 309"#)
     {
         return Err(io::Error::other("#309 must be mapped by the schema-2 issue map").into());
@@ -9103,7 +9163,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "label: Acceptance criteria",
         "label: Non-Goals",
         "label: Pre-Mortem",
-        "OpenSpec tasks:",
+        "Implementation tasks:",
+        "label: OpenSpec plan and task checklist",
+        "Maintainers add the mapped OpenSpec change",
     ] {
         for (name, content) in [
             ("bug", bug_issue_template.as_str()),
@@ -9118,11 +9180,31 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
+    for (name, content) in [
+        ("bug", bug_issue_template.as_str()),
+        ("chore", chore_issue_template.as_str()),
+        ("improvement", improvement_issue_template.as_str()),
+    ] {
+        for forbidden in [
+            "id: acceptance_review_tasks",
+            "label: Acceptance and Review Tasks",
+            "## Implementation Tasks",
+        ] {
+            if content.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "{name} issue form must not fabricate authoritative task field {forbidden:?}"
+                ))
+                .into());
+            }
+        }
+    }
     for required in [
         "Pre-Mortem",
         "Architecture Diagrams",
         "docs/*.md#user-content-heading` view on `main",
-        "OpenSpec tasks:",
+        "Implementation tasks:",
+        "Acceptance and Review Tasks",
+        "Already closed mapped issues",
         "commit/SHA permalink evidence",
     ] {
         if !workflow_docs.contains(required) {
@@ -9205,11 +9287,68 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary IssueOps step is missing"))?;
+    let mermaid_setup_step = ci
+        .split("- name: Install Mermaid parser")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("CI Mermaid setup step is missing"))?;
+    if ci.matches("- name: Install Mermaid parser").count() != 1 {
+        return Err(io::Error::other("CI must install the Mermaid parser exactly once").into());
+    }
+    let first_cargo_test = ci
+        .find("cargo test")
+        .ok_or_else(|| io::Error::other("CI omitted cargo tests"))?;
+    let mermaid_setup_position = ci
+        .find("- name: Install Mermaid parser")
+        .ok_or_else(|| io::Error::other("CI Mermaid setup step is missing"))?;
+    if mermaid_setup_position > first_cargo_test {
+        return Err(io::Error::other("CI Mermaid setup must precede its first cargo test").into());
+    }
+    if mermaid_setup_step.contains("\n        if:") {
+        return Err(io::Error::other("CI Mermaid setup must be unconditional").into());
+    }
+    for event in ["pull_request_review:", "pull_request_review_comment:"] {
+        if !ci.contains(event) {
+            return Err(io::Error::other(format!(
+                "CI must retain review-event coverage for {event:?}"
+            ))
+            .into());
+        }
+    }
+    for gate in [
+        "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+        "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+    ] {
+        if !mermaid_setup_step.contains(gate) {
+            return Err(io::Error::other(format!("CI Mermaid setup omitted gate {gate:?}")).into());
+        }
+        if checklist_step.contains(gate) {
+            return Err(io::Error::other(format!(
+                "CI IssueOps step must not own Mermaid setup gate {gate:?}"
+            ))
+            .into());
+        }
+    }
     if checklist_step.contains("--milestone") {
         return Err(io::Error::other(
             "ordinary pull requests must not require full milestone completion",
         )
         .into());
+    }
+    for required in [
+        "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+        "if [ \"$GITHUB_EVENT_NAME\" = \"pull_request\" ]; then",
+        "git fetch --no-tags --depth=1 origin \"$PR_BASE_SHA\"",
+        "--pull-request \"$PR_NUMBER\"",
+        "--base \"$PR_BASE_SHA\"",
+        "else",
+    ] {
+        if !checklist_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "pull-request IssueOps step is missing branch-aware gate {required:?}"
+            ))
+            .into());
+        }
     }
     if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
@@ -9241,7 +9380,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "types: [opened, edited, reopened, labeled, unlabeled, milestoned]",
+        "types: [opened, edited, reopened, labeled, unlabeled, milestoned, closed]",
         "--planned-issue \"$ISSUE_NUMBER\"",
         "timeout-minutes: 5",
         "contents: read",

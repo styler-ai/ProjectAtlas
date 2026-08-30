@@ -217,7 +217,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 cargo run -p projectatlas-cli -- lint --report-untracked
 ```
 
-When an issue has OpenSpec tasks, keep the issue checklist exactly synchronized and run the repository IssueOps checker before transitions.
+When an issue has OpenSpec tasks, keep exactly one visible `Implementation Tasks` section synchronized with its mapped local owner slice and exactly one canonical five-row `Acceptance and Review Tasks` section. Implementation tasks are live progress: check each row immediately after its behavior and required task-level proof pass, and reopen it immediately when review finds the implementation partial, resetting all acceptance/review rows. Keep acceptance unchecked until implementation is complete, then use a checked prefix. Every open mapped issue uses this current two-list contract; an already closed mapped issue is inert historical state and is not body-migrated or repeatedly task-validated. If an old issue is reopened, migrate its body to the current contract before work proceeds. Every open issue carries exactly one accepted `complexity:*` label, including unmapped backlog issues, without fabricating task fields. Use `(Implementation tasks: <task IDs>)` for open mapped pre-mortem mitigations, preserve existing implementation rows, and run the repository IssueOps checker before transitions. Pull-request validation resolves exactly one referenced owner, checks that open owner against live state, compares unrelated open slices with the accepted base, excludes closed unrelated history, and fails closed without ownership or base authority; `main` and release validation remain global and require native closed state for closure/release.
 
 ## References
 
