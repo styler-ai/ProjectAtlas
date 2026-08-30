@@ -1468,14 +1468,14 @@ def check_pull_request_tasks(
                     f"pull-request base slice"
                 )
         elif candidate_owners != accepted_owners:
-            candidate_by_issue = {owner.issue: owner for owner in candidate_owners}
-            accepted_by_issue = {owner.issue: owner for owner in accepted_owners}
             owner_only_range_change = (
-                candidate_by_issue.keys() == accepted_by_issue.keys()
+                tuple(owner.issue for owner in candidate_owners)
+                == tuple(owner.issue for owner in accepted_owners)
                 and all(
-                    issue == owner_issue
-                    or candidate_by_issue[issue] == accepted_by_issue[issue]
-                    for issue in candidate_by_issue
+                    candidate == accepted or candidate.issue == owner_issue
+                    for candidate, accepted in zip(
+                        candidate_owners, accepted_owners, strict=True
+                    )
                 )
             )
             if not owner_only_range_change:
@@ -2636,6 +2636,30 @@ Mitigations:
                 "accepted-base",
             )
             assert contracted_failures == []
+
+            base_texts[shared_relative_path] = shared_tasks
+            base_issue_map_text = shared_base_map
+            shared_task_path.write_text(
+                "- [ ] 2.1 Finish ordinary implementation.\n"
+                "- [x] 1.1 Anchored task\n",
+                encoding="utf-8",
+            )
+            reversed_order_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {
+                    "shared-change": (
+                        Owner(2, "2.1", "2.1"),
+                        Owner(1, "1.1", "1.1"),
+                    )
+                },
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "changes mapped OpenSpec owners" in failure
+                for failure in reversed_order_failures
+            )
 
             shared_task_path.write_text(extended_tasks, encoding="utf-8")
             overlap_failures = check_pull_request_tasks(
