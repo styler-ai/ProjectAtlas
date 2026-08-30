@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone)]
 pub(super) struct McpTaskRegistry {
     /// Session-local task records.
-    pub(super) records: VecDeque<McpTaskRecord>,
+    records: VecDeque<McpTaskRecord>,
 }
 
 impl McpTaskRegistry {
@@ -39,6 +39,30 @@ impl McpTaskRegistry {
             control: None,
         });
         registry
+    }
+
+    /// Return the number of admitted tasks that have not reached a terminal state.
+    pub(super) fn active_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|record| !record.is_terminal_state())
+            .count()
+    }
+
+    /// Return the number of retained task records.
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Return the newest retained task id for an operation.
+    #[cfg(test)]
+    pub(super) fn latest_task_id(&self, operation: &McpTaskOperation) -> Option<String> {
+        self.records
+            .iter()
+            .rev()
+            .find(|record| &record.operation == operation)
+            .map(|record| record.task_id.clone())
     }
 
     /// Insert or replace one task record while preserving the fixed registry capacity.
@@ -163,4 +187,60 @@ pub(super) struct McpTaskProgress {
     pub(super) total: Option<u64>,
     /// Concise progress message.
     pub(super) message: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evictions_prefer_old_terminal_records() {
+        let mut registry = McpTaskRegistry {
+            records: VecDeque::new(),
+        };
+        registry.insert(McpTaskRecord {
+            task_id: "running-0".to_string(),
+            operation: McpTaskOperation::Search,
+            state: McpTaskState::Running,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            progress: None,
+            error: None,
+            result_ref: None,
+            cancelable: true,
+            control: None,
+        });
+        for index in 1..MCP_TASK_REGISTRY_CAPACITY {
+            registry.insert(McpTaskRecord {
+                task_id: format!("complete-{index}"),
+                operation: McpTaskOperation::Search,
+                state: McpTaskState::Complete,
+                created_at_ms: index as u128,
+                updated_at_ms: index as u128,
+                progress: None,
+                error: None,
+                result_ref: None,
+                cancelable: false,
+                control: None,
+            });
+        }
+
+        registry.insert(McpTaskRecord {
+            task_id: "new-complete".to_string(),
+            operation: McpTaskOperation::Search,
+            state: McpTaskState::Complete,
+            created_at_ms: 100,
+            updated_at_ms: 100,
+            progress: None,
+            error: None,
+            result_ref: Some(MCP_TOOL_ATLAS_TASK_STATUS.to_string()),
+            cancelable: false,
+            control: None,
+        });
+
+        assert_eq!(registry.len(), MCP_TASK_REGISTRY_CAPACITY);
+        assert!(registry.get("running-0").is_some());
+        assert!(registry.get("complete-1").is_none());
+        assert!(registry.get("new-complete").is_some());
+    }
 }

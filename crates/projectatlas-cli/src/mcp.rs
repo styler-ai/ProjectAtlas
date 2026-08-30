@@ -5463,11 +5463,7 @@ impl ProjectAtlasMcpServer {
                 .task_registry
                 .write()
                 .map_err(|_poisoned| CliError::Mcp(MCP_PROJECT_STATE_LOCK_POISONED.to_string()))?;
-            let active = registry
-                .records
-                .iter()
-                .filter(|record| !record.is_terminal_state())
-                .count();
+            let active = registry.active_count();
             if active >= self.background_resources.task_limit {
                 let mut message = MCP_INDEX_TASK_LIMIT_PREFIX.to_string();
                 message.push_str(&self.background_resources.task_limit.to_string());
@@ -11455,11 +11451,7 @@ mod tests {
             .task_registry
             .read()
             .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
-            .records
-            .iter()
-            .rev()
-            .find(|record| &record.operation == operation)
-            .map(|record| record.task_id.clone())
+            .latest_task_id(operation)
             .ok_or_else(|| io::Error::other("background task was not admitted"))?;
         wait_for_background_task(server, &task_id)
     }
@@ -11802,7 +11794,6 @@ mod tests {
             .task_registry
             .read()
             .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
-            .records
             .len();
         let impact_started = Instant::now();
         let impact = server.atlas_symbol_relations_response(
@@ -11869,7 +11860,6 @@ mod tests {
                     .task_registry
                     .read()
                     .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
-                    .records
                     .len()
                     == task_records_before,
             "read-only MCP impact analysis changed publication or retained a task record",
@@ -16081,10 +16071,7 @@ mod tests {
             .task_registry
             .read()
             .map_err(|_poisoned| io::Error::other("task registry lock poisoned"))?
-            .records
-            .iter()
-            .find(|record| matches!(record.operation, McpTaskOperation::Scan))
-            .map(|record| record.task_id.clone())
+            .latest_task_id(&McpTaskOperation::Scan)
             .ok_or_else(|| io::Error::other("admitted background scan task missing"))?;
         let mut admitted_terminal = None;
         for _attempt in 0..1_000 {
@@ -16413,72 +16400,6 @@ mod tests {
                 &format!("{small_family} warm freshness work changed with repository scale"),
             )?;
         }
-        Ok(())
-    }
-
-    #[test]
-    fn task_registry_evictions_prefer_old_terminal_records()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut registry = McpTaskRegistry {
-            records: VecDeque::new(),
-        };
-        registry.insert(McpTaskRecord {
-            task_id: "running-0".to_string(),
-            operation: McpTaskOperation::Search,
-            state: McpTaskState::Running,
-            created_at_ms: 0,
-            updated_at_ms: 0,
-            progress: None,
-            error: None,
-            result_ref: None,
-            cancelable: true,
-            control: None,
-        });
-        for index in 1..MCP_TASK_REGISTRY_CAPACITY {
-            registry.insert(McpTaskRecord {
-                task_id: format!("complete-{index}"),
-                operation: McpTaskOperation::Search,
-                state: McpTaskState::Complete,
-                created_at_ms: index as u128,
-                updated_at_ms: index as u128,
-                progress: None,
-                error: None,
-                result_ref: None,
-                cancelable: false,
-                control: None,
-            });
-        }
-
-        registry.insert(McpTaskRecord {
-            task_id: "new-complete".to_string(),
-            operation: McpTaskOperation::Search,
-            state: McpTaskState::Complete,
-            created_at_ms: 100,
-            updated_at_ms: 100,
-            progress: None,
-            error: None,
-            result_ref: Some("atlas_search".to_string()),
-            cancelable: false,
-            control: None,
-        });
-
-        require(
-            registry.records.len() == MCP_TASK_REGISTRY_CAPACITY,
-            "task registry exceeded configured capacity",
-        )?;
-        require(
-            registry.get("running-0").is_some(),
-            "registry evicted a running record before old terminal records",
-        )?;
-        require(
-            registry.get("complete-1").is_none(),
-            "registry did not evict the oldest terminal record",
-        )?;
-        require(
-            registry.get("new-complete").is_some(),
-            "registry did not retain the newly inserted record",
-        )?;
-
         Ok(())
     }
 
