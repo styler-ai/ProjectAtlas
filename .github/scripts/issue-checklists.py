@@ -841,7 +841,15 @@ def acceptance_review_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
         raise SystemExit(
             "GitHub issue must contain exactly one visible Acceptance and Review Tasks heading"
         )
-    return parse_section_tasks(visible_body, heading_matches_acceptance_tasks)
+    acceptance_heading = acceptance[0]
+    acceptance_end = len(visible_body)
+    for heading in HEADING_RE.finditer(visible_body, acceptance_heading.end()):
+        acceptance_end = heading.start()
+        break
+    return parse_section_tasks(
+        visible_body[acceptance_heading.start() : acceptance_end],
+        heading_matches_acceptance_tasks,
+    )
 
 
 def heading_section(
@@ -1942,7 +1950,7 @@ Mitigations:
             "",
             "## Implementation Tasks",
             "- [ ] 1.1 Placeholder implementation task.",
-            "### Acceptance and Review Tasks",
+            "## Acceptance and Review Tasks",
             *[f"- [ ] {task}" for task in ACCEPTANCE_REVIEW_TASKS],
             "### Privacy check",
             "- [ ] I removed secrets and private paths.",
