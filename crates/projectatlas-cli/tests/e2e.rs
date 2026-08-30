@@ -167,6 +167,17 @@ const FAKE_CODEX_SKILL_CONTENT: &str =
 const FAKE_PATH_DIR: &str = "fake-path";
 const IGNORED_FIXTURE_DIR: &str = "ignored-dir";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
+#[cfg(unix)]
+const TEST_HOME_DIR_NAME: &str = "home";
+const TEST_ISOLATED_HOME_DIR_NAME: &str = "isolated home";
+const TEST_RUNTIME_DIR_NAME: &str = "runtime";
+const TEST_FORWARDER_PROVENANCE_FILE_NAME: &str = ".atlas-forwarder.provenance";
+const TEST_WINDOWS_APPDATA_DIR: &str = "AppData/Roaming";
+const TEST_WINDOWS_LOCAL_APPDATA_DIR: &str = "AppData/Local";
+const TEST_WINDOWS_INSTALLER_STATE_DIR: &str = "AppData/Local/ProjectAtlas/state";
+const TEST_POSIX_INSTALLER_STATE_DIR: &str = ".local/state/projectatlas";
+#[cfg(unix)]
+const TEST_ATLAS_FORWARDER_FILE_NAME: &str = if cfg!(windows) { "atlas.cmd" } else { "atlas" };
 const NPM_SHIM_DIR: &str = "npm";
 #[cfg(windows)]
 const WINDOWS_SYSTEM32_DIR: &str = "System32";
@@ -2095,7 +2106,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
             .ok_or_else(|| io::Error::other("release verifier case has no parent"))?;
         fs::create_dir_all(case_root)?;
         let temp_root = case_root.join("temp");
-        let home_root = case_root.join("home");
+        let home_root = case_root.join(TEST_HOME_DIR_NAME);
         fs::create_dir(&temp_root)?;
         fs::create_dir(&home_root)?;
         match label {
@@ -10185,7 +10196,7 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
     let workspace_root = workspace_root()?;
-    let runtime_dir = temp.path().join("runtime");
+    let runtime_dir = temp.path().join(TEST_RUNTIME_DIR_NAME);
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join(if cfg!(windows) {
         "projectatlas.exe"
@@ -10306,7 +10317,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         permissions.set_mode(0o755);
         fs::set_permissions(&runtime, permissions)?;
     }
-    let home = temp.path().join("isolated home");
+    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
     let inherited_path = env::var_os("PATH").unwrap_or_default();
     let run_path = env::join_paths(
@@ -10316,13 +10327,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
                 .to_path_buf(),
         )
-        .chain(env::split_paths(&inherited_path).filter(|entry| {
-            !entry
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .replace('/', "\\")
-                .contains("\\target\\debug")
-        })),
+        .chain(
+            env::split_paths(&inherited_path)
+                .filter(|entry| !is_shared_test_runtime_directory(entry)),
+        ),
     )?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
@@ -10372,8 +10380,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         command
             .env("HOME", &home)
             .env("USERPROFILE", &home)
-            .env("APPDATA", home.join("AppData/Roaming"))
-            .env("LOCALAPPDATA", home.join("AppData/Local"))
+            .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
+            .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
             .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
             .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
@@ -10405,8 +10413,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             command
                 .env("HOME", &home)
                 .env("USERPROFILE", &home)
-                .env("APPDATA", home.join("AppData/Roaming"))
-                .env("LOCALAPPDATA", home.join("AppData/Local"))
+                .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
+                .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
                 .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
                 .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
                 .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
@@ -10435,7 +10443,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     let provenance = runtime
         .parent()
         .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
-        .join(".atlas-forwarder.provenance");
+        .join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
     let unmanaged_collision = b"unmanaged atlas collision\n";
     fs::write(&forwarder, unmanaged_collision)?;
     let project_state_before_collision = repository_filesystem_snapshot(&repo)?;
@@ -10506,9 +10514,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         "installer did not publish the independent atlas forwarder provenance authority",
     )?;
     let installer_state_dir = if cfg!(windows) {
-        home.join("AppData/Local/ProjectAtlas/state")
+        home.join(TEST_WINDOWS_INSTALLER_STATE_DIR)
     } else {
-        home.join(".local/state/projectatlas")
+        home.join(TEST_POSIX_INSTALLER_STATE_DIR)
     };
     let installer_states =
         fs::read_dir(&installer_state_dir)?.collect::<Result<Vec<_>, io::Error>>()?;
@@ -10919,8 +10927,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?,
     )?;
 
-    fs::create_dir_all(home.join("AppData/Roaming"))?;
-    fs::create_dir_all(home.join("AppData/Local"))?;
+    fs::create_dir_all(home.join(TEST_WINDOWS_APPDATA_DIR))?;
+    fs::create_dir_all(home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))?;
     let uninstall_output = run_uninstall()?;
     require(
         uninstall_output.status.success()
@@ -10978,19 +10986,16 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
         }
     }
 
-    let home = temp.path().join("isolated home");
+    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
     let inherited_path = env::var_os("PATH").unwrap_or_default();
     let installer_path = env::join_paths(
         [first_runtime_dir.clone(), second_runtime_dir.clone()]
             .into_iter()
-            .chain(env::split_paths(&inherited_path).filter(|entry| {
-                !entry
-                    .to_string_lossy()
-                    .to_ascii_lowercase()
-                    .replace('/', "\\")
-                    .contains("\\target\\debug")
-            })),
+            .chain(
+                env::split_paths(&inherited_path)
+                    .filter(|entry| !is_shared_test_runtime_directory(entry)),
+            ),
     )?;
     let workspace_root = workspace_root()?;
     let run_install = |runtime: &Path| -> Result<std::process::Output, Box<dyn Error>> {
@@ -11050,16 +11055,16 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     let second_forwarder =
         second_runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
     let installer_state_dir = if cfg!(windows) {
-        home.join("AppData/Local/ProjectAtlas/state")
+        home.join(TEST_WINDOWS_INSTALLER_STATE_DIR)
     } else {
-        home.join(".local/state/projectatlas")
+        home.join(TEST_POSIX_INSTALLER_STATE_DIR)
     };
     require(
         first_forwarder.is_file(),
         "first managed atlas forwarder was not installed",
     )?;
-    let first_provenance = first_runtime_dir.join(".atlas-forwarder.provenance");
-    let second_provenance = second_runtime_dir.join(".atlas-forwarder.provenance");
+    let first_provenance = first_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+    let second_provenance = second_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
     let first_forwarder_before_failure = fs::read(&first_forwarder)?;
     let first_provenance_before_failure = fs::read(&first_provenance)?;
 
@@ -11220,13 +11225,13 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
+    let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
     fs::write(
         repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
-    let runtime_dir = temp.path().join("runtime");
+    let runtime_dir = temp.path().join(TEST_RUNTIME_DIR_NAME);
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join("projectatlas");
     let real_runtime = mcp_contract_executable();
@@ -11244,7 +11249,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     permissions.set_mode(0o755);
     fs::set_permissions(&runtime, permissions)?;
 
-    let home = temp.path().join("home");
+    let home = temp.path().join(TEST_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
     let workspace_root = workspace_root()?;
     let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
@@ -11266,7 +11271,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
             String::from_utf8_lossy(&install_output.stderr)
         ),
     )?;
-    let forwarder = runtime_dir.join("atlas");
+    let forwarder = runtime_dir.join(TEST_ATLAS_FORWARDER_FILE_NAME);
     let direct_info = StdCommand::new(&runtime)
         .args(["--format", "toon", "runtime-info"])
         .output()?;
@@ -11348,7 +11353,7 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
     }
     let runtime_link = temp.path().join("projectatlas-runtime-link");
     symlink(&runtime, &runtime_link)?;
-    let home = temp.path().join("home");
+    let home = temp.path().join(TEST_HOME_DIR_NAME);
 
     let installer_output = run_projectatlas_plugin_installer_with_optional_path_and_home(
         &workspace_root,
@@ -11398,7 +11403,7 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
         "opencode symlink",
     )?;
 
-    let forwarder = runtime_dir.join("atlas");
+    let forwarder = runtime_dir.join(TEST_ATLAS_FORWARDER_FILE_NAME);
     require(
         forwarder.is_file(),
         "POSIX installer did not place the forwarder beside the canonical runtime",
@@ -11470,7 +11475,7 @@ fn windows_installer_recovery_operation_preserves_config_selection() -> Result<(
     let temp = tempfile::tempdir()?;
     let outside = temp.path().join("outside");
     fs::create_dir(&outside)?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let installer = workspace_root()?
         .join("plugins")
         .join("projectatlas")
@@ -11643,9 +11648,10 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     let parent_path =
         std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
             std::env::split_paths(&inherited_path).filter(|entry| {
-                !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
-                    .iter()
-                    .any(|candidate| entry.join(candidate).exists())
+                !is_shared_test_runtime_directory(entry)
+                    && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                        .iter()
+                        .any(|candidate| entry.join(candidate).exists())
             }),
         ))?;
 
@@ -12584,6 +12590,8 @@ fn windows_installer_obsolete_mcp_handoff_retires_only_exact_child_and_reports_r
     fs::write(
         &fixture_source,
         r#"using System;
+using System.Diagnostics;
+using System.IO;
 using System.Threading;
 
 public static class Program
@@ -12597,7 +12605,10 @@ public static class Program
         }
         if (Array.IndexOf(arguments, "mcp") >= 0)
         {
-            Thread.Sleep(Timeout.Infinite);
+            using (var image_lock = new FileStream(Process.GetCurrentProcess().MainModule.FileName, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Thread.Sleep(Timeout.Infinite);
+            }
             return 0;
         }
         return 2;
@@ -12632,19 +12643,20 @@ public static class Program
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
     let parent_path =
         std::env::join_paths(std::env::split_paths(&inherited_path).filter(|entry| {
-            ![
-                "projectatlas.exe",
-                "projectatlas.cmd",
-                "projectatlas.bat",
-                "projectatlas.ps1",
-                "atlas",
-                "atlas.cmd",
-                "atlas.bat",
-                "atlas.ps1",
-                "atlas.com",
-            ]
-            .iter()
-            .any(|candidate| entry.join(candidate).exists())
+            !is_shared_test_runtime_directory(entry)
+                && ![
+                    "projectatlas.exe",
+                    "projectatlas.cmd",
+                    "projectatlas.bat",
+                    "projectatlas.ps1",
+                    "atlas",
+                    "atlas.cmd",
+                    "atlas.bat",
+                    "atlas.ps1",
+                    "atlas.com",
+                ]
+                .iter()
+                .any(|candidate| entry.join(candidate).exists())
         }))?;
     let stale_parent_path = std::env::join_paths(
         std::iter::once(
@@ -12657,7 +12669,7 @@ public static class Program
     )?;
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let plugin_cache = isolated_home.join(FAKE_CODEX_PLUGIN_CACHE_DIR);
     let plugin_manifest = plugin_cache
         .join(CODEX_PLUGIN_MANIFEST_DIR)
@@ -13222,6 +13234,8 @@ fn windows_installer_obsolete_mcp_handoff_preserves_unready_and_ambiguous_proces
     fs::write(
         &fixture_source,
         r#"using System;
+using System.Diagnostics;
+using System.IO;
 using System.Threading;
 
 public static class Program
@@ -13235,7 +13249,10 @@ public static class Program
         }
         if (Array.IndexOf(arguments, "mcp") >= 0)
         {
-            Thread.Sleep(Timeout.Infinite);
+            using (var image_lock = new FileStream(Process.GetCurrentProcess().MainModule.FileName, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Thread.Sleep(Timeout.Infinite);
+            }
             return 0;
         }
         return 2;
@@ -13350,9 +13367,10 @@ public static class Program
     let parent_path =
         std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
             std::env::split_paths(&inherited_path).filter(|entry| {
-                !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
-                    .iter()
-                    .any(|candidate| entry.join(candidate).exists())
+                !is_shared_test_runtime_directory(entry)
+                    && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                        .iter()
+                        .any(|candidate| entry.join(candidate).exists())
             }),
         ))?;
     let production_installer = workspace_root()?
@@ -15410,7 +15428,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         "existing project-local state must survive plugin updates\n",
     )?;
     let db = atlas_dir.join("projectatlas.db");
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     Command::new(&runtime)
         .current_dir(&repo)
         .arg("--db")
@@ -15892,7 +15910,7 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
@@ -15978,7 +15996,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
@@ -16119,7 +16137,7 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
@@ -16289,7 +16307,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let verify_separate_state =
         previous_ref == expected_release_tag && config_existed && !replacement_has_blank_source;
     let generated_state_before = if verify_separate_state {
@@ -16494,7 +16512,7 @@ fn posix_plugin_lock_rejects_indirection_and_survives_crash() -> Result<(), Box<
     let lock_root = fs::canonicalize(lock_root)?;
     let lock_path = lock_root.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME);
     let harness = temp.path().join("verify-plugin-lock-crash.sh");
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     fs::write(
         &harness,
         format!(
@@ -17078,7 +17096,7 @@ exit 0
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let first_mutated = isolated_home.join("first-mutated");
     let release_first = isolated_home.join("release-first");
     let second_observed = isolated_home.join("second-observed");
@@ -17249,7 +17267,7 @@ fn windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized()
     let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &workspace_root()?,
         &repo,
-        &mcp_contract_executable(),
+        &isolated_installer_runtime(temp.path())?,
         Some(&fake_path),
         Some(&isolated_home),
     )?;
@@ -17338,7 +17356,7 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
     };
     write_executable_script(&fake_codex, fake_codex_script)?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -17491,7 +17509,7 @@ fn assert_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(
         #[cfg(unix)]
         prepare_plugin_lock(&codex_dir)?;
         let state_before = repository_filesystem_snapshot(&codex_dir)?;
-        let runtime = mcp_contract_executable();
+        let runtime = isolated_installer_runtime(temp.path())?;
         let output = run_plugin_installer_with_codex_fixture(
             &workspace_root()?,
             &repo,
@@ -17833,7 +17851,7 @@ exec stat "$@"
 "#,
     )?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let inherited_path = std::env::var_os("PATH")
         .ok_or_else(|| io::Error::other("POSIX hostile restore test requires PATH"))?;
     let real_find = std::env::split_paths(&inherited_path)
@@ -18018,7 +18036,7 @@ fn windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot
     );
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -18114,7 +18132,7 @@ fn windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot()
     );
     write_executable_script(&fake_codex, &fake_script)?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -18224,7 +18242,7 @@ fn windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation()
             "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  echo {installed_json}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
         ),
     )?;
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -18302,7 +18320,7 @@ fn windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion()
             "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" goto plugin_list\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" goto plugin_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" goto plugin_add\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_list\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\necho {installed_json}\r\nexit /b 0\r\n:plugin_absent\r\necho {{\"installed\":[],\"available\":[]}}\r\nexit /b 0\r\n:plugin_remove\r\nif exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\nexit /b 0\r\n:plugin_add\r\ncopy /y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\nxcopy /e /i /q /y \"%PROJECTATLAS_FAKE_PLUGIN_ROOT%\" \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" >nul\r\nfor /d %%D in (\"%CODEX_HOME%\\.projectatlas-plugin-state-*\") do (\r\n  move \"%%~fD\" \"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\" >nul\r\n  >\"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\\outside-canary.txt\" echo outside state\r\n  mklink /J \"%%~fD\" \"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\" >nul\r\n)\r\nexit /b 0\r\n"
         ),
     )?;
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -18392,7 +18410,7 @@ fn windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot()
         ),
     )?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output_result = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -18514,7 +18532,7 @@ fn windows_installer_without_codex_reports_clean_skip() -> Result<(), Box<dyn Er
         .arg("-ProjectRoot")
         .arg(&repo)
         .arg("-RuntimePath")
-        .arg(assert_cmd::cargo::cargo_bin("projectatlas"))
+        .arg(isolated_installer_runtime(temp.path())?)
         .env("HOME", &isolated_home)
         .env("USERPROFILE", &isolated_home)
         .env("APPDATA", &app_data)
@@ -18598,9 +18616,10 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
     let parent_path =
         std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
             std::env::split_paths(&inherited_path).filter(|entry| {
-                !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
-                    .iter()
-                    .any(|candidate| entry.join(candidate).exists())
+                !is_shared_test_runtime_directory(entry)
+                    && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                        .iter()
+                        .any(|candidate| entry.join(candidate).exists())
             }),
         ))?;
 
@@ -18799,9 +18818,10 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
     )?;
     let stale_parent_path = std::env::join_paths(std::iter::once(stale_parent_bin).chain(
         std::env::split_paths(&inherited_path).filter(|entry| {
-            !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
-                .iter()
-                .any(|candidate| entry.join(candidate).exists())
+            !is_shared_test_runtime_directory(entry)
+                && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                    .iter()
+                    .any(|candidate| entry.join(candidate).exists())
         }),
     ))?;
     let stale_parent_install = StdCommand::new("powershell")
@@ -34472,6 +34492,51 @@ fn mcp_contract_executable() -> PathBuf {
     )
 }
 
+/// Give each isolated installer authority its own runtime publication path.
+fn isolated_installer_runtime(temp_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let runtime_dir = temp_root.join("projectatlas-installer-runtime");
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join(if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    });
+    fs::copy(mcp_contract_executable(), &runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime, permissions)?;
+    }
+    Ok(runtime)
+}
+
+/// Exclude the shared Cargo target runtime directory from installer fixture PATHs.
+fn is_shared_test_runtime_directory(path: &Path) -> bool {
+    let runtime = mcp_contract_executable();
+    let Some(runtime_directory) = runtime.parent() else {
+        return false;
+    };
+    let normalize = |value: &Path| {
+        value
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    if normalize(path) == normalize(runtime_directory)
+        || normalize(path) == normalize(&runtime_directory.join("deps"))
+    {
+        return true;
+    }
+    runtime_directory
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("deps"))
+        && runtime_directory
+            .parent()
+            .is_some_and(|parent| normalize(path) == normalize(parent))
+}
+
 /// Require the selected runtime and plugin skill to be the exact workspace release candidate.
 fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dyn Error>> {
     let runtime = run_mcp_contract_json(
@@ -41778,9 +41843,10 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     let current_path = std::env::var_os("PATH").unwrap_or_default();
     let inherited_path =
         std::env::join_paths(std::env::split_paths(&current_path).filter(|entry| {
-            !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
-                .iter()
-                .any(|candidate| entry.join(candidate).exists())
+            !is_shared_test_runtime_directory(entry)
+                && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                    .iter()
+                    .any(|candidate| entry.join(candidate).exists())
         }))?;
     if let Some(path_shadow) = path_shadow {
         let shadowed_path = std::env::join_paths(
