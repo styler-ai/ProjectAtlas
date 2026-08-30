@@ -88,7 +88,7 @@ The migration SHALL preserve every existing open mapped issue section, substanti
 - **AND** it still rejects unchecked historical implementation tasks.
 
 ### Requirement: Contract provenance is repository-controlled
-IssueOps SHALL select the issue contract from the repository-controlled `legacy_closed_issues` list in `openspec/issue-map.json`, not from mutable issue headings. Every mapped issue outside that explicit set SHALL use the new contract. Each listed issue SHALL be mapped, CLOSED, and contain exactly one visible legacy task heading with no `Implementation Tasks` or `Acceptance and Review Tasks` heading. Pull-request validation SHALL require the candidate provenance list to equal the accepted base once the accepted base contains the field; an accepted base that predates the field permits only the initial introduction of a validated list.
+IssueOps SHALL select the issue contract from the repository-controlled `legacy_closed_issues` list in `openspec/issue-map.json`, not from mutable issue headings. Every mapped issue outside that explicit set SHALL use the new contract. Each listed issue SHALL be mapped, CLOSED, contain exactly one visible legacy task heading with no `Implementation Tasks` or `Acceptance and Review Tasks` heading, mirror its exact local owner task slice, and contain no unchecked historical task. Pull-request validation SHALL require the candidate provenance list to equal the accepted base once the accepted base contains the field; an accepted base that predates the field permits only the initial introduction of a list validated against that complete contract using the authenticated payloads already fetched for the boundary.
 
 #### Scenario: Closed new-contract issue is downgraded
 - **WHEN** a mapped issue outside `legacy_closed_issues` is CLOSED after replacing `Implementation Tasks` with a legacy heading and removing acceptance
@@ -99,6 +99,10 @@ IssueOps SHALL select the issue contract from the repository-controlled `legacy_
 - **WHEN** a mapped CLOSED issue appears in `legacy_closed_issues` and retains exactly one legacy task heading without new task fields
 - **THEN** IssueOps validates its historical implementation tasks without requiring acceptance or complexity
 - **AND** unchecked historical tasks remain a closure failure.
+
+#### Scenario: Incomplete initial legacy provenance is rejected
+- **WHEN** the initial pull-request introduction lists or derives a mapped CLOSED legacy issue whose visible task list differs from its local owner slice or still has an unchecked task
+- **THEN** pull-request validation rejects the provenance introduction with the closed/unchecked or exact-slice diagnostic before accepting the field
 
 #### Scenario: Provenance is frozen at the accepted pull-request base
 - **WHEN** a pull request changes `legacy_closed_issues` after the accepted base already declares it

@@ -8931,6 +8931,19 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
     let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let issueops_self_test = StdCommand::new(python)
+        .current_dir(&workspace_root)
+        .args([".github/scripts/issue-checklists.py", "--self-test"])
+        .output()?;
+    if !issueops_self_test.status.success() {
+        return Err(io::Error::other(format!(
+            "IssueOps behavior self-test failed: {}{}",
+            String::from_utf8_lossy(&issueops_self_test.stdout),
+            String::from_utf8_lossy(&issueops_self_test.stderr)
+        ))
+        .into());
+    }
     let mermaid_parser = github.join("mermaid-parser");
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
@@ -9026,6 +9039,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "complexity_label_failures",
         "check_open_issue_complexity",
         "load_legacy_closed_issues",
+        "cached_issue_payload",
+        "local_issue_tasks",
         "legacy_closed_issue_mapping_failures",
         "legacy_closed_issue_failures",
         "live_legacy_closed_issues",

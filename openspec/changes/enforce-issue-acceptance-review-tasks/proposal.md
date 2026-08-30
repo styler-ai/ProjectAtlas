@@ -13,7 +13,7 @@ ProjectAtlas IssueOps currently treats the OpenSpec implementation checklist as 
 - Require all implementation and acceptance/review tasks to be checked before issue closure or milestone completion; ordinary in-progress pull requests may retain unchecked tasks.
 - Make pull-request validation branch-aware so immediate live task progress on one issue cannot fail an unrelated concurrent branch: compare the owning issue's candidate task slice with live state, require unrelated task slices to remain unchanged from the pull-request base, and keep `main` and release validation global and fail-closed.
 - Migrate every open mapped issue before activating the new gate. Preserve closed historical issue bodies and keep their legacy task headings readable for historical validation.
-- Record the only legacy-contract exceptions as per-issue `legacy_closed_issues` provenance in `openspec/issue-map.json`; mapped issues outside that explicit repository-controlled set use the new contract, and pull-request validation freezes the set after its initial introduction.
+- Record the only legacy-contract exceptions as per-issue `legacy_closed_issues` provenance in `openspec/issue-map.json`; mapped issues outside that explicit repository-controlled set use the new contract. Initial pull-request introduction validates every derived/listed exception as mapped, CLOSED, legacy-only, an exact local owner-slice mirror, and complete, then freezes the set against the accepted base.
 - Update issue templates, repository workflow guidance, pull-request guidance, and behavior-focused contract tests to describe and enforce the same two-list model.
 
 ## Capabilities
