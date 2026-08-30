@@ -566,7 +566,12 @@ def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
     return mapped
 
 
-def issue_payload(repo: str, number: int) -> dict[str, object]:
+def issue_payload(
+    repo: str, number: int, *, include_body: bool = True
+) -> dict[str, object]:
+    fields = "state,number,labels,milestone"
+    if include_body:
+        fields = "body,title,state,url,number,labels,milestone"
     payload = gh_json(
         [
             "issue",
@@ -575,7 +580,7 @@ def issue_payload(repo: str, number: int) -> dict[str, object]:
             "-R",
             repo,
             "--json",
-            "body,title,state,url,number,labels,milestone",
+            fields,
         ]
     )
     if not isinstance(payload, dict):
@@ -635,7 +640,7 @@ def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
 
 
 def open_issue_payloads(repo: str) -> list[dict[str, object]]:
-    """Fetch the bounded open-issue state and metadata set used by gates."""
+    """Fetch the bounded native issue state and metadata set used by gates."""
 
     payload = gh_json(
         [
@@ -644,7 +649,7 @@ def open_issue_payloads(repo: str) -> list[dict[str, object]]:
             "-R",
             repo,
             "--state",
-            "open",
+            "all",
             "--limit",
             "1000",
             "--json",
@@ -654,7 +659,7 @@ def open_issue_payloads(repo: str) -> list[dict[str, object]]:
     if not isinstance(payload, list) or not all(
         isinstance(issue, dict) for issue in payload
     ):
-        raise SystemExit("GitHub open issue list did not return issue objects")
+        raise SystemExit("GitHub issue list did not return issue objects")
     return payload
 
 
@@ -669,10 +674,15 @@ def check_open_issue_complexity(repo: str) -> list[str]:
     return failures
 
 
-def check_issue_complexity(repo: str, number: int) -> list[str]:
+def check_issue_complexity(
+    repo: str,
+    number: int,
+    issue: dict[str, object] | None = None,
+) -> list[str]:
     """Validate complexity for one issue selected by a scoped dispatch."""
 
-    issue = issue_payload(repo, number)
+    if issue is None:
+        issue = issue_payload(repo, number, include_body=False)
     return [
         f"#{number} issue contract {failure}"
         for failure in complexity_label_failures(issue)
@@ -686,6 +696,7 @@ def check_complexity_for_dispatch(
     planned_issue: int | None,
     pull_request_owner: int | None = None,
     pull_request_owner_error: str | None = None,
+    planned_issue_payload: dict[str, object] | None = None,
 ) -> list[str]:
     """Keep complexity validation aligned with the active IssueOps boundary."""
 
@@ -703,7 +714,7 @@ def check_complexity_for_dispatch(
             return []
         return check_issue_complexity(repo, owner_issue)
     if planned_issue is not None:
-        return check_issue_complexity(repo, planned_issue)
+        return check_issue_complexity(repo, planned_issue, planned_issue_payload)
     return check_open_issue_complexity(repo)
 
 
@@ -1426,14 +1437,31 @@ def check_pull_request_tasks(
 
     failures: list[str] = []
     try:
-        open_issue_numbers = {
-            positive_issue(issue.get("number"), "issue number")
-            for issue in open_issue_payloads(repo)
-            if str(issue.get("state", "OPEN")).upper() == "OPEN"
-        }
+        issue_states: dict[int, str] = {}
+        for issue in open_issue_payloads(repo):
+            number = positive_issue(issue.get("number"), "issue number")
+            state = str(issue.get("state", "")).upper()
+            if number in issue_states:
+                failures.append(f"mapped issue #{number} has duplicate native state")
+            else:
+                issue_states[number] = state
     except SystemExit as error:
-        return [f"pull request open issue state {error}"]
-    if owner_issue not in open_issue_numbers:
+        return [f"pull request issue state {error}"]
+    for number in sorted(mapped_issue_numbers(issue_map)):
+        state = issue_states.get(number)
+        if state is None:
+            failures.append(
+                f"mapped issue #{number} is missing from the complete native issue state"
+            )
+        elif state not in {"OPEN", "CLOSED"}:
+            failures.append(
+                f"mapped issue #{number} has unknown native state "
+                f"{state or 'UNKNOWN'}"
+            )
+    if failures:
+        return failures
+    owner_state = issue_states[owner_issue]
+    if owner_state != "OPEN":
         return [f"pull request owner #{owner_issue} must be OPEN"]
     configured_issue_map_path = (
         issue_map_path
@@ -1475,7 +1503,7 @@ def check_pull_request_tasks(
                     f"{base_ref}: expected {accepted_owners!r}, found {candidate_owners!r}"
                 )
     for change, owners in sorted(issue_map.items()):
-        if all(owner.issue not in open_issue_numbers for owner in owners):
+        if all(issue_states[owner.issue] != "OPEN" for owner in owners):
             continue
         path, candidate_tasks = local_tasks(root, change)
         try:
@@ -1486,7 +1514,7 @@ def check_pull_request_tasks(
         unrelated_slices = [
             (owner, expected)
             for owner, expected in candidate_slices
-            if owner.issue != owner_issue and owner.issue in open_issue_numbers
+            if owner.issue != owner_issue and issue_states[owner.issue] == "OPEN"
         ]
         base_slices: dict[int, list[tuple[bool, str]]] = {}
         if unrelated_slices:
@@ -1503,7 +1531,7 @@ def check_pull_request_tasks(
                 continue
         for owner, expected in candidate_slices:
             if owner.issue != owner_issue:
-                if owner.issue not in open_issue_numbers:
+                if issue_states[owner.issue] != "OPEN":
                     continue
                 accepted = base_slices.get(owner.issue)
                 if accepted is None:
@@ -1552,36 +1580,73 @@ def check_openspec_tasks(
     root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
     planned_issue: int | None = None,
+    planned_issue_payload: dict[str, object] | None = None,
 ) -> list[str]:
     failures: list[str] = []
-    open_issue_numbers: set[int] | None = None
+    issue_states: dict[int, str] | None = None
     if planned_issue is None:
         try:
-            open_issue_numbers = {
-                positive_issue(issue.get("number"), "issue number")
-                for issue in open_issue_payloads(repo)
-                if str(issue.get("state", "")).upper() == "OPEN"
-            }
+            issue_states = {}
+            for issue in open_issue_payloads(repo):
+                number = positive_issue(issue.get("number"), "issue number")
+                state = str(issue.get("state", "")).upper()
+                if number in issue_states:
+                    failures.append(f"mapped issue #{number} has duplicate native state")
+                else:
+                    issue_states[number] = state
         except SystemExit as error:
-            return [f"open issue state {error}"]
+            return [f"issue state {error}"]
+        for number in sorted(mapped_issue_numbers(issue_map)):
+            state = issue_states.get(number)
+            if state is None:
+                failures.append(
+                    f"mapped issue #{number} is missing from the complete native issue state"
+                )
+            elif state not in {"OPEN", "CLOSED"}:
+                failures.append(
+                    f"mapped issue #{number} has unknown native state "
+                    f"{state or 'UNKNOWN'}"
+                )
+        if failures:
+            return failures
+    elif planned_issue_payload is None:
+        try:
+            planned_issue_payload = issue_payload(
+                repo, planned_issue, include_body=False
+            )
+        except SystemExit as error:
+            return [f"planned issue state {error}"]
+
+    planned_payload: dict[str, object] | None = None
+    if planned_issue is not None:
+        assert planned_issue_payload is not None
+        planned_state = str(planned_issue_payload.get("state", "")).upper()
+        if planned_state == "CLOSED":
+            print(f"#{planned_issue}: closed issue body is inert")
+            return []
+        if planned_state != "OPEN":
+            return [
+                f"#{planned_issue} issue contract state must be OPEN or CLOSED; "
+                f"found {planned_state or 'UNKNOWN'}"
+            ]
+        try:
+            planned_payload = issue_payload(repo, planned_issue)
+        except SystemExit as error:
+            return [f"#{planned_issue} issue contract {error}"]
+        failures.extend(planned_issue_failures(planned_payload, issue_map, root))
     for change, owners in sorted(issue_map.items()):
         for owner in owners:
             if planned_issue is not None and owner.issue != planned_issue:
                 continue
-            if open_issue_numbers is not None and owner.issue not in open_issue_numbers:
+            if issue_states is not None and issue_states[owner.issue] == "CLOSED":
                 print(f"#{owner.issue} {change}: closed issue body is inert")
                 continue
-            payload = issue_payload(repo, owner.issue)
-            state = str(payload.get("state", "")).upper()
-            if state != "OPEN":
-                if state == "CLOSED":
-                    print(f"#{owner.issue} {change}: closed issue body is inert")
-                    continue
-                failures.append(
-                    f"#{owner.issue} issue contract state must be OPEN or CLOSED; "
-                    f"found {state or 'UNKNOWN'}"
-                )
-                continue
+            payload = (
+                planned_payload
+                if planned_issue is not None
+                else issue_payload(repo, owner.issue)
+            )
+            assert payload is not None
             path, tasks = local_tasks(root, change)
             try:
                 expected = next(
@@ -1942,7 +2007,7 @@ Mitigations:
     pull_request_issue_map_paths: list[object] = []
     global_complexity_fetches: list[str] = []
     try:
-        globals()["issue_payload"] = lambda _repo, number: (
+        globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
             complexity_fetches.append(number) or complexity_payloads[number]
         )
         globals()["pull_request_payload"] = lambda _repo, number: (
@@ -1986,7 +2051,7 @@ Mitigations:
             "2",
         ]
         main()
-        assert complexity_fetches == [2, 2]
+        assert complexity_fetches == [2]
         sys.argv = ["issue-checklists.py", "--repo", "owner/repo"]
         try:
             main()
@@ -2611,13 +2676,12 @@ Mitigations:
 
             globals()["run"] = fake_run
             globals()["pull_request_payload"] = lambda _repo, _number: pull_request
-            globals()["issue_payload"] = lambda _repo, number: (
+            globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
                 live_checked.append(number) or live_payloads[number]
             )
             globals()["open_issue_payloads"] = lambda _repo: [
                 {"number": number, "state": payload["state"]}
                 for number, payload in live_payloads.items()
-                if payload["state"] == "OPEN"
             ]
             globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
             assert check_pull_request_tasks(
@@ -2641,6 +2705,44 @@ Mitigations:
             )
             assert _closed_history_failures == []
             assert live_checked == [2], "closed unrelated history must be skipped"
+            pull_request["title"] = "Incremental work for #1"
+            closed_owner_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+            )
+            assert closed_owner_failures == ["pull request owner #1 must be OPEN"]
+            pull_request["title"] = "Incremental work for #2"
+            removed_live_payload = live_payloads.pop(1)
+            missing_pr_state_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "mapped issue #1 is missing from the complete native issue state"
+                in failure
+                for failure in missing_pr_state_failures
+            )
+            live_payloads[1] = {
+                **removed_live_payload,
+                "state": "UNKNOWN",
+            }
+            unknown_pr_state_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "mapped issue #1 has unknown native state UNKNOWN" in failure
+                for failure in unknown_pr_state_failures
+            )
             live_payloads[1] = {
                 "state": "OPEN",
                 "body": issue_contract.replace("- [x] 1.1", "- [ ] 1.1"),
@@ -2846,6 +2948,7 @@ Mitigations:
                 "removes mapped OpenSpec authority" in failure
                 for failure in deleted_change_failures
             )
+            live_payloads[3] = {"state": "OPEN", "body": issue_contract}
             reassigned_change_failures = check_pull_request_tasks(
                 "owner/repo",
                 branch_root,
@@ -2917,7 +3020,7 @@ Mitigations:
             )
 
             checked_numbers: list[int] = []
-            globals()["issue_payload"] = lambda _repo, number: (
+            globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
                 checked_numbers.append(number)
                 or {"state": "OPEN", "body": issue_contract}
             )
@@ -2955,14 +3058,14 @@ Mitigations:
                 517: {"number": 517, "state": "CLOSED", "body": legacy_body},
                 448: {"number": 448, "state": "OPEN", "body": issue_contract},
             }
-            fetches: list[int] = []
-            globals()["issue_payload"] = lambda _repo, number: (
-                fetches.append(number) or payloads[number]
+            fetches: list[tuple[int, bool]] = []
+            globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
+                fetches.append((number, _kwargs.get("include_body", True)))
+                or payloads[number]
             )
             globals()["open_issue_payloads"] = lambda _repo: [
                 {"number": number, "state": payload["state"]}
                 for number, payload in payloads.items()
-                if payload["state"] == "OPEN"
             ]
             mapped = {"legacy-change": (Owner(517),)}
             assert check_openspec_tasks("owner/repo", branch_root, mapped) == []
@@ -2976,7 +3079,7 @@ Mitigations:
             assert any(
                 "Implementation Tasks" in failure for failure in reopened_failures
             )
-            assert fetches == [517]
+            assert fetches == [(517, True)]
 
             mapped = {
                 "legacy-change": (Owner(517),),
@@ -2985,18 +3088,45 @@ Mitigations:
             payloads[517] = {"number": 517, "state": "CLOSED", "body": legacy_body}
             fetches.clear()
             assert check_openspec_tasks("owner/repo", branch_root, mapped) == []
-            assert fetches == [448], "global checks fetch only active issue bodies"
+            assert fetches == [(448, True)], "global checks fetch only active issue bodies"
             fetches.clear()
             assert check_openspec_tasks(
                 "owner/repo", branch_root, mapped, planned_issue=517
             ) == []
-            assert fetches == [517]
+            assert fetches == [(517, False)]
             fetches.clear()
             _planned_current_failures = check_openspec_tasks(
                 "owner/repo", branch_root, mapped, planned_issue=448
             )
             assert _planned_current_failures == []
-            assert fetches == [448], "planned checks must remain issue-scoped"
+            assert fetches == [(448, False), (448, True)], "planned checks must remain issue-scoped"
+
+            globals()["open_issue_payloads"] = lambda _repo: [
+                {"number": 448, "state": "OPEN"}
+            ]
+            missing_state_failures = check_openspec_tasks(
+                "owner/repo", branch_root, mapped
+            )
+            assert any(
+                "mapped issue #517 is missing from the complete native issue state"
+                in failure
+                for failure in missing_state_failures
+            )
+            globals()["open_issue_payloads"] = lambda _repo: [
+                {"number": 517, "state": "UNKNOWN"},
+                {"number": 448, "state": "OPEN"},
+            ]
+            unknown_state_failures = check_openspec_tasks(
+                "owner/repo", branch_root, mapped
+            )
+            assert any(
+                "mapped issue #517 has unknown native state UNKNOWN" in failure
+                for failure in unknown_state_failures
+            )
+            globals()["open_issue_payloads"] = lambda _repo: [
+                {"number": number, "state": payload["state"]}
+                for number, payload in payloads.items()
+            ]
 
             globals()["milestone_issues"] = lambda _repo, _milestone: [
                 {"number": 517, "state": "CLOSED"}
@@ -3201,6 +3331,7 @@ def main() -> None:
         raise SystemExit("--base requires --pull-request")
     pull_request_owner = None
     pull_request_owner_error = None
+    planned_issue_payload = None
     if args.pull_request is not None:
         try:
             pull_request_owner = pull_request_owner_issue(
@@ -3209,6 +3340,10 @@ def main() -> None:
             )
         except SystemExit as error:
             pull_request_owner_error = str(error)
+    elif args.planned_issue is not None:
+        planned_issue_payload = issue_payload(
+            args.repo, args.planned_issue, include_body=False
+        )
     failures.extend(
         check_complexity_for_dispatch(
             args.repo,
@@ -3216,6 +3351,7 @@ def main() -> None:
             planned_issue=args.planned_issue,
             pull_request_owner=pull_request_owner,
             pull_request_owner_error=pull_request_owner_error,
+            planned_issue_payload=planned_issue_payload,
         )
     )
     if args.pull_request is not None:
@@ -3238,12 +3374,7 @@ def main() -> None:
                 root,
                 issue_map,
                 planned_issue=args.planned_issue,
-            )
-        )
-    if args.planned_issue is not None:
-        failures.extend(
-            planned_issue_failures(
-                issue_payload(args.repo, args.planned_issue), issue_map, root
+                planned_issue_payload=planned_issue_payload,
             )
         )
     mapped_issues = mapped_issue_numbers(issue_map)
