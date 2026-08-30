@@ -1366,6 +1366,24 @@ def first_task_difference(
     return f"task count differs: expected {len(expected)}, found {len(actual)}"
 
 
+def base_issue_map(base_ref: str) -> dict[str, tuple[Owner, ...]]:
+    """Read the accepted pull-request base's mapped OpenSpec owners."""
+
+    if not base_ref.strip():
+        raise SystemExit("pull request accepted base is missing")
+    relative = "openspec/issue-map.json"
+    try:
+        text = run(["git", "show", f"{base_ref}:{relative}"])
+        with tempfile.TemporaryDirectory(prefix="issue-map-base-") as temporary:
+            path = Path(temporary) / "issue-map.json"
+            path.write_text(text, encoding="utf-8")
+            return load_issue_map(path)
+    except (OSError, UnicodeError, ValueError, SystemExit) as error:
+        raise SystemExit(
+            f"accepted pull-request base {base_ref!r} is unreadable for {relative}"
+        ) from error
+
+
 def base_local_tasks(root: Path, path: Path, base_ref: str) -> list[tuple[bool, str]]:
     """Read one mapped task file from the accepted pull-request base."""
 
@@ -1431,6 +1449,29 @@ def check_pull_request_tasks(
         ]
 
     failures: list[str] = []
+    try:
+        accepted_issue_map = base_issue_map(base_ref)
+    except SystemExit as error:
+        return [str(error)]
+    for change in sorted(set(issue_map) | set(accepted_issue_map)):
+        candidate_owners = issue_map.get(change)
+        accepted_owners = accepted_issue_map.get(change)
+        if candidate_owners is None:
+            failures.append(
+                f"{change} removes mapped OpenSpec authority from accepted pull-request base "
+                f"{base_ref}: owners {accepted_owners!r}"
+            )
+        elif accepted_owners is None:
+            if any(owner.issue != owner_issue for owner in candidate_owners):
+                failures.append(
+                    f"{change} adds unrelated mapped OpenSpec authority without an accepted "
+                    f"pull-request base slice"
+                )
+        elif candidate_owners != accepted_owners:
+            failures.append(
+                f"{change} changes mapped OpenSpec owners from accepted pull-request base "
+                f"{base_ref}: expected {accepted_owners!r}, found {candidate_owners!r}"
+            )
     for change, owners in sorted(issue_map.items()):
         path, candidate_tasks = local_tasks(root, change)
         try:
@@ -1449,18 +1490,26 @@ def check_pull_request_tasks(
                 base_tasks = base_local_tasks(root, path, base_ref)
                 base_slices = dict(
                     (owner.issue, expected)
-                    for owner, expected in owner_slices(path, base_tasks, owners)
+                    for owner, expected in owner_slices(
+                        path, base_tasks, accepted_issue_map.get(change, owners)
+                    )
                 )
             except SystemExit as error:
                 failures.append(str(error))
                 continue
         for owner, expected in candidate_slices:
             if owner.issue != owner_issue:
-                if expected != base_slices[owner.issue]:
+                accepted = base_slices.get(owner.issue)
+                if accepted is None:
+                    failures.append(
+                        f"#{owner.issue} {change} has no corresponding unrelated task slice "
+                        f"in accepted pull-request base {base_ref}"
+                    )
+                elif expected != accepted:
                     failures.append(
                         f"#{owner.issue} {change} changes an unrelated task slice from "
                         f"accepted pull-request base {base_ref}: "
-                        f"{first_task_difference(base_slices[owner.issue], expected)}"
+                        f"{first_task_difference(accepted, expected)}"
                     )
                 continue
             try:
@@ -2434,6 +2483,9 @@ Mitigations:
             path.write_text(branch_tasks, encoding="utf-8")
             base_texts[path.relative_to(branch_root).as_posix()] = branch_tasks
         base_texts.pop("openspec/changes/change-b/tasks.md")
+        base_issue_map_text = json.dumps(
+            {"schema_version": 2, "changes": {"change-a": 1}}
+        )
         saved_branch_helpers = {
             name: globals()[name]
             for name in (
@@ -2458,6 +2510,10 @@ Mitigations:
             def fake_run(args: list[str]) -> str:
                 if len(args) == 3 and args[:2] == ["git", "show"]:
                     path = args[2].split(":", 1)[1]
+                    if path == "openspec/issue-map.json":
+                        if args[2].startswith("unreadable-base:"):
+                            raise SystemExit("git show could not read accepted base")
+                        return base_issue_map_text
                     base_reads.append(path)
                     if args[2].startswith("unreadable-base:"):
                         raise SystemExit("git show could not read accepted base")
@@ -2475,6 +2531,29 @@ Mitigations:
             ) == []
             assert live_checked == [2], "unrelated live progress must not be fetched"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            deleted_change_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {"change-b": (Owner(2),)},
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "removes mapped OpenSpec authority" in failure
+                for failure in deleted_change_failures
+            )
+            reassigned_change_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {"change-a": (Owner(3),), "change-b": (Owner(2),)},
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "changes mapped OpenSpec owners" in failure
+                for failure in reassigned_change_failures
+            )
 
             (branch_root / "openspec" / "changes" / "change-a" / "tasks.md").write_text(
                 "- [ ] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n",
@@ -2553,9 +2632,12 @@ Mitigations:
         task_path.write_text(legacy_tasks, encoding="utf-8")
         saved_legacy_helpers = {
             name: globals()[name]
-            for name in ("pull_request_payload", "issue_payload")
+            for name in ("run", "pull_request_payload", "issue_payload")
         }
         try:
+            globals()["run"] = lambda _args: json.dumps(
+                {"schema_version": 2, "changes": {"legacy-change": 517}}
+            )
             globals()["pull_request_payload"] = lambda _repo, _number: {
                 "title": "Maintenance for #517",
                 "body": "",
