@@ -2689,6 +2689,24 @@ Mitigations:
             ) == []
             assert live_checked == [2], "unrelated live progress must not be fetched"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
+            globals()["open_issue_payloads"] = lambda _repo: [
+                {"number": 1, "state": "OPEN"},
+                {"number": 1, "state": "OPEN"},
+                {"number": 2, "state": "OPEN"},
+            ]
+            live_checked.clear()
+            duplicate_pr_state_failures = check_pull_request_tasks(
+                "owner/repo", branch_root, issue_map, 7, "accepted-base"
+            )
+            assert any(
+                "mapped issue #1 has duplicate native state" in failure
+                for failure in duplicate_pr_state_failures
+            )
+            assert live_checked == [], "duplicate state summaries must stop before body reads"
+            globals()["open_issue_payloads"] = lambda _repo: [
+                {"number": number, "state": payload["state"]}
+                for number, payload in live_payloads.items()
+            ]
             live_checked.clear()
             live_payloads[1] = {
                 "number": 1,
@@ -3123,6 +3141,20 @@ Mitigations:
                 "mapped issue #517 has unknown native state UNKNOWN" in failure
                 for failure in unknown_state_failures
             )
+            fetches.clear()
+            globals()["open_issue_payloads"] = lambda _repo: [
+                {"number": 517, "state": "CLOSED"},
+                {"number": 448, "state": "OPEN"},
+                {"number": 448, "state": "OPEN"},
+            ]
+            duplicate_state_failures = check_openspec_tasks(
+                "owner/repo", branch_root, mapped
+            )
+            assert any(
+                "mapped issue #448 has duplicate native state" in failure
+                for failure in duplicate_state_failures
+            )
+            assert fetches == [], "duplicate state summaries must stop before body reads"
             globals()["open_issue_payloads"] = lambda _repo: [
                 {"number": number, "state": payload["state"]}
                 for number, payload in payloads.items()
