@@ -197,7 +197,7 @@ const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(
 #[cfg(windows)]
 const CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
-const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(4);
+const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 // Delay the polling caller, not the child operation, so a completed helper is observed late.
 const CODEX_OWNER_LATE_COMPLETION_TEST_DELAY: Duration = Duration::from_secs(2);
