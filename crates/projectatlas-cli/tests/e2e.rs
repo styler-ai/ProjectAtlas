@@ -9027,8 +9027,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "check_open_issue_complexity",
         "ISSUE_REFERENCE_RE",
         "pull_request_owner_issue",
+        "configured_issue_map_path",
+        "base_issue_map(root, configured_issue_map_path, base_ref)",
         "base_local_tasks",
         "check_pull_request_tasks",
+        "issue_map_path=args.issue_map",
     ] {
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(

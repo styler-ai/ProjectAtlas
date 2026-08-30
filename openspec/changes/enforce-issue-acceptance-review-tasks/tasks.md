@@ -19,6 +19,6 @@
 ## 4. Live Migration and Acceptance
 
 - [x] 4.1 Prepare and independently diff every open mapped issue body, read back every open issue complexity label, and prepare the queued #517 milestone/status/relationship activation; preserve all prior prose, links, task text/state, milestone facts, and relationships; validate the complete candidate set with the new checker; and retain exact mutable-state rollback inputs without committing a body manifest or receipt ledger.
-- [x] 4.2 Obtain Terra High review of the immutable implementation and migration boundary, return every finding to the implementation owner, and keep all acceptance tasks and publication blocked until Terra accepts the complete issue intent, source, specifications, architecture, and tests.
+- [ ] 4.2 Obtain Terra High review of the immutable implementation and migration boundary, return every finding to the implementation owner, and keep all acceptance tasks and publication blocked until Terra accepts the complete issue intent, source, specifications, architecture, and tests.
 - [ ] 4.3 Publish the bounded live issue-body/relationship migration, validate the complete body/label/relationship set, push only the Terra-accepted implementation head, pass hosted checks and live IssueOps, reach exact merge-ready convergence, and restore prior bodies/relationships if convergence fails before merge.
-- [x] 4.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [ ] 4.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

@@ -1372,14 +1372,22 @@ def first_task_difference(
     return f"task count differs: expected {len(expected)}, found {len(actual)}"
 
 
-def base_issue_map(base_ref: str) -> dict[str, tuple[Owner, ...]]:
+def base_issue_map(
+    root: Path, issue_map_path: str | Path, base_ref: str
+) -> dict[str, tuple[Owner, ...]]:
     """Read the accepted pull-request base's mapped OpenSpec owners."""
 
     if not base_ref.strip():
         raise SystemExit("pull request accepted base is missing")
-    relative = "openspec/issue-map.json"
+    path = Path(issue_map_path)
     try:
-        text = run(["git", "show", f"{base_ref}:{relative}"])
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise SystemExit(
+            f"configured issue-map path {path} is outside repository root {root}"
+        ) from error
+    try:
+        text = run(["git", "show", f"{base_ref}:{relative.as_posix()}"])
         with tempfile.TemporaryDirectory(prefix="issue-map-base-") as temporary:
             path = Path(temporary) / "issue-map.json"
             path.write_text(text, encoding="utf-8")
@@ -1428,6 +1436,7 @@ def check_pull_request_tasks(
     pull_request: int,
     base_ref: str,
     *,
+    issue_map_path: str | Path | None = None,
     owner_issue: int | None = None,
     owner_error: str | None = None,
 ) -> list[str]:
@@ -1455,8 +1464,13 @@ def check_pull_request_tasks(
         ]
 
     failures: list[str] = []
+    configured_issue_map_path = (
+        issue_map_path
+        if issue_map_path is not None
+        else root / "openspec" / "issue-map.json"
+    )
     try:
-        accepted_issue_map = base_issue_map(base_ref)
+        accepted_issue_map = base_issue_map(root, configured_issue_map_path, base_ref)
     except SystemExit as error:
         return [str(error)]
     for change in sorted(set(issue_map) | set(accepted_issue_map)):
@@ -1938,6 +1952,7 @@ Mitigations:
     }
     complexity_fetches: list[int] = []
     pull_request_fetches: list[int] = []
+    pull_request_issue_map_paths: list[object] = []
     global_complexity_fetches: list[str] = []
     try:
         globals()["issue_payload"] = lambda _repo, number: (
@@ -1953,7 +1968,9 @@ Mitigations:
             for number, payload in complexity_payloads.items()
         ]
         globals()["load_issue_map"] = lambda _path: {}
-        globals()["check_pull_request_tasks"] = lambda *_args, **_kwargs: []
+        globals()["check_pull_request_tasks"] = lambda *_args, **kwargs: (
+            pull_request_issue_map_paths.append(kwargs["issue_map_path"]) or []
+        )
         globals()["check_openspec_tasks"] = lambda *_args, **_kwargs: []
         globals()["planned_issue_failures"] = lambda *_args, **_kwargs: []
         globals()["check_milestone_complete"] = lambda *_args, **_kwargs: []
@@ -1966,10 +1983,13 @@ Mitigations:
             "7",
             "--base",
             "accepted-base",
+            "--issue-map",
+            "custom/issue-map.json",
         ]
         main()
         assert complexity_fetches == [2]
         assert pull_request_fetches == [7]
+        assert pull_request_issue_map_paths == ["custom/issue-map.json"]
         complexity_fetches.clear()
         sys.argv = [
             "issue-checklists.py",
@@ -2574,14 +2594,25 @@ Mitigations:
         }
         live_checked: list[int] = []
         base_reads: list[str] = []
+        base_map_reads: list[str] = []
+        configured_base_issue_map_text = json.dumps(
+            {
+                "schema_version": 2,
+                "changes": {"change-a": 1, "change-b": 2},
+            }
+        )
         try:
             def fake_run(args: list[str]) -> str:
                 if len(args) == 3 and args[:2] == ["git", "show"]:
                     path = args[2].split(":", 1)[1]
                     if path == "openspec/issue-map.json":
+                        base_map_reads.append(path)
                         if args[2].startswith("unreadable-base:"):
                             raise SystemExit("git show could not read accepted base")
                         return base_issue_map_text
+                    if path == "custom/issue-map.json":
+                        base_map_reads.append(path)
+                        return configured_base_issue_map_text
                     base_reads.append(path)
                     if args[2].startswith("unreadable-base:"):
                         raise SystemExit("git show could not read accepted base")
@@ -2599,6 +2630,39 @@ Mitigations:
             ) == []
             assert live_checked == [2], "unrelated live progress must not be fetched"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            base_issue_map_text = json.dumps(
+                {
+                    "schema_version": 2,
+                    "changes": {"change-a": 1, "change-b": 3},
+                }
+            )
+            base_reads.clear()
+            base_map_reads.clear()
+            assert (
+                check_pull_request_tasks(
+                    "owner/repo",
+                    branch_root,
+                    issue_map,
+                    7,
+                    "accepted-base",
+                    issue_map_path=branch_root / "custom" / "issue-map.json",
+                )
+                == []
+            )
+            assert base_map_reads == ["custom/issue-map.json"]
+            assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            outside_map_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+                issue_map_path=branch_root.parent / "issue-map.json",
+            )
+            assert len(outside_map_failures) == 1
+            assert "outside repository root" in outside_map_failures[0]
 
             shared_change = branch_root / "openspec" / "changes" / "shared-change"
             shared_change.mkdir(parents=True)
@@ -3133,6 +3197,7 @@ def main() -> None:
                 issue_map,
                 args.pull_request,
                 args.base,
+                issue_map_path=args.issue_map,
                 owner_issue=pull_request_owner,
                 owner_error=pull_request_owner_error,
             )
