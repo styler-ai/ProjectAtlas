@@ -10257,12 +10257,24 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-#[test]
-fn installed_hosts_read_generated_configs_and_return_fixture_evidence() -> Result<(), Box<dyn Error>>
-{
-    let temp = tempfile::tempdir()?;
-    let repo = temp.path().join(TEST_REPO_DIR);
-    let host_root = temp.path().join("isolated-host");
+struct RealHostFixture {
+    name: String,
+    repo: PathBuf,
+    database: PathBuf,
+    claude_config: PathBuf,
+    opencode_config: PathBuf,
+    source_marker: String,
+}
+
+fn prepare_real_host_fixture(
+    temp_root: &Path,
+    name: &str,
+    source_marker: &str,
+    runtime: &Path,
+    workspace_root: &Path,
+    host_root: &Path,
+) -> Result<RealHostFixture, Box<dyn Error>> {
+    let repo = temp_root.join(name);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::create_dir_all(&atlas_dir)?;
@@ -10272,11 +10284,10 @@ fn installed_hosts_read_generated_configs_and_return_fixture_evidence() -> Resul
     )?;
     fs::write(
         repo.join(SRC_DIR_NAME).join("host_reader_fixture.rs"),
-        "pub fn host_reader_fixture_evidence() -> &'static str { \"host-reader-fixture\" }\n",
+        format!(
+            "pub fn host_reader_fixture_evidence() -> &'static str {{ \"{source_marker}\" }}\n"
+        ),
     )?;
-    fs::create_dir_all(&host_root)?;
-
-    let runtime = mcp_contract_executable();
     let database = atlas_dir.join("projectatlas.db");
     let init = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -10289,73 +10300,254 @@ fn installed_hosts_read_generated_configs_and_return_fixture_evidence() -> Resul
     require(
         init.status.success(),
         format!(
-            "fixture initialization failed: {}",
+            "fixture {name} initialization failed: {}",
             String::from_utf8_lossy(&init.stderr)
         ),
     )?;
 
-    let workspace_root = workspace_root()?;
     let mut installer = projectatlas_plugin_installer_command_with_optional_path_and_home(
-        &workspace_root,
+        workspace_root,
         &repo,
-        &runtime,
+        runtime,
         None,
-        Some(&host_root),
+        Some(host_root),
     )?;
-    installer.env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1");
+    configure_real_host_environment(&mut installer, host_root, None)?;
+    installer
+        .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PROJECTATLAS_RUNTIME_PATH", runtime)
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1");
     let installer_output = run_bounded_output(installer, "real-host installer")?;
     require(
         installer_output.status.success(),
         format!(
-            "real-host installer failed: {}{}",
+            "real-host installer for {name} failed: {}{}",
             String::from_utf8_lossy(&installer_output.stdout),
             String::from_utf8_lossy(&installer_output.stderr)
         ),
     )?;
 
-    let claude_config_path = atlas_dir.join("projectatlas.claude.mcp.json");
-    let opencode_config_path = atlas_dir.join("projectatlas.opencode.json");
-    let claude_config = read_json_file(&claude_config_path)?;
-    let opencode_config = read_json_file(&opencode_config_path)?;
-    let (claude_runtime, claude_arguments) = generated_host_launch(&claude_config, "claude")?;
-    let (opencode_runtime, opencode_arguments) =
-        generated_host_launch(&opencode_config, "opencode")?;
+    Ok(RealHostFixture {
+        name: name.to_owned(),
+        repo,
+        database,
+        claude_config: atlas_dir.join("projectatlas.claude.mcp.json"),
+        opencode_config: atlas_dir.join("projectatlas.opencode.json"),
+        source_marker: source_marker.to_owned(),
+    })
+}
 
-    let mut host_probed = false;
-    if let Some(claude) = find_host_executable("claude") {
-        host_probed = true;
-        host_version(&claude, &host_root)?;
-        verify_claude_native_reader(&claude, &claude_config_path, &repo, &host_root)?;
-        verify_exact_generated_mcp_route(
-            "Claude Code",
-            &claude_runtime,
-            &claude_arguments,
-            &repo,
-            &database,
+fn inventory_real_host_tree(root: &Path) -> Result<BTreeSet<PathBuf>, Box<dyn Error>> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut paths = BTreeSet::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root)?.to_owned();
+            paths.insert(relative);
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() && !file_type.is_symlink() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn snapshot_real_host_tree(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Box<dyn Error>> {
+    let mut snapshot = BTreeMap::new();
+    for path in inventory_real_host_tree(root)? {
+        let full_path = root.join(&path);
+        if full_path.is_file() {
+            snapshot.insert(path, fs::read(full_path)?);
+        }
+    }
+    Ok(snapshot)
+}
+
+#[test]
+fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let host_root = temp.path().join("isolated-host");
+    fs::create_dir_all(&host_root)?;
+
+    let runtime = mcp_contract_executable();
+    let workspace_root = workspace_root()?;
+    let fixtures = [
+        prepare_real_host_fixture(
+            temp.path(),
+            "repo-a",
+            "host-reader-fixture-a",
+            &runtime,
+            &workspace_root,
             &host_root,
+        )?,
+        prepare_real_host_fixture(
+            temp.path(),
+            "repo-b",
+            "host-reader-fixture-b",
+            &runtime,
+            &workspace_root,
+            &host_root,
+        )?,
+    ];
+    let claude = find_host_executable("claude");
+    let opencode = find_host_executable("opencode");
+    let mut host_versions = Vec::new();
+    let mut host_statuses = Vec::new();
+    if let Some(claude) = claude.as_deref() {
+        host_versions.push(("Claude Code", host_version(claude, &host_root)?));
+    }
+    if let Some(opencode) = opencode.as_deref() {
+        host_versions.push(("OpenCode", host_version(opencode, &host_root)?));
+    }
+    for fixture in &fixtures {
+        let project_before = snapshot_real_host_tree(&fixture.repo)?;
+        let host_before = inventory_real_host_tree(&host_root)?;
+        let claude_config = read_json_file(&fixture.claude_config)?;
+        let opencode_config = read_json_file(&fixture.opencode_config)?;
+        let (claude_runtime, claude_arguments) = generated_host_launch(&claude_config, "claude")?;
+        let (opencode_runtime, opencode_arguments) =
+            generated_host_launch(&opencode_config, "opencode")?;
+
+        if let Some(claude) = claude.as_deref() {
+            let status = verify_claude_native_reader(
+                claude,
+                &fixture.claude_config,
+                &fixture.repo,
+                &host_root,
+                &claude_runtime,
+                &claude_arguments,
+            )?;
+            host_statuses.push(("Claude Code", fixture.name.as_str(), status));
+            verify_generated_mcp_contract_compatibility(
+                "Claude Code",
+                &claude_runtime,
+                &claude_arguments,
+                &fixture.repo,
+                &fixture.database,
+                &host_root,
+                &fixture.source_marker,
+            )?;
+        }
+
+        if let Some(opencode) = opencode.as_deref() {
+            let status = verify_opencode_native_reader(
+                opencode,
+                &fixture.opencode_config,
+                &fixture.repo,
+                &host_root,
+            )?;
+            host_statuses.push(("OpenCode", fixture.name.as_str(), status));
+            verify_generated_mcp_contract_compatibility(
+                "OpenCode",
+                &opencode_runtime,
+                &opencode_arguments,
+                &fixture.repo,
+                &fixture.database,
+                &host_root,
+                &fixture.source_marker,
+            )?;
+        }
+        let project_after = snapshot_real_host_tree(&fixture.repo)?;
+        require(
+            project_before
+                .iter()
+                .filter(|(path, _)| path.as_path() != Path::new(".mcp.json"))
+                .eq(project_after
+                    .iter()
+                    .filter(|(path, _)| path.as_path() != Path::new(".mcp.json"))),
+            format!(
+                "native host changed unrelated project data in {}",
+                fixture.name
+            ),
+        )?;
+        let host_after = inventory_real_host_tree(&host_root)?;
+        require(
+            host_after.len() >= host_before.len(),
+            format!(
+                "native host inventory unexpectedly shrank in {}",
+                fixture.name
+            ),
         )?;
     }
 
-    if let Some(opencode) = find_host_executable("opencode") {
-        host_probed = true;
-        host_version(&opencode, &host_root)?;
-        verify_opencode_native_reader(&opencode, &opencode_config_path, &repo, &host_root)?;
-        verify_exact_generated_mcp_route(
-            "OpenCode",
-            &opencode_runtime,
-            &opencode_arguments,
-            &repo,
-            &database,
-            &host_root,
-        )?;
-    }
-
-    if !host_probed {
-        // CI images without either optional host pass without claiming host
-        // consumption; installed hosts are each probed above.
-        return Ok(());
-    }
+    let availability = [
+        ("claude", claude.is_some()),
+        ("opencode", opencode.is_some()),
+    ]
+    .into_iter()
+    .map(|(name, installed)| (name, NativeHostAvailability::from_installed(installed)))
+    .collect::<Vec<_>>();
+    let installed_host_count = availability
+        .iter()
+        .filter(|(_, status)| matches!(status, NativeHostAvailability::Installed))
+        .count();
+    require(
+        host_statuses
+            .iter()
+            .all(|(_, _, status)| status.is_connected()),
+        format!(
+            "real-host reader statuses were not connected: statuses={host_statuses:?}, availability={availability:?}, versions={host_versions:?}"
+        ),
+    )?;
+    require(
+        host_statuses.len() == installed_host_count * fixtures.len(),
+        format!(
+            "real-host availability did not account for each fixture: statuses={host_statuses:?}, availability={availability:?}, versions={host_versions:?}"
+        ),
+    )?;
     Ok(())
+}
+
+#[derive(Debug)]
+enum NativeHostSourceEvidence {
+    UnavailableWithoutModelInvocation,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum NativeHostAvailability {
+    Installed,
+    Missing,
+}
+
+impl NativeHostAvailability {
+    fn from_installed(installed: bool) -> Self {
+        if installed {
+            Self::Installed
+        } else {
+            Self::Missing
+        }
+    }
+}
+
+#[test]
+fn missing_real_host_is_a_typed_skip() {
+    assert_eq!(
+        NativeHostAvailability::from_installed(false),
+        NativeHostAvailability::Missing
+    );
+}
+
+#[derive(Debug)]
+enum NativeHostStatus {
+    Connected {
+        source_evidence: NativeHostSourceEvidence,
+    },
+}
+
+impl NativeHostStatus {
+    fn is_connected(&self) -> bool {
+        matches!(
+            self,
+            Self::Connected {
+                source_evidence: NativeHostSourceEvidence::UnavailableWithoutModelInvocation
+            }
+        )
+    }
 }
 
 /// Return the runtime and arguments from one generated host-specific config.
@@ -10466,8 +10658,35 @@ fn configure_real_host_environment(
     host_root: &Path,
     opencode_config: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
+    // Host CLIs must not inherit credentials, provider settings, or ambient
+    // config/data roots from the developer machine. Keep only the platform
+    // process plumbing needed to launch an installed npm shim and an isolated
+    // ProjectAtlas runtime.
+    command.env_clear();
+    for key in ["PATH", "LANG", "LC_ALL", "TMPDIR", "TERM"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    #[cfg(windows)]
+    for key in [
+        "SystemRoot",
+        "SystemDrive",
+        "ComSpec",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "WINDIR",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
     let app_data = host_root.join("app-data");
     let local_app_data = host_root.join("local-app-data");
+    let temp_dir = host_root.join("temp");
     let claude_config = host_root.join("claude-config");
     let xdg_config = host_root.join("xdg-config");
     let xdg_data = host_root.join("xdg-data");
@@ -10476,6 +10695,7 @@ fn configure_real_host_environment(
     for path in [
         &app_data,
         &local_app_data,
+        &temp_dir,
         &claude_config,
         &xdg_config,
         &xdg_data,
@@ -10489,6 +10709,9 @@ fn configure_real_host_environment(
         .env("USERPROFILE", host_root)
         .env("APPDATA", &app_data)
         .env("LOCALAPPDATA", &local_app_data)
+        .env("TMPDIR", &temp_dir)
+        .env("TEMP", &temp_dir)
+        .env("TMP", &temp_dir)
         .env("CLAUDE_CONFIG_DIR", &claude_config)
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
@@ -10517,32 +10740,177 @@ fn run_real_host_command(
     run_bounded_output(command, "real host reader")
 }
 
+fn host_output_text(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn claude_mcp_list(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    debug_file: Option<&Path>,
+) -> Result<String, Box<dyn Error>> {
+    let mut arguments = vec!["--bare".to_owned()];
+    if let Some(debug_file) = debug_file {
+        arguments.extend([
+            "--debug-file".to_owned(),
+            debug_file.to_string_lossy().into_owned(),
+        ]);
+    }
+    arguments.extend(["mcp".to_owned(), "list".to_owned()]);
+    let output = run_real_host_command(executable, repo, host_root, None, &arguments)?;
+    require(
+        output.status.success(),
+        format!("Claude Code mcp list failed: {}", host_output_text(&output)),
+    )?;
+    Ok(host_output_text(&output))
+}
+
+fn claude_mcp_add(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    scope: &str,
+    name: &str,
+    runtime: &Path,
+    arguments: &[String],
+) -> Result<(), Box<dyn Error>> {
+    let mut command_arguments = vec![
+        "--bare".to_owned(),
+        "mcp".to_owned(),
+        "add".to_owned(),
+        "--scope".to_owned(),
+        scope.to_owned(),
+        name.to_owned(),
+        "--".to_owned(),
+        runtime.to_string_lossy().into_owned(),
+    ];
+    command_arguments.extend(arguments.iter().cloned());
+    let output = run_real_host_command(executable, repo, host_root, None, &command_arguments)?;
+    require(
+        output.status.success(),
+        format!("Claude Code mcp add failed: {}", host_output_text(&output)),
+    )
+}
+
+fn claude_mcp_remove(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    scope: &str,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        None,
+        &[
+            "--bare".to_owned(),
+            "mcp".to_owned(),
+            "remove".to_owned(),
+            name.to_owned(),
+            "--scope".to_owned(),
+            scope.to_owned(),
+        ],
+    )?;
+    require(
+        output.status.success(),
+        format!(
+            "Claude Code mcp remove failed: {}",
+            host_output_text(&output)
+        ),
+    )
+}
+
 /// Verify Claude Code's native project reader and explicit config reader.
 fn verify_claude_native_reader(
     executable: &Path,
     generated_config: &Path,
     repo: &Path,
     host_root: &Path,
-) -> Result<(), Box<dyn Error>> {
+    runtime: &Path,
+    arguments: &[String],
+) -> Result<NativeHostStatus, Box<dyn Error>> {
     let project_config = repo.join(".mcp.json");
     fs::copy(generated_config, &project_config)?;
-    let output = run_real_host_command(
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        text.contains("projectatlas") && text.to_ascii_lowercase().contains("pending approval"),
+        format!(
+            "Claude Code native reader did not report generated project config as pending: {text}"
+        ),
+    )?;
+
+    // A project .mcp.json is intentionally pending until the native Claude
+    // command approves it. Add the same generated command through Claude's
+    // own writer, then let `mcp list` perform the real host health check.
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "projectatlas",
+        runtime,
+        arguments,
+    )?;
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "unrelated",
+        runtime,
+        arguments,
+    )?;
+    let debug_file = host_root.join("claude-mcp-list.debug.log");
+    let text = claude_mcp_list(executable, repo, host_root, Some(&debug_file))?;
+    require(
+        text.contains("projectatlas")
+            && text.contains("unrelated")
+            && text.to_ascii_lowercase().contains("connected"),
+        format!("Claude Code native reader did not connect generated command: {text}"),
+    )?;
+    let debug = fs::read_to_string(&debug_file)?;
+    let debug_lower = debug.to_ascii_lowercase();
+    require(
+        debug_lower.contains("hastools\":true")
+            && debug_lower.contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))),
+        format!("Claude Code native MCP health check omitted tools/runtime identity: {debug}"),
+    )?;
+    let get_output = run_real_host_command(
         executable,
         repo,
         host_root,
         None,
-        &["--bare", "mcp", "list"].map(str::to_owned),
+        &[
+            "--bare".to_owned(),
+            "mcp".to_owned(),
+            "get".to_owned(),
+            "projectatlas".to_owned(),
+        ],
     )?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let get_text = host_output_text(&get_output);
     require(
-        output.status.success() && text.contains("projectatlas"),
-        format!("Claude Code native project MCP reader did not consume generated entry: {text}"),
+        get_output.status.success()
+            && get_text.contains("projectatlas")
+            && get_text.to_ascii_lowercase().contains("connected")
+            && arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--db" && get_text.contains(&pair[1]))
+            && arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--config" && get_text.contains(&pair[1])),
+        format!("Claude Code native reader changed generated routing: {get_text}"),
     )?;
 
+    // Claude's non-model CLI has no tool-call/source route. Prove that the
+    // route is unavailable without credentials instead of treating a failed
+    // model invocation as host evidence.
     let explicit_arguments = [
         "--bare".to_owned(),
         "--mcp-config".to_owned(),
@@ -10559,9 +10927,8 @@ fn verify_claude_native_reader(
         String::from_utf8_lossy(&output.stderr)
     );
     require(
-        !text.to_ascii_lowercase().contains("invalid mcp")
-            && !text.to_ascii_lowercase().contains("unknown option"),
-        format!("Claude Code rejected generated config through --mcp-config: {text}"),
+        !output.status.success() && text.to_ascii_lowercase().contains("not logged in"),
+        format!("Claude Code did not fail closed without authentication: {text}"),
     )?;
 
     let malformed_config = host_root.join("claude-malformed.json");
@@ -10577,52 +10944,111 @@ fn verify_claude_native_reader(
         "Return exactly OK.".to_owned(),
     ];
     let output = run_real_host_command(executable, repo, host_root, None, &malformed_arguments)?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = host_output_text(&output);
     require(
         !output.status.success() && text.to_ascii_lowercase().contains("invalid mcp"),
         format!("Claude Code did not fail closed for malformed MCP config: {text}"),
     )?;
 
-    // Re-read the valid project-local config after the malformed probe. This
-    // demonstrates recovery without asking Claude Code to mutate credentials.
-    let output = run_real_host_command(
+    claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
+    let missing_runtime = host_root.join("missing-projectatlas-runtime");
+    claude_mcp_add(
         executable,
         repo,
         host_root,
-        None,
-        &["--bare", "mcp", "list"].map(str::to_owned),
+        "local",
+        "projectatlas",
+        &missing_runtime,
+        arguments,
     )?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
     require(
-        output.status.success() && text.contains("projectatlas"),
-        format!("Claude Code did not recover the valid generated config: {text}"),
+        text.contains("projectatlas") && text.to_ascii_lowercase().contains("failed to connect"),
+        format!("Claude Code did not fail closed for stale runtime config: {text}"),
     )?;
+    claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
+    let wrong_version_arguments = arguments
+        .iter()
+        .map(|argument| {
+            if argument == env!("CARGO_PKG_VERSION") {
+                "0.0.0".to_owned()
+            } else {
+                argument.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "projectatlas",
+        runtime,
+        &wrong_version_arguments,
+    )?;
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        text.contains("projectatlas") && text.to_ascii_lowercase().contains("failed to connect"),
+        format!("Claude Code did not fail closed for wrong-version config: {text}"),
+    )?;
+    claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "projectatlas",
+        runtime,
+        arguments,
+    )?;
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        text.contains("projectatlas")
+            && text.contains("unrelated")
+            && !text.to_ascii_lowercase().contains("failed to connect"),
+        format!("Claude Code native repair did not restore generated config: {text}"),
+    )?;
+    claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
     fs::remove_file(project_config)?;
-    let output = run_real_host_command(
+    // Claude's user scope is its shared registry. With the project-local
+    // entry removed, the same generated command must still connect through
+    // the shared route and retain the exact project database/config paths.
+    claude_mcp_add(
         executable,
         repo,
         host_root,
-        None,
-        &["--bare", "mcp", "list"].map(str::to_owned),
+        "user",
+        "projectatlas",
+        runtime,
+        arguments,
     )?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let shared_text = claude_mcp_list(executable, repo, host_root, None)?;
     require(
-        output.status.success() && !text.contains("projectatlas"),
-        format!("Claude Code still reported removed project-local MCP config: {text}"),
+        shared_text.contains("projectatlas")
+            && shared_text.to_ascii_lowercase().contains("connected")
+            && arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--db" && shared_text.contains(&pair[1]))
+            && arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--config" && shared_text.contains(&pair[1])),
+        format!(
+            "Claude Code shared native registry did not preserve project routing: {shared_text}"
+        ),
     )?;
-    Ok(())
+    claude_mcp_remove(executable, repo, host_root, "user", "projectatlas")?;
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("projectatlas:"))
+            && text.contains("unrelated"),
+        format!("Claude Code uninstall removed unrelated native config: {text}"),
+    )?;
+    claude_mcp_remove(executable, repo, host_root, "local", "unrelated")?;
+    Ok(NativeHostStatus::Connected {
+        source_evidence: NativeHostSourceEvidence::UnavailableWithoutModelInvocation,
+    })
 }
 
 /// Verify `OpenCode`'s native reader starts the generated MCP server in isolation.
@@ -10631,7 +11057,7 @@ fn verify_opencode_native_reader(
     generated_config: &Path,
     repo: &Path,
     host_root: &Path,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<NativeHostStatus, Box<dyn Error>> {
     let output = run_real_host_command(
         executable,
         repo,
@@ -10639,16 +11065,36 @@ fn verify_opencode_native_reader(
         Some(generated_config),
         &["mcp", "list"].map(str::to_owned),
     )?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = host_output_text(&output);
     require(
         output.status.success()
             && text.contains("projectatlas")
             && text.to_ascii_lowercase().contains("connected"),
         format!("OpenCode native reader did not connect generated MCP entry: {text}"),
+    )?;
+    let generated = read_json_file(generated_config)?;
+    let (generated_runtime, generated_arguments) = generated_host_launch(&generated, "opencode")?;
+    require(
+        text.contains(&generated_runtime.display().to_string())
+            && generated_arguments
+                .iter()
+                .all(|argument| text.contains(argument)),
+        format!("OpenCode native reader did not report the generated runtime route: {text}"),
+    )?;
+
+    let malformed_config = host_root.join("opencode-malformed.json");
+    fs::write(&malformed_config, b"{\n")?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(&malformed_config),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        !output.status.success() && text.to_ascii_lowercase().contains("not valid json"),
+        format!("OpenCode did not fail closed for malformed config: {text}"),
     )?;
 
     let mut invalid_runtime = read_json_file(generated_config)?;
@@ -10670,11 +11116,7 @@ fn verify_opencode_native_reader(
         Some(&invalid_runtime_path),
         &["mcp", "list"].map(str::to_owned),
     )?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = host_output_text(&output);
     require(
         output.status.success()
             && text.to_ascii_lowercase().contains("failed")
@@ -10704,16 +11146,71 @@ fn verify_opencode_native_reader(
         Some(&wrong_version_path),
         &["mcp", "list"].map(str::to_owned),
     )?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = host_output_text(&output);
     require(
         output.status.success()
             && text.to_ascii_lowercase().contains("failed")
             && !text.to_ascii_lowercase().contains("connected"),
         format!("OpenCode did not fail closed for wrong-version config: {text}"),
+    )?;
+
+    // A repaired config may change only the owned MCP command while retaining
+    // unrelated host settings. The native reader must reject the stale route,
+    // then connect the repaired route without losing that setting.
+    let repaired_config = host_root.join("opencode-repaired.json");
+    let mut repaired = read_json_file(generated_config)?;
+    repaired["mcp"]["unrelated"] = repaired["mcp"]["projectatlas"].clone();
+    repaired["mcp"]["projectatlas"]["command"][0] = Value::String(
+        host_root
+            .join("missing-projectatlas-runtime")
+            .display()
+            .to_string(),
+    );
+    fs::write(&repaired_config, serde_json::to_vec_pretty(&repaired)?)?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(&repaired_config),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success()
+            && text.contains("projectatlas")
+            && text.to_ascii_lowercase().contains("failed")
+            && text.contains("unrelated"),
+        format!("OpenCode did not fail closed for repaired stale config: {text}"),
+    )?;
+    let generated_command =
+        read_json_file(generated_config)?["mcp"]["projectatlas"]["command"].clone();
+    repaired["mcp"]["projectatlas"]["command"] = generated_command;
+    fs::write(&repaired_config, serde_json::to_vec_pretty(&repaired)?)?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(&repaired_config),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success()
+            && text.contains("projectatlas")
+            && text.to_ascii_lowercase().contains("connected"),
+        format!("OpenCode native repair did not reconnect generated command: {text}"),
+    )?;
+    let resolved = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(&repaired_config),
+        &["debug", "config"].map(str::to_owned),
+    )?;
+    let resolved_text = host_output_text(&resolved);
+    require(
+        resolved.status.success() && resolved_text.contains("unrelated"),
+        format!("OpenCode native repair changed unrelated settings: {resolved_text}"),
     )?;
 
     // The shared default registry and the explicit generated path must both
@@ -10734,11 +11231,7 @@ fn verify_opencode_native_reader(
         None,
         &["mcp", "list"].map(str::to_owned),
     )?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = host_output_text(&output);
     require(
         output.status.success()
             && text.contains("projectatlas")
@@ -10756,26 +11249,26 @@ fn verify_opencode_native_reader(
         Some(&empty_config),
         &["mcp", "list"].map(str::to_owned),
     )?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = host_output_text(&output);
     require(
         output.status.success() && !text.contains("projectatlas"),
         format!("OpenCode still reported removed MCP config: {text}"),
     )?;
-    Ok(())
+    Ok(NativeHostStatus::Connected {
+        source_evidence: NativeHostSourceEvidence::UnavailableWithoutModelInvocation,
+    })
 }
 
-/// Execute the exact generated runtime/argument route and read source evidence.
-fn verify_exact_generated_mcp_route(
+/// Prove generated routing and source access through a direct MCP contract.
+/// This is separate compatibility evidence, not host-reader evidence.
+fn verify_generated_mcp_contract_compatibility(
     host: &str,
     executable: &Path,
     arguments: &[String],
     repo: &Path,
     database: &Path,
     host_root: &Path,
+    source_marker: &str,
 ) -> Result<(), Box<dyn Error>> {
     let home = host_root.to_string_lossy().into_owned();
     let app_data = host_root.join("app-data");
@@ -10866,7 +11359,7 @@ fn verify_exact_generated_mcp_route(
     )?;
     require(
         source_evidence.contains("host_reader_fixture_evidence")
-            && source_evidence.contains("host-reader-fixture"),
+            && source_evidence.contains(source_marker),
         format!("{host} MCP source evidence was not from fixture: {source_evidence}"),
     )?;
     session.shutdown()
@@ -35211,6 +35704,7 @@ impl McpContractSession {
         command
             .current_dir(repo)
             .args(arguments)
+            .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
