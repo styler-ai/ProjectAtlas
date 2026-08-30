@@ -9025,10 +9025,16 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "acceptance_state_failures",
         "complexity_label_failures",
         "check_open_issue_complexity",
+        "load_legacy_closed_issues",
+        "legacy_closed_issue_mapping_failures",
+        "legacy_closed_issue_failures",
+        "live_legacy_closed_issues",
+        "legacy_closed_issues",
+        "accepted_legacy_closed_issues",
         "ISSUE_REFERENCE_RE",
         "pull_request_owner_issue",
         "configured_issue_map_path",
-        "base_issue_map(root, configured_issue_map_path, base_ref)",
+        "base_issue_map(",
         "base_local_tasks",
         "check_pull_request_tasks",
         "issue_map_path=args.issue_map",
@@ -9101,6 +9107,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     if !issue_map.contains(r#""schema_version": 2"#)
+        || !issue_map.contains(r#""legacy_closed_issues": ["#)
         || !issue_map.contains(r#""enforce-rust-test-quality-gates": 309"#)
     {
         return Err(io::Error::other("#309 must be mapped by the schema-2 issue map").into());
@@ -9156,6 +9163,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "docs/*.md#user-content-heading` view on `main",
         "Implementation tasks:",
         "Acceptance and Review Tasks",
+        "legacy_closed_issues",
         "commit/SHA permalink evidence",
     ] {
         if !workflow_docs.contains(required) {

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Collection
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -493,6 +494,34 @@ def positive_issue(value: object, label: str) -> int:
     return value
 
 
+def load_legacy_closed_issues(
+    path: str | Path, *, required: bool = True
+) -> frozenset[int] | None:
+    """Load the repository-owned closed-legacy contract provenance."""
+
+    path = Path(path)
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
+    if "legacy_closed_issues" not in payload:
+        if required:
+            raise SystemExit(f"{path} must declare legacy_closed_issues")
+        return None
+    values = payload["legacy_closed_issues"]
+    if not isinstance(values, list):
+        raise SystemExit(f"{path} legacy_closed_issues must be a list")
+    parsed = [
+        positive_issue(value, f"{path} legacy_closed_issues[{index}]")
+        for index, value in enumerate(values)
+    ]
+    if parsed != sorted(set(parsed)):
+        raise SystemExit(
+            f"{path} legacy_closed_issues must be sorted and contain unique issue numbers"
+        )
+    return frozenset(parsed)
+
+
 def validate_unique_issue_ownership(
     path: Path, issue_map: dict[str, tuple[Owner, ...]]
 ) -> None:
@@ -507,7 +536,9 @@ def validate_unique_issue_ownership(
             issue_owners[owner.issue] = change
 
 
-def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
+def load_issue_map(
+    path: str | Path, *, require_legacy_closed_issues: bool = True
+) -> dict[str, tuple[Owner, ...]]:
     path = Path(path)
     with path.open(encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -563,6 +594,7 @@ def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
                 f"{path} is missing OpenSpec issue mappings for: {', '.join(missing)}"
             )
     validate_unique_issue_ownership(path, mapped)
+    load_legacy_closed_issues(path, required=require_legacy_closed_issues)
     return mapped
 
 
@@ -733,14 +765,105 @@ def issue_task_headings(
     return visible_body, implementation, acceptance, legacy
 
 
-def issue_uses_new_contract(issue: dict[str, object]) -> bool:
-    _, implementation, acceptance, _ = issue_task_headings(issue)
-    return bool(implementation or acceptance)
+def legacy_closed_issue_mapping_failures(
+    issue_map: dict[str, tuple[Owner, ...]],
+    legacy_closed_issues: Collection[int],
+) -> list[str]:
+    """Reject legacy provenance entries without a unique local mapping."""
+
+    mapped = mapped_issue_numbers(issue_map)
+    failures: list[str] = []
+    for number in sorted(legacy_closed_issues):
+        if number not in mapped:
+            failures.append(
+                f"legacy closed issue #{number} has no local OpenSpec mapping"
+            )
+    return failures
 
 
-def issue_checklist_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
+def legacy_closed_issue_failures(
+    repo: str,
+    issue_map: dict[str, tuple[Owner, ...]],
+    legacy_closed_issues: Collection[int],
+) -> list[str]:
+    """Validate every explicit legacy exception against current mapped issue state."""
+
+    mapped = mapped_issue_numbers(issue_map)
+    failures = legacy_closed_issue_mapping_failures(issue_map, legacy_closed_issues)
+    for number in sorted(legacy_closed_issues):
+        if number not in mapped:
+            continue
+        try:
+            issue = issue_payload(repo, number)
+            state = str(issue.get("state", "")).upper()
+            if state != "CLOSED":
+                failures.append(
+                    f"legacy closed issue #{number} is {state or 'UNKNOWN'}, not CLOSED"
+                )
+                continue
+            _, implementation, acceptance, legacy = issue_task_headings(issue)
+        except SystemExit as error:
+            failures.append(f"legacy closed issue #{number} is invalid: {error}")
+            continue
+        if len(legacy) != 1 or implementation or acceptance:
+            failures.append(
+                f"legacy closed issue #{number} must retain exactly one visible legacy "
+                "OpenSpec task heading and no new-contract task fields"
+            )
+    return failures
+
+
+def live_legacy_closed_issues(
+    repo: str, issue_map: dict[str, tuple[Owner, ...]]
+) -> tuple[frozenset[int], list[str]]:
+    """Derive the initial provenance set from authenticated mapped issue state."""
+
+    derived: set[int] = set()
+    failures: list[str] = []
+    for number in sorted(mapped_issue_numbers(issue_map)):
+        try:
+            issue = issue_payload(repo, number)
+            state = str(issue.get("state", "")).upper()
+            if state != "CLOSED":
+                continue
+            _, implementation, acceptance, legacy = issue_task_headings(issue)
+        except SystemExit as error:
+            failures.append(f"mapped issue #{number} is invalid: {error}")
+            continue
+        if len(legacy) == 1 and not implementation and not acceptance:
+            derived.add(number)
+    return frozenset(derived), failures
+
+
+def issue_uses_new_contract(
+    issue: dict[str, object], legacy_closed_issues: Collection[int] = ()
+) -> bool:
+    """Select the contract from immutable repository provenance, not headings."""
+
+    number = issue.get("number")
+    return not (
+        isinstance(number, int)
+        and not isinstance(number, bool)
+        and number in legacy_closed_issues
+    )
+
+
+def issue_checklist_tasks(
+    issue: dict[str, object], legacy_closed_issues: Collection[int] = ()
+) -> list[tuple[bool, str]]:
     visible_body, implementation, acceptance, legacy = issue_task_headings(issue)
     state = str(issue.get("state", "")).upper()
+    if not issue_uses_new_contract(issue, legacy_closed_issues):
+        if state != "CLOSED":
+            raise SystemExit(
+                "grandfathered legacy issue must remain CLOSED"
+            )
+        if len(legacy) != 1 or implementation or acceptance:
+            raise SystemExit(
+                "grandfathered legacy issue must retain exactly one visible legacy "
+                "OpenSpec task heading and no new-contract task fields"
+            )
+        return parse_section_tasks(visible_body, heading_matches_openspec_tasks)
     if state == "OPEN":
         if len(implementation) != 1:
             raise SystemExit(
@@ -751,18 +874,12 @@ def issue_checklist_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
                 "GitHub open issue must not retain a legacy OpenSpec task heading"
             )
         return parse_section_tasks(visible_body, heading_matches_implementation_tasks)
-    if implementation or acceptance:
-        if len(implementation) != 1 or len(acceptance) != 1 or legacy:
-            raise SystemExit(
-                "GitHub new-contract issue must contain exactly one visible Implementation Tasks "
-                "and Acceptance and Review Tasks heading"
-            )
-        return parse_section_tasks(visible_body, heading_matches_implementation_tasks)
-    if len(legacy) != 1:
+    if len(implementation) != 1 or len(acceptance) != 1 or legacy:
         raise SystemExit(
-            "GitHub closed historical issue must contain exactly one visible legacy OpenSpec task heading"
+            "GitHub new-contract issue must contain exactly one visible Implementation Tasks "
+            "and Acceptance and Review Tasks heading"
         )
-    return parse_section_tasks(visible_body, heading_matches_openspec_tasks)
+    return parse_section_tasks(visible_body, heading_matches_implementation_tasks)
 
 
 def acceptance_review_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
@@ -1129,15 +1246,21 @@ def issue_contract_failures(
     expected_tasks: list[tuple[bool, str]],
     repo: str,
     root: Path,
+    *,
+    legacy_closed_issues: Collection[int] = (),
 ) -> list[str]:
     """Validate the two-list #305 issue shape and its state transition."""
 
     state = str(issue.get("state", "")).upper()
     if state != "OPEN":
-        if not issue_uses_new_contract(issue):
+        if not issue_uses_new_contract(issue, legacy_closed_issues):
+            try:
+                issue_checklist_tasks(issue, legacy_closed_issues)
+            except SystemExit as error:
+                return [str(error)]
             return closed_task_failures(issue, expected_tasks)
         try:
-            implementation = issue_checklist_tasks(issue)
+            implementation = issue_checklist_tasks(issue, legacy_closed_issues)
             acceptance = acceptance_review_tasks(issue)
         except SystemExit as error:
             return [str(error)]
@@ -1163,6 +1286,8 @@ def issue_contract_failures(
         issue_task_headings(issue)
     )
     failures: list[str] = []
+    if not issue_uses_new_contract(issue, legacy_closed_issues):
+        failures.append("grandfathered legacy issue must remain CLOSED")
     if requires_exact_head_proof(visible_body):
         failures.append(
             "must bind proof to behavior-relevant inputs instead of exact-head commit identity"
@@ -1374,8 +1499,8 @@ def first_task_difference(
 
 def base_issue_map(
     root: Path, issue_map_path: str | Path, base_ref: str
-) -> dict[str, tuple[Owner, ...]]:
-    """Read the accepted pull-request base's mapped OpenSpec owners."""
+) -> tuple[dict[str, tuple[Owner, ...]], frozenset[int] | None]:
+    """Read mapped owners and legacy provenance from the accepted pull-request base."""
 
     if not base_ref.strip():
         raise SystemExit("pull request accepted base is missing")
@@ -1391,7 +1516,10 @@ def base_issue_map(
         with tempfile.TemporaryDirectory(prefix="issue-map-base-") as temporary:
             path = Path(temporary) / "issue-map.json"
             path.write_text(text, encoding="utf-8")
-            return load_issue_map(path)
+            return (
+                load_issue_map(path, require_legacy_closed_issues=False),
+                load_legacy_closed_issues(path, required=False),
+            )
     except (OSError, UnicodeError, ValueError, SystemExit) as error:
         raise SystemExit(
             f"accepted pull-request base {base_ref!r} is unreadable for {relative}"
@@ -1439,6 +1567,8 @@ def check_pull_request_tasks(
     issue_map_path: str | Path | None = None,
     owner_issue: int | None = None,
     owner_error: str | None = None,
+    legacy_closed_issues: Collection[int] = (),
+    verify_initial_provenance: bool = False,
 ) -> list[str]:
     """Check one PR owner against live state and unrelated slices against its base."""
 
@@ -1470,7 +1600,9 @@ def check_pull_request_tasks(
         else root / "openspec" / "issue-map.json"
     )
     try:
-        accepted_issue_map = base_issue_map(root, configured_issue_map_path, base_ref)
+        accepted_issue_map, accepted_legacy_closed_issues = base_issue_map(
+            root, configured_issue_map_path, base_ref
+        )
     except SystemExit as error:
         return [str(error)]
     for change in sorted(set(issue_map) | set(accepted_issue_map)):
@@ -1503,6 +1635,28 @@ def check_pull_request_tasks(
                     f"{change} changes mapped OpenSpec owners from accepted pull-request base "
                     f"{base_ref}: expected {accepted_owners!r}, found {candidate_owners!r}"
                 )
+    if accepted_legacy_closed_issues is not None:
+        if frozenset(legacy_closed_issues) != accepted_legacy_closed_issues:
+            failures.append(
+                "pull request changes legacy closed-issue provenance from accepted "
+                f"pull-request base {base_ref}: expected "
+                f"{sorted(accepted_legacy_closed_issues)!r}, found "
+                f"{sorted(legacy_closed_issues)!r}"
+            )
+    elif verify_initial_provenance:
+        derived_legacy_closed_issues, derivation_failures = live_legacy_closed_issues(
+            repo, issue_map
+        )
+        failures.extend(
+            f"initial legacy closed-issue provenance {failure}"
+            for failure in derivation_failures
+        )
+        if frozenset(legacy_closed_issues) != derived_legacy_closed_issues:
+            failures.append(
+                "initial legacy closed-issue provenance must match authenticated "
+                f"mapped issue state: expected {sorted(derived_legacy_closed_issues)!r}, "
+                f"found {sorted(legacy_closed_issues)!r}"
+            )
     for change, owners in sorted(issue_map.items()):
         path, candidate_tasks = local_tasks(root, change)
         try:
@@ -1545,7 +1699,7 @@ def check_pull_request_tasks(
                 continue
             try:
                 payload = issue_payload(repo, owner.issue)
-                remote = issue_checklist_tasks(payload)
+                remote = issue_checklist_tasks(payload, legacy_closed_issues)
             except SystemExit as error:
                 failures.append(f"#{owner.issue} issue contract {error}")
                 continue
@@ -1559,7 +1713,13 @@ def check_pull_request_tasks(
                     f"#{owner.issue} candidate does not mirror live issue state: "
                     f"{first_task_difference(expected, remote)}"
                 )
-            for failure in issue_contract_failures(payload, expected, repo, root):
+            for failure in issue_contract_failures(
+                payload,
+                expected,
+                repo,
+                root,
+                legacy_closed_issues=legacy_closed_issues,
+            ):
                 failures.append(f"#{owner.issue} issue contract {failure}")
     return failures
 
@@ -1569,6 +1729,8 @@ def check_openspec_tasks(
     root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
     planned_issue: int | None = None,
+    *,
+    legacy_closed_issues: Collection[int] = (),
 ) -> list[str]:
     failures: list[str] = []
     for change, owners in sorted(issue_map.items()):
@@ -1582,7 +1744,7 @@ def check_openspec_tasks(
                 continue
             payload = issue_payload(repo, owner.issue)
             try:
-                remote = issue_checklist_tasks(payload)
+                remote = issue_checklist_tasks(payload, legacy_closed_issues)
             except SystemExit as error:
                 failures.append(f"#{owner.issue} issue contract {error}")
                 continue
@@ -1596,7 +1758,13 @@ def check_openspec_tasks(
                     f"#{owner.issue} does not exactly mirror {path}: "
                     f"{first_task_difference(expected, remote)}"
                 )
-            for failure in issue_contract_failures(payload, expected, repo, root):
+            for failure in issue_contract_failures(
+                payload,
+                expected,
+                repo,
+                root,
+                legacy_closed_issues=legacy_closed_issues,
+            ):
                 failures.append(f"#{owner.issue} issue contract {failure}")
     return failures
 
@@ -1688,7 +1856,11 @@ def milestone_issue_failures(
 
 
 def check_milestone_complete(
-    repo: str, milestone: str, mapped_issues: set[int]
+    repo: str,
+    milestone: str,
+    mapped_issues: set[int],
+    *,
+    legacy_closed_issues: Collection[int] = (),
 ) -> list[str]:
     failures: list[str] = []
     issues = milestone_issues(repo, milestone)
@@ -1701,7 +1873,7 @@ def check_milestone_complete(
             continue
         issue = issue_payload(repo, number)
         try:
-            tasks = issue_checklist_tasks(issue)
+            tasks = issue_checklist_tasks(issue, legacy_closed_issues)
         except SystemExit as error:
             failures.append(f"#{number} in milestone {milestone}: {error}")
             continue
@@ -1715,7 +1887,7 @@ def check_milestone_complete(
             failures.append(f"#{number} in milestone {milestone} has no visible checklist tasks")
         if unchecked:
             failures.append(f"#{number} in milestone {milestone} has {unchecked} unchecked tasks")
-        if issue_uses_new_contract(issue):
+        if issue_uses_new_contract(issue, legacy_closed_issues):
             try:
                 acceptance = acceptance_review_tasks(issue)
             except SystemExit as error:
@@ -1855,7 +2027,7 @@ Mitigations:
         "body": form_created_backlog,
         "labels": [{"name": "complexity:medium"}],
     }
-    assert not issue_uses_new_contract(backlog_issue)
+    assert issue_uses_new_contract(backlog_issue)
     assert complexity_label_failures(backlog_issue) == []
     assert planned_issue_failures(backlog_issue, {}, self_test_root) == []
     for template_name in (
@@ -1871,9 +2043,17 @@ Mitigations:
         assert "## Implementation Tasks" not in template
 
     def contract_failures(
-        issue: dict[str, object], tasks: list[tuple[bool, str]]
+        issue: dict[str, object],
+        tasks: list[tuple[bool, str]],
+        legacy_closed_issues: Collection[int] = (),
     ) -> list[str]:
-        return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
+        return issue_contract_failures(
+            issue,
+            tasks,
+            "owner/repo",
+            self_test_root,
+            legacy_closed_issues=legacy_closed_issues,
+        )
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
     assert referenced_issue_numbers("owner/repo", "Work for #517", "") == [517]
@@ -1940,6 +2120,7 @@ Mitigations:
             "pull_request_payload",
             "open_issue_payloads",
             "load_issue_map",
+            "load_legacy_closed_issues",
             "check_pull_request_tasks",
             "check_openspec_tasks",
             "planned_issue_failures",
@@ -1967,7 +2148,8 @@ Mitigations:
             or {"number": number, **payload}
             for number, payload in complexity_payloads.items()
         ]
-        globals()["load_issue_map"] = lambda _path: {}
+        globals()["load_issue_map"] = lambda _path, **_kwargs: {}
+        globals()["load_legacy_closed_issues"] = lambda _path: frozenset()
         globals()["check_pull_request_tasks"] = lambda *_args, **kwargs: (
             pull_request_issue_map_paths.append(kwargs["issue_map_path"]) or []
         )
@@ -2085,14 +2267,51 @@ Mitigations:
         "## OpenSpec Tasks\n- [x] 1.1 Anchored task\n"
         "- [x] 2.1 Historical task.\n"
     )
-    assert issue_checklist_tasks({"state": "CLOSED", "body": historical_closed}) == [
+    assert issue_checklist_tasks(
+        {"number": 448, "state": "CLOSED", "body": historical_closed}, {448}
+    ) == [
         (True, "1.1 Anchored task"),
         (True, "2.1 Historical task."),
     ]
     assert contract_failures(
-        {"state": "CLOSED", "body": historical_closed},
+        {"number": 448, "state": "CLOSED", "body": historical_closed},
         [(True, "1.1 Anchored task"), (True, "2.1 Historical task.")],
+        {448},
     ) == []
+    downgraded_closed = {
+        "number": 448,
+        "state": "CLOSED",
+        "body": issue_contract.split("## Acceptance and Review Tasks", 1)[0]
+        .replace("## Implementation Tasks", "## OpenSpec Tasks"),
+    }
+    assert issue_uses_new_contract(downgraded_closed, set())
+    assert any(
+        "new-contract issue" in failure
+        for failure in contract_failures(downgraded_closed, expected)
+    )
+    assert not issue_uses_new_contract(
+        {"number": 448, "state": "CLOSED", "body": historical_closed}, {448}
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        provenance_path = Path(temporary) / "issue-map.json"
+        provenance_path.write_text(
+            json.dumps({"schema_version": 2, "legacy_closed_issues": [448]}),
+            encoding="utf-8",
+        )
+        assert load_legacy_closed_issues(provenance_path) == frozenset({448})
+        for invalid in (
+            {"schema_version": 2},
+            {"schema_version": 2, "legacy_closed_issues": None},
+            {"schema_version": 2, "legacy_closed_issues": [448, 448]},
+            {"schema_version": 2, "legacy_closed_issues": [449, 448]},
+        ):
+            provenance_path.write_text(json.dumps(invalid), encoding="utf-8")
+            try:
+                load_legacy_closed_issues(provenance_path)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("invalid legacy provenance was accepted")
     assert any(
         "both implementation and acceptance tasks checked" in failure
         for failure in contract_failures({"state": "CLOSED", "body": issue_contract}, expected)
@@ -2387,10 +2606,13 @@ Mitigations:
         "unknown or foreign" in failure
         for failure in contract_failures({"state": "OPEN", "body": unknown_task}, expected)
     )
-    assert contract_failures(
-        {"state": "CLOSED", "body": ""},
-        [(True, task) for _, task in expected],
-    ) == []
+    assert any(
+        "new-contract issue" in failure
+        for failure in contract_failures(
+            {"state": "CLOSED", "body": ""},
+            [(True, task) for _, task in expected],
+        )
+    )
     wrong_final = [expected[0], (False, "2.1 Finish ordinary tests.")]
     assert not any(
         "final OpenSpec task must be the architecture acceptance task" in failure
@@ -2624,12 +2846,54 @@ Mitigations:
             globals()["issue_payload"] = lambda _repo, number: (
                 live_checked.append(number) or live_payloads[number]
             )
-            globals()["issue_contract_failures"] = lambda *_args: []
+            globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
             assert check_pull_request_tasks(
                 "owner/repo", branch_root, issue_map, 7, "accepted-base"
             ) == []
             assert live_checked == [2], "unrelated live progress must not be fetched"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
+            live_checked.clear()
+            initial_provenance_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+                legacy_closed_issues={1},
+                verify_initial_provenance=True,
+            )
+            assert any(
+                "initial legacy closed-issue provenance" in failure
+                for failure in initial_provenance_failures
+            )
+
+            base_issue_map_text = json.dumps(
+                {
+                    "schema_version": 2,
+                    "legacy_closed_issues": [1],
+                    "changes": {"change-a": 1},
+                }
+            )
+            assert check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+                legacy_closed_issues={1},
+            ) == []
+            provenance_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+                legacy_closed_issues={2},
+            )
+            assert any(
+                "legacy closed-issue provenance" in failure
+                for failure in provenance_failures
+            )
 
             base_issue_map_text = json.dumps(
                 {
@@ -2905,7 +3169,7 @@ Mitigations:
                 checked_numbers.append(number)
                 or {"state": "OPEN", "body": issue_contract}
             )
-            globals()["issue_checklist_tasks"] = lambda _payload: expected
+            globals()["issue_checklist_tasks"] = lambda _payload, *_args: expected
             assert check_openspec_tasks("owner/repo", branch_root, issue_map) == []
             assert checked_numbers == [1, 2]
         finally:
@@ -2930,6 +3194,7 @@ Mitigations:
                 "body": "",
             }
             globals()["issue_payload"] = lambda _repo, _number: {
+                "number": 517,
                 "state": "CLOSED",
                 "body": "## OpenSpec Tasks\n" + legacy_tasks,
             }
@@ -2939,6 +3204,7 @@ Mitigations:
                 {"legacy-change": (Owner(517),)},
                 9,
                 "accepted-base",
+                legacy_closed_issues={517},
             )
             assert any(
                 "closed but still has unchecked tasks" in failure
@@ -2948,6 +3214,7 @@ Mitigations:
             completed_tasks = "- [x] 1.1 Historical implementation.\n"
             task_path.write_text(completed_tasks, encoding="utf-8")
             globals()["issue_payload"] = lambda _repo, _number: {
+                "number": 517,
                 "state": "CLOSED",
                 "body": "## OpenSpec Tasks\n" + completed_tasks,
             }
@@ -2957,7 +3224,48 @@ Mitigations:
                 {"legacy-change": (Owner(517),)},
                 9,
                 "accepted-base",
+                legacy_closed_issues={517},
             ) == []
+            assert any(
+                "new-contract issue" in failure
+                for failure in check_openspec_tasks(
+                    "owner/repo", branch_root, {"legacy-change": (Owner(517),)}
+                )
+            )
+            assert check_openspec_tasks(
+                "owner/repo",
+                branch_root,
+                {"legacy-change": (Owner(517),)},
+                legacy_closed_issues={517},
+            ) == []
+            assert any(
+                "no local OpenSpec mapping" in failure
+                for failure in legacy_closed_issue_failures(
+                    "owner/repo", {}, {517}
+                )
+            )
+            globals()["issue_payload"] = lambda _repo, _number: {
+                "number": 517,
+                "state": "OPEN",
+                "body": "## OpenSpec Tasks\n" + completed_tasks,
+            }
+            assert any(
+                "not CLOSED" in failure
+                for failure in legacy_closed_issue_failures(
+                    "owner/repo", {"legacy-change": (Owner(517),)}, {517}
+                )
+            )
+            globals()["issue_payload"] = lambda _repo, _number: {
+                "number": 517,
+                "state": "CLOSED",
+                "body": "## Implementation Tasks\n" + completed_tasks,
+            }
+            assert any(
+                "no new-contract task fields" in failure
+                for failure in legacy_closed_issue_failures(
+                    "owner/repo", {"legacy-change": (Owner(517),)}, {517}
+                )
+            )
         finally:
             for name, helper in saved_legacy_helpers.items():
                 globals()[name] = helper
@@ -2981,6 +3289,11 @@ Mitigations:
     saved_milestone_issues = globals()["milestone_issues"]
     saved_issue_payload = globals()["issue_payload"]
     try:
+        completed_downgraded_closed = {
+            **downgraded_closed,
+            "body": completed_contract.split("## Acceptance and Review Tasks", 1)[0]
+            .replace("## Implementation Tasks", "## OpenSpec Tasks"),
+        }
         globals()["milestone_issues"] = lambda _repo, _milestone: [
             {"number": 448, "state": "closed"}
         ]
@@ -2990,6 +3303,17 @@ Mitigations:
             "body": completed_contract,
         }
         assert check_milestone_complete("owner/repo", "v1.0.0-00", {448}) == []
+        globals()["issue_payload"] = lambda _repo, _number: completed_downgraded_closed
+        assert any(
+            "new-contract issue" in failure
+            for failure in check_milestone_complete("owner/repo", "v1.0.0-00", {448})
+        )
+        assert check_milestone_complete(
+            "owner/repo",
+            "v1.0.0-00",
+            {448},
+            legacy_closed_issues={448},
+        ) == []
         globals()["issue_payload"] = lambda _repo, _number: {
             "number": 448,
             "state": "CLOSED",
@@ -3162,6 +3486,10 @@ def main() -> None:
     root = Path(args.root)
     failures: list[str] = []
     issue_map = load_issue_map(args.issue_map)
+    legacy_closed_issues = load_legacy_closed_issues(args.issue_map)
+    if legacy_closed_issues is None:
+        raise SystemExit(f"{args.issue_map} must declare legacy_closed_issues")
+    failures.extend(legacy_closed_issue_mapping_failures(issue_map, legacy_closed_issues))
     if args.pull_request is not None and args.planned_issue is not None:
         raise SystemExit("--pull-request cannot be combined with --planned-issue")
     if args.pull_request is not None and args.skip_openspec:
@@ -3200,12 +3528,18 @@ def main() -> None:
                 issue_map_path=args.issue_map,
                 owner_issue=pull_request_owner,
                 owner_error=pull_request_owner_error,
+                legacy_closed_issues=legacy_closed_issues,
+                verify_initial_provenance=True,
             )
         )
     elif not args.skip_openspec:
         failures.extend(
             check_openspec_tasks(
-                args.repo, root, issue_map, planned_issue=args.planned_issue
+                args.repo,
+                root,
+                issue_map,
+                planned_issue=args.planned_issue,
+                legacy_closed_issues=legacy_closed_issues,
             )
         )
     if args.planned_issue is not None:
@@ -3216,7 +3550,14 @@ def main() -> None:
         )
     mapped_issues = mapped_issue_numbers(issue_map)
     for milestone in args.milestone:
-        failures.extend(check_milestone_complete(args.repo, milestone, mapped_issues))
+        failures.extend(
+            check_milestone_complete(
+                args.repo,
+                milestone,
+                mapped_issues,
+                legacy_closed_issues=legacy_closed_issues,
+            )
+        )
 
     if failures:
         print("\nIssue checklist validation failed:", file=sys.stderr)

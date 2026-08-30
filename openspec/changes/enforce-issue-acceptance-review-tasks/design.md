@@ -33,6 +33,8 @@ Hosted validation of two independent v0.5 branches exposed one concurrency defec
 
 This avoids renaming every local OpenSpec file or introducing another task store. Treating the GitHub issue as a second free-form implementation plan was rejected because it would lose exact synchronization.
 
+Contract provenance is separate from mutable issue headings. `openspec/issue-map.json` owns one sorted, unique `legacy_closed_issues` list of mapped issue numbers. Every mapped issue outside that list is a new-contract issue, regardless of which headings a user later edits. Each listed issue is valid only while it remains mapped, CLOSED, and contains exactly one legacy task heading with no new task fields; the checker fails closed otherwise. The list is populated from authenticated live state during the initial migration, so it contains only actual closed historical legacy issues. A pull request may introduce the field when its accepted base predates it, but once an accepted base contains the field, candidate and base sets must match exactly. This per-issue authority handles mixed-owner change mappings without issue-number or timestamp heuristics.
+
 The migration preserves any existing review-oriented OpenSpec row, including the historical final architecture-reconciliation task, because deleting it would weaken an accepted issue packet. The new checker no longer requires every future implementation list to end with that review-only row: the canonical specification/architecture acceptance task now owns the holistic reconciliation gate.
 
 ### 2. Use one fixed, model-blind acceptance checklist

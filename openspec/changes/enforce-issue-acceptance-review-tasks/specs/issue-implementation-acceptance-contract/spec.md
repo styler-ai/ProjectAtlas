@@ -87,6 +87,24 @@ The migration SHALL preserve every existing open mapped issue section, substanti
 - **AND** it does not require new acceptance fields or complexity labels retroactively
 - **AND** it still rejects unchecked historical implementation tasks.
 
+### Requirement: Contract provenance is repository-controlled
+IssueOps SHALL select the issue contract from the repository-controlled `legacy_closed_issues` list in `openspec/issue-map.json`, not from mutable issue headings. Every mapped issue outside that explicit set SHALL use the new contract. Each listed issue SHALL be mapped, CLOSED, and contain exactly one visible legacy task heading with no `Implementation Tasks` or `Acceptance and Review Tasks` heading. Pull-request validation SHALL require the candidate provenance list to equal the accepted base once the accepted base contains the field; an accepted base that predates the field permits only the initial introduction of a validated list.
+
+#### Scenario: Closed new-contract issue is downgraded
+- **WHEN** a mapped issue outside `legacy_closed_issues` is CLOSED after replacing `Implementation Tasks` with a legacy heading and removing acceptance
+- **THEN** issue-event, global, milestone, and release validation reject it as a malformed new-contract issue
+- **AND** headings cannot silently change its contract classification.
+
+#### Scenario: Explicit closed legacy issue remains compatible
+- **WHEN** a mapped CLOSED issue appears in `legacy_closed_issues` and retains exactly one legacy task heading without new task fields
+- **THEN** IssueOps validates its historical implementation tasks without requiring acceptance or complexity
+- **AND** unchecked historical tasks remain a closure failure.
+
+#### Scenario: Provenance is frozen at the accepted pull-request base
+- **WHEN** a pull request changes `legacy_closed_issues` after the accepted base already declares it
+- **THEN** pull-request validation rejects the candidate even if its mutable issue headings appear compatible
+- **AND** a missing, open, unmapped, or mixed-heading grandfather entry fails closed.
+
 ### Requirement: Activation fails closed across live state
 The new contract SHALL become authoritative only after the accepted checker, every open mapped live issue body, and every open issue complexity label converge. The migration SHALL validate exact live readback and provide restoration of prior bodies, #517 milestone/status, and native relationships before merge. The independently authorized complexity classification SHALL remain intact across checker/body rollback.
 

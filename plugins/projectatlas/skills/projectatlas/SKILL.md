@@ -219,6 +219,8 @@ cargo run -p projectatlas-cli -- lint --report-untracked
 
 When an issue has OpenSpec tasks, keep exactly one visible `Implementation Tasks` section synchronized with its mapped local owner slice and exactly one canonical five-row `Acceptance and Review Tasks` section. Implementation tasks are live progress: check each row immediately after its behavior and required task-level proof pass, and reopen it immediately when review finds the implementation partial, resetting all acceptance/review rows. Keep acceptance unchecked until implementation is complete, then use a checked prefix; closed historical issues may retain one legacy OpenSpec task heading, while new-contract closed issues require both lists. Every open issue carries exactly one accepted `complexity:*` label, including unmapped backlog issues, without fabricating task fields. Use `(Implementation tasks: <task IDs>)` for open mapped pre-mortem mitigations, preserve existing implementation rows, and run the repository IssueOps checker before transitions. Pull-request validation resolves exactly one referenced owner, checks that owner against live state, checks unrelated slices against the accepted base, and fails closed without ownership or base authority; `main` and release validation remain global.
 
+Contract provenance is repository-controlled per issue in `openspec/issue-map.json` under `legacy_closed_issues`: mapped issues outside that explicit set default to the new contract, and every exception must remain mapped, closed, and legacy-only. Pull-request validation freezes the set against the accepted base after its initial introduction.
+
 ## References
 
 - <https://github.com/styler-ai/ProjectAtlas>
