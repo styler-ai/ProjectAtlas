@@ -138,12 +138,24 @@ sequenceDiagram
   participant H as Real host CLI
   participant M as Generated ProjectAtlas MCP config
   participant R as Verified runtime
+  participant L as Isolated loopback model endpoint
   I->>C: write host-specific config and plugin/skill state
   H->>C: parse/list configuration through native reader
-  H->>M: consume generated MCP entry
-  H->>R: start exact installed runtime
-  R-->>H: initialize + tools/list + bounded tool call
-  H-->>I: isolated success or typed reader/startup failure
+  H->>M: consume generated MCP entry from native config
+  H->>R: launch generated runtime with exact root/database/config/version
+  R-->>H: initialize + tools/list
+  alt OpenCode native title preflight
+    H->>L: no-tools title request
+    L-->>H: bounded title response
+  end
+  H->>L: model request with ProjectAtlas tool schema
+  L-->>H: exactly one tool_use/tool_call
+  H->>R: invoke atlas_slice through the launched MCP session
+  R-->>H: source evidence for the isolated fixture
+  H->>L: matching tool_result with the source marker
+  L-->>H: final bounded marker and end_turn/[DONE]
+  H-->>I: host output plus causal isolated source evidence
+  Note over H,L: Synthetic key, localhost only, isolated roots, no ambient credentials
 ```
 
 ## Released-main database baseline decision

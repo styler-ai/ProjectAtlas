@@ -153,6 +153,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Install exact real host CLIs for native reader proof
+        timeout-minutes: 10
+        shell: bash
+        run: npm install --global @anthropic-ai/claude-code@2.1.201 opencode-ai@1.18.10
+
+      - name: Real installed host reader proof
+        timeout-minutes: 15
+        shell: bash
+        run: cargo test --locked -p projectatlas-cli --all-features --test e2e installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture
+
       - name: Rust toolchain preflight
         shell: bash
         run: |

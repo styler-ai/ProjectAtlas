@@ -10368,7 +10368,695 @@ fn snapshot_real_host_tree(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Bo
     Ok(snapshot)
 }
 
+const REAL_HOST_LOOPBACK_MAX_HEADER_BYTES: usize = 64 * 1024;
+const REAL_HOST_LOOPBACK_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const REAL_HOST_LOOPBACK_MAX_REQUESTS: usize = 8;
+const REAL_HOST_LOOPBACK_TOOL_CALL_ID: &str = "projectatlas-loopback-tool-call";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoopbackModelProtocol {
+    AnthropicMessages,
+    OpenAiCompatible,
+}
+
+#[derive(Debug)]
+struct LoopbackModelObservation {
+    requests: usize,
+    tool_name: String,
+    tool_call_id: String,
+    source_marker: String,
+}
+
+#[derive(Debug)]
+struct LoopbackModelServer {
+    address: std::net::SocketAddr,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<thread::JoinHandle<Result<LoopbackModelObservation, String>>>,
+}
+
+impl LoopbackModelServer {
+    fn start(protocol: LoopbackModelProtocol, source_marker: &str) -> Result<Self, Box<dyn Error>> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        let source_marker = source_marker.to_owned();
+        let join = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            let mut model_requests = 0;
+            loop {
+                if thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err("loopback model server stopped before host evidence".to_owned());
+                }
+                if Instant::now() >= deadline {
+                    return Err("loopback model server exceeded 45-second deadline".to_owned());
+                }
+                match listener.accept() {
+                    Ok((mut stream, peer)) => {
+                        if !peer.ip().is_loopback() {
+                            return Err(
+                                "loopback model server accepted a non-loopback peer".to_owned()
+                            );
+                        }
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .map_err(|error| {
+                                format!("loopback read timeout setup failed: {error}")
+                            })?;
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(2)))
+                            .map_err(|error| {
+                                format!("loopback write timeout setup failed: {error}")
+                            })?;
+                        let request = read_loopback_http_request(&mut stream)?;
+                        if matches!(request.method.as_str(), "GET" | "HEAD")
+                            && (request.path == "/" || request.path.ends_with("/models"))
+                        {
+                            write_loopback_http_response(
+                                &mut stream,
+                                "application/json",
+                                br#"{"data":[]}"#,
+                            )?;
+                            continue;
+                        }
+                        if request.method != "POST" {
+                            return Err(
+                                "loopback model request used an unexpected method".to_owned()
+                            );
+                        }
+                        if protocol == LoopbackModelProtocol::AnthropicMessages
+                            && request
+                                .path
+                                .split('?')
+                                .next()
+                                .is_some_and(|path| path.ends_with("/count_tokens"))
+                        {
+                            write_loopback_http_response(
+                                &mut stream,
+                                "application/json",
+                                br#"{"input_tokens":1}"#,
+                            )?;
+                            continue;
+                        }
+                        if model_requests >= REAL_HOST_LOOPBACK_MAX_REQUESTS {
+                            return Err(
+                                "loopback model server received too many model requests".to_owned()
+                            );
+                        }
+                        let response = loopback_model_response(
+                            protocol,
+                            model_requests,
+                            &request,
+                            &source_marker,
+                        )?;
+                        write_loopback_http_response(
+                            &mut stream,
+                            response.content_type,
+                            response.body.as_bytes(),
+                        )?;
+                        model_requests += 1;
+                        if let Some(observation) = response.observation {
+                            return Ok(LoopbackModelObservation {
+                                requests: model_requests,
+                                tool_name: observation.tool_name,
+                                tool_call_id: observation.tool_call_id,
+                                source_marker,
+                            });
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(error) => {
+                        return Err(format!("loopback model server accept failed: {error}"));
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            address,
+            stop,
+            join: Some(join),
+        })
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    fn finish(mut self) -> Result<LoopbackModelObservation, Box<dyn Error>> {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let join = self
+            .join
+            .take()
+            .ok_or_else(|| io::Error::other("loopback model server was already joined"))?;
+        match join.join() {
+            Ok(Ok(observation)) => Ok(observation),
+            Ok(Err(error)) => Err(io::Error::other(error).into()),
+            Err(_) => Err(io::Error::other("loopback model server thread panicked").into()),
+        }
+    }
+}
+
+impl Drop for LoopbackModelServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take()
+            && let Err(_panic) = join.join()
+        {}
+    }
+}
+
+struct LoopbackHttpRequest {
+    method: String,
+    path: String,
+    body: Value,
+}
+
+struct LoopbackHttpResponse {
+    content_type: &'static str,
+    body: String,
+    observation: Option<LoopbackToolObservation>,
+}
+
+struct LoopbackToolObservation {
+    tool_name: String,
+    tool_call_id: String,
+}
+
+fn read_loopback_http_request(
+    stream: &mut std::net::TcpStream,
+) -> Result<LoopbackHttpRequest, String> {
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    let header_end = loop {
+        if let Some(offset) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let end = offset + 4;
+            if end > REAL_HOST_LOOPBACK_MAX_HEADER_BYTES {
+                return Err("loopback request headers exceeded 64 KiB".to_owned());
+            }
+            break end;
+        }
+        if bytes.len() >= REAL_HOST_LOOPBACK_MAX_HEADER_BYTES {
+            return Err("loopback request headers omitted a bounded terminator".to_owned());
+        }
+        let mut chunk = [0_u8; 8192];
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| format!("loopback request header read failed: {error}"))?;
+        if read == 0 {
+            return Err("loopback request ended before headers".to_owned());
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    };
+    let (method, path, content_length, chunked, has_content_length) = {
+        let headers = std::str::from_utf8(&bytes[..header_end])
+            .map_err(|error| format!("loopback request headers were not UTF-8: {error}"))?;
+        let mut lines = headers.split("\r\n");
+        let request_line = lines
+            .next()
+            .ok_or_else(|| "loopback request omitted a request line".to_owned())?;
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap_or_default();
+        let path = request_parts.next().unwrap_or_default();
+        if path.is_empty() {
+            return Err("loopback request omitted its path".to_owned());
+        }
+        let mut content_length = None;
+        let mut chunked = false;
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let (name, value) = line
+                .split_once(':')
+                .ok_or_else(|| "loopback request had a malformed header".to_owned())?;
+            if name.eq_ignore_ascii_case("content-length") {
+                if content_length.is_some() {
+                    return Err("loopback request repeated Content-Length".to_owned());
+                }
+                content_length = Some(value.trim().parse::<usize>().map_err(|error| {
+                    format!("loopback request Content-Length was invalid: {error}")
+                })?);
+            }
+            if name.eq_ignore_ascii_case("transfer-encoding")
+                && value.trim().eq_ignore_ascii_case("chunked")
+            {
+                chunked = true;
+            }
+        }
+        let has_content_length = content_length.is_some();
+        let content_length = match content_length {
+            Some(content_length) => content_length,
+            None if matches!(method, "GET" | "HEAD") => 0,
+            None if chunked => 0,
+            None => 0,
+        };
+        (
+            method.to_owned(),
+            path.to_owned(),
+            content_length,
+            chunked,
+            has_content_length,
+        )
+    };
+    if !chunked && content_length > REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+        return Err("loopback request body exceeded 2 MiB".to_owned());
+    }
+    let body_bytes = if chunked {
+        read_loopback_chunked_body(stream, &mut bytes, header_end)?
+    } else if !has_content_length && method == "POST" {
+        let mut body = bytes[header_end..].to_vec();
+        while body.len() < REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+            let mut chunk = [0_u8; 8192];
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => body.extend_from_slice(&chunk[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(format!("loopback unframed body read failed: {error}")),
+            }
+        }
+        if body.len() > REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+            return Err("loopback unframed request body exceeded 2 MiB".to_owned());
+        }
+        body
+    } else {
+        while bytes.len() < header_end + content_length {
+            let mut chunk = [0_u8; 8192];
+            let read = stream
+                .read(&mut chunk)
+                .map_err(|error| format!("loopback request body read failed: {error}"))?;
+            if read == 0 {
+                return Err("loopback request ended before Content-Length bytes".to_owned());
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        bytes[header_end..header_end + content_length].to_vec()
+    };
+    let body = if body_bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body_bytes)
+            .map_err(|error| format!("loopback request body was not JSON: {error}"))?
+    };
+    Ok(LoopbackHttpRequest { method, path, body })
+}
+
+fn read_loopback_chunked_body(
+    stream: &mut std::net::TcpStream,
+    bytes: &mut Vec<u8>,
+    header_end: usize,
+) -> Result<Vec<u8>, String> {
+    let mut cursor = header_end;
+    let mut body = Vec::new();
+    loop {
+        let line_end = loop {
+            if let Some(offset) = bytes[cursor..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+            {
+                break cursor + offset;
+            }
+            if bytes.len() >= header_end + REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+                return Err("loopback chunked request exceeded 2 MiB".to_owned());
+            }
+            let mut chunk = [0_u8; 8192];
+            let read = stream
+                .read(&mut chunk)
+                .map_err(|error| format!("loopback chunk size read failed: {error}"))?;
+            if read == 0 {
+                return Err("loopback chunked request ended before chunk size".to_owned());
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        };
+        let size_text = std::str::from_utf8(&bytes[cursor..line_end])
+            .map_err(|error| format!("loopback chunk size was not UTF-8: {error}"))?
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|error| format!("loopback chunk size was not hexadecimal: {error}"))?;
+        cursor = line_end + 2;
+        if size == 0 {
+            return Ok(body);
+        }
+        if body.len().saturating_add(size) > REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+            return Err("loopback chunked request body exceeded 2 MiB".to_owned());
+        }
+        while bytes.len() < cursor + size + 2 {
+            let mut chunk = [0_u8; 8192];
+            let read = stream
+                .read(&mut chunk)
+                .map_err(|error| format!("loopback chunk body read failed: {error}"))?;
+            if read == 0 {
+                return Err("loopback chunked request ended before chunk body".to_owned());
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        body.extend_from_slice(&bytes[cursor..cursor + size]);
+        if &bytes[cursor + size..cursor + size + 2] != b"\r\n" {
+            return Err("loopback chunked request omitted its terminator".to_owned());
+        }
+        cursor += size + 2;
+    }
+}
+
+fn write_loopback_http_response(
+    stream: &mut std::net::TcpStream,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .and_then(|()| stream.write_all(body))
+        .map_err(|error| format!("loopback response write failed: {error}"))
+}
+
+fn loopback_model_response(
+    protocol: LoopbackModelProtocol,
+    request_number: usize,
+    request: &LoopbackHttpRequest,
+    source_marker: &str,
+) -> Result<LoopbackHttpResponse, String> {
+    let first_path = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => "/messages",
+        LoopbackModelProtocol::OpenAiCompatible => "/chat/completions",
+    };
+    if !request
+        .path
+        .split('?')
+        .next()
+        .is_some_and(|path| path.ends_with(first_path))
+    {
+        return Err(format!(
+            "loopback model request used an unexpected endpoint: {}",
+            request.path
+        ));
+    }
+    if protocol == LoopbackModelProtocol::OpenAiCompatible
+        && request_number == 0
+        && request.body["tools"].as_array().is_none_or(Vec::is_empty)
+    {
+        return Ok(LoopbackHttpResponse {
+            content_type: "text/event-stream",
+            body: openai_title_response()?,
+            observation: None,
+        });
+    }
+    let tool_name = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => "mcp__projectatlas__atlas_slice",
+        LoopbackModelProtocol::OpenAiCompatible => "projectatlas_atlas_slice",
+    };
+    let tool_request_number = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => 0,
+        LoopbackModelProtocol::OpenAiCompatible => 1,
+    };
+    if request_number == tool_request_number {
+        if !request.body["model"].is_string() {
+            return Err("loopback model request omitted its model".to_owned());
+        }
+        return Ok(LoopbackHttpResponse {
+            content_type: "text/event-stream",
+            body: match protocol {
+                LoopbackModelProtocol::AnthropicMessages => {
+                    anthropic_tool_call_response(tool_name)?
+                }
+                LoopbackModelProtocol::OpenAiCompatible => openai_tool_call_response(tool_name)?,
+            },
+            observation: None,
+        });
+    }
+    let result_request_number = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => 1,
+        LoopbackModelProtocol::OpenAiCompatible => 2,
+    };
+    if request_number != result_request_number {
+        return Err("loopback model request count exceeded the two-turn proof".to_owned());
+    }
+    let has_tool_result = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => {
+            has_anthropic_tool_call(&request.body)
+                && has_anthropic_tool_result(&request.body, source_marker)
+        }
+        LoopbackModelProtocol::OpenAiCompatible => {
+            has_openai_tool_call(&request.body)
+                && has_openai_tool_result(&request.body, source_marker)
+        }
+    };
+    if !has_tool_result {
+        return Err(format!(
+            "loopback model did not receive the exact MCP source marker; request shape={}",
+            loopback_request_shape(&request.body)
+        ));
+    }
+    Ok(LoopbackHttpResponse {
+        content_type: "text/event-stream",
+        body: match protocol {
+            LoopbackModelProtocol::AnthropicMessages => anthropic_final_response(source_marker)?,
+            LoopbackModelProtocol::OpenAiCompatible => openai_final_response(source_marker)?,
+        },
+        observation: Some(LoopbackToolObservation {
+            tool_name: tool_name.to_owned(),
+            tool_call_id: REAL_HOST_LOOPBACK_TOOL_CALL_ID.to_owned(),
+        }),
+    })
+}
+
+fn loopback_request_shape(value: &Value) -> String {
+    let mut entries = Vec::new();
+    if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(object) = message.as_object() {
+                let keys = object.keys().cloned().collect::<Vec<_>>().join(",");
+                let role = object.get("role").and_then(Value::as_str).unwrap_or("-");
+                let kind = object.get("type").and_then(Value::as_str).unwrap_or("-");
+                let call_id = object
+                    .get("tool_call_id")
+                    .or_else(|| object.get("toolCallId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                entries.push(format!(
+                    "keys={keys};role={role};type={kind};call_id={call_id}"
+                ));
+            }
+        }
+    }
+    format!("messages=[{}]", entries.join(" | "))
+}
+
+fn anthropic_sse_event(event: &str, payload: &Value) -> Result<String, String> {
+    Ok(format!(
+        "event: {event}\ndata: {}\n\n",
+        serde_json::to_string(payload)
+            .map_err(|error| { format!("loopback Anthropic event was not JSON: {error}") })?
+    ))
+}
+
+fn anthropic_tool_call_response(tool_name: &str) -> Result<String, String> {
+    let input = json!({
+        "file": "src/host_reader_fixture.rs",
+        "start_line": 1,
+        "end_line": 1,
+    });
+    let input_json = serde_json::to_string(&input)
+        .map_err(|error| format!("loopback Anthropic tool input was not JSON: {error}"))?;
+    let mut body = String::new();
+    body.push_str(&anthropic_sse_event(
+        "message_start",
+        &json!({"type":"message_start","message":{"id":"msg_projectatlas","type":"message","role":"assistant","model":"sonnet","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_start",
+        &json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":REAL_HOST_LOOPBACK_TOOL_CALL_ID,"name":tool_name,"input":{}}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_delta",
+        &json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input_json}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_stop",
+        &json!({"type":"content_block_stop","index":0}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "message_delta",
+        &json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":1}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "message_stop",
+        &json!({"type":"message_stop"}),
+    )?);
+    Ok(body)
+}
+
+fn anthropic_final_response(source_marker: &str) -> Result<String, String> {
+    let mut body = String::new();
+    body.push_str(&anthropic_sse_event(
+        "message_start",
+        &json!({"type":"message_start","message":{"id":"msg_projectatlas_final","type":"message","role":"assistant","model":"sonnet","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_start",
+        &json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_delta",
+        &json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":source_marker}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_stop",
+        &json!({"type":"content_block_stop","index":0}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "message_delta",
+        &json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "message_stop",
+        &json!({"type":"message_stop"}),
+    )?);
+    Ok(body)
+}
+
+fn openai_sse_chunk(payload: &Value) -> Result<String, String> {
+    Ok(format!(
+        "data: {}\n\n",
+        serde_json::to_string(payload)
+            .map_err(|error| format!("loopback OpenAI event was not JSON: {error}"))?
+    ))
+}
+
+fn openai_tool_call_response(tool_name: &str) -> Result<String, String> {
+    let input = serde_json::to_string(&json!({
+        "file": "src/host_reader_fixture.rs",
+        "start_line": 1,
+        "end_line": 1,
+    }))
+    .map_err(|error| format!("loopback OpenAI tool input was not JSON: {error}"))?;
+    let mut body = openai_sse_chunk(
+        &json!({"id":"chatcmpl_projectatlas","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":REAL_HOST_LOOPBACK_TOOL_CALL_ID,"type":"function","function":{"name":tool_name,"arguments":input}}]},"finish_reason":null}]}),
+    )?;
+    body.push_str(&openai_sse_chunk(&json!({"id":"chatcmpl_projectatlas","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}))?);
+    body.push_str("data: [DONE]\n\n");
+    Ok(body)
+}
+
+fn openai_title_response() -> Result<String, String> {
+    let mut body = openai_sse_chunk(
+        &json!({"id":"chatcmpl_projectatlas_title","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ProjectAtlas source evidence"},"finish_reason":null}]}),
+    )?;
+    body.push_str(&openai_sse_chunk(&json!({"id":"chatcmpl_projectatlas_title","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}))?);
+    body.push_str("data: [DONE]\n\n");
+    Ok(body)
+}
+
+fn openai_final_response(source_marker: &str) -> Result<String, String> {
+    let mut body = openai_sse_chunk(
+        &json!({"id":"chatcmpl_projectatlas_final","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{"role":"assistant","content":source_marker},"finish_reason":null}]}),
+    )?;
+    body.push_str(&openai_sse_chunk(&json!({"id":"chatcmpl_projectatlas_final","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}))?);
+    body.push_str("data: [DONE]\n\n");
+    Ok(body)
+}
+
+fn has_anthropic_tool_result(value: &Value, source_marker: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| has_anthropic_tool_result(value, source_marker)),
+        Value::Object(object) => {
+            (object.get("type").and_then(Value::as_str) == Some("tool_result")
+                && object.get("tool_use_id").and_then(Value::as_str)
+                    == Some(REAL_HOST_LOOPBACK_TOOL_CALL_ID)
+                && value_contains_string(value, source_marker))
+                || object
+                    .values()
+                    .any(|value| has_anthropic_tool_result(value, source_marker))
+        }
+        _ => false,
+    }
+}
+
+fn has_anthropic_tool_call(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(has_anthropic_tool_call),
+        Value::Object(object) => {
+            (object.get("type").and_then(Value::as_str) == Some("tool_use")
+                && object.get("id").and_then(Value::as_str)
+                    == Some(REAL_HOST_LOOPBACK_TOOL_CALL_ID)
+                && object.get("name").and_then(Value::as_str)
+                    == Some("mcp__projectatlas__atlas_slice"))
+                || object.values().any(has_anthropic_tool_call)
+        }
+        _ => false,
+    }
+}
+
+fn has_openai_tool_result(value: &Value, source_marker: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| has_openai_tool_result(value, source_marker)),
+        Value::Object(object) => {
+            let tool_call_id = object
+                .get("tool_call_id")
+                .or_else(|| object.get("toolCallId"))
+                .and_then(Value::as_str);
+            (object.get("role").and_then(Value::as_str) == Some("tool")
+                && tool_call_id == Some(REAL_HOST_LOOPBACK_TOOL_CALL_ID)
+                && value_contains_string(value, source_marker))
+                || object
+                    .values()
+                    .any(|value| has_openai_tool_result(value, source_marker))
+        }
+        _ => false,
+    }
+}
+
+fn has_openai_tool_call(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(has_openai_tool_call),
+        Value::Object(object) => {
+            (object.get("id").and_then(Value::as_str) == Some(REAL_HOST_LOOPBACK_TOOL_CALL_ID)
+                && object.get("type").and_then(Value::as_str) == Some("function")
+                && object
+                    .get("function")
+                    .and_then(Value::as_object)
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                    == Some("projectatlas_atlas_slice"))
+                || object.values().any(has_openai_tool_call)
+        }
+        _ => false,
+    }
+}
+
+fn value_contains_string(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(expected),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_string(value, expected)),
+        Value::Object(object) => object
+            .values()
+            .any(|value| value_contains_string(value, expected)),
+        _ => false,
+    }
+}
+
 #[test]
+#[ignore = "requires Claude Code 2.1.201 and OpenCode 1.18.10"]
 fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let host_root = temp.path().join("isolated-host");
@@ -10396,62 +11084,58 @@ fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(
     ];
     let claude = find_host_executable("claude");
     let opencode = find_host_executable("opencode");
+    let availability = [
+        ("claude", claude.is_some()),
+        ("opencode", opencode.is_some()),
+    ]
+    .into_iter()
+    .map(|(name, installed)| (name, NativeHostAvailability::from_installed(installed)))
+    .collect::<Vec<_>>();
+    require(
+        claude.is_some() && opencode.is_some(),
+        format!(
+            "real-host reader proof requires both supported CLIs; availability={availability:?}"
+        ),
+    )?;
+    let claude = claude.ok_or_else(|| io::Error::other("Claude Code availability changed"))?;
+    let opencode = opencode.ok_or_else(|| io::Error::other("OpenCode availability changed"))?;
     let mut host_versions = Vec::new();
     let mut host_statuses = Vec::new();
-    if let Some(claude) = claude.as_deref() {
-        host_versions.push(("Claude Code", host_version(claude, &host_root)?));
-    }
-    if let Some(opencode) = opencode.as_deref() {
-        host_versions.push(("OpenCode", host_version(opencode, &host_root)?));
-    }
+    let claude_version = host_version(&claude, &host_root)?;
+    require_exact_host_version("Claude Code", &claude_version, "2.1.201")?;
+    host_versions.push(("Claude Code", claude_version));
+    let opencode_version = host_version(&opencode, &host_root)?;
+    require_exact_host_version("OpenCode", &opencode_version, "1.18.10")?;
+    host_versions.push(("OpenCode", opencode_version));
     for fixture in &fixtures {
         let project_before = snapshot_real_host_tree(&fixture.repo)?;
         let host_before = inventory_real_host_tree(&host_root)?;
         let claude_config = read_json_file(&fixture.claude_config)?;
         let opencode_config = read_json_file(&fixture.opencode_config)?;
         let (claude_runtime, claude_arguments) = generated_host_launch(&claude_config, "claude")?;
-        let (opencode_runtime, opencode_arguments) =
-            generated_host_launch(&opencode_config, "opencode")?;
+        let _ = generated_host_launch(&opencode_config, "opencode")?;
 
-        if let Some(claude) = claude.as_deref() {
-            let status = verify_claude_native_reader(
-                claude,
-                &fixture.claude_config,
-                &fixture.repo,
-                &host_root,
-                &claude_runtime,
-                &claude_arguments,
-            )?;
-            host_statuses.push(("Claude Code", fixture.name.as_str(), status));
-            verify_generated_mcp_contract_compatibility(
-                "Claude Code",
-                &claude_runtime,
-                &claude_arguments,
-                &fixture.repo,
-                &fixture.database,
-                &host_root,
-                &fixture.source_marker,
-            )?;
-        }
+        let status = verify_claude_native_reader(
+            &claude,
+            &fixture.claude_config,
+            &fixture.repo,
+            &fixture.database,
+            &fixture.source_marker,
+            &host_root,
+            &claude_runtime,
+            &claude_arguments,
+        )?;
+        host_statuses.push(("Claude Code", fixture.name.as_str(), status));
 
-        if let Some(opencode) = opencode.as_deref() {
-            let status = verify_opencode_native_reader(
-                opencode,
-                &fixture.opencode_config,
-                &fixture.repo,
-                &host_root,
-            )?;
-            host_statuses.push(("OpenCode", fixture.name.as_str(), status));
-            verify_generated_mcp_contract_compatibility(
-                "OpenCode",
-                &opencode_runtime,
-                &opencode_arguments,
-                &fixture.repo,
-                &fixture.database,
-                &host_root,
-                &fixture.source_marker,
-            )?;
-        }
+        let status = verify_opencode_native_reader(
+            &opencode,
+            &fixture.opencode_config,
+            &fixture.repo,
+            &fixture.database,
+            &fixture.source_marker,
+            &host_root,
+        )?;
+        host_statuses.push(("OpenCode", fixture.name.as_str(), status));
         let project_after = snapshot_real_host_tree(&fixture.repo)?;
         require(
             project_before
@@ -10475,13 +11159,6 @@ fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(
         )?;
     }
 
-    let availability = [
-        ("claude", claude.is_some()),
-        ("opencode", opencode.is_some()),
-    ]
-    .into_iter()
-    .map(|(name, installed)| (name, NativeHostAvailability::from_installed(installed)))
-    .collect::<Vec<_>>();
     let installed_host_count = availability
         .iter()
         .filter(|(_, status)| matches!(status, NativeHostAvailability::Installed))
@@ -10505,7 +11182,10 @@ fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(
 
 #[derive(Debug)]
 enum NativeHostSourceEvidence {
-    UnavailableWithoutModelInvocation,
+    Observed {
+        source_marker: String,
+        tool_name: String,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -10525,7 +11205,7 @@ impl NativeHostAvailability {
 }
 
 #[test]
-fn missing_real_host_is_a_typed_skip() {
+fn missing_real_host_is_reported_without_native_acceptance() {
     assert_eq!(
         NativeHostAvailability::from_installed(false),
         NativeHostAvailability::Missing
@@ -10544,10 +11224,27 @@ impl NativeHostStatus {
         matches!(
             self,
             Self::Connected {
-                source_evidence: NativeHostSourceEvidence::UnavailableWithoutModelInvocation
-            }
+                source_evidence: NativeHostSourceEvidence::Observed {
+                    source_marker,
+                    tool_name,
+                }
+            } if !source_marker.is_empty() && !tool_name.is_empty()
         )
     }
+}
+
+fn require_exact_host_version(
+    host: &str,
+    observed: &str,
+    expected: &str,
+) -> Result<(), Box<dyn Error>> {
+    require(
+        observed.split_whitespace().any(|token| {
+            token.trim_matches(|character: char| !character.is_ascii_digit() && character != '.')
+                == expected
+        }),
+        format!("{host} version is not the required {expected}: {observed}"),
+    )
 }
 
 /// Return the runtime and arguments from one generated host-specific config.
@@ -10734,9 +11431,33 @@ fn run_real_host_command(
     opencode_config: Option<&Path>,
     arguments: &[String],
 ) -> Result<std::process::Output, Box<dyn Error>> {
+    run_real_host_command_with_environment(
+        executable,
+        repo,
+        host_root,
+        opencode_config,
+        arguments,
+        &[],
+    )
+}
+
+fn run_real_host_command_with_environment(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    opencode_config: Option<&Path>,
+    arguments: &[String],
+    environment: &[(&str, &str)],
+) -> Result<std::process::Output, Box<dyn Error>> {
     let mut command = host_command(executable);
-    command.current_dir(repo).args(arguments);
+    command
+        .current_dir(repo)
+        .args(arguments)
+        .stdin(Stdio::null());
     configure_real_host_environment(&mut command, host_root, opencode_config)?;
+    for (key, value) in environment {
+        command.env(key, value);
+    }
     run_bounded_output(command, "real host reader")
 }
 
@@ -10746,6 +11467,19 @@ fn host_output_text(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn redacted_host_output(output: &std::process::Output) -> String {
+    host_output_text(output).replace("synthetic-projectatlas-test-key", "<redacted>")
+}
+
+fn host_output_contains_path(text: &str, path: &Path) -> bool {
+    let display = path.display().to_string();
+    text.contains(&display) || text.contains(&display.replace('\\', "\\\\"))
+}
+
+fn host_output_contains_argument(text: &str, argument: &str) -> bool {
+    text.contains(argument) || text.contains(&argument.replace('\\', "\\\\"))
 }
 
 fn claude_mcp_list(
@@ -10832,6 +11566,8 @@ fn verify_claude_native_reader(
     executable: &Path,
     generated_config: &Path,
     repo: &Path,
+    database: &Path,
+    source_marker: &str,
     host_root: &Path,
     runtime: &Path,
     arguments: &[String],
@@ -11046,8 +11782,85 @@ fn verify_claude_native_reader(
         format!("Claude Code uninstall removed unrelated native config: {text}"),
     )?;
     claude_mcp_remove(executable, repo, host_root, "local", "unrelated")?;
+    let loopback =
+        LoopbackModelServer::start(LoopbackModelProtocol::AnthropicMessages, source_marker)?;
+    let base_url = loopback.base_url();
+    let model_arguments = vec![
+        "--bare".to_owned(),
+        "--strict-mcp-config".to_owned(),
+        "--mcp-config".to_owned(),
+        generated_config.to_string_lossy().into_owned(),
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "--no-session-persistence".to_owned(),
+        "--permission-mode".to_owned(),
+        "dontAsk".to_owned(),
+        "--allowedTools".to_owned(),
+        "mcp__projectatlas__atlas_slice".to_owned(),
+        "--model".to_owned(),
+        "sonnet".to_owned(),
+        format!(
+            "Use the projectatlas_atlas_slice tool exactly once for src/host_reader_fixture.rs lines 1-1, then return exactly this source marker: {source_marker}"
+        ),
+    ];
+    let model_environment = [
+        ("ANTHROPIC_API_KEY", "synthetic-projectatlas-test-key"),
+        ("ANTHROPIC_BASE_URL", base_url.as_str()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+        ("CLAUDE_CODE_DISABLE_BETAS", "1"),
+        ("DISABLE_AUTOUPDATER", "1"),
+        ("DISABLE_TELEMETRY", "1"),
+        ("DISABLE_ERROR_REPORTING", "1"),
+        ("CLAUDE_CODE_DISABLE_CLAUDEAI_MCP_SERVERS", "1"),
+    ];
+    let model_output_result = run_real_host_command_with_environment(
+        executable,
+        repo,
+        host_root,
+        None,
+        &model_arguments,
+        &model_environment,
+    );
+    let observation_result = loopback.finish();
+    let model_output = model_output_result.map_err(|error| {
+        if let Err(server_error) = &observation_result {
+            io::Error::other(format!("{error}; loopback observation: {server_error}"))
+        } else {
+            io::Error::other(error.to_string())
+        }
+    })?;
+    let observation = observation_result.map_err(|error| {
+        io::Error::other(format!(
+            "Claude Code host exited with {}; loopback observation: {error}; output={}",
+            model_output.status,
+            redacted_host_output(&model_output)
+        ))
+    })?;
+    let model_text = String::from_utf8_lossy(&model_output.stdout);
+    require(
+        model_output.status.success() && model_text.contains(source_marker),
+        format!(
+            "Claude Code host-mediated model run did not return fixture evidence for {}: status={} stderr={}",
+            database.display(),
+            model_output.status,
+            redacted_host_output(&model_output)
+        ),
+    )?;
+    require(
+        observation.source_marker == source_marker
+            && observation.tool_name == "mcp__projectatlas__atlas_slice"
+            && observation.tool_call_id == REAL_HOST_LOOPBACK_TOOL_CALL_ID
+            && observation.requests == 2,
+        format!(
+            "Claude Code loopback did not observe a causal two-turn tool exchange: {observation:?}"
+        ),
+    )?;
     Ok(NativeHostStatus::Connected {
-        source_evidence: NativeHostSourceEvidence::UnavailableWithoutModelInvocation,
+        source_evidence: NativeHostSourceEvidence::Observed {
+            source_marker: source_marker.to_owned(),
+            tool_name: observation.tool_name,
+        },
     })
 }
 
@@ -11056,8 +11869,24 @@ fn verify_opencode_native_reader(
     executable: &Path,
     generated_config: &Path,
     repo: &Path,
+    database: &Path,
+    source_marker: &str,
     host_root: &Path,
 ) -> Result<NativeHostStatus, Box<dyn Error>> {
+    let generated = read_json_file(generated_config)?;
+    let (generated_runtime, generated_arguments) = generated_host_launch(&generated, "opencode")?;
+    let resolved = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(generated_config),
+        &["debug", "config"].map(str::to_owned),
+    )?;
+    let resolved_text = host_output_text(&resolved);
+    require(
+        resolved.status.success() && host_output_contains_path(&resolved_text, &generated_runtime),
+        format!("OpenCode debug config did not consume generated config: {resolved_text}"),
+    )?;
     let output = run_real_host_command(
         executable,
         repo,
@@ -11072,13 +11901,11 @@ fn verify_opencode_native_reader(
             && text.to_ascii_lowercase().contains("connected"),
         format!("OpenCode native reader did not connect generated MCP entry: {text}"),
     )?;
-    let generated = read_json_file(generated_config)?;
-    let (generated_runtime, generated_arguments) = generated_host_launch(&generated, "opencode")?;
     require(
-        text.contains(&generated_runtime.display().to_string())
+        host_output_contains_path(&text, &generated_runtime)
             && generated_arguments
                 .iter()
-                .all(|argument| text.contains(argument)),
+                .all(|argument| host_output_contains_argument(&text, argument)),
         format!("OpenCode native reader did not report the generated runtime route: {text}"),
     )?;
 
@@ -11200,14 +12027,14 @@ fn verify_opencode_native_reader(
             && text.to_ascii_lowercase().contains("connected"),
         format!("OpenCode native repair did not reconnect generated command: {text}"),
     )?;
-    let resolved = run_real_host_command(
+    let repaired_resolved = run_real_host_command(
         executable,
         repo,
         host_root,
         Some(&repaired_config),
         &["debug", "config"].map(str::to_owned),
     )?;
-    let resolved_text = host_output_text(&resolved);
+    let resolved_text = host_output_text(&repaired_resolved);
     require(
         resolved.status.success() && resolved_text.contains("unrelated"),
         format!("OpenCode native repair changed unrelated settings: {resolved_text}"),
@@ -11254,115 +12081,102 @@ fn verify_opencode_native_reader(
         output.status.success() && !text.contains("projectatlas"),
         format!("OpenCode still reported removed MCP config: {text}"),
     )?;
-    Ok(NativeHostStatus::Connected {
-        source_evidence: NativeHostSourceEvidence::UnavailableWithoutModelInvocation,
-    })
-}
-
-/// Prove generated routing and source access through a direct MCP contract.
-/// This is separate compatibility evidence, not host-reader evidence.
-fn verify_generated_mcp_contract_compatibility(
-    host: &str,
-    executable: &Path,
-    arguments: &[String],
-    repo: &Path,
-    database: &Path,
-    host_root: &Path,
-    source_marker: &str,
-) -> Result<(), Box<dyn Error>> {
-    let home = host_root.to_string_lossy().into_owned();
-    let app_data = host_root.join("app-data");
-    let local_app_data = host_root.join("local-app-data");
-    let claude_config = host_root.join("claude-config");
-    let xdg_config = host_root.join("xdg-config");
-    let xdg_data = host_root.join("xdg-data");
-    let xdg_state = host_root.join("xdg-state");
-    let opencode_config_dir = host_root.join("opencode-config");
-    let app_data = app_data.to_string_lossy().into_owned();
-    let local_app_data = local_app_data.to_string_lossy().into_owned();
-    let claude_config = claude_config.to_string_lossy().into_owned();
-    let xdg_config = xdg_config.to_string_lossy().into_owned();
-    let xdg_data = xdg_data.to_string_lossy().into_owned();
-    let xdg_state = xdg_state.to_string_lossy().into_owned();
-    let opencode_config_dir = opencode_config_dir.to_string_lossy().into_owned();
-    let environment = [
-        ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
-        ("HOME", Some(home.as_str())),
-        ("USERPROFILE", Some(home.as_str())),
-        ("APPDATA", Some(app_data.as_str())),
-        ("LOCALAPPDATA", Some(local_app_data.as_str())),
-        ("CLAUDE_CONFIG_DIR", Some(claude_config.as_str())),
-        ("XDG_CONFIG_HOME", Some(xdg_config.as_str())),
-        ("XDG_DATA_HOME", Some(xdg_data.as_str())),
-        ("XDG_STATE_HOME", Some(xdg_state.as_str())),
-        ("OPENCODE_CONFIG_DIR", Some(opencode_config_dir.as_str())),
+    let loopback =
+        LoopbackModelServer::start(LoopbackModelProtocol::OpenAiCompatible, source_marker)?;
+    let base_url = loopback.base_url();
+    let overlay = serde_json::to_string(&json!({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "loopback": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "loopback",
+                "options": {
+                    "baseURL": format!("{base_url}/v1"),
+                    "apiKey": "synthetic-projectatlas-test-key"
+                },
+                "models": {
+                    "loopback-model": {"name": "loopback-model"}
+                }
+            }
+        },
+        "model": "loopback/loopback-model",
+        "enabled_providers": ["loopback"],
+        "permission": {"*": "deny", "projectatlas_atlas_slice": "allow"},
+        "autoupdate": false,
+        "snapshot": false,
+        "share": "disabled",
+        "plugin": [],
+        "instructions": []
+    }))?;
+    let model_arguments = vec![
+        "run".to_owned(),
+        "--pure".to_owned(),
+        "--format".to_owned(),
+        "json".to_owned(),
+        "--model".to_owned(),
+        "loopback/loopback-model".to_owned(),
+        format!(
+            "Use the projectatlas_atlas_slice tool exactly once for src/host_reader_fixture.rs lines 1-1, then return exactly this source marker: {source_marker}"
+        ),
     ];
-    let expected_database = normalize_native_path_display(database);
-    require(
-        arguments.windows(2).any(|pair| {
-            pair[0] == "--db"
-                && normalize_native_path_display(Path::new(&pair[1])) == expected_database
-        }),
-        format!("{host} generated MCP route did not select fixture database {expected_database}"),
-    )?;
-    let expected_config =
-        normalize_native_path_display(repo.join(ATLAS_DIR_NAME).join("config.toml"));
-    require(
-        arguments.windows(2).any(|pair| {
-            pair[0] == "--config"
-                && normalize_native_path_display(Path::new(&pair[1])) == expected_config
-        }),
-        format!("{host} generated MCP route did not select fixture config {expected_config}"),
-    )?;
-    require(
-        arguments
-            .windows(2)
-            .any(|pair| pair[0] == "--require-version" && pair[1] == env!("CARGO_PKG_VERSION")),
-        format!("{host} generated MCP route omitted the current version guard"),
-    )?;
-    let (mut session, initialized) = McpContractSession::spawn_initialized_with_arguments(
+    let model_environment = [
+        ("OPENCODE_CONFIG_CONTENT", overlay.as_str()),
+        ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
+        ("OPENCODE_DISABLE_CLAUDE", "1"),
+        ("OPENCODE_DISABLE_TELEMETRY", "1"),
+        ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
+        ("OPENCODE_DISABLE_SNAPSHOT", "1"),
+        ("OPENCODE_DISABLE_SHARE", "1"),
+        ("DO_NOT_TRACK", "1"),
+    ];
+    let model_output_result = run_real_host_command_with_environment(
         executable,
         repo,
-        arguments,
-        &environment,
-    )?;
-    let version = initialized["result"]["serverInfo"]["version"]
-        .as_str()
-        .ok_or_else(|| {
-            io::Error::other(format!("{host} MCP initialize omitted runtime version"))
-        })?;
+        host_root,
+        Some(generated_config),
+        &model_arguments,
+        &model_environment,
+    );
+    let observation_result = loopback.finish();
+    let model_output = model_output_result.map_err(|error| {
+        if let Err(server_error) = &observation_result {
+            io::Error::other(format!("{error}; loopback observation: {server_error}"))
+        } else {
+            io::Error::other(error.to_string())
+        }
+    })?;
+    let observation = observation_result.map_err(|error| {
+        io::Error::other(format!(
+            "OpenCode host exited with {}; loopback observation: {error}; output={}",
+            model_output.status,
+            redacted_host_output(&model_output)
+        ))
+    })?;
+    let model_text = String::from_utf8_lossy(&model_output.stdout);
     require(
-        version == env!("CARGO_PKG_VERSION"),
-        format!("{host} MCP initialize returned unexpected runtime version {version}"),
-    )?;
-    let tools = session.request("tools/list", &json!({}))?;
-    let tool_names = tools["result"]["tools"]
-        .as_array()
-        .ok_or_else(|| io::Error::other(format!("{host} MCP tools/list omitted tools")))?;
-    require(
-        tool_names.iter().any(|tool| tool["name"] == "atlas_root")
-            && tool_names.iter().any(|tool| tool["name"] == "atlas_slice"),
-        format!("{host} MCP tools/list omitted root/source tools: {tools}"),
-    )?;
-    let root_evidence = session.call_tool("atlas_root", &json!({}))?;
-    require(
-        root_evidence.contains(&normalize_native_path_display(repo)),
-        format!("{host} MCP root evidence did not identify fixture root: {root_evidence}"),
-    )?;
-    let source_evidence = session.call_tool(
-        "atlas_slice",
-        &json!({
-            "file": "src/host_reader_fixture.rs",
-            "start_line": 1,
-            "end_line": 1
-        }),
+        model_output.status.success() && model_text.contains(source_marker),
+        format!(
+            "OpenCode host-mediated model run did not return fixture evidence for {}: status={} stderr={}",
+            database.display(),
+            model_output.status,
+            redacted_host_output(&model_output)
+        ),
     )?;
     require(
-        source_evidence.contains("host_reader_fixture_evidence")
-            && source_evidence.contains(source_marker),
-        format!("{host} MCP source evidence was not from fixture: {source_evidence}"),
+        observation.source_marker == source_marker
+            && observation.tool_name == "projectatlas_atlas_slice"
+            && observation.tool_call_id == REAL_HOST_LOOPBACK_TOOL_CALL_ID
+            && observation.requests == 3,
+        format!(
+            "OpenCode loopback did not observe a causal title/tool/result exchange: {observation:?}"
+        ),
     )?;
-    session.shutdown()
+    Ok(NativeHostStatus::Connected {
+        source_evidence: NativeHostSourceEvidence::Observed {
+            source_marker: source_marker.to_owned(),
+            tool_name: observation.tool_name,
+        },
+    })
 }
 
 #[test]
@@ -35693,24 +36507,6 @@ impl McpContractSession {
         Self::spawn_initialized_command(command, environment)
     }
 
-    /// Spawn the exact command line emitted in a host-specific MCP config.
-    fn spawn_initialized_with_arguments(
-        executable: &Path,
-        repo: &Path,
-        arguments: &[String],
-        environment: &[(&str, Option<&str>)],
-    ) -> Result<(Self, Value), Box<dyn Error>> {
-        let mut command = StdCommand::new(executable);
-        command
-            .current_dir(repo)
-            .args(arguments)
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        Self::spawn_initialized_command(command, environment)
-    }
-
     /// Spawn and initialize a configured MCP command under the contract reader.
     fn spawn_initialized_command(
         mut command: StdCommand,
@@ -40823,6 +41619,20 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                     );
                     return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                 }
+            }
+            if label == "real host reader" {
+                // A host can leave an MCP child holding inherited stdout/stderr
+                // handles after the host itself is killed. Drop our pipe ends
+                // before waiting so this reader timeout remains a real bound.
+                child.stdin.take();
+                drop(child.stdout.take());
+                drop(child.stderr.take());
+                let status = child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{label} plugin installer exceeded {timeout:?} (status {status})"),
+                )
+                .into());
             }
             let output = child.wait_with_output()?;
             let mut diagnostic = format!(
