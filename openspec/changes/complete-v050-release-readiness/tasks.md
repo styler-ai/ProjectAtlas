@@ -56,10 +56,10 @@
 
 ## 9. Real host configuration consumption (#390)
 
-- [ ] 9.1 Trace installer-generated Claude Code and OpenCode configuration ownership, native schemas, absolute runtime/database/config fields, version guards, restart messaging, isolated host roots, and collision-safe repair paths.
-- [ ] 9.2 Make each installed host consume its generated configuration through the real host reader and establish a ProjectAtlas MCP session without weakening per-project routing or treating structural parsing or checked-in fallback state as proof.
-- [ ] 9.3 Exercise installer-generated Claude Code and OpenCode configuration through the actual installed host readers in isolated homes/config roots on supported platforms. Cover valid launch and MCP initialize/session/source-evidence readback; missing host; invalid, stale, wrong-version, and repaired configuration; shared-registry default versus explicit project-root routing; and uninstall. Do not mutate unrelated host-global configuration, credentials, authentication state, or project data.
-- [ ] 9.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 9.1 Trace installer-generated Claude Code and OpenCode configuration ownership, native schemas, absolute runtime/database/config fields, version guards, restart messaging, isolated host roots, and collision-safe repair paths.
+- [x] 9.2 Make each installed host consume its generated configuration through the real host reader and establish a ProjectAtlas MCP session without weakening per-project routing or treating structural parsing or checked-in fallback state as proof.
+- [x] 9.3 Exercise installer-generated Claude Code and OpenCode configuration through the actual installed host readers in isolated homes/config roots on supported platforms. Cover valid launch and MCP initialize/session/source-evidence readback; missing host; invalid, stale, wrong-version, and repaired configuration; shared-registry default versus explicit project-root routing; and uninstall. Do not mutate unrelated host-global configuration, credentials, authentication state, or project data.
+- [x] 9.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 10. Released-main database baseline decision (#456)
 
