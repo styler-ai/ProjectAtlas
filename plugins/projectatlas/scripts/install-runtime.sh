@@ -134,6 +134,101 @@ atlas_forwarder_provenance_path() {
   printf '%s/.atlas-forwarder.provenance\n' "$(dirname -- "$forwarder")"
 }
 
+atlas_forwarder_state_root() {
+  printf '%s/projectatlas\n' "${XDG_STATE_HOME:-$HOME/.local/state}"
+}
+
+atlas_forwarder_state_path() {
+  forwarder=$1
+  canonical_forwarder=$(canonical_file "$forwarder") || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$canonical_forwarder" | sha256sum | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$canonical_forwarder" | shasum -a 256 | awk '{print $1}')
+  else
+    printf '%s\n' "ProjectAtlas requires sha256sum or shasum for atlas forwarder installer state." >&2
+    return 1
+  fi
+  printf '%s/atlas-forwarder-%s.state\n' "$(atlas_forwarder_state_root)" "$digest"
+}
+
+new_atlas_forwarder_capability() {
+  capability=$(od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]' || true)
+  case "$capability" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]* ) ;;
+    *) return 1 ;;
+  esac
+  [ "${#capability}" -eq 64 ] || return 1
+  expected_content=$(atlas_forwarder_state_content "$forwarder" "$verified" "$capability") || return 1
+  [ "$(cat "$state_path" 2>/dev/null || true)" = "$expected_content" ] || return 1
+  printf '%s\n' "$capability"
+}
+
+atlas_forwarder_state_content() {
+  forwarder=$1
+  verified=$2
+  capability=$3
+  canonical_forwarder=$(canonical_file "$forwarder") || return 1
+  canonical_verified=$(canonical_file "$verified") || return 1
+  printf '%s\n' '# ProjectAtlas atlas forwarder installer state v1'
+  printf '%s\n' "forwarder: $canonical_forwarder"
+  printf '%s\n' "runtime: $canonical_verified"
+  printf '%s\n' "capability: $capability"
+}
+
+atlas_forwarder_state_capability() {
+  forwarder=$1
+  verified=$2
+  state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
+  is_direct_regular_file "$state_path" || return 1
+  expected_forwarder=$(canonical_file "$forwarder") || return 1
+  expected_verified=$(canonical_file "$verified") || return 1
+  state_forwarder=$(sed -n 's/^forwarder: //p' "$state_path" | head -n 1)
+  state_verified=$(sed -n 's/^runtime: //p' "$state_path" | head -n 1)
+  capability=$(sed -n 's/^capability: //p' "$state_path" | head -n 1)
+  [ "$(sed -n '1p' "$state_path")" = '# ProjectAtlas atlas forwarder installer state v1' ] || return 1
+  [ "$state_forwarder" = "$expected_forwarder" ] || return 1
+  [ "$state_verified" = "$expected_verified" ] || return 1
+  case "$capability" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]* ) ;;
+    *) return 1 ;;
+  esac
+  [ "${#capability}" -eq 64 ] || return 1
+  printf '%s\n' "$capability"
+}
+
+ensure_atlas_forwarder_state() {
+  forwarder=$1
+  verified=$2
+  ATLAS_FORWARDER_STATE_PUBLISHED=0
+  state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
+  if [ -e "$state_path" ] || [ -L "$state_path" ]; then
+    atlas_forwarder_state_capability "$forwarder" "$verified" >/dev/null || {
+      printf '%s\n' "ProjectAtlas atlas forwarder installer state is missing, mismatched, or linked: $state_path" >&2
+      return 1
+    }
+    return 0
+  fi
+  state_root=$(atlas_forwarder_state_root)
+  mkdir -p -- "$state_root" || return 1
+  chmod 700 "$state_root" 2>/dev/null || true
+  capability=$(new_atlas_forwarder_capability) || return 1
+  temporary=$(mktemp "$state_root/.atlas-forwarder-state.XXXXXX") || return 1
+  chmod 600 "$temporary" 2>/dev/null || true
+  if ! atlas_forwarder_state_content "$forwarder" "$verified" "$capability" >"$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ln "$temporary" "$state_path" 2>/dev/null; then
+    rm -f -- "$temporary"
+    ATLAS_FORWARDER_STATE_PUBLISHED=1
+    return 0
+  fi
+  rm -f -- "$temporary"
+  atlas_forwarder_state_capability "$forwarder" "$verified" >/dev/null || return 1
+  return 0
+}
+
 shell_quote() {
   value=$1
   value=$(printf '%s' "$value" | sed "s/'/'\\\\''/g")
@@ -170,6 +265,7 @@ is_atlas_forwarder_provenance() {
   provenance=$1
   forwarder=$2
   verified=$3
+  atlas_forwarder_state_capability "$forwarder" "$verified" >/dev/null || return 1
   is_direct_regular_file "$provenance" || return 1
   expected_content=$(atlas_forwarder_provenance_content "$forwarder" "$verified") || return 1
   actual_content=$(cat "$provenance" 2>/dev/null || true)
@@ -181,8 +277,70 @@ remove_published_atlas_forwarder_provenance() {
   forwarder=$2
   verified=$3
   if is_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
-    rm -f -- "$provenance"
+    quarantine=$(new_atlas_forwarder_quarantine "$provenance") || return 1
+    if ! mv -- "$provenance" "$quarantine"; then
+      rm -f -- "$quarantine"
+      return 1
+    fi
+    expected=$(atlas_forwarder_provenance_content "$forwarder" "$verified") || return 1
+    actual=$(cat "$quarantine" 2>/dev/null || true)
+    if [ "$actual" != "$expected" ] || [ -e "$provenance" ] || [ -L "$provenance" ]; then
+      restore_atlas_forwarder_quarantine "$quarantine" "$provenance"
+      return 1
+    fi
+    rm -f -- "$quarantine"
   fi
+}
+
+new_atlas_forwarder_quarantine() {
+  file=$1
+  mktemp "$(dirname -- "$file")/.atlas-forwarder-retire.XXXXXX"
+}
+
+restore_atlas_forwarder_quarantine() {
+  quarantine=$1
+  destination=$2
+  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+    if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
+      mv -- "$quarantine" "$destination"
+    fi
+  fi
+}
+
+retire_atlas_forwarder_race() {
+  path=$1
+  race_path=$2
+  content=$3
+  [ -n "$race_path" ] && [ "$(canonical_file "$race_path")" = "$(canonical_file "$path")" ] || return 0
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    return 0
+  fi
+  printf '%s' "$content" >"$path"
+}
+
+remove_atlas_forwarder_state() {
+  forwarder=$1
+  verified=$2
+  state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
+  if [ ! -e "$state_path" ] && [ ! -L "$state_path" ]; then
+    return 0
+  fi
+  capability=$(atlas_forwarder_state_capability "$forwarder" "$verified") || {
+    printf '%s\n' "ProjectAtlas atlas forwarder installer state changed during retirement: $state_path" >&2
+    return 1
+  }
+  quarantine=$(new_atlas_forwarder_quarantine "$state_path") || return 1
+  if ! mv -- "$state_path" "$quarantine"; then
+    rm -f -- "$quarantine"
+    return 1
+  fi
+  expected=$(atlas_forwarder_state_content "$forwarder" "$verified" "$capability") || return 1
+  actual=$(cat "$quarantine" 2>/dev/null || true)
+  if [ "$actual" != "$expected" ]; then
+    restore_atlas_forwarder_quarantine "$quarantine" "$state_path"
+    return 1
+  fi
+  rm -f -- "$quarantine"
 }
 
 managed_atlas_forwarder_target() {
@@ -214,15 +372,42 @@ is_managed_atlas_forwarder() {
 migrate_managed_atlas_forwarder() {
   candidate=$1
   verified=$2
+  allow_same_target=${3:-0}
   [ -n "$verified" ] || return 1
   managed_target=$(managed_atlas_forwarder_target "$candidate") || return 1
-  [ "$managed_target" != "$(canonical_file "$verified")" ] || return 1
+  [ "$managed_target" != "$(canonical_file "$verified")" ] || [ "$allow_same_target" -eq 1 ] || return 1
   if ! is_managed_atlas_forwarder "$candidate" "$managed_target"; then
     return 1
   fi
   provenance=$(atlas_forwarder_provenance_path "$candidate") || return 1
-  rm -f -- "$candidate" || return 1
-  rm -f -- "$provenance" || return 1
+  forwarder_quarantine=$(new_atlas_forwarder_quarantine "$candidate") || return 1
+  provenance_quarantine=$(new_atlas_forwarder_quarantine "$provenance") || {
+    rm -f -- "$forwarder_quarantine"
+    return 1
+  }
+  if ! mv -- "$candidate" "$forwarder_quarantine"; then
+    rm -f -- "$forwarder_quarantine" "$provenance_quarantine"
+    return 1
+  fi
+  retire_atlas_forwarder_race "$candidate" "${PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH:-}" "foreign forwarder retirement race"
+  if ! mv -- "$provenance" "$provenance_quarantine"; then
+    restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    rm -f -- "$provenance_quarantine"
+    return 1
+  fi
+  retire_atlas_forwarder_race "$provenance" "${PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RETIRE_RACE_PATH:-}" "foreign provenance retirement race"
+  expected_content=$(atlas_forwarder_content "$managed_target") || return 1
+  actual_content=$(cat "$forwarder_quarantine" 2>/dev/null || true)
+  expected_provenance=$(atlas_forwarder_provenance_content "$candidate" "$managed_target") || return 1
+  actual_provenance=$(cat "$provenance_quarantine" 2>/dev/null || true)
+  if { [ "$actual_content" != "$expected_content" ] || [ "$actual_provenance" != "$expected_provenance" ]; } ||
+    [ -e "$candidate" ] || [ -L "$candidate" ] || [ -e "$provenance" ] || [ -L "$provenance" ]; then
+    restore_atlas_forwarder_quarantine "$provenance_quarantine" "$provenance"
+    restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    return 1
+  fi
+  rm -f -- "$forwarder_quarantine" "$provenance_quarantine"
+  remove_atlas_forwarder_state "$candidate" "$managed_target" || return 1
   printf '%s\n' "Migrated ProjectAtlas atlas forwarder: $candidate -> $(atlas_forwarder_path "$(canonical_file "$verified")")"
 }
 
@@ -261,6 +446,7 @@ write_atlas_forwarder() {
   verified=$(canonical_file "$1") || return 1
   forwarder=$(atlas_forwarder_path "$verified")
   provenance=$(atlas_forwarder_provenance_path "$forwarder")
+  state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
   previous_atlas=$(command -v atlas 2>/dev/null || true)
   ensure_atlas_forwarder_collision_free "$forwarder" "$verified" || return 1
   runtime_dir=$(dirname -- "$verified")
@@ -297,6 +483,11 @@ write_atlas_forwarder() {
     rm -f "$temporary" "$temporary_provenance"
     return 1
   }
+  if ! ensure_atlas_forwarder_state "$forwarder" "$verified"; then
+    rm -f -- "$temporary" "$temporary_provenance"
+    return 1
+  fi
+  state_published=$ATLAS_FORWARDER_STATE_PUBLISHED
   provenance_published=0
   if [ -e "$provenance" ] || [ -L "$provenance" ]; then
     if ! is_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
@@ -317,6 +508,9 @@ write_atlas_forwarder() {
     if [ "$provenance_published" -eq 1 ]; then
       remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"
     fi
+    if [ "$state_published" -eq 1 ]; then
+      remove_atlas_forwarder_state "$forwarder" "$verified" || true
+    fi
     rm -f "$temporary"
     return 1
   fi
@@ -324,6 +518,9 @@ write_atlas_forwarder() {
     if ! inject_atlas_forwarder_publication_race "$forwarder" || ! ln "$temporary" "$forwarder"; then
       if [ "$provenance_published" -eq 1 ]; then
         remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"
+      fi
+      if [ "$state_published" -eq 1 ]; then
+        remove_atlas_forwarder_state "$forwarder" "$verified" || true
       fi
       rm -f "$temporary"
       printf '%s\n' "ProjectAtlas atlas forwarder publication collided; refusing to overwrite: $forwarder" >&2
@@ -334,6 +531,13 @@ write_atlas_forwarder() {
     rm -f "$temporary"
   fi
   if ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
+    if [ "$provenance_published" -eq 1 ]; then
+      remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified" || true
+    fi
+    if [ "$state_published" -eq 1 ]; then
+      remove_atlas_forwarder_state "$forwarder" "$verified" || true
+    fi
+    rm -f -- "$temporary"
     printf '%s\n' "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder" >&2
     return 1
   fi
@@ -354,9 +558,10 @@ remove_atlas_forwarder() {
     printf '%s\n' "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $forwarder" >&2
     return 1
   fi
-  provenance=$(atlas_forwarder_provenance_path "$forwarder") || return 1
-  rm -f -- "$forwarder" || return 1
-  rm -f -- "$provenance" || return 1
+  migrate_managed_atlas_forwarder "$forwarder" "$verified" 1 || {
+    printf '%s\n' "ProjectAtlas atlas uninstall could not retire the owned forwarder safely: $forwarder" >&2
+    return 1
+  }
   printf 'ProjectAtlas atlas forwarder removed: %s\n' "$forwarder"
 }
 
