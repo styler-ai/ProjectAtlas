@@ -6660,7 +6660,16 @@ fn parse_admitted_symbol_job(
         };
         (graph, None)
     };
-    let source_parser = source_parser.unwrap_or(graph.parser);
+    let source_parser = source_parser.unwrap_or_else(|| {
+        job.language
+            .as_deref()
+            .and_then(language_capability)
+            .and_then(|capability| match capability.symbol_parser {
+                SymbolParserOwner::TreeSitter(_) => Some(ParserKind::TreeSitter),
+                _ => None,
+            })
+            .unwrap_or(graph.parser)
+    });
     let structural_summary = if let Some(facts) = &markdown_facts {
         markdown_summary_from_facts(
             facts,
@@ -10447,6 +10456,62 @@ mod tests {
                 .content,
             &current_source.to_string(),
             "current source after contention",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn partial_php_facts_keep_tree_sitter_source_provenance() -> Result<(), Box<dyn Error>> {
+        let content = "<?php function run(): void { $callable(); helper(); }";
+        let job = SymbolParseJob {
+            path: "src/dynamic.php".to_string(),
+            native_path: PathBuf::new(),
+            expected_content_hash: String::new(),
+            language: Some("php".to_string()),
+            fallback_summary: None,
+            purpose_needs_suggestion: false,
+        };
+        let SymbolParseOutcome::Parsed(parsed) = parse_admitted_symbol_job(
+            &job,
+            content,
+            None,
+            &SymbolBuildOptions::new(1_024, Some(1), None),
+            &standalone_index_work_control(),
+        ) else {
+            return Err(io::Error::other("partial PHP fixture did not parse").into());
+        };
+        require_eq(
+            &parsed.graph.parser,
+            &ParserKind::Fallback,
+            "partial PHP fact parser",
+        )?;
+        require_eq(
+            &parsed.source_parser,
+            &ParserKind::TreeSitter,
+            "partial PHP source parser",
+        )?;
+        require_eq(
+            &parsed
+                .graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "run"),
+            &true,
+            "partial PHP recovered symbol",
+        )?;
+        require_eq(
+            &parsed.graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Calls && relation.target_name == "helper"
+            }),
+            &true,
+            "partial PHP known call",
+        )?;
+        require_eq(
+            &parsed.graph.relations.iter().all(|relation| {
+                relation.kind != RelationKind::Calls || relation.target_name != "$callable"
+            }),
+            &true,
+            "partial PHP dynamic call abstention",
         )?;
         Ok(())
     }

@@ -6497,7 +6497,7 @@ mod tests {
         MAX_INCREMENTAL_GRAPH_ROWS, PARTIAL_COVERAGE_REASON, PackageIndex,
         ProjectResolutionRegistry, QUALIFIED_SYMBOL_SCOPE_PREFIX, RepositoryGraphMutation,
         StagedRepositoryGraph, build_entity_projection, build_entity_projection_with_config,
-        build_entity_projection_with_config_limit, cleanup_abandoned_graph_staging,
+        build_entity_projection_with_config_limit, cleanup_abandoned_graph_staging, coverage_for_graph,
         document_casefold_resolution_key, document_coverage, document_fact_map_retained_bytes,
         document_projection_retained_bytes, enforce_incremental_projection_budget,
         enforce_incremental_projection_limits, enforce_resolution_staging_budget,
@@ -12639,6 +12639,33 @@ mod tests {
             "fallback coverage after reopen",
         )?;
         reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn partial_php_graph_publishes_existing_partial_coverage() -> Result<(), Box<dyn Error>> {
+        let graph = extract_symbol_graph(
+            "src/dynamic.php",
+            Some("php"),
+            "<?php function run(): void { $callable(); helper(); }",
+        );
+        require_eq(
+            &graph.parser,
+            &ParserKind::Fallback,
+            "partial PHP fact parser",
+        )?;
+        let coverage = coverage_for_graph(&graph, IndexGeneration::new(1))?;
+        require_eq(
+            &coverage.state(),
+            &CoverageState::Partial,
+            "partial PHP coverage state",
+        )?;
+        require_eq(&coverage.covered(), &1, "partial PHP covered relations")?;
+        require_eq(&coverage.omitted(), &1, "partial PHP omitted relations")?;
+        require(
+            coverage.reason().is_some(),
+            "partial PHP coverage must disclose its reason",
+        )?;
         Ok(())
     }
 

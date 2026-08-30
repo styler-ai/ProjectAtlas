@@ -41925,9 +41925,20 @@ function helper(): void {}
         require_json_string(
             summary,
             &["file_summary", "parser_kind"],
-            "tree-sitter-symbol-graph",
+            "fallback-symbol-graph",
         )?;
-        require_json_string(summary, &["file_summary", "summary_status"], "ok")?;
+        require_json_string(summary, &["file_summary", "summary_status"], "fallback")?;
+        require_json_string(
+            summary,
+            &["file_summary", "coverage", "parser"],
+            "tree-sitter",
+        )?;
+        require_json_usize_at_least(
+            summary,
+            &["file_summary", "coverage", "states", "partial"],
+            1,
+        )?;
+        require_json_usize_at_least(summary, &["file_summary", "coverage", "omitted"], 1)?;
         let file_summary = json_at(summary, &["file_summary"])?;
         let imports = json_at(file_summary, &["imports"])?
             .as_array()

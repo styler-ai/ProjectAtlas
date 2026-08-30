@@ -127,6 +127,9 @@ fn extract_symbol_graph_checked<E>(
         extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
     {
         restore_php_selector_columns(&mut parsed.graph, content);
+        if parsed.incomplete {
+            mark_graph_fallback(&mut parsed.graph);
+        }
         if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
             check()?;
             return Ok(parsed.graph);
@@ -838,6 +841,8 @@ struct TreeSitterParse {
     graph: SymbolGraph,
     /// Whether tree-sitter found syntax errors while parsing.
     had_errors: bool,
+    /// Whether the extracted facts omit PHP semantics that cannot be proven statically.
+    incomplete: bool,
 }
 
 /// PHP mixed-grammar result with its grammar-owned opening-tag classification.
@@ -882,9 +887,11 @@ fn extract_tree_sitter_graph<E>(
         return Ok(Some(TreeSitterParse {
             graph,
             had_errors: false,
+            incomplete: false,
         }));
     }
     let had_errors = root.has_error() && has_php_opening_tag != Some(false);
+    let mut incomplete = has_php_opening_tag == Some(true) && had_errors;
     let mut php_namespace_context = if has_php_opening_tag == Some(true) {
         Some(PhpNamespaceContext::from_program(root, content, check)?)
     } else {
@@ -896,11 +903,16 @@ fn extract_tree_sitter_graph<E>(
         &mut graph,
         check,
         php_namespace_context.as_mut(),
+        &mut incomplete,
     )?;
     check()?;
     languages::augment_language_graph(&mut graph, content, check)?;
     check()?;
-    Ok(Some(TreeSitterParse { graph, had_errors }))
+    Ok(Some(TreeSitterParse {
+        graph,
+        had_errors,
+        incomplete,
+    }))
 }
 
 /// Precomputed source-order ownership ranges for semicolon PHP namespaces.
@@ -1215,7 +1227,12 @@ fn is_php_pre_tag_inline_opening(node: Node<'_>, content: &str, range_start: usi
     }
     content
         .get(range_start..node.start_byte())
-        .is_some_and(|prefix| prefix.starts_with("//") || prefix.starts_with('#'))
+        .is_some_and(|prefix| {
+            prefix
+                .strip_prefix("//")
+                .or_else(|| prefix.strip_prefix('#'))
+                .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+        })
 }
 
 /// Return whether the PHP-only parse node is opaque to mixed-grammar tags.
@@ -1248,8 +1265,12 @@ fn visit_node<E>(
     graph: &mut SymbolGraph,
     check: &mut impl FnMut() -> Result<(), E>,
     mut php_namespace_context: Option<&mut PhpNamespaceContext>,
+    incomplete: &mut bool,
 ) -> Result<(), E> {
     check()?;
+    if is_php_language(graph.language.as_deref()) && php_node_is_incomplete(node, content) {
+        *incomplete = true;
+    }
     if graph.symbols.len() < MAX_SYMBOLS_PER_FILE
         && let Some(kind) = declaration_kind(node.kind())
         && should_emit_declaration_symbol(node, content)
@@ -1279,6 +1300,7 @@ fn visit_node<E>(
             graph,
             check,
             php_namespace_context.as_deref_mut(),
+            incomplete,
         )?;
     }
     Ok(())
@@ -1916,6 +1938,25 @@ fn push_php_trait_use_relations(graph: &mut SymbolGraph, node: Node<'_>, content
 /// Return whether a supplied language identifier selects the PHP owner.
 fn is_php_language(language: Option<&str>) -> bool {
     language.is_some_and(|language| language.eq_ignore_ascii_case("php"))
+}
+
+/// Return whether a PHP node's facts require conservative partial coverage.
+fn php_node_is_incomplete(node: Node<'_>, content: &str) -> bool {
+    if is_call_node(node.kind()) {
+        return php_call_target(node, content).is_none();
+    }
+    is_php_include_node(node.kind()) && php_static_include_target(node, content).is_none()
+}
+
+/// Keep recovered PHP facts while exposing their conservative parser tier.
+fn mark_graph_fallback(graph: &mut SymbolGraph) {
+    graph.parser = ParserKind::Fallback;
+    for symbol in &mut graph.symbols {
+        symbol.parser = ParserKind::Fallback;
+    }
+    for relation in &mut graph.relations {
+        relation.parser = ParserKind::Fallback;
+    }
 }
 
 /// Return a static PHP include target, omitting dynamic or ambiguous expressions.
@@ -4971,7 +5012,7 @@ class Service {
 function helper(string $value): void {}
 "#;
         let graph = extract_symbol_graph("src/Service.php", Some("php"), source);
-        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        assert_eq!(graph.parser, ParserKind::Fallback);
 
         for name in [
             "Atlas\\Domain",
@@ -5308,6 +5349,8 @@ function run(string $code): void {
 }
 ";
         let graph = extract_symbol_graph("src/DynamicExecution.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::Fallback);
+        assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
         let calls = graph
             .relations
             .iter()
@@ -5326,6 +5369,13 @@ function run(string $code): void {
                 && relation.path == "src/DynamicExecution.php"
                 && relation.context.contains("helper()")
         }));
+    }
+
+    #[test]
+    fn php_complete_static_source_stays_tree_sitter() {
+        let graph = extract_symbol_graph("fixture.php", Some("php"), "<?php function run() {}");
+        assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+        assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
     }
 
     #[test]
@@ -5728,6 +5778,7 @@ class Owner {
             Some("php"),
             "<?php $callable(); $object->$method(); include $path;",
         );
+        assert_eq!(dynamic.parser, ParserKind::Fallback);
         assert!(dynamic.relations.iter().all(|relation| {
             !matches!(relation.kind, RelationKind::Calls | RelationKind::Imports)
                 || ![
@@ -5744,8 +5795,18 @@ class Owner {
         let malformed = extract_symbol_graph(
             "src/broken.php",
             Some("php"),
-            "<?php function broken( { $unknown->();",
+            "<?php function recovered(): void {} function broken( { $unknown->();",
         );
+        assert_eq!(malformed.parser, ParserKind::Fallback);
+        assert!(
+            malformed
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "recovered")
+        );
+        assert!(malformed.relations.iter().all(|relation| {
+            relation.kind != RelationKind::Calls || relation.target_name != "$unknown"
+        }));
         assert!(malformed.symbols.len() <= MAX_SYMBOLS_PER_FILE);
         assert!(malformed.relations.len() <= 8_000);
     }
@@ -5833,6 +5894,8 @@ TEXT;
 }",
             "function marker(): string { return `echo <?`; }",
             "// <?\rfunction marker(): string { return 'marker'; }",
+            "//x<?php function marker(): string {}",
+            "#output<?= $value ?>",
         ] {
             assert!(
                 !super::contains_php_opening_tag(source),
