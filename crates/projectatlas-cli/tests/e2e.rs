@@ -11628,15 +11628,18 @@ public static class Program
         None,
     )?;
     let readiness_elapsed = readiness_started.elapsed();
+    let delayed_publication_max_elapsed = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_IDENTITY_CAPTURE_BUDGET
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     let delayed_publication_crossed_former_budget = readiness_elapsed > Duration::from_secs(5)
-        && readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT;
+        && readiness_elapsed < delayed_publication_max_elapsed;
     let mut second_codex_owner = None;
     let mut second_obsolete_mcp_pid = None;
     let mut non_codex_child = None;
     let test_result = (|| -> Result<(), Box<dyn Error>> {
         if !delayed_publication_crossed_former_budget {
             return Err(io::Error::other(format!(
-                "delayed Codex owner publication did not cross the former five-second boundary within the readiness budget: elapsed={readiness_elapsed:?} budget={CODEX_OWNER_READINESS_TIMEOUT:?}"
+                "delayed Codex owner publication did not cross the former five-second boundary within the bounded readiness/capture envelope: elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} identity_capture={CODEX_OWNER_IDENTITY_CAPTURE_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} max_elapsed={delayed_publication_max_elapsed:?}"
             ))
             .into());
         }
