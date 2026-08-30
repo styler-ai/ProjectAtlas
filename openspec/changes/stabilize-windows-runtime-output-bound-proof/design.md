@@ -38,3 +38,15 @@ The test remains in the current Windows delivery E2E owner and follows #487's ac
 - [Risk] The fixture still passes without exceeding the ceiling. -> Emit a finite payload strictly larger than the existing bound before blocking and assert the output-limit disposition.
 - [Risk] The fix races ongoing E2E ownership changes. -> Start implementation only from the accepted shared baseline and preserve the final single #487 owner.
 - [Risk] A disposition string becomes a new public contract. -> Keep it private to the installer script/test boundary and do not serialize or document it as product output.
+
+## Migration Plan
+
+No data or schema migration. Land the private observation and causal Windows fixtures together; rollback is a direct revert of that script/test change.
+
+## Dependencies / Cross-Issue Impact
+
+No prerequisite issue. If #487 lands first, refresh onto its accepted test-ownership move; #518 and #523 remain separate E2E boundaries.
+
+## Open Questions
+
+None.
