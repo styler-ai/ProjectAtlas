@@ -2670,13 +2670,13 @@ fn php_declaration_is_exported(node: Node<'_>, content: &str) -> bool {
         return true;
     };
     let mut cursor = declaration.walk();
-    declaration
+    !declaration
         .named_children(&mut cursor)
         .filter(|child| child.kind() == "visibility_modifier")
-        .find_map(|modifier| node_text(modifier, content))
-        .is_none_or(|modifier| {
+        .filter_map(|modifier| node_text(modifier, content))
+        .any(|modifier| {
             let modifier = modifier.trim();
-            !modifier.eq_ignore_ascii_case("private") && !modifier.eq_ignore_ascii_case("protected")
+            modifier.eq_ignore_ascii_case("private") || modifier.eq_ignore_ascii_case("protected")
         })
 }
 
@@ -5177,6 +5177,7 @@ class Service {
     private(set) string $readablePrivateSet;
     protected(set) string $readableProtectedSet;
     public(set) string $readablePublicSet;
+    private(set) protected string $privateSetWithProtectedRead;
     public static function exposed(): void {}
     function defaulted(): void {}
 }
@@ -5190,6 +5191,7 @@ class Service {
             ("readablePrivateSet", true),
             ("readableProtectedSet", true),
             ("readablePublicSet", true),
+            ("privateSetWithProtectedRead", false),
             ("exposed", true),
             ("defaulted", true),
         ] {
@@ -5223,6 +5225,7 @@ class Service {
         assert!(exported_names.contains(&"readablePrivateSet"));
         assert!(exported_names.contains(&"readableProtectedSet"));
         assert!(exported_names.contains(&"readablePublicSet"));
+        assert!(!exported_names.contains(&"privateSetWithProtectedRead"));
         assert!(!exported_names.contains(&"guarded"));
         assert!(!exported_names.contains(&"cache"));
     }
