@@ -1008,7 +1008,9 @@ fn parse_php_tree<E>(
     let Some(mixed) = parse_tree_sitter_language(&mixed_language, content, check)? else {
         return Ok(None);
     };
-    let Some(first_tag_start) = first_php_tag_start(mixed.root_node()) else {
+    let mut examined_nodes = 0;
+    let Some(first_tag_start) = first_php_tag_start(mixed.root_node(), check, &mut examined_nodes)?
+    else {
         return Ok(Some(PhpParse {
             tree: mixed,
             has_opening_tag: false,
@@ -1095,14 +1097,23 @@ fn parse_tree_sitter_language<E>(
 }
 
 /// Return the first opening-tag byte offset in a mixed PHP parse.
-fn first_php_tag_start(node: Node<'_>) -> Option<usize> {
+fn first_php_tag_start<E>(
+    node: Node<'_>,
+    check: &mut impl FnMut() -> Result<(), E>,
+    examined_nodes: &mut usize,
+) -> Result<Option<usize>, E> {
+    *examined_nodes += 1;
+    check_parser_iteration(*examined_nodes, check)?;
     if node.kind() == "php_tag" {
-        return Some(node.start_byte());
+        return Ok(Some(node.start_byte()));
     }
     let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .filter_map(first_php_tag_start)
-        .min()
+    for child in node.children(&mut cursor) {
+        if let Some(start) = first_php_tag_start(child, check, examined_nodes)? {
+            return Ok(Some(start));
+        }
+    }
+    Ok(None)
 }
 
 /// Return whether a mixed parse contains a tag outside a PHP literal or comment.
@@ -1190,7 +1201,9 @@ fn visit_node<E>(
         );
     }
     if graph.relations.len() < MAX_RELATIONS_PER_FILE {
-        if is_import_node(node.kind()) {
+        if is_php_trait_use_declaration(node) {
+            push_php_trait_use_relations(graph, node, content);
+        } else if is_import_node(node.kind()) {
             push_import_relation(graph, node, content);
         } else if is_call_node(node.kind()) {
             push_call_relation(graph, node, content);
@@ -1247,6 +1260,9 @@ fn declaration_is_method_context(node: Node<'_>) -> bool {
 
 /// Return whether this declaration node should become its own symbol row.
 fn should_emit_declaration_symbol(node: Node<'_>, content: &str) -> bool {
+    if is_php_trait_use_declaration(node) {
+        return false;
+    }
     if is_object_literal_method(node) {
         return object_literal_method_owner(node, content).is_some_and(|owner| owner.exported);
     }
@@ -1753,6 +1769,73 @@ fn is_php_include_node(kind: &str) -> bool {
     )
 }
 
+/// Return whether a PHP `use` declaration composes traits inside a type.
+fn is_php_trait_use_declaration(node: Node<'_>) -> bool {
+    node.kind() == "use_declaration"
+        && has_ancestor_kind_any(
+            node.parent(),
+            &["class_declaration", "trait_declaration", "enum_declaration"],
+        )
+}
+
+/// Return the owning type for a PHP trait composition declaration.
+fn php_trait_use_owner(node: Node<'_>, content: &str) -> Option<String> {
+    if !is_php_trait_use_declaration(node) {
+        return None;
+    }
+    let mut current = node.parent();
+    while let Some(candidate) = current {
+        if declaration_kind(candidate.kind()).is_some() {
+            return matches!(
+                candidate.kind(),
+                "class_declaration" | "trait_declaration" | "enum_declaration"
+            )
+            .then(|| node_name(candidate, content))
+            .flatten();
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+/// Return direct trait targets, excluding alias and adaptation clause names.
+fn php_trait_use_targets(node: Node<'_>, content: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if targets.len() >= MAX_RELATIONS_PER_FILE {
+            break;
+        }
+        if matches!(child.kind(), "name" | "qualified_name" | "relative_name")
+            && let Some(target) = named_text(child, content)
+            && target.chars().count() <= MAX_SNIPPET_CHARS
+        {
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+/// Publish exact trait-composition targets under their owning PHP type.
+fn push_php_trait_use_relations(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+    let Some(owner) = php_trait_use_owner(node, content) else {
+        return;
+    };
+    for target in php_trait_use_targets(node, content) {
+        if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
+            break;
+        }
+        push_relation(
+            graph,
+            &owner,
+            &target,
+            RelationKind::Imports,
+            node.start_position().row + 1,
+            &target,
+        );
+    }
+}
+
 /// Return whether a supplied language identifier selects the PHP owner.
 fn is_php_language(language: Option<&str>) -> bool {
     language.is_some_and(|language| language.eq_ignore_ascii_case("php"))
@@ -1989,14 +2072,25 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
     if import_text.is_empty() || import_text.chars().count() > MAX_SNIPPET_CHARS {
         return;
     }
-    push_relation(
-        graph,
-        "<module>",
-        &import_text,
-        RelationKind::Imports,
-        node.start_position().row + 1,
-        &import_text,
-    );
+    if is_php_include_node(node.kind()) {
+        push_relation_preserving_target(
+            graph,
+            "<module>",
+            &import_text,
+            RelationKind::Imports,
+            node.start_position().row + 1,
+            &import_text,
+        );
+    } else {
+        push_relation(
+            graph,
+            "<module>",
+            &import_text,
+            RelationKind::Imports,
+            node.start_position().row + 1,
+            &import_text,
+        );
+    }
 }
 
 /// Push a call relation from a call node.
@@ -2929,6 +3023,33 @@ fn push_relation(
         kind,
         line,
         context: truncate_chars_at_boundary(&compact_text(context), MAX_SNIPPET_CHARS),
+        parser: graph.parser,
+    });
+}
+
+/// Push a bounded relation while preserving a target already decoded by a mapper.
+fn push_relation_preserving_target(
+    graph: &mut SymbolGraph,
+    source_name: &str,
+    target_name: &str,
+    kind: RelationKind,
+    line: usize,
+    context: &str,
+) {
+    if graph.relations.len() >= MAX_RELATIONS_PER_FILE
+        || target_name.is_empty()
+        || target_name.chars().count() > MAX_SNIPPET_CHARS
+        || context.chars().count() > MAX_SNIPPET_CHARS
+    {
+        return;
+    }
+    graph.relations.push(SymbolRelation {
+        path: graph.path.clone(),
+        source_name: truncate_chars_at_boundary(&compact_text(source_name), MAX_SNIPPET_CHARS),
+        target_name: target_name.to_string(),
+        kind,
+        line,
+        context: context.to_string(),
         parser: graph.parser,
     });
 }
@@ -5226,7 +5347,7 @@ require (1 + 2);
         for (target, line) in [
             ("vendor\\bootstrap.php", 2),
             ("vendor\"quoted.php", 3),
-            ("control path.php", 4),
+            ("control\npath.php", 4),
             ("dollar$name.php", 5),
         ] {
             let matches = imports
@@ -5293,6 +5414,45 @@ include_once(Vendor\BOOTSTRAP);
                 relation.target_name.as_str(),
                 "nested.php" | "malformed.php" | "boot/$name.php" | "$dynamic" | "[]" | "BOOTSTRAP"
             ) && !relation.target_name.contains("Vendor")
+        }));
+    }
+
+    #[test]
+    fn php_trait_use_relations_preserve_type_ownership_and_ignore_adaptations() {
+        let source = r"<?php
+trait Auditable {}
+trait FirstTrait {}
+class Service {
+    use Auditable;
+    use FirstTrait, Vendor\SecondTrait {
+        FirstTrait::audit insteadof Vendor\SecondTrait;
+        Vendor\SecondTrait::audit as protected auditFromSecond;
+    }
+}
+";
+        let graph = extract_symbol_graph("src/Traits.php", Some("php"), source);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        for target in ["Auditable", "FirstTrait", "Vendor\\SecondTrait"] {
+            assert!(
+                imports.iter().any(|relation| {
+                    relation.source_name == "Service" && relation.target_name == target
+                }),
+                "missing class-owned PHP trait relation {target}: {imports:?}"
+            );
+        }
+        assert!(imports.iter().all(|relation| {
+            relation.source_name != "<module>"
+                && !relation.target_name.starts_with("use ")
+                && !relation.target_name.contains("audit")
+                && !relation.target_name.contains("protected")
+        }));
+        assert!(!graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Import && symbol.parent.as_deref() == Some("Service")
         }));
     }
 
@@ -5607,6 +5767,64 @@ TEXT;
                 "mixed PHP symbol disappeared after opening-tag classification: {source:?}"
             );
         }
+    }
+
+    #[test]
+    fn php_opening_tag_search_stops_at_first_source_order_tag() {
+        let mut source = String::from("<?php\n");
+        for index in 0..512 {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let language = super::tree_sitter_language("php");
+        assert!(language.is_some(), "PHP grammar should be registered");
+        let Some(language) = language else { return };
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let tree = super::parse_tree_sitter_language(&language, &source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(tree.is_some(), "mixed PHP source should produce a tree");
+        let Some(tree) = tree else { return };
+        let mut examined_nodes = 0;
+        let first = super::first_php_tag_start(
+            tree.root_node(),
+            &mut || Ok::<(), Infallible>(()),
+            &mut examined_nodes,
+        );
+        assert_eq!(first, Ok(Some(0)));
+        assert!(
+            examined_nodes < 16,
+            "source-order tag search should stop before walking the function body: {examined_nodes}"
+        );
+    }
+
+    #[test]
+    fn php_opening_tag_search_checks_cancellation_on_large_tagless_tree() {
+        let mut source = String::new();
+        for index in 0..512 {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let language = super::tree_sitter_language("php");
+        assert!(language.is_some(), "PHP grammar should be registered");
+        let Some(language) = language else { return };
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let tree = super::parse_tree_sitter_language(&language, &source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(tree.is_some(), "PHP-only source should produce a tree");
+        let Some(tree) = tree else { return };
+        let mut examined_nodes = 0;
+        let mut checks = 0;
+        let result = super::first_php_tag_start(
+            tree.root_node(),
+            &mut || {
+                checks += 1;
+                Err::<(), _>("cancelled")
+            },
+            &mut examined_nodes,
+        );
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(checks, 1);
+        assert!(examined_nodes >= super::PARSER_CONTROL_CHECK_INTERVAL);
     }
 
     #[test]
