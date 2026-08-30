@@ -10708,6 +10708,132 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 }
 
 #[test]
+fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+
+    let runtime_name = if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    };
+    let first_runtime_dir = temp.path().join("first runtime");
+    let second_runtime_dir = temp.path().join("second runtime");
+    fs::create_dir_all(&first_runtime_dir)?;
+    fs::create_dir_all(&second_runtime_dir)?;
+    let first_runtime = first_runtime_dir.join(runtime_name);
+    let second_runtime = second_runtime_dir.join(runtime_name);
+    fs::copy(mcp_contract_executable(), &first_runtime)?;
+    fs::copy(mcp_contract_executable(), &second_runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for runtime in [&first_runtime, &second_runtime] {
+            let mut permissions = fs::metadata(runtime)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(runtime, permissions)?;
+        }
+    }
+
+    let home = temp.path().join("isolated home");
+    fs::create_dir_all(&home)?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let installer_path = env::join_paths(
+        [first_runtime_dir.clone(), second_runtime_dir.clone()]
+            .into_iter()
+            .chain(env::split_paths(&inherited_path).filter(|entry| {
+                !entry
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .replace('/', "\\")
+                    .contains("\\target\\debug")
+            })),
+    )?;
+    let workspace_root = workspace_root()?;
+    let run_install = |runtime: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &installer_path);
+        Ok(command.output()?)
+    };
+
+    let first_output = run_install(&first_runtime)?;
+    require(
+        first_output.status.success(),
+        format!(
+            "installer failed to create the first managed atlas forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&first_output.stdout),
+            String::from_utf8_lossy(&first_output.stderr)
+        ),
+    )?;
+    let first_forwarder = first_runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let second_forwarder =
+        second_runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    require(
+        first_forwarder.is_file(),
+        "first managed atlas forwarder was not installed",
+    )?;
+
+    let second_output = run_install(&second_runtime)?;
+    let second_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&second_output.stdout),
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    require(
+        second_output.status.success() && !first_forwarder.exists() && second_forwarder.is_file(),
+        format!(
+            "installer did not migrate the owned forwarder from the old PATH location:\n{second_output_text}"
+        ),
+    )?;
+
+    let direct_output = StdCommand::new(&second_runtime)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let alias_output = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .args(["/D", "/C", "call"])
+            .arg(&second_forwarder)
+            .args(["--format", "toon", "runtime-info"])
+            .output()?
+    } else {
+        StdCommand::new(&second_forwarder)
+            .env("PATH", &installer_path)
+            .args(["--format", "toon", "runtime-info"])
+            .output()?
+    };
+    require(
+        direct_output.status == alias_output.status
+            && direct_output.stdout == alias_output.stdout
+            && direct_output.stderr == alias_output.stderr,
+        format!(
+            "migrated atlas forwarder diverged from the new runtime:\ndirect={} {}\nalias={} {}",
+            direct_output.status,
+            String::from_utf8_lossy(&direct_output.stderr),
+            alias_output.status,
+            String::from_utf8_lossy(&alias_output.stderr)
+        ),
+    )?;
+    Ok(())
+}
+
+#[test]
 #[cfg(unix)]
 fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
@@ -10721,7 +10847,16 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime_dir = temp.path().join("real runtime");
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join("projectatlas");
+    fs::copy(mcp_contract_executable(), &runtime)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime, permissions)?;
+    }
     let runtime_link = temp.path().join("projectatlas-runtime-link");
     symlink(&runtime, &runtime_link)?;
 
@@ -10766,6 +10901,69 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
         json_string_at(&opencode_config, &["mcp", "projectatlas", "command", "0"])?,
         &runtime,
         "opencode symlink",
+    )?;
+
+    let forwarder = runtime_dir.join("atlas");
+    require(
+        forwarder.is_file(),
+        "POSIX installer did not place the forwarder beside the canonical runtime",
+    )?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let bare_path = env::join_paths(
+        std::iter::once(runtime_dir.clone()).chain(env::split_paths(&inherited_path)),
+    )?;
+    let bare_output = StdCommand::new("atlas")
+        .env("PATH", &bare_path)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let direct_output = StdCommand::new(&runtime)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    require(
+        bare_output.status == direct_output.status
+            && bare_output.stdout == direct_output.stdout
+            && bare_output.stderr == direct_output.stderr,
+        format!(
+            "bare atlas did not resolve through the canonical symlink runtime directory:\nbare={} {}\ndirect={} {}",
+            bare_output.status,
+            String::from_utf8_lossy(&bare_output.stderr),
+            direct_output.status,
+            String::from_utf8_lossy(&direct_output.stderr)
+        ),
+    )?;
+
+    fs::remove_file(&forwarder)?;
+    let repaired_output = run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime_link)?;
+    require(
+        repaired_output.status.success() && forwarder.is_file(),
+        format!(
+            "POSIX installer did not repair the canonical symlink runtime forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&repaired_output.stdout),
+            String::from_utf8_lossy(&repaired_output.stderr)
+        ),
+    )?;
+
+    let mut uninstall = StdCommand::new("bash");
+    uninstall
+        .arg(workspace_root.join("plugins/projectatlas/scripts/install-runtime.sh"))
+        .arg("--uninstall")
+        .arg(&repo)
+        .env("HOME", temp.path().join("home"))
+        .env("PROJECTATLAS_RUNTIME_PATH", &runtime_link)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    let uninstall_output = uninstall.output()?;
+    require(
+        uninstall_output.status.success() && !forwarder.exists() && runtime.is_file(),
+        format!(
+            "POSIX installer uninstall did not remove only the canonical symlink runtime forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&uninstall_output.stdout),
+            String::from_utf8_lossy(&uninstall_output.stderr)
+        ),
     )?;
 
     Ok(())

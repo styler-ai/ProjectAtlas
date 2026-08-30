@@ -427,9 +427,12 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  installer[Installer] --> collision{Existing atlas command?}
+  installer[Installer] --> identity[Canonical verified runtime identity]
+  identity --> collision{Existing atlas command?}
   collision -->|unmanaged| reject[Typed collision; no overwrite]
-  collision -->|managed| shim[Atomic managed shim install]
+  collision -->|owned current| shim[Atomic managed shim install]
+  collision -->|owned prior target| migrate[Verify marker and prior runtime; retire old shim]
+  migrate --> shim
   shim --> discover[PATH discovery]
   discover --> aliases[atlas top-level command aliases]
   aliases --> canonical[Canonical projectatlas command handlers]

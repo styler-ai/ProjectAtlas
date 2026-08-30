@@ -144,16 +144,43 @@ atlas_forwarder_content() {
   printf 'exec %s "$@"\n' "$target_quoted"
 }
 
+managed_atlas_forwarder_target() {
+  candidate=$1
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  candidate_links=$(stat -c %h -- "$candidate" 2>/dev/null || stat -f %l "$candidate" 2>/dev/null || true)
+  [ "$candidate_links" = 1 ] || return 1
+  marker_target=$(sed -n 's/^# target: //p' "$candidate" | head -n 1)
+  [ -n "$marker_target" ] || return 1
+  canonical_target=$(canonical_file "$marker_target") || return 1
+  [ "$marker_target" = "$canonical_target" ] || return 1
+  expected_forwarder=$(atlas_forwarder_path "$canonical_target") || return 1
+  [ "$(canonical_file "$candidate")" = "$(canonical_file "$expected_forwarder")" ] || return 1
+  is_projectatlas_runtime_contract "$canonical_target" || return 1
+  expected_content=$(atlas_forwarder_content "$canonical_target") || return 1
+  actual_content=$(cat "$candidate" 2>/dev/null || true)
+  [ "$actual_content" = "$expected_content" ] || return 1
+  printf '%s\n' "$canonical_target"
+}
+
 is_managed_atlas_forwarder() {
   candidate=$1
   verified=$2
-  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
   [ -n "$verified" ] || return 1
-  expected_forwarder=$(atlas_forwarder_path "$(canonical_file "$verified")") || return 1
-  [ "$(canonical_file "$candidate")" = "$(canonical_file "$expected_forwarder")" ] || return 1
-  expected_content=$(atlas_forwarder_content "$verified") || return 1
-  actual_content=$(cat "$candidate" 2>/dev/null || true)
-  [ "$actual_content" = "$expected_content" ]
+  managed_target=$(managed_atlas_forwarder_target "$candidate") || return 1
+  [ "$managed_target" = "$(canonical_file "$verified")" ]
+}
+
+migrate_managed_atlas_forwarder() {
+  candidate=$1
+  verified=$2
+  [ -n "$verified" ] || return 1
+  managed_target=$(managed_atlas_forwarder_target "$candidate") || return 1
+  [ "$managed_target" != "$(canonical_file "$verified")" ] || return 1
+  if ! is_managed_atlas_forwarder "$candidate" "$managed_target"; then
+    return 1
+  fi
+  rm -f -- "$candidate" || return 1
+  printf '%s\n' "Migrated ProjectAtlas atlas forwarder: $candidate -> $(atlas_forwarder_path "$(canonical_file "$verified")")"
 }
 
 ensure_atlas_forwarder_collision_free() {
@@ -161,15 +188,20 @@ ensure_atlas_forwarder_collision_free() {
   verified=$2
   if [ -e "$forwarder" ] || [ -L "$forwarder" ]; then
     if ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
-      printf '%s\n' "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $forwarder" >&2
-      return 1
+      if ! migrate_managed_atlas_forwarder "$forwarder" "$verified"; then
+        printf '%s\n' "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $forwarder" >&2
+        return 1
+      fi
     fi
   fi
   existing=$(command -v atlas 2>/dev/null || true)
   if [ -n "$existing" ] && [ "$(canonical_file "$existing")" != "$(canonical_file "$forwarder")" ]; then
     if ! is_managed_atlas_forwarder "$existing" "$verified"; then
-      printf '%s\n' "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $existing" >&2
-      return 1
+      if ! migrate_managed_atlas_forwarder "$existing" "$verified"; then
+        printf '%s\n' "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $existing" >&2
+        return 1
+      fi
+      hash -r 2>/dev/null || true
     fi
   fi
 }
@@ -1566,6 +1598,13 @@ verify_release_checksum() {
     return 1
   fi
 }
+
+if [ -n "$runtime_override" ]; then
+  runtime_override=$(canonical_file "$runtime_override") || {
+    printf '%s\n' "ProjectAtlas runtime path could not be canonicalized: $runtime_override" >&2
+    exit 1
+  }
+fi
 
 if [ "$uninstall" -eq 1 ]; then
   uninstall_atlas_forwarders

@@ -2056,31 +2056,72 @@ function Get-ProjectAtlasAtlasForwarderPath {
     return Join-Path (Split-Path -Parent $VerifiedPath) "atlas.cmd"
 }
 
+function Get-ProjectAtlasManagedAtlasForwarderTarget {
+    param(
+        [string]$FilePath
+    )
+    $item = Get-Item -Force -LiteralPath $FilePath -ErrorAction SilentlyContinue
+    if (-not $item -or -not ($item -is [System.IO.FileInfo]) `
+        -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        return $null
+    }
+    if ($item.PSObject.Properties.Name -contains "LinkType" `
+        -and [string]::Equals($item.LinkType, "HardLink", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    try {
+        $actualContent = [System.IO.File]::ReadAllText($FilePath)
+        $targetMatch = [regex]::Match($actualContent, '(?m)^rem target: ([^\r\n]+)\r?$')
+        if (-not $targetMatch.Success) {
+            return $null
+        }
+        $target = Get-NormalizedPathEntry $targetMatch.Groups[1].Value
+        if (-not (Test-ProjectAtlasRuntime $target $null)) {
+            return $null
+        }
+        $expectedForwarder = Get-ProjectAtlasAtlasForwarderPath $target
+        if ((Get-NormalizedPathEntry $FilePath) -ine (Get-NormalizedPathEntry $expectedForwarder)) {
+            return $null
+        }
+        if ($actualContent -cne (Get-ProjectAtlasAtlasForwarderContent $target) `
+            -and $actualContent -cne (Get-ProjectAtlasLegacyAtlasForwarderContent $target)) {
+            return $null
+        }
+        return $target
+    }
+    catch {
+        return $null
+    }
+}
+
 function Test-ProjectAtlasManagedAtlasForwarder {
     param(
         [string]$FilePath,
         [string]$VerifiedPath
     )
-    $item = Get-Item -Force -LiteralPath $FilePath -ErrorAction SilentlyContinue
-    if (-not $item -or -not ($item -is [System.IO.FileInfo]) `
-        -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    if ([string]::IsNullOrWhiteSpace($VerifiedPath)) {
         return $false
     }
-    try {
-        if ([string]::IsNullOrWhiteSpace($VerifiedPath)) {
-            return $false
-        }
-        $expectedForwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
-        if ((Get-NormalizedPathEntry $FilePath) -ine (Get-NormalizedPathEntry $expectedForwarder)) {
-            return $false
-        }
-        $actualContent = [System.IO.File]::ReadAllText($FilePath)
-        return $actualContent -ceq (Get-ProjectAtlasAtlasForwarderContent $VerifiedPath) `
-            -or $actualContent -ceq (Get-ProjectAtlasLegacyAtlasForwarderContent $VerifiedPath)
-    }
-    catch {
+    $target = Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath
+    return $target -and (Get-NormalizedPathEntry $target) -ieq (Get-NormalizedPathEntry $VerifiedPath)
+}
+
+function Move-ProjectAtlasManagedAtlasForwarder {
+    param(
+        [string]$FilePath,
+        [string]$VerifiedPath
+    )
+    $target = Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath
+    if (-not $target -or (Get-NormalizedPathEntry $target) -ieq (Get-NormalizedPathEntry $VerifiedPath)) {
         return $false
     }
+    if (-not (Test-ProjectAtlasManagedAtlasForwarder $FilePath $target)) {
+        return $false
+    }
+    Assert-ProjectAtlasDirectFilePath $FilePath "ProjectAtlas atlas forwarder"
+    Remove-Item -LiteralPath $FilePath -Force
+    Write-Output "Migrated ProjectAtlas atlas forwarder: $FilePath -> $(Get-ProjectAtlasAtlasForwarderPath $VerifiedPath)"
+    return $true
 }
 
 function Get-ProjectAtlasAtlasForwarderContent {
@@ -2121,6 +2162,10 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
             -and (Test-ProjectAtlasManagedAtlasForwarder $candidate $VerifiedPath)) {
             continue
         }
+        if ((Get-NormalizedPathEntry $candidate) -ieq $forwarderNormalized `
+            -and (Move-ProjectAtlasManagedAtlasForwarder $candidate $VerifiedPath)) {
+            continue
+        }
         throw "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $candidate"
     }
     $command = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -2129,7 +2174,9 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
         if ([string]::IsNullOrWhiteSpace($commandPath) -or (Get-NormalizedPathEntry $commandPath) -ine $forwarderNormalized) {
             $observed = if ($commandPath) { $commandPath } else { $command.Name }
             if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Test-ProjectAtlasManagedAtlasForwarder $commandPath $VerifiedPath)) {
-                throw "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $observed"
+                if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Move-ProjectAtlasManagedAtlasForwarder $commandPath $VerifiedPath)) {
+                    throw "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $observed"
+                }
             }
         }
     }
