@@ -20,7 +20,7 @@ Production installer callers SHALL continue to receive the existing nullable val
 
 #### Scenario: Invalid, flooding, hanging, or cleanup-failing runtime
 - **WHEN** runtime execution violates validation, resource, exit, or cleanup requirements
-- **THEN** the same null/fail-closed production result is returned and only the exact installer-owned process and temporary probe files are cleaned
+- **THEN** the same null/fail-closed production result is returned, bounded cleanup is attempted only for the exact installer-owned process and temporary probe files, and deletion failure is not reported as successful cleanup or validation
 
 ### Requirement: The release gate is reliable under ordinary parallel load
 The focused Windows fixture and the ordinary parallel locked workspace gate SHALL pass without retries, suite serialization, timeout inflation, global locks, or test-only acceptance of a true timeout.

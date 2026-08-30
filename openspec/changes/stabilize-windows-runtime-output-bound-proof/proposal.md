@@ -4,7 +4,7 @@ The Windows installer E2E currently measures its output-flooding probe from befo
 
 ## What Changes
 
-- Measure output-bound enforcement from one test-owned writer-readiness observation instead of charging nested-process startup delay to the byte-limit assertion.
+- Assert output-bound enforcement from one optional private output-limit/timeout disposition at the existing decision points; writer readiness may coordinate the fixture but is not the branch oracle.
 - Distinguish delayed startup, live output-limit termination, and the existing true five-second timeout while preserving exact owned-process cleanup and fail-closed runtime validation.
 - Keep installer/runtime behavior, the five-second product timeout, the one-MiB output ceiling, public contracts, dependencies, and suite parallelism unchanged unless the causal fixture proves a separate product defect.
 - Treat this as backlog specification work until the packet and issue mirror are published on `main`; only then may #525 enter `v0.5.0-00` and implementation routing.
