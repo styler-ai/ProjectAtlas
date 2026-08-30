@@ -123,6 +123,30 @@ REQUIRED_DESIGN_HEADINGS = {
 ISSUE_REFERENCE_RE = re.compile(
     r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)"
 )
+ISSUE_STATE_QUERY = """
+query($owner: String!, $name: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 100, after: $endCursor, states: [OPEN, CLOSED]) {
+      nodes {
+        number
+        state
+        labels(first: 100) {
+          nodes {
+            name
+          }
+        }
+        milestone {
+          title
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"""
 
 
 @dataclass(frozen=True)
@@ -645,22 +669,60 @@ def issue_state_payloads(repo: str) -> list[dict[str, object]]:
     owner, name = repo_parts(repo)
     payload = gh_api_json(
         [
+            "graphql",
             "--paginate",
             "--slurp",
-            f"repos/{owner}/{name}/issues",
-            "--method",
-            "GET",
+            "-f",
+            f"query={ISSUE_STATE_QUERY}",
             "-F",
-            "state=all",
+            f"owner={owner}",
             "-F",
-            "per_page=100",
+            f"name={name}",
         ]
     )
-    return [
-        issue
-        for issue in flatten_paginated_response(payload)
-        if "pull_request" not in issue
-    ]
+    if not isinstance(payload, list):
+        raise SystemExit("GitHub GraphQL pagination did not return page objects")
+    issues: list[dict[str, object]] = []
+    for page in payload:
+        if not isinstance(page, dict):
+            raise SystemExit("GitHub GraphQL pagination returned a non-object page")
+        data = page.get("data")
+        repository = data.get("repository") if isinstance(data, dict) else None
+        connection = repository.get("issues") if isinstance(repository, dict) else None
+        page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+        nodes = connection.get("nodes") if isinstance(connection, dict) else None
+        if (
+            not isinstance(connection, dict)
+            or not isinstance(nodes, list)
+            or not isinstance(page_info, dict)
+            or not isinstance(page_info.get("hasNextPage"), bool)
+            or not (
+                isinstance(page_info.get("endCursor"), str)
+                or page_info.get("endCursor") is None
+            )
+        ):
+            raise SystemExit("GitHub GraphQL issue page had an invalid shape")
+        for issue in nodes:
+            if not isinstance(issue, dict):
+                raise SystemExit("GitHub GraphQL issue page returned a non-object issue")
+            labels = issue.get("labels")
+            label_nodes = labels.get("nodes") if isinstance(labels, dict) else None
+            milestone = issue.get("milestone")
+            if (
+                not isinstance(label_nodes, list)
+                or not all(isinstance(label, dict) for label in label_nodes)
+                or (milestone is not None and not isinstance(milestone, dict))
+            ):
+                raise SystemExit("GitHub GraphQL issue metadata had an invalid shape")
+            issues.append(
+                {
+                    "number": issue.get("number"),
+                    "state": issue.get("state"),
+                    "labels": label_nodes,
+                    "milestone": milestone,
+                }
+            )
+    return issues
 
 
 def check_open_issue_complexity(repo: str) -> list[str]:
@@ -3184,38 +3246,119 @@ Mitigations:
         {"number": 2},
     ]
     saved_gh_api_json = gh_api_json
+    saved_issue_payload = issue_payload
+    saved_issue_checklist_tasks = issue_checklist_tasks
     paginated_issue_api_calls: list[list[str]] = []
-    first_page_issue = {"number": 1, "state": "open"}
-    later_page_issue = {"number": 2, "state": "closed"}
-    pull_request_item = {
-        "number": 3,
-        "state": "open",
-        "pull_request": {"url": "https://api.github.com/pulls/3"},
+    first_page_issue = {
+        "number": 1,
+        "state": "OPEN",
+        "labels": {"nodes": [{"name": "complexity:high"}]},
+        "milestone": {"title": "v1.0.0-00"},
+    }
+    later_page_issue = {
+        "number": 517,
+        "state": "CLOSED",
+        "body": "## OpenSpec Tasks\n- [ ] Historical task.\n",
+        "labels": {"nodes": []},
+        "milestone": None,
     }
     try:
         globals()["gh_api_json"] = lambda args: (
             paginated_issue_api_calls.append(args)
-            or [[first_page_issue], [later_page_issue, pull_request_item]]
+            or [
+                {
+                    "data": {
+                        "repository": {
+                            "issues": {
+                                "nodes": [first_page_issue],
+                                "pageInfo": {
+                                    "hasNextPage": True,
+                                    "endCursor": "cursor-1",
+                                },
+                            }
+                        }
+                    }
+                },
+                {
+                    "data": {
+                        "repository": {
+                            "issues": {
+                                "nodes": [later_page_issue],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": "cursor-2",
+                                },
+                            }
+                        }
+                    }
+                },
+            ]
+        )
+        def unexpected_issue_payload(*_args, **_kwargs):
+            raise AssertionError("closed issue body was fetched")
+
+        globals()["issue_payload"] = unexpected_issue_payload
+        task_parsing_calls: list[dict[str, object]] = []
+        globals()["issue_checklist_tasks"] = lambda payload: (
+            task_parsing_calls.append(payload) or []
         )
         assert issue_state_payloads("owner/repo") == [
-            first_page_issue,
-            later_page_issue,
+            {
+                "number": 1,
+                "state": "OPEN",
+                "labels": [{"name": "complexity:high"}],
+                "milestone": {"title": "v1.0.0-00"},
+            },
+            {
+                "number": 517,
+                "state": "CLOSED",
+                "labels": [],
+                "milestone": None,
+            },
         ]
+        assert all("body" not in issue for issue in issue_state_payloads("owner/repo"))
+        with tempfile.TemporaryDirectory() as temporary:
+            legacy_root = Path(temporary)
+            legacy_tasks = (
+                legacy_root
+                / "openspec"
+                / "changes"
+                / "legacy-change"
+                / "tasks.md"
+            )
+            legacy_tasks.parent.mkdir(parents=True)
+            legacy_tasks.write_text(
+                "- [ ] 1.1 Historical implementation.\n", encoding="utf-8"
+            )
+            assert check_openspec_tasks(
+                "owner/repo",
+                legacy_root,
+                {"legacy-change": (Owner(517),)},
+            ) == []
+        assert not task_parsing_calls
         assert paginated_issue_api_calls == [
             [
+                "graphql",
                 "--paginate",
                 "--slurp",
-                "repos/owner/repo/issues",
-                "--method",
-                "GET",
+                "-f",
+                f"query={ISSUE_STATE_QUERY}",
                 "-F",
-                "state=all",
+                "owner=owner",
                 "-F",
-                "per_page=100",
+                "name=repo",
             ]
-        ]
+        ] * 3
+        assert "issues(first: 100" in ISSUE_STATE_QUERY
+        assert "pageInfo" in ISSUE_STATE_QUERY
+        assert "$endCursor" in ISSUE_STATE_QUERY
+        assert "pullRequest" not in ISSUE_STATE_QUERY
+        assert "pullRequests" not in ISSUE_STATE_QUERY
+        assert "body" not in ISSUE_STATE_QUERY.lower()
     finally:
         globals()["gh_api_json"] = saved_gh_api_json
+        globals()["issue_payload"] = saved_issue_payload
+        globals()["issue_checklist_tasks"] = saved_issue_checklist_tasks
     assert mapped_issue_numbers({"one": (Owner(1),), "two": (Owner(2),)}) == {
         1,
         2,
