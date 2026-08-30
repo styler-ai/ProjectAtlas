@@ -1196,7 +1196,8 @@ fn tree_contains_php_tag_outside_ranges<E>(
         let outside_opaque_range = opaque_ranges.get(*next_opaque).is_none_or(|&(start, end)| {
             start >= node.end_byte()
                 || end <= node.start_byte()
-                || is_php_inline_output_opening(node, content)
+                || (is_php_inline_output_opening(node, content)
+                    && !is_php_block_comment_range(content, start))
         });
         if outside_opaque_range {
             return Ok(true);
@@ -1218,7 +1219,7 @@ fn tree_contains_php_tag_outside_ranges<E>(
     Ok(false)
 }
 
-/// Return whether the mixed grammar classified line-comment text before a PHP opening tag.
+/// Return whether inline output text directly precedes a PHP opening tag.
 fn is_php_inline_output_opening(node: Node<'_>, content: &str) -> bool {
     if node.kind() != "php_tag"
         || !node_text(node, content).is_some_and(|tag| tag == "<?php" || tag == "<?=")
@@ -1242,13 +1243,12 @@ fn is_php_inline_output_opening(node: Node<'_>, content: &str) -> bool {
         }
         previous = Some(sibling);
     }
-    previous.is_some_and(|text| {
-        text.kind() == "text"
-            && text.end_byte() == node.start_byte()
-            && content
-                .get(text.start_byte()..text.end_byte())
-                .is_some_and(|prefix| prefix.starts_with("//") || prefix.starts_with('#'))
-    })
+    previous.is_some_and(|text| text.kind() == "text" && text.end_byte() == node.start_byte())
+}
+
+/// Keep a PHP-only block comment opaque when it overlaps a mixed-grammar tag.
+fn is_php_block_comment_range(content: &str, start: usize) -> bool {
+    content.get(start..start.saturating_add(2)) == Some("/*")
 }
 
 /// Return whether the PHP-only parse node is opaque to mixed-grammar tags.
@@ -2001,7 +2001,7 @@ fn php_static_string_target(node: Node<'_>, content: &str) -> Option<String> {
     let mut has_part = false;
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            "string_content" => target.push_str(&named_text(child, content)?),
+            "string_content" => target.push_str(&node_text(child, content)?),
             "escape_sequence" if node.kind() == "string" => {
                 match node_text(child, content)?.as_str() {
                     r"\\" => target.push('\\'),
@@ -5513,6 +5513,7 @@ require $dynamic;
 require BOOTSTRAP;
 require Vendor\BOOTSTRAP;
 require (1 + 2);
+require 'dir  bootstrap.php';
 "#;
         let graph = extract_symbol_graph("src/StaticIncludes.php", Some("php"), source);
         let imports = graph
@@ -5526,6 +5527,7 @@ require (1 + 2);
             ("vendor\"quoted.php", 3),
             ("control\npath.php", 4),
             ("dollar$name.php", 5),
+            ("dir  bootstrap.php", 12),
         ] {
             let matches = imports
                 .iter()
@@ -6000,6 +6002,13 @@ TEXT;
                 "function marker(): string { helper(); }",
                 9,
                 48,
+            ),
+            (
+                "HTML // <?php function marker(): string { helper(); }",
+                "marker",
+                "function marker(): string { helper(); }",
+                14,
+                53,
             ),
             (
                 "#output<?= $value ?><?php function after_echo(): void { helper(); }",
