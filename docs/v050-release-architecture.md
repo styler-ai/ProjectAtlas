@@ -190,7 +190,7 @@ flowchart LR
 ## Invalid graph identity admission
 
 ```mermaid
-flowchart LR
+flowchart TB
   Parser["Parser facts and exact spans"] --> SourceAdmit{"Source identity admission"}
   SourceAdmit -->|valid| SourceRows["Valid source, symbol, and relation facts"]
   SourceAdmit -->|invalid| SourceReject["Typed source rejection detail<br/>file + span + parser + field + reason"]
