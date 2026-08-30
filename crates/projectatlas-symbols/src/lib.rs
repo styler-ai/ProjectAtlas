@@ -883,11 +883,94 @@ fn extract_tree_sitter_graph<E>(
         }));
     }
     let had_errors = root.has_error() && has_php_opening_tag != Some(false);
-    visit_node(root, content, &mut graph, check)?;
+    let mut php_namespace_context = (has_php_opening_tag == Some(true))
+        .then(|| PhpNamespaceContext::from_program(root, content));
+    visit_node(
+        root,
+        content,
+        &mut graph,
+        check,
+        php_namespace_context.as_mut(),
+    )?;
     check()?;
     languages::augment_language_graph(&mut graph, content, check)?;
     check()?;
     Ok(Some(TreeSitterParse { graph, had_errors }))
+}
+
+/// Precomputed source-order ownership ranges for semicolon PHP namespaces.
+struct PhpNamespaceContext {
+    /// Non-overlapping ranges whose declarations belong to a namespace.
+    ranges: Vec<PhpNamespaceRange>,
+    /// Next range to inspect while declarations are visited in source order.
+    next_range: usize,
+}
+
+/// One semicolon namespace's source-order ownership range.
+struct PhpNamespaceRange {
+    /// First byte after the namespace declaration.
+    start_byte: usize,
+    /// First byte of the next namespace declaration or end of source.
+    end_byte: usize,
+    /// Namespace name owned by this range.
+    name: String,
+}
+
+impl PhpNamespaceContext {
+    /// Build namespace ranges in one forward pass over the program children.
+    fn from_program(root: Node<'_>, content: &str) -> Self {
+        let mut context = Self {
+            ranges: Vec::new(),
+            next_range: 0,
+        };
+        let mut active = None;
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() != "namespace_definition" {
+                continue;
+            }
+            if let Some((start_byte, name)) = active.take() {
+                context.ranges.push(PhpNamespaceRange {
+                    start_byte,
+                    end_byte: child.start_byte(),
+                    name,
+                });
+            }
+            if !child.has_error()
+                && child.child_by_field_name("body").is_none()
+                && let Some(name) = child
+                    .child_by_field_name("name")
+                    .and_then(|name| named_text(name, content))
+            {
+                active = Some((child.end_byte(), name));
+            }
+        }
+        if let Some((start_byte, name)) = active {
+            context.ranges.push(PhpNamespaceRange {
+                start_byte,
+                end_byte: content.len(),
+                name,
+            });
+        }
+        context
+    }
+
+    /// Return the active namespace for the next source-order top-level node.
+    fn parent_for(&mut self, node: Node<'_>) -> Option<String> {
+        while self
+            .ranges
+            .get(self.next_range)
+            .is_some_and(|range| range.end_byte <= node.start_byte())
+        {
+            self.next_range += 1;
+        }
+        self.ranges
+            .get(self.next_range)
+            .filter(|range| {
+                range.start_byte <= node.start_byte() && node.start_byte() < range.end_byte
+            })
+            .map(|range| range.name.clone())
+    }
 }
 
 /// Select the official PHP-only or mixed grammar from their parsed roots.
@@ -1065,13 +1148,20 @@ fn visit_node<E>(
     content: &str,
     graph: &mut SymbolGraph,
     check: &mut impl FnMut() -> Result<(), E>,
+    mut php_namespace_context: Option<&mut PhpNamespaceContext>,
 ) -> Result<(), E> {
     check()?;
     if graph.symbols.len() < MAX_SYMBOLS_PER_FILE
         && let Some(kind) = declaration_kind(node.kind())
         && should_emit_declaration_symbol(node, content)
     {
-        push_tree_symbol(graph, node, content, effective_declaration_kind(node, kind));
+        push_tree_symbol(
+            graph,
+            node,
+            content,
+            effective_declaration_kind(node, kind),
+            php_namespace_context.as_deref_mut(),
+        );
     }
     if graph.relations.len() < MAX_RELATIONS_PER_FILE {
         if is_import_node(node.kind()) {
@@ -1082,7 +1172,13 @@ fn visit_node<E>(
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        visit_node(child, content, graph, check)?;
+        visit_node(
+            child,
+            content,
+            graph,
+            check,
+            php_namespace_context.as_deref_mut(),
+        )?;
     }
     Ok(())
 }
@@ -1353,12 +1449,14 @@ fn push_tree_symbol(
     node: Node<'_>,
     content: &str,
     symbol_kind: SymbolKind,
+    php_namespace_context: Option<&mut PhpNamespaceContext>,
 ) {
     let Some(name) = node_name(node, content) else {
         return;
     };
     let signature = declaration_signature(node, content);
-    let parent = symbol_parent(node, content).and_then(|parent| compact_symbol_identity(&parent));
+    let parent = symbol_parent(node, content, php_namespace_context)
+        .and_then(|parent| compact_symbol_identity(&parent));
     let exported = has_direct_export_parent(node)
         || object_literal_method_owner(node, content).is_some_and(|owner| owner.exported)
         || is_exported_symbol(graph.language.as_deref(), node, content, &name, &signature);
@@ -1485,7 +1583,11 @@ fn blank_prefix_preserving_newlines(content: &str, end: usize) -> String {
 }
 
 /// Return the semantic parent for a declaration symbol.
-fn symbol_parent(node: Node<'_>, content: &str) -> Option<String> {
+fn symbol_parent(
+    node: Node<'_>,
+    content: &str,
+    php_namespace_context: Option<&mut PhpNamespaceContext>,
+) -> Option<String> {
     if let Some(owner) = object_literal_method_owner(node, content) {
         return Some(owner.name);
     }
@@ -1510,11 +1612,15 @@ fn symbol_parent(node: Node<'_>, content: &str) -> Option<String> {
     } else {
         node.parent()
     };
-    enclosing_symbol_name(parent, content).or_else(|| php_semicolon_namespace_parent(node, content))
+    enclosing_symbol_name(parent, content)
+        .or_else(|| php_semicolon_namespace_parent(node, php_namespace_context))
 }
 
 /// Return the active PHP namespace for a top-level declaration in a semicolon namespace.
-fn php_semicolon_namespace_parent(node: Node<'_>, content: &str) -> Option<String> {
+fn php_semicolon_namespace_parent(
+    node: Node<'_>,
+    php_namespace_context: Option<&mut PhpNamespaceContext>,
+) -> Option<String> {
     if node.kind() == "namespace_definition"
         || node
             .parent()
@@ -1522,19 +1628,7 @@ fn php_semicolon_namespace_parent(node: Node<'_>, content: &str) -> Option<Strin
     {
         return None;
     }
-    let mut previous = node.prev_named_sibling();
-    while let Some(candidate) = previous {
-        if candidate.kind() == "namespace_definition" {
-            if candidate.has_error() || candidate.child_by_field_name("body").is_some() {
-                return None;
-            }
-            return candidate
-                .child_by_field_name("name")
-                .and_then(|name| named_text(name, content));
-        }
-        previous = candidate.prev_named_sibling();
-    }
-    None
+    php_namespace_context.and_then(|context| context.parent_for(node))
 }
 
 /// Map tree-sitter node kinds to `ProjectAtlas` symbol kinds.
@@ -1773,6 +1867,14 @@ fn php_namespace_use_target(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Return a conservative PHP call target, suppressing dynamic calls.
 fn php_call_target(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "function_call_expression"
+        && node
+            .child_by_field_name("function")
+            .and_then(|function| named_text(function, content))
+            .is_some_and(|name| name.eq_ignore_ascii_case("eval"))
+    {
+        return None;
+    }
     let target = match node.kind() {
         "scoped_call_expression" => {
             let scope = node.child_by_field_name("scope")?;
@@ -2890,6 +2992,7 @@ mod tests {
         IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
     };
     use std::fmt::Write as _;
+    use std::time::{Duration, Instant};
 
     fn tree_symbol<'a>(
         graph: &'a SymbolGraph,
@@ -4926,6 +5029,36 @@ class Child extends Base {
     }
 
     #[test]
+    fn php_dynamic_execution_is_not_published_as_a_call() {
+        let source = r"<?php
+function run(string $code): void {
+    eval($code);
+    $callable();
+    helper();
+}
+";
+        let graph = extract_symbol_graph("src/DynamicExecution.php", Some("php"), source);
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+
+        assert!(calls.iter().all(|relation| relation.target_name != "eval"));
+        assert!(
+            calls
+                .iter()
+                .all(|relation| relation.target_name != "$callable")
+        );
+        assert!(calls.iter().any(|relation| {
+            relation.target_name == "helper"
+                && relation.source_name == "run"
+                && relation.path == "src/DynamicExecution.php"
+                && relation.context.contains("helper()")
+        }));
+    }
+
+    #[test]
     fn php_callable_acquisition_and_import_targets_stay_precise() {
         let source = r#"<?php
 use Vendor\One, Vendor\Two as TwoAlias;
@@ -5267,9 +5400,15 @@ class OutsideGlobal {}
         for index in 0..(MAX_SYMBOLS_PER_FILE + 50) {
             assert!(writeln!(large, "function function_{index}(): void {{}}").is_ok());
         }
+        let started = Instant::now();
         let bounded = extract_symbol_graph("src/large.php", Some("php"), &large);
+        let elapsed = started.elapsed();
         assert_eq!(bounded.parser, ParserKind::TreeSitter);
         assert_eq!(bounded.symbols.len(), MAX_SYMBOLS_PER_FILE);
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "large PHP source regressed to a sibling-rescanning parse: {elapsed:?}"
+        );
     }
 
     #[test]
