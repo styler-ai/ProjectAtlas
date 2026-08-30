@@ -1642,16 +1642,12 @@ fn symbol_parent(
         .or_else(|| php_semicolon_namespace_parent(node, php_namespace_context))
 }
 
-/// Return the active PHP namespace for a top-level declaration in a semicolon namespace.
+/// Return the active PHP namespace for a declaration in a semicolon namespace.
 fn php_semicolon_namespace_parent(
     node: Node<'_>,
     php_namespace_context: Option<&mut PhpNamespaceContext>,
 ) -> Option<String> {
-    if node.kind() == "namespace_definition"
-        || node
-            .parent()
-            .is_none_or(|parent| parent.kind() != "program")
-    {
+    if node.kind() == "namespace_definition" {
         return None;
     }
     php_namespace_context.and_then(|context| context.parent_for(node))
@@ -2530,11 +2526,8 @@ fn php_declaration_is_exported(node: Node<'_>, content: &str) -> bool {
         .filter(|child| child.kind() == "visibility_modifier")
         .find_map(|modifier| node_text(modifier, content))
         .is_none_or(|modifier| {
-            let keyword = modifier
-                .split_once('(')
-                .map_or(modifier.as_str(), |(keyword, _)| keyword)
-                .trim();
-            !keyword.eq_ignore_ascii_case("private") && !keyword.eq_ignore_ascii_case("protected")
+            let modifier = modifier.trim();
+            !modifier.eq_ignore_ascii_case("private") && !modifier.eq_ignore_ascii_case("protected")
         })
 }
 
@@ -4974,6 +4967,9 @@ class Account {
 class Service {
     final protected function guarded(): void {}
     static private string $cache;
+    private(set) string $readablePrivateSet;
+    protected(set) string $readableProtectedSet;
+    public(set) string $readablePublicSet;
     public static function exposed(): void {}
     function defaulted(): void {}
 }
@@ -4984,6 +4980,9 @@ class Service {
             ("Service", true),
             ("guarded", false),
             ("cache", false),
+            ("readablePrivateSet", true),
+            ("readableProtectedSet", true),
+            ("readablePublicSet", true),
             ("exposed", true),
             ("defaulted", true),
         ] {
@@ -5014,6 +5013,9 @@ class Service {
             .collect::<Vec<_>>();
         assert!(exported_names.contains(&"exposed"));
         assert!(exported_names.contains(&"defaulted"));
+        assert!(exported_names.contains(&"readablePrivateSet"));
+        assert!(exported_names.contains(&"readableProtectedSet"));
+        assert!(exported_names.contains(&"readablePublicSet"));
         assert!(!exported_names.contains(&"guarded"));
         assert!(!exported_names.contains(&"cache"));
     }
@@ -5383,6 +5385,50 @@ class OutsideGlobal {}
         assert!(!malformed.relations.iter().any(|relation| {
             relation.kind == RelationKind::Contains && relation.target_name == "AfterMalformed"
         }));
+    }
+
+    #[test]
+    fn php_conditional_namespace_declarations_preserve_scope_without_crossing_symbol_owners() {
+        let source = r"<?php
+namespace Conditional;
+if ($enabled) {
+    function boot(): void {}
+    class ConditionalService {}
+}
+class Owner {
+    public function run(): void {
+        if ($enabled) {
+            function nested(): void {}
+        }
+    }
+}
+";
+        let graph = extract_symbol_graph("src/Conditional.php", Some("php"), source);
+
+        for name in ["boot", "ConditionalService"] {
+            let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
+            assert!(symbol.is_some(), "missing conditional PHP symbol {name}");
+            let Some(symbol) = symbol else { return };
+            assert_eq!(symbol.parent.as_deref(), Some("Conditional"));
+            assert!(graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Contains
+                    && relation.source_name == "Conditional"
+                    && relation.target_name == name
+            }));
+        }
+
+        for (name, parent) in [("run", "Owner"), ("nested", "run")] {
+            let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
+            assert!(symbol.is_some(), "missing nested PHP symbol {name}");
+            let Some(symbol) = symbol else { return };
+            assert_eq!(symbol.parent.as_deref(), Some(parent));
+            assert!(graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Contains
+                    && relation.source_name == parent
+                    && relation.target_name == name
+            }));
+            assert_ne!(symbol.parent.as_deref(), Some("Conditional"));
+        }
     }
 
     #[test]
