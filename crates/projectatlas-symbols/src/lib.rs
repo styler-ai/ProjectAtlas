@@ -1196,7 +1196,7 @@ fn tree_contains_php_tag_outside_ranges<E>(
         let outside_opaque_range = opaque_ranges.get(*next_opaque).is_none_or(|&(start, end)| {
             start >= node.end_byte()
                 || end <= node.start_byte()
-                || is_php_pre_tag_inline_opening(node, content, start)
+                || is_php_inline_output_opening(node, content)
         });
         if outside_opaque_range {
             return Ok(true);
@@ -1218,21 +1218,37 @@ fn tree_contains_php_tag_outside_ranges<E>(
     Ok(false)
 }
 
-/// Return whether a long PHP opening tag follows pre-tag line-comment output.
-fn is_php_pre_tag_inline_opening(node: Node<'_>, content: &str, range_start: usize) -> bool {
+/// Return whether the mixed grammar classified line-comment text before a PHP opening tag.
+fn is_php_inline_output_opening(node: Node<'_>, content: &str) -> bool {
     if node.kind() != "php_tag"
         || !node_text(node, content).is_some_and(|tag| tag == "<?php" || tag == "<?=")
     {
         return false;
     }
-    content
-        .get(range_start..node.start_byte())
-        .is_some_and(|prefix| {
-            prefix
-                .strip_prefix("//")
-                .or_else(|| prefix.strip_prefix('#'))
-                .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
-        })
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if parent.kind() != "program" {
+        return false;
+    }
+    let mut cursor = parent.walk();
+    let mut previous = None;
+    for sibling in parent.children(&mut cursor) {
+        if sibling.kind() == node.kind()
+            && sibling.start_byte() == node.start_byte()
+            && sibling.end_byte() == node.end_byte()
+        {
+            break;
+        }
+        previous = Some(sibling);
+    }
+    previous.is_some_and(|text| {
+        text.kind() == "text"
+            && text.end_byte() == node.start_byte()
+            && content
+                .get(text.start_byte()..text.end_byte())
+                .is_some_and(|prefix| prefix.starts_with("//") || prefix.starts_with('#'))
+    })
 }
 
 /// Return whether the PHP-only parse node is opaque to mixed-grammar tags.
@@ -5894,8 +5910,6 @@ TEXT;
 }",
             "function marker(): string { return `echo <?`; }",
             "// <?\rfunction marker(): string { return 'marker'; }",
-            "//x<?php function marker(): string {}",
-            "#output<?= $value ?>",
         ] {
             assert!(
                 !super::contains_php_opening_tag(source),
@@ -5930,6 +5944,11 @@ TEXT;
             ),
             ("// <?php function boot() {}", "boot"),
             ("# <?php function hash_boot() {}", "hash_boot"),
+            ("//x<?php function marker(): string {}", "marker"),
+            (
+                "#output<?= $value ?><?php function after_echo(): void {}",
+                "after_echo",
+            ),
         ] {
             assert!(
                 super::contains_php_opening_tag(source),
@@ -5950,9 +5969,17 @@ TEXT;
     fn php_pre_tag_inline_output_keeps_exact_symbol_identity() {
         let source = "// <?php function boot() {}";
         let graph = extract_symbol_graph("src/boot.php", Some("php"), source);
+        assert!(
+            graph.symbols.iter().any(|symbol| symbol.name == "boot"),
+            "pre-tag PHP function must be recovered"
+        );
         let Some(symbol) = graph.symbols.iter().find(|symbol| symbol.name == "boot") else {
             return;
         };
+        assert!(
+            symbol.source_selector.is_some(),
+            "pre-tag PHP function must retain its selector"
+        );
         let Some(selector) = symbol.source_selector else {
             return;
         };
@@ -5962,6 +5989,93 @@ TEXT;
         );
         assert_eq!(selector.column_start, 9);
         assert_eq!(selector.column_end, 27);
+    }
+
+    #[test]
+    fn php_mixed_inline_output_transitions_retain_tree_sitter_facts() {
+        for (source, symbol_name, expected_selector, expected_start, expected_end) in [
+            (
+                "//x<?php function marker(): string { helper(); }",
+                "marker",
+                "function marker(): string { helper(); }",
+                9,
+                48,
+            ),
+            (
+                "#output<?= $value ?><?php function after_echo(): void { helper(); }",
+                "after_echo",
+                "function after_echo(): void { helper(); }",
+                26,
+                67,
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/inline-output.php", Some("php"), source);
+            assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == symbol_name),
+                "mixed PHP declaration must be recovered"
+            );
+            let Some(symbol) = graph
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == symbol_name)
+            else {
+                return;
+            };
+            assert_eq!(symbol.parser, ParserKind::TreeSitter);
+            assert!(
+                symbol.source_selector.is_some(),
+                "mixed PHP declaration must retain its selector"
+            );
+            let Some(selector) = symbol.source_selector else {
+                return;
+            };
+            assert_eq!(selector.byte_start, expected_start);
+            assert_eq!(selector.byte_end, expected_end);
+            assert_eq!(selector.column_start, expected_start);
+            assert_eq!(selector.column_end, expected_end);
+            assert_eq!(
+                &source[selector.byte_start..selector.byte_end],
+                expected_selector
+            );
+            assert!(graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Calls
+                    && relation.source_name == symbol_name
+                    && relation.target_name == "helper"
+                    && relation.path == "src/inline-output.php"
+                    && relation.parser == ParserKind::TreeSitter
+            }));
+        }
+    }
+
+    #[test]
+    fn php_confirmed_mode_does_not_promote_tag_like_literals() {
+        let source = r#"<?php
+//x<?php function fake_comment(): void {}
+#output<?php function fake_hash_comment(): void {}
+$value = "<?php function fake_string(): void {}";
+$doc = <<<TEXT
+<?php function fake_heredoc(): void {}
+TEXT;
+function real(): void { helper(); }
+"#;
+        let graph = extract_symbol_graph("src/confirmed-mode.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+        assert!(graph.symbols.iter().any(|symbol| symbol.name == "real"));
+        assert!(graph.symbols.iter().all(|symbol| {
+            !matches!(
+                symbol.name.as_str(),
+                "fake_comment" | "fake_hash_comment" | "fake_string" | "fake_heredoc"
+            )
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Calls
+                && relation.source_name == "real"
+                && relation.target_name == "helper"
+        }));
     }
 
     #[test]

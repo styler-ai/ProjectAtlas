@@ -12670,6 +12670,52 @@ mod tests {
     }
 
     #[test]
+    fn mixed_php_graph_publishes_complete_coverage() -> Result<(), Box<dyn Error>> {
+        for (path, source, symbol_name) in [
+            (
+                "src/inline-output.php",
+                "//x<?php function marker(): void { helper(); }",
+                "marker",
+            ),
+            (
+                "src/inline-echo.php",
+                "#output<?= $value ?><?php function after_echo(): void { helper(); }",
+                "after_echo",
+            ),
+        ] {
+            let graph = extract_symbol_graph(path, Some("php"), source);
+            require_eq(
+                &graph.parser,
+                &ParserKind::TreeSitter,
+                "mixed PHP fact parser",
+            )?;
+            require(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == symbol_name),
+                "mixed PHP declaration is missing before coverage projection",
+            )?;
+            let coverage = coverage_for_graph(&graph, IndexGeneration::new(1))?;
+            require_eq(
+                &coverage.state(),
+                &CoverageState::Complete,
+                "mixed PHP coverage state",
+            )?;
+            require(
+                coverage.covered() > 0,
+                "mixed PHP complete coverage must retain static relations",
+            )?;
+            require_eq(&coverage.omitted(), &0, "mixed PHP omitted relations")?;
+            require(
+                coverage.reason().is_none(),
+                "complete mixed PHP coverage must not disclose a partial reason",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn persisted_closure_overflow_preserves_the_complete_generation() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;

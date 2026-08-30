@@ -92,9 +92,9 @@
 ## 14. Built-in PHP support (#477)
 
 - [x] 14.1 Pin `tree-sitter-php` 0.24.2 against the workspace Tree-sitter 0.26.9 contract and freeze PHP 8 registration, grammar dispatch, symbol kinds/parents/signatures, byte/line/column spans, namespace/import/include/call relation rules, parser provenance, mixed HTML/PHP handling, dynamic/unsupported fallback, cancellation, and file/node/output budgets without a provider framework.
-- [x] 14.2 Add PHP to the existing `LanguageCapability` and built-in Tree-sitter dispatch and implement the smallest PHP-specific node mapping inside `projectatlas-symbols`; centralize identifiers at the owning registry/parser boundary and preserve existing runtime/graph publication.
+- [ ] 14.2 Add PHP to the existing `LanguageCapability` and built-in Tree-sitter dispatch and implement the smallest PHP-specific node mapping inside `projectatlas-symbols`; centralize identifiers at the owning registry/parser boundary and preserve existing runtime/graph publication.
 - [ ] 14.3 Cover functions, namespaces, classes/interfaces/traits/enums, methods/properties/constants, `use` aliases, include/require, malformed/recovery trees, mixed HTML/PHP, dynamic constructs, duplicate/ambiguous names, exact spans, large/canceled parses, incremental refresh, CLI/MCP navigation, representative Composer repositories, and Windows/Linux/macOS behavior.
-- [x] 14.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [ ] 14.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 15. Complete bounded document-graph publication (#480)
 
