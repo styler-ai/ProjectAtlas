@@ -9013,6 +9013,25 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
+    for (name, workflow) in [("release", release.as_str()), ("pre-push", hook.as_str())] {
+        let first_cargo_test = workflow
+            .find("cargo test")
+            .ok_or_else(|| io::Error::other(format!("{name} omitted cargo tests")))?;
+        for gate in [
+            "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+        ] {
+            let gate_position = workflow
+                .find(gate)
+                .ok_or_else(|| io::Error::other(format!("{name} omitted Mermaid gate {gate:?}")))?;
+            if gate_position > first_cargo_test {
+                return Err(io::Error::other(format!(
+                    "{name} Mermaid gate {gate:?} must precede its first cargo test"
+                ))
+                .into());
+            }
+        }
+    }
 
     for required in [
         "validate_unique_issue_ownership",
@@ -9038,7 +9057,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "acceptance_state_failures",
         "complexity_label_failures",
         "check_open_issue_complexity",
-        "open_issue_payloads",
+        "issue_state_payloads",
+        "--paginate",
+        "--slurp",
+        "repos/{owner}/{name}/issues",
+        "state=all",
+        "per_page=100",
+        "if \"pull_request\" not in issue",
         "closed issue body is inert",
         "must be OPEN",
         "ISSUE_REFERENCE_RE",

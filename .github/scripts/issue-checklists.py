@@ -639,33 +639,33 @@ def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
     return candidates[0]
 
 
-def open_issue_payloads(repo: str) -> list[dict[str, object]]:
-    """Fetch the bounded native issue state and metadata set used by gates."""
+def issue_state_payloads(repo: str) -> list[dict[str, object]]:
+    """Fetch complete native issue state and metadata for repository gates."""
 
-    payload = gh_json(
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
         [
-            "issue",
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "all",
-            "--limit",
-            "1000",
-            "--json",
-            "state,number,labels,milestone",
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{name}/issues",
+            "--method",
+            "GET",
+            "-F",
+            "state=all",
+            "-F",
+            "per_page=100",
         ]
     )
-    if not isinstance(payload, list) or not all(
-        isinstance(issue, dict) for issue in payload
-    ):
-        raise SystemExit("GitHub issue list did not return issue objects")
-    return payload
+    return [
+        issue
+        for issue in flatten_paginated_response(payload)
+        if "pull_request" not in issue
+    ]
 
 
 def check_open_issue_complexity(repo: str) -> list[str]:
     failures: list[str] = []
-    for issue in open_issue_payloads(repo):
+    for issue in issue_state_payloads(repo):
         number = positive_issue(issue.get("number"), "issue number")
         failures.extend(
             f"#{number} issue contract {failure}"
@@ -1438,7 +1438,7 @@ def check_pull_request_tasks(
     failures: list[str] = []
     try:
         issue_states: dict[int, str] = {}
-        for issue in open_issue_payloads(repo):
+        for issue in issue_state_payloads(repo):
             number = positive_issue(issue.get("number"), "issue number")
             state = str(issue.get("state", "")).upper()
             if number in issue_states:
@@ -1587,7 +1587,7 @@ def check_openspec_tasks(
     if planned_issue is None:
         try:
             issue_states = {}
-            for issue in open_issue_payloads(repo):
+            for issue in issue_state_payloads(repo):
                 number = positive_issue(issue.get("number"), "issue number")
                 state = str(issue.get("state", "")).upper()
                 if number in issue_states:
@@ -1990,7 +1990,7 @@ Mitigations:
         for name in (
             "issue_payload",
             "pull_request_payload",
-            "open_issue_payloads",
+            "issue_state_payloads",
             "load_issue_map",
             "check_pull_request_tasks",
             "check_openspec_tasks",
@@ -2014,7 +2014,7 @@ Mitigations:
             pull_request_fetches.append(number)
             or {"title": "Work for #2", "body": ""}
         )
-        globals()["open_issue_payloads"] = lambda _repo: [
+        globals()["issue_state_payloads"] = lambda _repo: [
             global_complexity_fetches.append("global")
             or {"number": number, **payload}
             for number, payload in complexity_payloads.items()
@@ -2634,7 +2634,7 @@ Mitigations:
                 "run",
                 "pull_request_payload",
                 "issue_payload",
-                "open_issue_payloads",
+                "issue_state_payloads",
                 "issue_contract_failures",
                 "issue_checklist_tasks",
             )
@@ -2679,7 +2679,7 @@ Mitigations:
             globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
                 live_checked.append(number) or live_payloads[number]
             )
-            globals()["open_issue_payloads"] = lambda _repo: [
+            globals()["issue_state_payloads"] = lambda _repo: [
                 {"number": number, "state": payload["state"]}
                 for number, payload in live_payloads.items()
             ]
@@ -2689,7 +2689,7 @@ Mitigations:
             ) == []
             assert live_checked == [2], "unrelated live progress must not be fetched"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
-            globals()["open_issue_payloads"] = lambda _repo: [
+            globals()["issue_state_payloads"] = lambda _repo: [
                 {"number": 1, "state": "OPEN"},
                 {"number": 1, "state": "OPEN"},
                 {"number": 2, "state": "OPEN"},
@@ -2703,7 +2703,7 @@ Mitigations:
                 for failure in duplicate_pr_state_failures
             )
             assert live_checked == [], "duplicate state summaries must stop before body reads"
-            globals()["open_issue_payloads"] = lambda _repo: [
+            globals()["issue_state_payloads"] = lambda _repo: [
                 {"number": number, "state": payload["state"]}
                 for number, payload in live_payloads.items()
             ]
@@ -3065,7 +3065,7 @@ Mitigations:
             name: globals()[name]
             for name in (
                 "issue_payload",
-                "open_issue_payloads",
+                "issue_state_payloads",
                 "issue_contract_failures",
                 "milestone_issues",
             )
@@ -3081,7 +3081,7 @@ Mitigations:
                 fetches.append((number, _kwargs.get("include_body", True)))
                 or payloads[number]
             )
-            globals()["open_issue_payloads"] = lambda _repo: [
+            globals()["issue_state_payloads"] = lambda _repo: [
                 {"number": number, "state": payload["state"]}
                 for number, payload in payloads.items()
             ]
@@ -3119,7 +3119,7 @@ Mitigations:
             assert _planned_current_failures == []
             assert fetches == [(448, False), (448, True)], "planned checks must remain issue-scoped"
 
-            globals()["open_issue_payloads"] = lambda _repo: [
+            globals()["issue_state_payloads"] = lambda _repo: [
                 {"number": 448, "state": "OPEN"}
             ]
             missing_state_failures = check_openspec_tasks(
@@ -3130,7 +3130,7 @@ Mitigations:
                 in failure
                 for failure in missing_state_failures
             )
-            globals()["open_issue_payloads"] = lambda _repo: [
+            globals()["issue_state_payloads"] = lambda _repo: [
                 {"number": 517, "state": "UNKNOWN"},
                 {"number": 448, "state": "OPEN"},
             ]
@@ -3142,7 +3142,7 @@ Mitigations:
                 for failure in unknown_state_failures
             )
             fetches.clear()
-            globals()["open_issue_payloads"] = lambda _repo: [
+            globals()["issue_state_payloads"] = lambda _repo: [
                 {"number": 517, "state": "CLOSED"},
                 {"number": 448, "state": "OPEN"},
                 {"number": 448, "state": "OPEN"},
@@ -3155,7 +3155,7 @@ Mitigations:
                 for failure in duplicate_state_failures
             )
             assert fetches == [], "duplicate state summaries must stop before body reads"
-            globals()["open_issue_payloads"] = lambda _repo: [
+            globals()["issue_state_payloads"] = lambda _repo: [
                 {"number": number, "state": payload["state"]}
                 for number, payload in payloads.items()
             ]
@@ -3183,6 +3183,39 @@ Mitigations:
         {"number": 1},
         {"number": 2},
     ]
+    saved_gh_api_json = gh_api_json
+    paginated_issue_api_calls: list[list[str]] = []
+    first_page_issue = {"number": 1, "state": "open"}
+    later_page_issue = {"number": 2, "state": "closed"}
+    pull_request_item = {
+        "number": 3,
+        "state": "open",
+        "pull_request": {"url": "https://api.github.com/pulls/3"},
+    }
+    try:
+        globals()["gh_api_json"] = lambda args: (
+            paginated_issue_api_calls.append(args)
+            or [[first_page_issue], [later_page_issue, pull_request_item]]
+        )
+        assert issue_state_payloads("owner/repo") == [
+            first_page_issue,
+            later_page_issue,
+        ]
+        assert paginated_issue_api_calls == [
+            [
+                "--paginate",
+                "--slurp",
+                "repos/owner/repo/issues",
+                "--method",
+                "GET",
+                "-F",
+                "state=all",
+                "-F",
+                "per_page=100",
+            ]
+        ]
+    finally:
+        globals()["gh_api_json"] = saved_gh_api_json
     assert mapped_issue_numbers({"one": (Owner(1),), "two": (Owner(2),)}) == {
         1,
         2,
