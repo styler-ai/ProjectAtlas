@@ -5152,6 +5152,25 @@ pub(super) fn admit_symbol_build_stage(
         }
         report.merge(graph_report, control)?;
     }
+    let mut symbols = 0_usize;
+    let mut relations = 0_usize;
+    for change in &staged.changes {
+        let SymbolProjectionChange::Parsed(parsed) = change else {
+            continue;
+        };
+        symbols = symbols
+            .checked_add(parsed.graph.symbols.len())
+            .ok_or_else(|| {
+                CliError::InvalidInput("admitted symbol report count overflowed".to_string())
+            })?;
+        relations = relations
+            .checked_add(parsed.graph.relations.len())
+            .ok_or_else(|| {
+                CliError::InvalidInput("admitted relation report count overflowed".to_string())
+            })?;
+    }
+    staged.report.symbols = symbols;
+    staged.report.relations = relations;
     report.source_admitted = true;
     Ok(report)
 }
@@ -10283,6 +10302,26 @@ mod tests {
             }),
         ];
         symbols.identity_admission = super::admit_symbol_build_stage(&mut symbols, &control)?;
+        let admitted_counts = symbols
+            .changes
+            .iter()
+            .filter_map(|change| match change {
+                SymbolProjectionChange::Parsed(parsed) => {
+                    Some((parsed.graph.symbols.len(), parsed.graph.relations.len()))
+                }
+                SymbolProjectionChange::Clear { .. } => None,
+            })
+            .fold(
+                (0, 0),
+                |(symbols, relations), (next_symbols, next_relations)| {
+                    (symbols + next_symbols, relations + next_relations)
+                },
+            );
+        require_eq(
+            &(symbols.report.symbols, symbols.report.relations),
+            &admitted_counts,
+            "post-admission symbol report counts",
+        )?;
         require_eq(
             &symbols.identity_admission.rejections.len(),
             &1,

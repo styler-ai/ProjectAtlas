@@ -150,12 +150,63 @@ pub struct ResolutionProjectionContext<'a> {
 type ImportScopeCache = BTreeMap<String, BTreeMap<String, Vec<String>>>;
 
 /// Bounded contract failures retained while a graph keeps valid siblings.
-#[derive(Default)]
 struct ContractFailures {
     /// Rejected derived-key facts retained for typed adapter detail.
     failures: Vec<ResolutionProjectionFactFailure>,
-    /// Total rejected derived-key facts observed before the detail bound.
+    /// Number of distinct rejected derived-key facts observed.
     rejected_count: usize,
+    /// Whether the source fact has already been rejected.
+    source_seen: bool,
+    /// Rejected symbol ordinals, bit-packed by `Vec<bool>`.
+    symbol_seen: Vec<bool>,
+    /// Rejected relation ordinals, bit-packed by `Vec<bool>`.
+    relation_seen: Vec<bool>,
+}
+
+impl ContractFailures {
+    /// Allocate closed ordinal tracking for one parser graph.
+    fn new(symbol_count: usize, relation_count: usize) -> Self {
+        Self {
+            failures: Vec::new(),
+            rejected_count: 0,
+            source_seen: false,
+            symbol_seen: vec![false; symbol_count],
+            relation_seen: vec![false; relation_count],
+        }
+    }
+
+    /// Record the first failure for one dense parser fact.
+    fn remember(&mut self, fact: ResolutionProjectionFact, error: GraphContractError) {
+        let seen = match fact {
+            ResolutionProjectionFact::Source => {
+                let seen = self.source_seen;
+                self.source_seen = true;
+                !seen
+            }
+            ResolutionProjectionFact::Symbol(index) => {
+                self.symbol_seen.get_mut(index).is_some_and(|seen| {
+                    let was_seen = *seen;
+                    *seen = true;
+                    !was_seen
+                })
+            }
+            ResolutionProjectionFact::Relation(index) => {
+                self.relation_seen.get_mut(index).is_some_and(|seen| {
+                    let was_seen = *seen;
+                    *seen = true;
+                    !was_seen
+                })
+            }
+        };
+        if !seen {
+            return;
+        }
+        self.rejected_count = self.rejected_count.saturating_add(1);
+        if self.failures.len() < MAX_RESOLUTION_PROJECTION_FAILURES {
+            self.failures
+                .push(ResolutionProjectionFactFailure { error, fact });
+        }
+    }
 }
 
 impl<'a> ResolutionProjectionContext<'a> {
@@ -522,7 +573,6 @@ pub fn derive_resolution_keys_with_context(
     graph: &SymbolGraph,
     context: ResolutionProjectionContext<'_>,
 ) -> Result<ResolutionKeyProjection, ResolutionProjectionError> {
-    let mut contract_failures = ContractFailures::default();
     let Some(provider_owner) = semantic::provider_for_graph(graph) else {
         return Ok(ResolutionKeyProjection {
             source: Vec::new(),
@@ -538,6 +588,7 @@ pub fn derive_resolution_keys_with_context(
             relations: Vec::new(),
         });
     };
+    let mut contract_failures = ContractFailures::new(graph.symbols.len(), graph.relations.len());
     let language = GraphIdentityText::new(resolution_family)?;
     let package = package.map(GraphIdentityText::new).transpose()?;
 
@@ -1040,12 +1091,7 @@ fn remember_contract_failure(
     fact: ResolutionProjectionFact,
     error: GraphContractError,
 ) {
-    contract_failures.rejected_count = contract_failures.rejected_count.saturating_add(1);
-    if contract_failures.failures.len() < MAX_RESOLUTION_PROJECTION_FAILURES {
-        contract_failures
-            .failures
-            .push(ResolutionProjectionFactFailure { error, fact });
-    }
+    contract_failures.remember(fact, error);
 }
 
 /// Sort, deduplicate, and enforce the per-fact canonical-key limit.
@@ -1171,7 +1217,9 @@ mod tests {
     };
     use projectatlas_core::graph::{CanonicalResolutionKey, ProjectInstanceId};
     use projectatlas_core::language::SemanticProviderOwner;
-    use projectatlas_core::symbols::{ParserKind, RelationKind, SymbolGraph, SymbolRelation};
+    use projectatlas_core::symbols::{
+        CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    };
     use std::error::Error;
     use std::io;
 
@@ -2319,6 +2367,67 @@ mod tests {
                 .iter()
                 .all(|failure| !format!("{:?}", failure.error()).contains(&imported)),
             "contract failure retained rejected raw identity text",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn contract_failure_deduplicates_repeated_facts_after_detail_ceiling()
+    -> Result<(), Box<dyn Error>> {
+        let mut graph = SymbolGraph {
+            path: "src/main.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::with_capacity(super::MAX_RESOLUTION_PROJECTION_FAILURES + 1),
+            relations: Vec::new(),
+        };
+        for index in 0..super::MAX_RESOLUTION_PROJECTION_FAILURES {
+            graph.symbols.push(CodeSymbol {
+                path: graph.path.clone(),
+                language: graph.language.clone(),
+                name: format!("invalid\0{index}"),
+                kind: SymbolKind::Function,
+                signature: "fn invalid()".to_string(),
+                exported: true,
+                documentation: None,
+                line_start: index + 1,
+                line_end: index + 1,
+                source_selector: None,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: None,
+            });
+        }
+        graph.symbols.push(CodeSymbol {
+            path: graph.path.clone(),
+            language: graph.language.clone(),
+            name: "valid_tail".to_string(),
+            kind: SymbolKind::Function,
+            signature: "fn valid_tail()".to_string(),
+            exported: true,
+            documentation: None,
+            line_start: graph.symbols.len() + 1,
+            line_end: graph.symbols.len() + 1,
+            source_selector: None,
+            parent: Some("\0invalid-parent".to_string()),
+            parser: ParserKind::TreeSitter,
+            detail: None,
+        });
+
+        let Err(ResolutionProjectionError::Contract(failure)) =
+            derive_resolution_keys(project_id(24)?, None, &graph)
+        else {
+            return Err(
+                io::Error::other("repeated post-ceiling failures were not reported").into(),
+            );
+        };
+        require(
+            failure.failures().len() == super::MAX_RESOLUTION_PROJECTION_FAILURES,
+            "detail ceiling retained repeated fact attempts",
+        )?;
+        require(
+            failure.rejected_count() == super::MAX_RESOLUTION_PROJECTION_FAILURES + 1,
+            "repeated post-ceiling fact inflated rejected count",
         )?;
         Ok(())
     }

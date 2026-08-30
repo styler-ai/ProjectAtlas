@@ -2372,26 +2372,21 @@ fn migrate_20_to_21(connection: &Connection) -> DbResult<()> {
 
 /// Add deterministic same-span parser-fact identity to rejection provenance.
 fn migrate_21_to_22(connection: &Connection) -> DbResult<()> {
+    let had_rejections = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM graph_identity_rejections)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
     connection.execute_batch(
         "DROP INDEX idx_graph_identity_rejections_generation_path;
          ALTER TABLE graph_identity_rejections
              RENAME TO graph_identity_rejections_schema_21;",
     )?;
     connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_SQL)?;
-    connection.execute(
-        "INSERT INTO graph_identity_rejections(
-             id, project_instance_id, generation, file_path,
-             start_line, start_column, end_line, end_column,
-             parser, field, reason, fact_index
-         )
-         SELECT id, project_instance_id, generation, file_path,
-                start_line, start_column, end_line, end_column,
-                parser, field, reason, id
-           FROM graph_identity_rejections_schema_21
-          ORDER BY id",
-        [],
-    )?;
     connection.execute_batch("DROP TABLE graph_identity_rejections_schema_21;")?;
+    if had_rejections {
+        invalidate_derived_publication(connection)?;
+    }
     Ok(())
 }
 
@@ -5757,6 +5752,21 @@ mod tests {
             ))
             .into());
         }
+        let retained_publication_keys = connection.query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if retained_publication_keys != 3 {
+            return Err(io::Error::other(format!(
+                "schema-20 empty migration changed publication metadata: {retained_publication_keys}"
+            ))
+            .into());
+        }
         drop(connection);
 
         let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
@@ -5773,7 +5783,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_twentyone_upgrade_backfills_rejection_fact_identity_and_reopens()
+    fn schema_twentyone_upgrade_discards_unreconstructable_rejection_identity_and_reopens()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("schema-21-root");
@@ -5789,8 +5799,16 @@ mod tests {
         )?;
         store.connection.execute_batch(
             "DROP TABLE graph_identity_rejections;
-             UPDATE metadata SET value = '21' WHERE key = 'schema_version';",
+             UPDATE metadata SET value = '21' WHERE key = 'schema_version';
+             UPDATE project_identity SET active_generation = 1 WHERE singleton = 1;",
         )?;
+        for (key, value) in [
+            (INDEX_PUBLICATION_STATE_KEY, "complete"),
+            (INDEX_PUBLICATION_FINGERPRINT_KEY, "schema-21-fixture"),
+            (INDEX_PUBLICATION_GENERATION_KEY, "1"),
+        ] {
+            set_metadata(&store.connection, key, value)?;
+        }
         store
             .connection
             .execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL)?;
@@ -5805,17 +5823,78 @@ mod tests {
         )?;
         drop(store);
 
-        let migrated = AtlasStore::open_for_project(&database, &root)?;
-        let migrated_row = migrated.connection.query_row(
-            "SELECT id, fact_index
-               FROM graph_identity_rejections
-              WHERE project_instance_id = ?1 AND generation = 1",
-            [&project.as_bytes()[..]],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        let connection = Connection::open(&database)?;
+        configure_writable(&connection)?;
+        connection.execute_batch(
+            "CREATE TEMP TRIGGER fail_schema_twentyone_rejection_migration
+             BEFORE UPDATE OF value ON metadata
+             WHEN OLD.key = 'schema_version' AND NEW.value = '22'
+             BEGIN SELECT RAISE(ABORT, 'injected schema-21 migration failure'); END;",
         )?;
-        if migrated_row.0 != migrated_row.1 {
+        let failed = initialize(&connection, Some(&normalize_native_path_display(&root)));
+        if !matches!(failed, Err(DbError::Sqlite(_))) {
             return Err(io::Error::other(format!(
-                "schema-21 migration did not backfill fact identity from row id: {migrated_row:?}"
+                "schema-21 injected failure returned the wrong result: {failed:?}"
+            ))
+            .into());
+        }
+        let rolled_back = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM graph_identity_rejections),
+                (SELECT COUNT(*) FROM sqlite_master
+                  WHERE name = 'graph_identity_rejections_schema_21'),
+                (SELECT COUNT(*) FROM metadata
+                  WHERE key IN (?1, ?2, ?3))",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if rolled_back != ("21".to_string(), 1, 0, 3)
+            || read_schema_contract(&connection)? != *graph_identity_rejection_schema_contract()?
+        {
+            return Err(io::Error::other(format!(
+                "schema-21 failure exposed partial rejection migration state: {rolled_back:?}"
+            ))
+            .into());
+        }
+        connection.execute_batch("DROP TRIGGER fail_schema_twentyone_rejection_migration")?;
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        let migrated_state = migrated.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM graph_identity_rejections),
+                (SELECT COUNT(*) FROM metadata
+                  WHERE key IN (?1, ?2, ?3)),
+                (SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'index' AND name = 'idx_graph_identity_rejections_generation_path')",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if migrated_state != ("22".to_string(), 0, 0, 1) {
+            return Err(io::Error::other(format!(
+                "schema-21 migration retained unreconstructable state: {migrated_state:?}"
             ))
             .into());
         }
@@ -5838,10 +5917,81 @@ mod tests {
             [&project.as_bytes()[..]],
             |row| row.get::<_, i64>(0),
         )?;
-        if reopened_count != 1 {
+        let reopened_generation = reopened.repository_graph_generation()?;
+        if reopened_count != 0 || reopened_generation.is_some() {
             return Err(io::Error::other(format!(
-                "schema-21 migration lost rejection rows on reopen: {reopened_count}"
+                "schema-21 migration did not fail closed on reopen: count={reopened_count}, generation={reopened_generation:?}",
             ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_twentyone_empty_upgrade_preserves_publication_metadata() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-21-empty-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("schema-21-empty.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        store.connection.execute_batch(
+            "DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '21' WHERE key = 'schema_version';
+             UPDATE project_identity SET active_generation = 3 WHERE singleton = 1;",
+        )?;
+        for (key, value) in [
+            (INDEX_PUBLICATION_STATE_KEY, "complete"),
+            (INDEX_PUBLICATION_FINGERPRINT_KEY, "schema-21-empty"),
+            (INDEX_PUBLICATION_GENERATION_KEY, "3"),
+        ] {
+            set_metadata(&store.connection, key, value)?;
+        }
+        store
+            .connection
+            .execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL)?;
+        drop(store);
+
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        let metadata = migrated.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = ?1),
+                (SELECT value FROM metadata WHERE key = ?2),
+                (SELECT value FROM metadata WHERE key = ?3),
+                (SELECT COUNT(*) FROM graph_identity_rejections)",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if metadata
+            != (
+                Some("complete".to_string()),
+                Some("schema-21-empty".to_string()),
+                Some("3".to_string()),
+                0,
+            )
+        {
+            return Err(io::Error::other(format!(
+                "schema-21 empty migration changed publication metadata: {metadata:?}"
+            ))
+            .into());
+        }
+        drop(migrated);
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        if reopened.repository_graph_generation()? != Some(IndexGeneration::new(3)) {
+            return Err(io::Error::other(
+                "schema-21 empty migration did not retain the complete generation",
+            )
             .into());
         }
         Ok(())
@@ -6004,7 +6154,7 @@ mod tests {
                 ))
             },
         )?;
-        if migrated_state != ("22".to_string(), 7, 1, 1, 1, 1)
+        if migrated_state != ("22".to_string(), 7, 1, 1, 0, 1)
             || migrated.project_root_identity()? != Some(expected_identity.clone())
         {
             return Err(io::Error::other(format!(
