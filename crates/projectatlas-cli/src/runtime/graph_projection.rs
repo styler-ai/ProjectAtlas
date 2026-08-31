@@ -122,36 +122,68 @@ fn parser_fact_index(namespace: u64, index: usize) -> u64 {
     }
 }
 
-/// Find the relation observation paired with one import symbol.
+/// Relation observation paired with each symbol in one parser graph.
+struct PairedImportRelations {
+    /// Relation index for each paired import symbol.
+    by_symbol: Vec<Option<usize>>,
+    /// Test-only proof that pairing scans each bounded input row once.
+    #[cfg(test)]
+    work_items: usize,
+}
+
+/// Pair import symbols and relations once by source line and occurrence.
 ///
 /// Tree-sitter emits an import declaration as both a symbol and an import
 /// relation. Pairing by source line and occurrence keeps those observations
 /// tied to one parser fact while retaining distinct same-line imports.
-fn paired_import_relation_index(graph: &SymbolGraph, symbol_index: usize) -> Option<usize> {
-    let symbol = graph.symbols.get(symbol_index)?;
-    if symbol.kind != SymbolKind::Import {
-        return None;
+fn paired_import_relations(
+    graph: &SymbolGraph,
+    control: &IndexWorkControl,
+) -> Result<PairedImportRelations, CliError> {
+    let mut relations_by_line = HashMap::<usize, (Vec<usize>, usize)>::new();
+    #[cfg(test)]
+    let mut work_items = 0_usize;
+    for (relation_index, relation) in graph.relations.iter().enumerate() {
+        check_graph_work(control, relation_index)?;
+        #[cfg(test)]
+        {
+            work_items = work_items.saturating_add(1);
+        }
+        if relation.kind == RelationKind::Imports {
+            relations_by_line
+                .entry(relation.line)
+                .or_default()
+                .0
+                .push(relation_index);
+        }
     }
-    let import_ordinal = graph.symbols[..symbol_index]
-        .iter()
-        .filter(|candidate| {
-            candidate.kind == SymbolKind::Import && candidate.line_start == symbol.line_start
-        })
-        .count();
-    graph
-        .relations
-        .iter()
-        .enumerate()
-        .filter(|(_, relation)| {
-            relation.kind == RelationKind::Imports && relation.line == symbol.line_start
-        })
-        .nth(import_ordinal)
-        .map(|(relation_index, _)| relation_index)
+    let mut by_symbol = vec![None; graph.symbols.len()];
+    for (symbol_index, symbol) in graph.symbols.iter().enumerate() {
+        check_graph_work(control, symbol_index)?;
+        #[cfg(test)]
+        {
+            work_items = work_items.saturating_add(1);
+        }
+        if symbol.kind != SymbolKind::Import {
+            continue;
+        }
+        let Some((relation_indices, next_ordinal)) = relations_by_line.get_mut(&symbol.line_start)
+        else {
+            continue;
+        };
+        by_symbol[symbol_index] = relation_indices.get(*next_ordinal).copied();
+        *next_ordinal = (*next_ordinal).saturating_add(1);
+    }
+    Ok(PairedImportRelations {
+        by_symbol,
+        #[cfg(test)]
+        work_items,
+    })
 }
 
 /// Reuse the relation ordinal for its paired import symbol observation.
-fn symbol_parser_fact_index(graph: &SymbolGraph, symbol_index: usize) -> u64 {
-    paired_import_relation_index(graph, symbol_index).map_or_else(
+fn symbol_parser_fact_index(symbol_index: usize, paired_relation_index: Option<usize>) -> u64 {
+    paired_relation_index.map_or_else(
         || parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, symbol_index),
         |relation_index| parser_fact_index(RELATION_FACT_INDEX_NAMESPACE, relation_index),
     )
@@ -171,7 +203,11 @@ struct IdentitySpan {
 }
 
 /// Use one source span for paired import symbol and relation observations.
-fn symbol_identity_span(graph: &SymbolGraph, symbol_index: usize) -> IdentitySpan {
+fn symbol_identity_span(
+    graph: &SymbolGraph,
+    symbol_index: usize,
+    paired_relation_index: Option<usize>,
+) -> IdentitySpan {
     let Some(symbol) = graph.symbols.get(symbol_index) else {
         return IdentitySpan {
             start_line: 1,
@@ -182,7 +218,7 @@ fn symbol_identity_span(graph: &SymbolGraph, symbol_index: usize) -> IdentitySpa
     };
     let start_line = symbol.line_start.max(1);
     let end_line = symbol.line_end.max(symbol.line_start).max(1);
-    if let Some(relation_index) = paired_import_relation_index(graph, symbol_index)
+    if let Some(relation_index) = paired_relation_index
         && let Some(relation) = graph.relations.get(relation_index)
     {
         let line = relation.line.max(1);
@@ -485,6 +521,9 @@ pub(super) struct GraphIdentityAdmission {
     /// Test-only proof of one derivation per source path and generation.
     #[cfg(test)]
     resolution_derivations: BTreeMap<(String, IndexGeneration), usize>,
+    /// Test-only count of source rows inspected while pairing import facts.
+    #[cfg(test)]
+    paired_import_pairing_work: usize,
 }
 
 impl GraphIdentityAdmission {
@@ -798,6 +837,15 @@ impl GraphIdentityAdmission {
         if peak_retained_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
             return Err(identity_fact_budget_failure(peak_retained_bytes));
         }
+        #[cfg(test)]
+        {
+            self.paired_import_pairing_work = self
+                .paired_import_pairing_work
+                .checked_add(other.paired_import_pairing_work)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("paired import work count overflowed".to_string())
+                })?;
+        }
         self.source_admitted |= other.source_admitted;
         if other
             .resolution_projections
@@ -1018,6 +1066,8 @@ impl GraphIdentityAdmission {
             reused_rejection_details_incomplete: BTreeSet::new(),
             #[cfg(test)]
             resolution_derivations: BTreeMap::new(),
+            #[cfg(test)]
+            paired_import_pairing_work: 0,
         })
     }
 
@@ -5249,10 +5299,16 @@ fn admit_symbol_graph<'a>(
     control: &IndexWorkControl,
 ) -> Result<(Cow<'a, SymbolGraph>, GraphIdentityAdmission), CliError> {
     let mut report = GraphIdentityAdmission::default();
+    let paired_import_relations = paired_import_relations(&graph, control)?;
+    #[cfg(test)]
+    {
+        report.paired_import_pairing_work = paired_import_relations.work_items;
+    }
     let mut rejected_symbols = vec![false; graph.symbols.len()];
     for (index, symbol) in graph.symbols.iter().enumerate() {
         check_graph_work(control, index)?;
-        let span = symbol_identity_span(&graph, index);
+        let paired_relation_index = paired_import_relations.by_symbol[index];
+        let span = symbol_identity_span(&graph, index, paired_relation_index);
         let mut failures = Vec::new();
         let name_field = if symbol.kind == SymbolKind::Package {
             GraphIdentityField::Package
@@ -5275,7 +5331,7 @@ fn admit_symbol_graph<'a>(
                 &graph.path,
                 span,
                 symbol.parser,
-                symbol_parser_fact_index(&graph, index),
+                symbol_parser_fact_index(index, paired_relation_index),
                 &failures,
                 control,
             )?;
@@ -6373,6 +6429,136 @@ mod tests {
         require(
             admitted.symbols.is_empty() && admitted.relations.is_empty(),
             "paired multiline import retained an invalid parser fact",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn paired_import_admission_scans_scale_bound_once_and_deduplicates_replay()
+    -> Result<(), Box<dyn Error>> {
+        const IMPORT_SYMBOLS: usize = 4_000;
+        const IMPORT_RELATIONS: usize = 8_000;
+        const PAIRING_WORK_ITEMS: usize = IMPORT_SYMBOLS + IMPORT_RELATIONS;
+        let graph = |path: &str, invalid: bool| SymbolGraph {
+            path: path.to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: (0..IMPORT_SYMBOLS)
+                .map(|index| {
+                    let name = if invalid {
+                        format!("invalid\0import-{index}")
+                    } else {
+                        format!("import-{index}")
+                    };
+                    CodeSymbol {
+                        path: path.to_string(),
+                        language: Some("typescript".to_string()),
+                        name: name.clone(),
+                        kind: SymbolKind::Import,
+                        signature: name,
+                        exported: false,
+                        documentation: None,
+                        line_start: 1,
+                        line_end: 2,
+                        source_selector: None,
+                        parent: None,
+                        parser: ParserKind::TreeSitter,
+                        detail: Some("import_statement".to_string()),
+                    }
+                })
+                .collect(),
+            relations: (0..IMPORT_RELATIONS)
+                .map(|index| SymbolRelation {
+                    path: path.to_string(),
+                    source_name: path.to_string(),
+                    target_name: if invalid {
+                        format!("invalid\0module-{index}")
+                    } else {
+                        format!("module-{index}")
+                    },
+                    kind: RelationKind::Imports,
+                    line: 1,
+                    context: "import".to_string(),
+                    parser: ParserKind::TreeSitter,
+                })
+                .collect(),
+        };
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+
+        let (valid, valid_report) = super::admit_symbol_graph(
+            Cow::Owned(graph("src/import-scale-valid.ts", false)),
+            &control,
+        )?;
+        require_eq(
+            &valid_report.paired_import_pairing_work,
+            &PAIRING_WORK_ITEMS,
+            "valid import pairing work",
+        )?;
+        require_eq(
+            &valid.symbols.len(),
+            &IMPORT_SYMBOLS,
+            "valid import symbol count",
+        )?;
+        require_eq(
+            &valid.relations.len(),
+            &IMPORT_RELATIONS,
+            "valid import relation count",
+        )?;
+        require_eq(
+            &valid_report.rejected_facts_for("src/import-scale-valid.ts"),
+            &0,
+            "valid import rejection count",
+        )?;
+
+        let invalid_graph = graph("src/import-scale-invalid.ts", true);
+        let (invalid, mut invalid_report) =
+            super::admit_symbol_graph(Cow::Owned(invalid_graph.clone()), &control)?;
+        require_eq(
+            &invalid_report.paired_import_pairing_work,
+            &PAIRING_WORK_ITEMS,
+            "invalid import pairing work",
+        )?;
+        require(
+            invalid.symbols.is_empty() && invalid.relations.is_empty(),
+            "invalid import facts survived admission",
+        )?;
+        require_eq(
+            &invalid_report.rejected_facts_for("src/import-scale-invalid.ts"),
+            &u64::try_from(IMPORT_RELATIONS)?,
+            "invalid import rejection count",
+        )?;
+        require_eq(
+            &invalid_report.rejections.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "invalid import detail ceiling",
+        )?;
+
+        let (replayed, replay_report) =
+            super::admit_symbol_graph(Cow::Owned(invalid_graph), &control)?;
+        require(
+            replayed.symbols.is_empty() && replayed.relations.is_empty(),
+            "replayed invalid import facts survived admission",
+        )?;
+        require_eq(
+            &replay_report.paired_import_pairing_work,
+            &PAIRING_WORK_ITEMS,
+            "replayed import pairing work",
+        )?;
+        invalid_report.merge(replay_report, &control)?;
+        require_eq(
+            &invalid_report.paired_import_pairing_work,
+            &(PAIRING_WORK_ITEMS * 2),
+            "merged replay import pairing work",
+        )?;
+        require_eq(
+            &invalid_report.rejected_facts_for("src/import-scale-invalid.ts"),
+            &u64::try_from(IMPORT_RELATIONS)?,
+            "replayed import rejection count",
+        )?;
+        require_eq(
+            &invalid_report.rejections.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "replayed import detail ceiling",
         )?;
         Ok(())
     }
