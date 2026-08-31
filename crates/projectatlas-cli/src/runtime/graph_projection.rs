@@ -122,18 +122,15 @@ fn parser_fact_index(namespace: u64, index: usize) -> u64 {
     }
 }
 
-/// Reuse the relation ordinal for its paired import symbol observation.
+/// Find the relation observation paired with one import symbol.
 ///
 /// Tree-sitter emits an import declaration as both a symbol and an import
-/// relation. They are one parser fact even though their compact graph values
-/// differ; pairing by source line and occurrence keeps that fact from being
-/// double-counted while retaining distinct same-line imports.
-fn symbol_parser_fact_index(graph: &SymbolGraph, symbol_index: usize) -> u64 {
-    let Some(symbol) = graph.symbols.get(symbol_index) else {
-        return parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, symbol_index);
-    };
+/// relation. Pairing by source line and occurrence keeps those observations
+/// tied to one parser fact while retaining distinct same-line imports.
+fn paired_import_relation_index(graph: &SymbolGraph, symbol_index: usize) -> Option<usize> {
+    let symbol = graph.symbols.get(symbol_index)?;
     if symbol.kind != SymbolKind::Import {
-        return parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, symbol_index);
+        return None;
     }
     let import_ordinal = graph.symbols[..symbol_index]
         .iter()
@@ -149,10 +146,15 @@ fn symbol_parser_fact_index(graph: &SymbolGraph, symbol_index: usize) -> u64 {
             relation.kind == RelationKind::Imports && relation.line == symbol.line_start
         })
         .nth(import_ordinal)
-        .map_or_else(
-            || parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, symbol_index),
-            |(relation_index, _)| parser_fact_index(RELATION_FACT_INDEX_NAMESPACE, relation_index),
-        )
+        .map(|(relation_index, _)| relation_index)
+}
+
+/// Reuse the relation ordinal for its paired import symbol observation.
+fn symbol_parser_fact_index(graph: &SymbolGraph, symbol_index: usize) -> u64 {
+    paired_import_relation_index(graph, symbol_index).map_or_else(
+        || parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, symbol_index),
+        |relation_index| parser_fact_index(RELATION_FACT_INDEX_NAMESPACE, relation_index),
+    )
 }
 
 /// Bounded source span attached to one rejected parser identity.
@@ -166,6 +168,37 @@ struct IdentitySpan {
     end_line: usize,
     /// Zero-based exclusive end column when the parser provides one.
     end_column: usize,
+}
+
+/// Use one source span for paired import symbol and relation observations.
+fn symbol_identity_span(graph: &SymbolGraph, symbol_index: usize) -> IdentitySpan {
+    let Some(symbol) = graph.symbols.get(symbol_index) else {
+        return IdentitySpan {
+            start_line: 1,
+            start_column: 0,
+            end_line: 1,
+            end_column: 0,
+        };
+    };
+    let start_line = symbol.line_start.max(1);
+    let end_line = symbol.line_end.max(symbol.line_start).max(1);
+    if let Some(relation_index) = paired_import_relation_index(graph, symbol_index)
+        && let Some(relation) = graph.relations.get(relation_index)
+    {
+        let line = relation.line.max(1);
+        return IdentitySpan {
+            start_line: line,
+            start_column: 0,
+            end_line: line,
+            end_column: 0,
+        };
+    }
+    IdentitySpan {
+        start_line,
+        start_column: 0,
+        end_line,
+        end_column: 0,
+    }
 }
 
 /// Internal identity for one observed parser fact, independent of retained
@@ -5219,12 +5252,7 @@ fn admit_symbol_graph<'a>(
     let mut rejected_symbols = vec![false; graph.symbols.len()];
     for (index, symbol) in graph.symbols.iter().enumerate() {
         check_graph_work(control, index)?;
-        let span = IdentitySpan {
-            start_line: symbol.line_start.max(1),
-            start_column: 0,
-            end_line: symbol.line_end.max(symbol.line_start).max(1),
-            end_column: 0,
-        };
+        let span = symbol_identity_span(&graph, index);
         let mut failures = Vec::new();
         let name_field = if symbol.kind == SymbolKind::Package {
             GraphIdentityField::Package
@@ -6301,6 +6329,53 @@ mod tests {
     use std::path::Path;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn paired_multiline_import_rejection_is_one_parser_fact() -> Result<(), Box<dyn Error>> {
+        let graph = extract_symbol_graph(
+            "src/page.ts",
+            Some("typescript"),
+            "import {\n  helper\n} from './LeakedIdentity\u{0}module';\n",
+        );
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let (admitted, report) = super::admit_symbol_graph(Cow::Owned(graph), &control)?;
+        require_eq(
+            &report.rejected_facts_for("src/page.ts"),
+            &1,
+            "paired multiline import omission count",
+        )?;
+        require_eq(
+            &report.rejections.len(),
+            &3,
+            "paired multiline import typed detail count",
+        )?;
+        require(
+            report.rejections.iter().all(|rejection| {
+                rejection.fact_index == report.rejections[0].fact_index
+                    && rejection.span.start_line() == 1
+                    && rejection.span.end_line() == 1
+            }),
+            "paired multiline import details did not share one parser span",
+        )?;
+        for field in [
+            GraphIdentityField::RelationTarget,
+            GraphIdentityField::Signature,
+            GraphIdentityField::Symbol,
+        ] {
+            require(
+                report
+                    .rejections
+                    .iter()
+                    .any(|rejection| rejection.field == field),
+                "paired multiline import lost a typed invalid field",
+            )?;
+        }
+        require(
+            admitted.symbols.is_empty() && admitted.relations.is_empty(),
+            "paired multiline import retained an invalid parser fact",
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn admission_counts_distinct_same_span_facts_but_deduplicates_replays()

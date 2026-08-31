@@ -23314,7 +23314,7 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     let relative_path = "src/page.ts";
-    let source = "import './LeakedIdentity\0one';\nimport './LeakedIdentity\0two';\nimport * as worker from './worker';\nexport function caller() { worker.run(); }\n";
+    let source = "import {\n  helper\n} from './LeakedIdentity\0one';\nimport './LeakedIdentity\0two';\nimport * as worker from './worker';\nexport function caller() { worker.run(); }\n";
     fs::write(repo.join(relative_path), source)?;
     fs::write(
         repo.join(SRC_DIR_NAME).join("worker.ts"),
@@ -23461,6 +23461,39 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
     run_watch_once(&repo, &db)?;
     assert_identity_navigation_survives_invalid_siblings(&db, relative_path)?;
     assert_identity_relation_surfaces(&repo, &db, relative_path)?;
+    let incremental_health = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            relative_path,
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !incremental_health.status.success() {
+        return Err(io::Error::other(format!(
+            "incremental identity coverage failed: {}",
+            String::from_utf8_lossy(&incremental_health.stderr)
+        ))
+        .into());
+    }
+    let incremental_report: Value = serde_json::from_slice(&incremental_health.stdout)?;
+    if incremental_report["rows"][0]["omitted"] != 2
+        || incremental_report["rows"][0]["identity_rejections"]
+            .as_array()
+            .is_none_or(|rows| rows.len() != 6)
+    {
+        return Err(io::Error::other(format!(
+            "incremental identity coverage split paired import facts: {incremental_report}"
+        ))
+        .into());
+    }
     let repaired_source =
         "import * as worker from './worker';\nexport function caller() { worker.run(); }\n";
     fs::write(repo.join(relative_path), repaired_source)?;
@@ -23534,7 +23567,7 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
         .any(|row| row["span"]["start_line"].as_u64() == Some(1));
     let has_second_import_rejection = identity_rejections
         .iter()
-        .any(|row| row["span"]["start_line"].as_u64() == Some(2));
+        .any(|row| row["span"]["start_line"].as_u64() == Some(4));
     if cli_report["returned"] != 1
         || cli_report["rows"][0]["reason"] != "parser does not prove complete relationship coverage"
         || cli_report["rows"][0]["omitted"] != 2
@@ -23545,7 +23578,7 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
             row["path"] == relative_path
                 && row["reason"] == "control-characters"
                 && row["parser"] == "tree-sitter"
-                && matches!(row["span"]["start_line"].as_u64(), Some(1 | 2))
+                && matches!(row["span"]["start_line"].as_u64(), Some(1 | 4))
         })
         || !["relation.target", "signature", "symbol"]
             .into_iter()
