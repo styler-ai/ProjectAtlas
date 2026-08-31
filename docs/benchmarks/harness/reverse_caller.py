@@ -187,6 +187,21 @@ def wait_for_cancellation_stage(
     return observation
 
 
+def require_definitive_cancellation(observation: dict[str, Any]) -> None:
+    """Require the operation result, not a bridge-drop diagnostic marker."""
+
+    if (
+        observation.get("request_cancellation_observed") is not True
+        or observation.get("work_cancellation_observed") is not True
+        or observation.get("outcome") != "canceled"
+        or observation.get("result_was_canceled") is not True
+    ):
+        raise AssertionError(
+            "MCP cancellation did not reach a definitive canceled terminal state: "
+            f"{observation!r}"
+        )
+
+
 def run_mcp_cancellation(
     binary: Path,
     root: Path,
@@ -318,17 +333,7 @@ def run_mcp_cancellation(
         terminal_observation = wait_for_cancellation_stage(
             cancellation_trace, process, "terminal"
         )
-        if (
-            terminal_observation.get("request_cancellation_observed") is not True
-            or terminal_observation.get("work_cancellation_observed") is not True
-            or terminal_observation.get("outcome")
-            not in {"canceled", "request-context-canceled"}
-            or terminal_observation.get("result_was_canceled") not in {True, None}
-        ):
-            raise AssertionError(
-                "MCP cancellation did not reach a definitive canceled terminal state: "
-                f"{terminal_observation!r}"
-            )
+        require_definitive_cancellation(terminal_observation)
         # A live ping proves the server stayed up while rmcp suppressed the
         # canceled request's response; a response for id=2 would be a failure.
         request(3, "ping", {})
