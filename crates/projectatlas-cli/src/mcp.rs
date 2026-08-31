@@ -3545,6 +3545,84 @@ struct McpRequestCancellationBridge {
     terminal_recorded: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Environment variable used to opt the benchmark harness into cancellation tracing.
+#[cfg(feature = "reverse-caller-benchmark")]
+const MCP_REVERSE_CALLER_CANCELLATION_TRACE_ENV: &str =
+    "PROJECTATLAS_REVERSE_CALLER_CANCELLATION_TRACE";
+
+/// Lifecycle stages emitted by the benchmark-only cancellation trace.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum McpBenchmarkCancellationStage {
+    /// The request bridge was created.
+    Started,
+    /// The request bridge reached a terminal observation.
+    Terminal,
+}
+
+/// Terminal outcomes emitted by the benchmark-only cancellation trace.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Debug, Serialize)]
+enum McpBenchmarkCancellationOutcome {
+    /// The shared index work observed cancellation.
+    #[serde(rename = "canceled")]
+    Canceled,
+    /// The shared index work completed successfully.
+    #[serde(rename = "completed")]
+    Completed,
+    /// The shared index work failed without cancellation.
+    #[serde(rename = "failed")]
+    Failed,
+    /// The bridge was dropped after request cancellation without a terminal work result.
+    #[serde(rename = "request-context-canceled")]
+    RequestContextCanceled,
+}
+
+/// Initial request-bridge observation written by the benchmark-only trace.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Debug, Serialize)]
+struct McpBenchmarkCancellationStarted {
+    /// Lifecycle stage.
+    stage: McpBenchmarkCancellationStage,
+    /// Whether the request context was canceled.
+    request_cancellation_observed: bool,
+    /// Whether synchronous work had observed cancellation.
+    work_cancellation_observed: bool,
+}
+
+/// Authoritative terminal request-bridge observation written by the benchmark-only trace.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Debug, Serialize)]
+struct McpBenchmarkCancellationTerminal {
+    /// Lifecycle stage.
+    stage: McpBenchmarkCancellationStage,
+    /// Whether the request context was canceled.
+    request_cancellation_observed: bool,
+    /// Whether synchronous work had observed cancellation.
+    work_cancellation_observed: bool,
+    /// Whether the returned work error represented cancellation.
+    result_was_canceled: bool,
+    /// Terminal work outcome.
+    outcome: McpBenchmarkCancellationOutcome,
+}
+
+/// Diagnostic bridge-drop observation retained when no authoritative result was available.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Debug, Serialize)]
+struct McpBenchmarkCancellationDiagnostic {
+    /// Lifecycle stage.
+    stage: McpBenchmarkCancellationStage,
+    /// Whether the request context was canceled.
+    request_cancellation_observed: bool,
+    /// Whether synchronous work had observed cancellation.
+    work_cancellation_observed: bool,
+    /// No work result exists for a diagnostic bridge-drop observation.
+    result_was_canceled: Option<bool>,
+    /// Diagnostic outcome that is not authoritative benchmark evidence.
+    outcome: McpBenchmarkCancellationOutcome,
+}
+
 impl McpRequestCancellationBridge {
     /// Start a request-local monitor from one owned RMCP context.
     fn start(
@@ -3602,7 +3680,7 @@ impl McpRequestCancellationBridge {
             terminal_recorded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         #[cfg(feature = "reverse-caller-benchmark")]
-        bridge.record_benchmark_stage("started")?;
+        bridge.record_benchmark_stage()?;
         Ok(bridge)
     }
 
@@ -3622,19 +3700,19 @@ impl McpRequestCancellationBridge {
         result_succeeded: bool,
     ) -> Result<(), CliError> {
         let outcome = if result_was_canceled {
-            "canceled"
+            McpBenchmarkCancellationOutcome::Canceled
         } else if result_succeeded {
-            "completed"
+            McpBenchmarkCancellationOutcome::Completed
         } else {
-            "failed"
+            McpBenchmarkCancellationOutcome::Failed
         };
-        let payload = serde_json::json!({
-            "stage": "terminal",
-            "request_cancellation_observed": (self.probe)(),
-            "work_cancellation_observed": work_cancelled,
-            "result_was_canceled": result_was_canceled,
-            "outcome": outcome,
-        });
+        let payload = McpBenchmarkCancellationTerminal {
+            stage: McpBenchmarkCancellationStage::Terminal,
+            request_cancellation_observed: (self.probe)(),
+            work_cancellation_observed: work_cancelled,
+            result_was_canceled,
+            outcome,
+        };
         Self::write_benchmark_stage(&payload)?;
         self.terminal_recorded.store(true, Ordering::Release);
         Ok(())
@@ -3642,22 +3720,26 @@ impl McpRequestCancellationBridge {
 
     /// Persist one benchmark-only cancellation lifecycle stage.
     #[cfg(feature = "reverse-caller-benchmark")]
-    fn record_benchmark_stage(&self, stage: &str) -> Result<(), CliError> {
-        Self::write_benchmark_stage(&serde_json::json!({
-            "stage": stage,
-            "request_cancellation_observed": (self.probe)(),
-            "work_cancellation_observed": self.cancellation_observed.load(Ordering::Acquire),
-        }))
+    fn record_benchmark_stage(&self) -> Result<(), CliError> {
+        let payload = McpBenchmarkCancellationStarted {
+            stage: McpBenchmarkCancellationStage::Started,
+            request_cancellation_observed: (self.probe)(),
+            work_cancellation_observed: self.cancellation_observed.load(Ordering::Acquire),
+        };
+        Self::write_benchmark_stage(&payload)
     }
 
     /// Write one feature-only benchmark stage when a trace path is configured.
     #[cfg(feature = "reverse-caller-benchmark")]
-    fn write_benchmark_stage(payload: &serde_json::Value) -> Result<(), CliError> {
-        let Some(path) = std::env::var_os("PROJECTATLAS_REVERSE_CALLER_CANCELLATION_TRACE") else {
+    fn write_benchmark_stage<T>(payload: &T) -> Result<(), CliError>
+    where
+        T: Serialize,
+    {
+        let Some(path) = std::env::var_os(MCP_REVERSE_CALLER_CANCELLATION_TRACE_ENV) else {
             return Ok(());
         };
         let path = PathBuf::from(path);
-        let encoded = serde_json::to_vec(&payload)?;
+        let encoded = serde_json::to_vec(payload)?;
         fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })
     }
 }
@@ -3672,13 +3754,15 @@ impl Drop for McpRequestCancellationBridge {
         if self.cancellation_observed.load(Ordering::Acquire)
             && !self.terminal_recorded.load(Ordering::Acquire)
         {
-            drop(Self::write_benchmark_stage(&serde_json::json!({
-                "stage": "terminal",
-                "request_cancellation_observed": (self.probe)(),
-                "work_cancellation_observed": true,
-                "result_was_canceled": serde_json::Value::Null,
-                "outcome": "request-context-canceled",
-            })));
+            drop(Self::write_benchmark_stage(
+                &McpBenchmarkCancellationDiagnostic {
+                    stage: McpBenchmarkCancellationStage::Terminal,
+                    request_cancellation_observed: (self.probe)(),
+                    work_cancellation_observed: true,
+                    result_was_canceled: None,
+                    outcome: McpBenchmarkCancellationOutcome::RequestContextCanceled,
+                },
+            ));
         }
     }
 }
