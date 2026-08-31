@@ -30,7 +30,7 @@ pub use resolution_keys::{
     resolve_relative_import_path, semantic_resolution_contract_digest, source_stems_for_path,
 };
 
-use projectatlas_core::graph::QUALIFIED_SYMBOL_SCOPE_PREFIX;
+use projectatlas_core::graph::{GraphIdentityText, QUALIFIED_SYMBOL_SCOPE_PREFIX};
 use projectatlas_core::language::{
     EmbeddedHostKind, EmbeddedLanguageCapability, SymbolParserOwner, TreeSitterGrammar,
     builtin_tree_sitter_language_ids, language_capability, tree_sitter_grammar,
@@ -1985,7 +1985,11 @@ fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
         "string" | "encapsed_string" => php_static_string_target(expression, content)?,
         _ => return None,
     };
-    Some(target).filter(|target| !target.is_empty() && target.chars().count() <= MAX_SNIPPET_CHARS)
+    Some(target).filter(|target| {
+        !target.is_empty()
+            && target.chars().count() <= MAX_SNIPPET_CHARS
+            && GraphIdentityText::new(target.clone()).is_ok()
+    })
 }
 
 /// Return the plain content of a PHP string literal when it has no interpolation.
@@ -2236,7 +2240,8 @@ fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
     let Some(target_node) = target_node else {
         return;
     };
-    let target = if is_php_language(graph.language.as_deref()) {
+    let is_php = is_php_language(graph.language.as_deref());
+    let target = if is_php {
         let Some(target) = php_call_target(node, content) else {
             return;
         };
@@ -2244,7 +2249,7 @@ fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
     } else {
         compact_text(node_text(target_node, content).as_deref().unwrap_or(""))
     };
-    if target.is_empty() || target.len() > MAX_SNIPPET_CHARS {
+    if target.is_empty() || (!is_php && target.len() > MAX_SNIPPET_CHARS) {
         return;
     }
     let source = enclosing_symbol_name(node.parent(), content).unwrap_or_else(|| "<module>".into());
@@ -5519,7 +5524,6 @@ require 'dir  bootstrap.php';
         for (target, line) in [
             ("vendor\\bootstrap.php", 2),
             ("vendor\"quoted.php", 3),
-            ("control\npath.php", 4),
             ("dollar$name.php", 5),
             ("dir  bootstrap.php", 12),
         ] {
@@ -5538,6 +5542,10 @@ require 'dir  bootstrap.php';
             assert_eq!(relation.context, target);
         }
         assert!(imports.iter().all(|relation| {
+            relation.target_name != "control\npath.php"
+                && !relation.target_name.chars().any(char::is_control)
+        }));
+        assert!(imports.iter().all(|relation| {
             !relation.target_name.contains("unsupported")
                 && !relation.target_name.contains("boot/")
                 && relation.target_name != "$dynamic"
@@ -5545,6 +5553,31 @@ require 'dir  bootstrap.php';
                 && !relation.target_name.contains("Vendor")
                 && !relation.target_name.contains("1 + 2")
         }));
+    }
+
+    #[test]
+    fn php_call_targets_use_character_bounds_for_unicode_names() {
+        let target = "é".repeat(MAX_SNIPPET_CHARS / 2 + 1);
+        assert!(target.chars().count() <= MAX_SNIPPET_CHARS);
+        assert!(target.len() > MAX_SNIPPET_CHARS);
+        let source = format!("<?php\nfunction caller(): void {{\n{target}();\n}}\n");
+        let graph = extract_symbol_graph("src/UnicodeCalls.php", Some("php"), &source);
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+        assert!(
+            calls.iter().any(|relation| relation.target_name == target),
+            "Unicode PHP call within character bound must be published: {calls:?}"
+        );
+        let Some(relation) = calls.iter().find(|relation| relation.target_name == target) else {
+            return;
+        };
+        assert_eq!(relation.source_name, "caller");
+        assert_eq!(relation.path, "src/UnicodeCalls.php");
+        assert_eq!(relation.line, 3);
+        assert_eq!(relation.context, format!("{target}()"));
     }
 
     #[test]
