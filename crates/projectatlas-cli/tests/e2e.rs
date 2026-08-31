@@ -33519,6 +33519,29 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
+    // A zero-length private deadline drives each real owner through its
+    // running-child cleanup path without changing process-global state.
+    let still_running_shutdown = run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        Duration::ZERO,
+        None,
+    );
+    let still_running_shutdown_text = still_running_shutdown
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_shutdown.is_ok()
+        || !still_running_shutdown_text.contains("still running at deadline")
+        || !still_running_shutdown_text.contains("status=")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not terminate and reap a child still running at its deadline: {still_running_shutdown:?}"
+        ))
+        .into());
+    }
 
     let args = vec![
         "--db".to_string(),
@@ -33579,6 +33602,29 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
+    let still_running_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        Duration::ZERO,
+        None,
+    );
+    let still_running_mcp_text = still_running_mcp
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_mcp.is_ok()
+        || !still_running_mcp_text.contains("still running at deadline")
+        || !still_running_mcp_text.contains("status=")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not terminate and reap a child still running at its deadline: {still_running_mcp:?}"
+        ))
+        .into());
+    }
 
     let in_time_installer = wait_for_plugin_installer_output_with_test_delay(
         StdCommand::new(&executable)
@@ -33616,6 +33662,34 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
     {
         return Err(io::Error::other(format!(
             "installer observer did not distinguish late completion from a running timeout: {late_installer:?}"
+        ))
+        .into());
+    }
+    let still_running_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--version")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "still-running",
+        Duration::ZERO,
+        None,
+    );
+    let still_running_installer_text = still_running_installer
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_installer.is_ok()
+        || !still_running_installer_text.contains("still running at deadline")
+        || !still_running_installer_text.contains("status=")
+        || !still_running_installer_text.contains("stdout:")
+        || !still_running_installer_text.contains("stderr:")
+    {
+        return Err(io::Error::other(format!(
+            "installer observer did not terminate and drain a child still running at its deadline: {still_running_installer:?}"
         ))
         .into());
     }
@@ -38203,12 +38277,13 @@ fn wait_for_plugin_installer_output_with_test_delay(
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
-                    "{label} plugin installer exceeded {timeout:?}: {}\nstdout:\n{}\nstderr:\n{}",
+                    "{label} plugin installer exceeded {timeout:?}: {} status={}\nstdout:\n{}\nstderr:\n{}",
                     if still_running {
                         "still running at deadline"
                     } else {
                         "completed after deadline"
                     },
+                    output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 ),
@@ -38228,7 +38303,8 @@ fn wait_for_plugin_installer_output_with_test_delay(
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
-                    "{label} plugin installer exceeded {timeout:?}: completed after deadline (observed_at={observed_at:?})\nstdout:\n{}\nstderr:\n{}",
+                    "{label} plugin installer exceeded {timeout:?}: completed after deadline (observed_at={observed_at:?}) status={}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 ),
