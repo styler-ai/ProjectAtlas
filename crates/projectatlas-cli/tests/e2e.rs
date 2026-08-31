@@ -33172,6 +33172,7 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill(
         timeout,
         observer_delay,
         hold_stdin_until_observation,
+        None,
         kill_child,
         None,
     )
@@ -33186,6 +33187,7 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
     timeout: Duration,
     observer_delay: Option<Duration>,
     hold_stdin_until_observation: bool,
+    exit_probe_error: Option<io::Error>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
 ) -> Result<String, Box<dyn Error>> {
@@ -33208,6 +33210,7 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
             timeout,
             observer_delay,
             hold_stdin_until_observation,
+            exit_probe_error,
             kill_child,
             handoff_live_child,
         )
@@ -33537,7 +33540,11 @@ fn complete_mcp_test_after_shutdown<T>(
 fn synchronize_prompt_exit_before_delayed_observation(
     child: &mut Child,
     label: &str,
-) -> Result<(), Box<dyn Error>> {
+    exit_probe_error: Option<io::Error>,
+) -> io::Result<()> {
+    if let Some(error) = exit_probe_error {
+        return Err(error);
+    }
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(10))
         .ok_or_else(|| io::Error::other("test child exit deadline overflowed"))?;
@@ -33550,11 +33557,36 @@ fn synchronize_prompt_exit_before_delayed_observation(
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("{label} did not exit before the delayed observer was released"),
-            )
-            .into());
+            ));
         }
         thread::sleep(Duration::from_millis(25).min(remaining));
     }
+}
+
+fn require_injected_exit_probe_failure<T>(
+    result: &Result<T, Box<dyn Error>>,
+    owner: &str,
+    cause: &str,
+    disposition: &str,
+) -> Result<(), Box<dyn Error>> {
+    let error = result
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other(format!("{owner} exit probe failure was not returned")))?;
+    let io_error = error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other(format!("{owner} exit probe lost its io error")))?;
+    let diagnostic = error.to_string();
+    if io_error.kind() != io::ErrorKind::TimedOut
+        || !diagnostic.contains(cause)
+        || !diagnostic.contains(disposition)
+    {
+        return Err(io::Error::other(format!(
+            "{owner} exit probe failure lost its classification, cause, or ownership disposition: {diagnostic}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 #[test]
@@ -33585,6 +33617,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
 -> Result<(), Box<dyn Error>> {
     const OBSERVER_TIMEOUT: Duration = Duration::from_secs(2);
     const FIRST_OBSERVATION_DELAY: Duration = Duration::from_secs(3);
+    const INJECTED_EXIT_PROBE_FAILURE: &str = "injected delayed-observer exit probe failure";
 
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -33622,6 +33655,32 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
+    let mut session_probe_cleanup_packet = None;
+    let session_probe_failure = {
+        let mut session_probe_cleanup_handoff = |packet: McpContractCleanupPacket| {
+            session_probe_cleanup_packet = Some(packet);
+        };
+        run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &database,
+            OBSERVER_TIMEOUT,
+            Some(FIRST_OBSERVATION_DELAY),
+            false,
+            Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+            &mut |child| child.kill(),
+            Some(&mut session_probe_cleanup_handoff),
+        )
+    };
+    require_injected_exit_probe_failure(
+        &session_probe_failure,
+        "MCP session observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup incomplete: child/readers detached",
+    )?;
+    reap_mcp_contract_packet(session_probe_cleanup_packet.take().ok_or_else(|| {
+        io::Error::other("session exit-probe ownership was not synchronously transferred")
+    })?)?;
     // Keep the real MCP server's owned pipe open so its stdio future is
     // causally pending when the zero-length deadline probe runs.
     let still_running_shutdown = run_mcp_contract_inventory_with_test_delay(
@@ -33660,6 +33719,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             Duration::ZERO,
             None,
             true,
+            None,
             &mut injected_session_kill,
             Some(&mut session_cleanup_handoff),
         )
@@ -33777,6 +33837,41 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
+    let mut stdio_probe_cleanup_packet = None;
+    let stdio_probe_failure = {
+        let mut stdio_probe_cleanup_handoff =
+            |child: Child,
+             stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+                stdio_probe_cleanup_packet = Some(McpStdioCleanupPacket {
+                    child,
+                    stdout_reader,
+                    stderr_reader,
+                });
+            };
+        run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &args,
+            &messages,
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+            OBSERVER_TIMEOUT,
+            Some(FIRST_OBSERVATION_DELAY),
+            false,
+            Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+            &mut |child| child.kill(),
+            Some(&mut stdio_probe_cleanup_handoff),
+        )
+    };
+    require_injected_exit_probe_failure(
+        &stdio_probe_failure,
+        "MCP stdio observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup incomplete: child/readers detached",
+    )?;
+    reap_mcp_stdio_packet(stdio_probe_cleanup_packet.take().ok_or_else(|| {
+        io::Error::other("stdio exit-probe ownership was not synchronously transferred")
+    })?)?;
     let still_running_mcp = run_mcp_stdio_with_env_and_test_delay(
         &executable,
         &repo,
@@ -33824,6 +33919,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             Duration::ZERO,
             None,
             true,
+            None,
             &mut injected_stdio_kill,
             Some(&mut stdio_cleanup_handoff),
         )
@@ -33896,6 +33992,35 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
+    let mut installer_probe_cleanup_child = None;
+    let installer_probe_failure = {
+        let mut installer_probe_cleanup_handoff = |child: Child| {
+            installer_probe_cleanup_child = Some(child);
+        };
+        wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--version")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+            "probe-failure",
+            OBSERVER_TIMEOUT,
+            Some(FIRST_OBSERVATION_DELAY),
+            Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+            &mut |child| child.kill(),
+            Some(&mut installer_probe_cleanup_handoff),
+        )
+    };
+    require_injected_exit_probe_failure(
+        &installer_probe_failure,
+        "installer observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup incomplete: child detached",
+    )?;
+    reap_plugin_installer_child(installer_probe_cleanup_child.take().ok_or_else(|| {
+        io::Error::other("installer exit-probe ownership was not synchronously transferred")
+    })?)?;
     // The held stdio pipe keeps this real MCP child running until the observer
     // kills this exact process and wait_with_output drains both streams.
     let still_running_installer = wait_for_plugin_installer_output_with_test_delay(
@@ -33947,6 +34072,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
                 .spawn()?,
             "injected-installer",
             Duration::ZERO,
+            None,
             None,
             &mut injected_installer_kill,
             Some(&mut installer_cleanup_handoff),
@@ -34340,6 +34466,7 @@ impl McpContractSession {
             timeout,
             observer_delay,
             hold_stdin_until_observation,
+            None,
             kill_child,
             None,
         )
@@ -34351,6 +34478,7 @@ impl McpContractSession {
         timeout: Duration,
         observer_delay: Option<Duration>,
         hold_stdin_until_observation: bool,
+        exit_probe_error: Option<io::Error>,
         kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
         handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
     ) -> Result<(), Box<dyn Error>> {
@@ -34358,11 +34486,40 @@ impl McpContractSession {
             self.stdin.take();
         }
         if observer_delay.is_some() && !hold_stdin_until_observation {
-            let child = self
-                .child
-                .as_mut()
-                .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
-            synchronize_prompt_exit_before_delayed_observation(child, "MCP contract server")?;
+            let synchronization = self.child.as_mut().map_or_else(
+                || Err(io::Error::other("MCP contract child was consumed")),
+                |child| {
+                    synchronize_prompt_exit_before_delayed_observation(
+                        child,
+                        "MCP contract server",
+                        exit_probe_error,
+                    )
+                },
+            );
+            if let Err(error) = synchronization {
+                self.stdin.take();
+                let stdout_reader = self.stdout_reader.take();
+                let stderr_reader = self.stderr_reader.take();
+                if let Some(child) = self.child.take() {
+                    let packet = McpContractCleanupPacket {
+                        child,
+                        stdout_reader,
+                        stderr_reader,
+                    };
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(packet);
+                    } else {
+                        drop(packet);
+                    }
+                } else {
+                    drop(stdout_reader);
+                    drop(stderr_reader);
+                }
+                let diagnostic = format!(
+                    "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+                );
+                return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+            }
         }
         let deadline = Instant::now()
             .checked_add(timeout)
@@ -34751,6 +34908,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill(
         timeout,
         observer_delay,
         hold_stdin_until_observation,
+        None,
         kill_child,
         None,
     )
@@ -34767,6 +34925,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
     timeout: Duration,
     observer_delay: Option<Duration>,
     hold_stdin_until_observation: bool,
+    exit_probe_error: Option<io::Error>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     handoff_live_child: Option<
         &mut dyn FnMut(
@@ -34891,8 +35050,26 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
     }
     drop(response_receiver);
 
-    if observer_delay.is_some() && !hold_stdin_until_observation {
-        synchronize_prompt_exit_before_delayed_observation(&mut child, "projectatlas mcp")?;
+    if observer_delay.is_some()
+        && !hold_stdin_until_observation
+        && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
+            &mut child,
+            "projectatlas mcp",
+            exit_probe_error,
+        )
+    {
+        stdin.take();
+        if let Some(handoff) = handoff_live_child {
+            handoff(child, stdout_reader, stderr_reader);
+        } else {
+            drop(child);
+            drop(stdout_reader);
+            drop(stderr_reader);
+        }
+        let diagnostic = format!(
+            "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+        );
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
     }
 
     let deadline = Instant::now()
@@ -38825,6 +39002,7 @@ fn wait_for_plugin_installer_output_with_test_delay(
         label,
         timeout,
         observer_delay,
+        None,
         &mut |child| child.kill(),
         None,
     )
@@ -38837,11 +39015,24 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     label: &str,
     timeout: Duration,
     observer_delay: Option<Duration>,
+    exit_probe_error: Option<io::Error>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     handoff_live_child: Option<&mut dyn FnMut(Child)>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    if observer_delay.is_some() {
-        synchronize_prompt_exit_before_delayed_observation(&mut child, label)?;
+    if observer_delay.is_some()
+        && let Err(error) =
+            synchronize_prompt_exit_before_delayed_observation(&mut child, label, exit_probe_error)
+    {
+        child.stdin.take();
+        if let Some(handoff) = handoff_live_child {
+            handoff(child);
+        } else {
+            drop(child);
+        }
+        let diagnostic = format!(
+            "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup incomplete: child detached"
+        );
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
     }
     let deadline = Instant::now()
         .checked_add(timeout)
