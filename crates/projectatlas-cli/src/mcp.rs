@@ -3537,6 +3537,11 @@ struct McpRequestCancellationBridge {
     monitor: Option<thread::JoinHandle<()>>,
     /// Direct request probe retained for synchronous cancellation fences.
     probe: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// Whether the request token reached the shared work control.
+    cancellation_observed: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the benchmark-only terminal observation was written.
+    #[cfg(feature = "reverse-caller-benchmark")]
+    terminal_recorded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl McpRequestCancellationBridge {
@@ -3555,19 +3560,23 @@ impl McpRequestCancellationBridge {
         P: Fn() -> bool + Send + Sync + 'static,
     {
         let probe: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(probe);
+        let cancellation_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if probe() {
             control.cancel();
+            cancellation_observed.store(true, Ordering::Release);
         }
         let observed_control = control.clone();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let monitor_stop = Arc::clone(&stop);
         let monitor_probe = Arc::clone(&probe);
+        let monitor_cancellation_observed = Arc::clone(&cancellation_observed);
         let monitor = thread::Builder::new()
             .name(MCP_CANCELLATION_MONITOR_THREAD_NAME.to_string())
             .spawn(move || {
                 while !monitor_stop.load(Ordering::Acquire) {
                     if monitor_probe() {
                         observed_control.cancel();
+                        monitor_cancellation_observed.store(true, Ordering::Release);
                         break;
                     }
                     thread::sleep(std::time::Duration::from_millis(5));
@@ -3578,11 +3587,17 @@ impl McpRequestCancellationBridge {
                 message.push_str(&source.to_string());
                 CliError::InvalidInput(message)
             })?;
-        Ok(Self {
+        let bridge = Self {
             stop,
             monitor: Some(monitor),
             probe,
-        })
+            cancellation_observed,
+            #[cfg(feature = "reverse-caller-benchmark")]
+            terminal_recorded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        #[cfg(feature = "reverse-caller-benchmark")]
+        bridge.record_benchmark_stage("started")?;
+        Ok(bridge)
     }
 
     /// Copy the request token into synchronous index-work cancellation.
@@ -3591,6 +3606,54 @@ impl McpRequestCancellationBridge {
             control.cancel();
         }
     }
+
+    /// Persist the terminal cancellation observation for the benchmark harness only.
+    #[cfg(feature = "reverse-caller-benchmark")]
+    fn record_benchmark_terminal(
+        &self,
+        work_cancelled: bool,
+        result_was_canceled: bool,
+        result_succeeded: bool,
+    ) -> Result<(), CliError> {
+        let outcome = if result_was_canceled {
+            "canceled"
+        } else if result_succeeded {
+            "completed"
+        } else {
+            "failed"
+        };
+        let payload = serde_json::json!({
+            "stage": "terminal",
+            "request_cancellation_observed": (self.probe)(),
+            "work_cancellation_observed": work_cancelled,
+            "result_was_canceled": result_was_canceled,
+            "outcome": outcome,
+        });
+        self.write_benchmark_stage(payload)?;
+        self.terminal_recorded.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Persist one benchmark-only cancellation lifecycle stage.
+    #[cfg(feature = "reverse-caller-benchmark")]
+    fn record_benchmark_stage(&self, stage: &str) -> Result<(), CliError> {
+        self.write_benchmark_stage(serde_json::json!({
+            "stage": stage,
+            "request_cancellation_observed": (self.probe)(),
+            "work_cancellation_observed": self.cancellation_observed.load(Ordering::Acquire),
+        }))
+    }
+
+    /// Write one feature-only benchmark stage when a trace path is configured.
+    #[cfg(feature = "reverse-caller-benchmark")]
+    fn write_benchmark_stage(&self, payload: serde_json::Value) -> Result<(), CliError> {
+        let Some(path) = std::env::var_os("PROJECTATLAS_REVERSE_CALLER_CANCELLATION_TRACE") else {
+            return Ok(());
+        };
+        let path = PathBuf::from(path);
+        let encoded = serde_json::to_vec(&payload)?;
+        fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })
+    }
 }
 
 impl Drop for McpRequestCancellationBridge {
@@ -3598,6 +3661,18 @@ impl Drop for McpRequestCancellationBridge {
         self.stop.store(true, Ordering::Release);
         if let Some(monitor) = self.monitor.take() {
             drop(monitor.join());
+        }
+        #[cfg(feature = "reverse-caller-benchmark")]
+        if self.cancellation_observed.load(Ordering::Acquire)
+            && !self.terminal_recorded.load(Ordering::Acquire)
+        {
+            drop(self.write_benchmark_stage(serde_json::json!({
+                "stage": "terminal",
+                "request_cancellation_observed": (self.probe)(),
+                "work_cancellation_observed": true,
+                "result_was_canceled": serde_json::Value::Null,
+                "outcome": "request-context-canceled",
+            })));
         }
     }
 }
@@ -3730,8 +3805,16 @@ impl ProjectAtlasMcpServer {
                 },
             )
             .map_err(|error| Self::with_target_error_context(error, state));
+        #[cfg(feature = "reverse-caller-benchmark")]
+        let result_was_canceled = result.as_ref().err().is_some_and(task_error_is_canceled);
         if let Some(bridge) = bridge.as_ref() {
             bridge.synchronize(&control);
+            #[cfg(feature = "reverse-caller-benchmark")]
+            bridge.record_benchmark_terminal(
+                control.cancellation().is_cancelled(),
+                result_was_canceled,
+                result.is_ok(),
+            )?;
         }
         drop(bridge);
         result

@@ -153,6 +153,40 @@ def serialize_process(measured: dict[str, Any], fixture_root: Path) -> dict[str,
     }
 
 
+def wait_for_cancellation_stage(
+    trace_path: Path,
+    process: subprocess.Popen[bytes],
+    stage: str,
+) -> dict[str, Any]:
+    """Wait for one bridge-owned cancellation lifecycle stage."""
+
+    deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
+    while True:
+        if process.poll() is not None and not trace_path.is_file():
+            raise RuntimeError(
+                f"MCP server exited before the cancellation {stage} observation"
+            )
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"MCP cancellation {stage} observation timed out")
+        if not trace_path.is_file():
+            time.sleep(0.005)
+            continue
+        try:
+            observation = json.loads(trace_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            time.sleep(0.005)
+            continue
+        if observation.get("stage") == stage:
+            break
+        if stage == "terminal" and observation.get("stage") == "started":
+            time.sleep(0.005)
+            continue
+        raise AssertionError(
+            f"MCP cancellation reached {observation.get('stage')!r}, expected {stage!r}"
+        )
+    return observation
+
+
 def run_mcp_cancellation(
     binary: Path,
     root: Path,
@@ -160,9 +194,15 @@ def run_mcp_cancellation(
 ) -> dict[str, Any]:
     """Cancel one real MCP summary request through the supported request boundary."""
 
+    cancellation_trace = root.parent / f"{root.name}-cancellation-trace.json"
+    environment = os.environ.copy()
+    environment["PROJECTATLAS_REVERSE_CALLER_CANCELLATION_TRACE"] = str(
+        cancellation_trace
+    )
     process = subprocess.Popen(
         [str(binary), "mcp"],
         cwd=root,
+        env=environment,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -269,17 +309,29 @@ def run_mcp_cancellation(
             ) + "\n").encode("utf-8")
         )
         process.stdin.flush()
+        wait_for_cancellation_stage(cancellation_trace, process, "started")
         # MCP cancellation is a notification for the in-flight request, not process teardown.
         notify(
             "notifications/cancelled",
             {"requestId": 2, "reason": "reverse-caller benchmark cancellation"},
         )
+        terminal_observation = wait_for_cancellation_stage(
+            cancellation_trace, process, "terminal"
+        )
+        if (
+            terminal_observation.get("request_cancellation_observed") is not True
+            or terminal_observation.get("work_cancellation_observed") is not True
+            or terminal_observation.get("outcome")
+            not in {"canceled", "request-context-canceled"}
+            or terminal_observation.get("result_was_canceled") not in {True, None}
+        ):
+            raise AssertionError(
+                "MCP cancellation did not reach a definitive canceled terminal state: "
+                f"{terminal_observation!r}"
+            )
         # A live ping proves the server stayed up while rmcp suppressed the
         # canceled request's response; a response for id=2 would be a failure.
         request(3, "ping", {})
-        time.sleep(0.3)
-        if not response_queue.empty():
-            raise AssertionError("canceled MCP summary emitted a response")
         with response_lock:
             responses.pop(2, None)
             responses.pop(3, None)
@@ -298,8 +350,22 @@ def run_mcp_cancellation(
             cleanup_error = RuntimeError("MCP response reader did not stop")
         if process.stderr is not None:
             stderr = process.stderr.read()
+        if cancellation_trace.is_file():
+            cancellation_trace.unlink()
     if cleanup_error is not None:
         raise cleanup_error
+    stream_responses = []
+    for line in bytes(stdout).splitlines():
+        if not line.strip():
+            continue
+        try:
+            stream_responses.append(json.loads(line))
+        except json.JSONDecodeError as error:
+            raise AssertionError(
+                f"MCP cancellation emitted a non-JSON stream line: {error}"
+            ) from error
+    if any(response.get("id") == 2 for response in stream_responses):
+        raise AssertionError("canceled MCP summary emitted a response")
     response_text = json.dumps(
         {"canceled_request_response": None, "ping": "ok"},
         sort_keys=True,
@@ -314,6 +380,7 @@ def run_mcp_cancellation(
         "stderr_sha256": sha256_bytes(stderr),
         "stderr_base64": base64.b64encode(stderr).decode("ascii"),
         "stderr_text": sanitize_text(stderr, root),
+        "terminal_observation": terminal_observation,
         "response_sha256": sha256_bytes(response_text.encode("utf-8")),
         "response_text": response_text,
         "response_is_error": False,
@@ -524,6 +591,7 @@ def run_summary(
     if trace_path.is_file():
         trace = json.loads(trace_path.read_text(encoding="utf-8"))
         trace_path.unlink()
+        attach_query_plans(root / ".projectatlas" / "projectatlas.db", trace)
     result["allocation_metrics"] = trace.get("allocations")
     result["query_observations"] = trace.get("queries", [])
     if measured["returncode"] == 0:
@@ -580,6 +648,40 @@ def aggregate_queries(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "events": observations,
         "by_family": by_family,
     }
+
+
+def sqlite_parameter(value: Any) -> Any:
+    """Decode one benchmark trace binding for Python's SQLite adapter."""
+
+    if isinstance(value, list):
+        return bytes(value)
+    return value
+
+
+def attach_query_plans(database: Path, trace: dict[str, Any]) -> None:
+    """Collect exact production plans after the measured child has exited."""
+
+    connection = sqlite3.connect(database)
+    try:
+        for observation in trace.get("queries", []):
+            sql = observation.get("sql")
+            parameters = observation.get("parameters")
+            if not isinstance(sql, str) or not isinstance(parameters, list):
+                raise AssertionError(
+                    f"production query trace omitted exact SQL bindings: {observation!r}"
+                )
+            try:
+                rows = connection.execute(
+                    f"EXPLAIN QUERY PLAN {sql}",
+                    tuple(sqlite_parameter(value) for value in parameters),
+                ).fetchall()
+            except sqlite3.Error as error:
+                raise AssertionError(
+                    f"production query plan replay failed for {sql!r}: {error}"
+                ) from error
+            observation["query_plan"] = [row[3] for row in rows]
+    finally:
+        connection.close()
 
 
 def measure_shape(
@@ -710,6 +812,7 @@ def failure_case(binary: Path, name: str, arm: str) -> dict[str, Any]:
         if trace_path.is_file():
             trace = json.loads(trace_path.read_text(encoding="utf-8"))
             trace_path.unlink()
+            attach_query_plans(root / ".projectatlas" / "projectatlas.db", trace)
         result["allocation_metrics"] = trace.get("allocations")
         result["query_observations"] = trace.get("queries", [])
         if name == "corrupt-relation":
@@ -756,6 +859,7 @@ def compare_cancellation_runs(
         "stdout_base64",
         "stderr_base64",
         "response_text",
+        "terminal_observation",
     ):
         if baseline.get(field) != candidate.get(field):
             findings.append(f"cancellation {field} drift")
@@ -948,7 +1052,7 @@ def main() -> None:
     )
 
     result = {
-        "schema": "projectatlas.reverse-caller-performance.v4",
+        "schema": "projectatlas.reverse-caller-performance.v5",
         "issue": 342,
         "repository_revision": git_revision(),
         "repeats": args.repeats,

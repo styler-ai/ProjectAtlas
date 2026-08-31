@@ -1073,6 +1073,10 @@ pub struct ReverseCallerBenchmarkQuery {
     pub rows: usize,
     /// UTF-8 bytes retained by the decoded relation fields.
     pub row_bytes: usize,
+    /// Exact production SQL captured for the untimed plan replay.
+    pub sql: String,
+    /// Exact bound values supplied to the production SQL.
+    pub parameters: Vec<serde_json::Value>,
     /// `EXPLAIN QUERY PLAN` details for the exact production SQL.
     pub query_plan: Vec<String>,
 }
@@ -1084,18 +1088,6 @@ thread_local! {
 }
 
 #[cfg(feature = "reverse-caller-benchmark")]
-/// Read the planner output for one exact production query and binding set.
-fn reverse_caller_benchmark_query_plan(
-    connection: &Connection,
-    sql: &str,
-    values: &[Value],
-) -> DbResult<Vec<String>> {
-    let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
-    let rows = statement.query_map(params_from_iter(values.iter()), |row| row.get(3))?;
-    Ok(rows.collect::<Result<Vec<String>, _>>()?)
-}
-
-#[cfg(feature = "reverse-caller-benchmark")]
 /// Append one bounded production query observation to the current summary.
 fn record_reverse_caller_benchmark_query(
     family: &'static str,
@@ -1103,7 +1095,8 @@ fn record_reverse_caller_benchmark_query(
     limit: usize,
     rows: usize,
     row_bytes: usize,
-    query_plan: Vec<String>,
+    sql: &str,
+    values: &[Value],
 ) {
     REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| {
         let mut observations = observations.borrow_mut();
@@ -1115,7 +1108,18 @@ fn record_reverse_caller_benchmark_query(
             limit,
             rows,
             row_bytes,
-            query_plan,
+            sql: sql.to_string(),
+            parameters: values
+                .iter()
+                .map(|value| match value {
+                    Value::Null => serde_json::Value::Null,
+                    Value::Integer(value) => serde_json::json!(value),
+                    Value::Real(value) => serde_json::json!(value),
+                    Value::Text(value) => serde_json::json!(value),
+                    Value::Blob(value) => serde_json::json!(value),
+                })
+                .collect(),
+            query_plan: Vec::new(),
         });
     });
 }
@@ -4103,7 +4107,8 @@ impl AtlasStore {
             limit_per_target.max(1),
             relations.len(),
             relations.iter().map(symbol_relation_bytes).sum(),
-            reverse_caller_benchmark_query_plan(&self.connection, &sql, &values)?,
+            &sql,
+            &values,
         );
         Ok(relations)
     }
@@ -4126,14 +4131,10 @@ impl AtlasStore {
             let pattern = sqlite_like_pattern(term);
             let limit = limit_per_term.max(1);
             #[cfg(feature = "reverse-caller-benchmark")]
-            let query_plan = reverse_caller_benchmark_query_plan(
-                &self.connection,
-                IMPORT_RELATIONS_MATCHING_TARGETS_SQL,
-                &[
-                    Value::Text(pattern.clone()),
-                    Value::Integer(usize_to_i64(limit)),
-                ],
-            )?;
+            let benchmark_values = [
+                Value::Text(pattern.clone()),
+                Value::Integer(usize_to_i64(limit)),
+            ];
             let mut statement = self
                 .connection
                 .prepare_cached(IMPORT_RELATIONS_MATCHING_TARGETS_SQL)?;
@@ -4155,7 +4156,8 @@ impl AtlasStore {
                     .iter()
                     .map(stored_import_relation_bytes)
                     .sum(),
-                query_plan,
+                IMPORT_RELATIONS_MATCHING_TARGETS_SQL,
+                &benchmark_values,
             );
             relations.extend(term_relations);
         }
@@ -4187,14 +4189,10 @@ impl AtlasStore {
     ) -> DbResult<Vec<StoredImportRelation>> {
         let bounded_limit = limit.max(1);
         #[cfg(feature = "reverse-caller-benchmark")]
-        let query_plan = reverse_caller_benchmark_query_plan(
-            &self.connection,
-            IMPORT_RELATIONS_FOR_PATH_SQL,
-            &[
-                Value::Text(path.to_string()),
-                Value::Integer(usize_to_i64(bounded_limit)),
-            ],
-        )?;
+        let benchmark_values = [
+            Value::Text(path.to_string()),
+            Value::Integer(usize_to_i64(bounded_limit)),
+        ];
         let mut statement = self
             .connection
             .prepare_cached(IMPORT_RELATIONS_FOR_PATH_SQL)?;
@@ -4213,7 +4211,8 @@ impl AtlasStore {
             bounded_limit,
             relations.len(),
             relations.iter().map(stored_import_relation_bytes).sum(),
-            query_plan,
+            IMPORT_RELATIONS_FOR_PATH_SQL,
+            &benchmark_values,
         );
         Ok(relations)
     }
