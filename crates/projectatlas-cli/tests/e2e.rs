@@ -10416,6 +10416,9 @@ impl LoopbackModelServer {
                                 "loopback model server accepted a non-loopback peer".to_owned()
                             );
                         }
+                        stream.set_nonblocking(false).map_err(|error| {
+                            format!("loopback blocking mode setup failed: {error}")
+                        })?;
                         stream
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .map_err(|error| {
