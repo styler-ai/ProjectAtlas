@@ -33119,6 +33119,26 @@ fn run_mcp_contract_inventory_with_test_delay(
     observer_delay: Option<Duration>,
     hold_stdin_until_observation: bool,
 ) -> Result<String, Box<dyn Error>> {
+    run_mcp_contract_inventory_with_test_delay_and_kill(
+        executable,
+        cwd,
+        database,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        &mut |child| child.kill(),
+    )
+}
+
+fn run_mcp_contract_inventory_with_test_delay_and_kill(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+) -> Result<String, Box<dyn Error>> {
     let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
         cwd,
@@ -33134,7 +33154,12 @@ fn run_mcp_contract_inventory_with_test_delay(
         ))
     })();
     complete_mcp_test_after_shutdown(operation_result, || {
-        session.shutdown_with_test_delay(timeout, observer_delay, hold_stdin_until_observation)
+        session.shutdown_with_test_delay_and_kill(
+            timeout,
+            observer_delay,
+            hold_stdin_until_observation,
+            kill_child,
+        )
     })
 }
 
@@ -33547,7 +33572,37 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-
+    let mut injected_session_kill =
+        |_child: &mut Child| Err(io::Error::other("injected session kill failure"));
+    let injected_session_failure = run_mcp_contract_inventory_with_test_delay_and_kill(
+        &executable,
+        &repo,
+        &database,
+        Duration::ZERO,
+        None,
+        true,
+        &mut injected_session_kill,
+    );
+    let injected_session_error = injected_session_failure
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("injected session kill failure was not returned"))?;
+    let injected_session_io_error = injected_session_error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("injected session failure lost its io error"))?;
+    if injected_session_io_error.kind() != io::ErrorKind::TimedOut
+        || !injected_session_error
+            .to_string()
+            .contains("still running at deadline")
+        || !injected_session_error
+            .to_string()
+            .contains("injected session kill failure")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not preserve timeout classification for an injected kill failure: {injected_session_failure:?}"
+        ))
+        .into());
+    }
     let args = vec![
         "--db".to_string(),
         database.display().to_string(),
@@ -33630,6 +33685,39 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
     {
         return Err(io::Error::other(format!(
             "MCP stdio observer did not terminate and reap a child still running at its deadline: {still_running_mcp:?}"
+        ))
+        .into());
+    }
+    let mut injected_stdio_kill =
+        |_child: &mut Child| Err(io::Error::other("injected stdio kill failure"));
+    let injected_stdio_failure = run_mcp_stdio_with_env_and_test_delay_and_kill(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        Duration::ZERO,
+        None,
+        true,
+        &mut injected_stdio_kill,
+    );
+    let injected_stdio_error = injected_stdio_failure
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("injected stdio kill failure was not returned"))?;
+    let injected_stdio_io_error = injected_stdio_error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("injected stdio failure lost its io error"))?;
+    if injected_stdio_io_error.kind() != io::ErrorKind::TimedOut
+        || !injected_stdio_error
+            .to_string()
+            .contains("still running at deadline")
+        || !injected_stdio_error
+            .to_string()
+            .contains("injected stdio kill failure")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not preserve timeout classification for an injected kill failure: {injected_stdio_failure:?}"
         ))
         .into());
     }
@@ -34035,10 +34123,25 @@ impl McpContractSession {
     }
 
     fn shutdown_with_test_delay(
+        self,
+        timeout: Duration,
+        observer_delay: Option<Duration>,
+        hold_stdin_until_observation: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        self.shutdown_with_test_delay_and_kill(
+            timeout,
+            observer_delay,
+            hold_stdin_until_observation,
+            &mut |child| child.kill(),
+        )
+    }
+
+    fn shutdown_with_test_delay_and_kill(
         mut self,
         timeout: Duration,
         observer_delay: Option<Duration>,
         hold_stdin_until_observation: bool,
+        kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     ) -> Result<(), Box<dyn Error>> {
         if !hold_stdin_until_observation {
             self.stdin.take();
@@ -34093,28 +34196,51 @@ impl McpContractSession {
             .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
         if timeout_reason.is_some() {
             let (status, observed_at) = {
-                let status = child.try_wait()?;
+                let status = match child.try_wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        self.stdin.take();
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "MCP contract server did not exit after stdin closed: {} (re-probe failed before termination attempt: {error})",
+                                timeout_reason.as_deref().unwrap_or("timeout")
+                            ),
+                        )
+                        .into());
+                    }
+                };
                 let observed_at = Instant::now();
                 (status, observed_at)
             };
             if status.is_none() {
-                let kill_result = child.kill();
+                let kill_result = kill_child(&mut child);
                 let status_after_kill = match child.try_wait() {
                     Ok(status) => status,
                     Err(error) => {
                         self.stdin.take();
-                        return Err(error.into());
-                    }
-                };
-                if let Err(error) = kill_result {
-                    if status_after_kill.is_none() {
-                        self.stdin.take();
                         return Err(io::Error::new(
-                            error.kind(),
-                            format!("MCP contract server termination failed: {error}"),
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "MCP contract server did not exit after stdin closed: {} (re-probe failed after termination attempt: {error})",
+                                timeout_reason.as_deref().unwrap_or("timeout")
+                            ),
                         )
                         .into());
                     }
+                };
+                if let Err(error) = kill_result
+                    && status_after_kill.is_none()
+                {
+                    self.stdin.take();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "MCP contract server did not exit after stdin closed: {} (termination failed: {error})",
+                            timeout_reason.as_deref().unwrap_or("timeout")
+                        ),
+                    )
+                    .into());
                 }
             } else if timeout_reason.as_deref() == Some("still running at deadline") {
                 timeout_reason = Some(format!(
@@ -34302,7 +34428,7 @@ fn run_mcp_stdio_with_env(
     messages: &[impl AsRef<str>],
     environment: &[(&str, Option<&str>)],
 ) -> Result<String, Box<dyn Error>> {
-    run_mcp_stdio_with_env_and_test_delay(
+    run_mcp_stdio_with_env_and_test_delay_and_kill(
         executable,
         cwd,
         args,
@@ -34311,6 +34437,7 @@ fn run_mcp_stdio_with_env(
         Duration::from_secs(10),
         None,
         false,
+        &mut |child| child.kill(),
     )
 }
 
@@ -34323,6 +34450,30 @@ fn run_mcp_stdio_with_env_and_test_delay(
     timeout: Duration,
     observer_delay: Option<Duration>,
     hold_stdin_until_observation: bool,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env_and_test_delay_and_kill(
+        executable,
+        cwd,
+        args,
+        messages,
+        environment,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        &mut |child| child.kill(),
+    )
+}
+
+fn run_mcp_stdio_with_env_and_test_delay_and_kill(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
 ) -> Result<String, Box<dyn Error>> {
     let mut expected_responses = BTreeSet::new();
     for message in messages {
@@ -34481,28 +34632,60 @@ fn run_mcp_stdio_with_env_and_test_delay(
 
     if timeout_reason.is_some() {
         let (status, observed_at) = {
-            let status = child.try_wait()?;
+            let status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    stdin.take();
+                    drop(child);
+                    drop(stdout_reader.join());
+                    drop(stderr_reader.join());
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "projectatlas mcp did not exit after stdin closed: {} (re-probe failed before termination attempt: {error})",
+                            timeout_reason.as_deref().unwrap_or("timeout")
+                        ),
+                    )
+                    .into());
+                }
+            };
             let observed_at = Instant::now();
             (status, observed_at)
         };
         if status.is_none() {
-            let kill_result = child.kill();
+            let kill_result = kill_child(&mut child);
             let status_after_kill = match child.try_wait() {
                 Ok(status) => status,
                 Err(error) => {
                     stdin.take();
-                    return Err(error.into());
-                }
-            };
-            if let Err(error) = kill_result {
-                if status_after_kill.is_none() {
-                    stdin.take();
+                    drop(child);
+                    drop(stdout_reader.join());
+                    drop(stderr_reader.join());
                     return Err(io::Error::new(
-                        error.kind(),
-                        format!("projectatlas mcp termination failed: {error}"),
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "projectatlas mcp did not exit after stdin closed: {} (re-probe failed after termination attempt: {error})",
+                            timeout_reason.as_deref().unwrap_or("timeout")
+                        ),
                     )
                     .into());
                 }
+            };
+            if let Err(error) = kill_result
+                && status_after_kill.is_none()
+            {
+                stdin.take();
+                drop(child);
+                drop(stdout_reader.join());
+                drop(stderr_reader.join());
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "projectatlas mcp did not exit after stdin closed: {} (termination failed: {error})",
+                        timeout_reason.as_deref().unwrap_or("timeout")
+                    ),
+                )
+                .into());
             }
         } else if timeout_reason.as_deref() == Some("still running at deadline") {
             timeout_reason = Some(format!(
