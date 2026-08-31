@@ -11053,7 +11053,7 @@ fn value_contains_string(value: &Value, expected: &str) -> bool {
 }
 
 #[test]
-#[ignore = "requires Claude Code 2.1.201 and OpenCode 1.18.10"]
+#[ignore = "runs installed Claude Code/OpenCode readers; missing hosts are typed skips"]
 fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let host_root = temp.path().join("isolated-host");
