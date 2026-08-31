@@ -5,8 +5,8 @@
 
 ## 2. Deadline Classification And Cleanup
 
-- [ ] 2.1 Make `McpContractSession::shutdown`, `run_mcp_stdio_with_env`, and `wait_for_plugin_installer_output` classify `Instant::now() >= deadline` before accepting completion while preserving exact-child termination/reaping after successful termination or an observed-exit race; on a proven-live termination failure, preserve the timed-out reason/cause and transfer owned cleanup without an unbounded wait, output, status, diagnostics, and in-deadline compatibility without a new process framework.
-- [ ] 2.2 Add narrow test-only observer-delay and cleanup-transfer seams and causal late-observation regressions for all three helpers, including prompt child completion, timeout classification, exact cleanup by the receiving owner, normal in-time success, and no retries, locks, serialization, or scheduler slack.
+- [ ] 2.1 Make `McpContractSession::shutdown`, `run_mcp_stdio_with_env`, and `wait_for_plugin_installer_output` classify `Instant::now() >= deadline` before accepting completion while preserving exact-child termination/reaping after successful termination or an observed-exit race; on a proven-live termination failure, release owned stdin, preserve the timed-out reason/cause, explicitly detach exact owned child/readers, report incomplete unreaped cleanup, and avoid any unbounded wait, output, status, diagnostics, or in-deadline compatibility regression without a new process framework.
+- [ ] 2.2 Add narrow test-only observer-delay and infallible cleanup-capture seams and causal late-observation regressions for all three helpers, including prompt child completion, timeout classification, synchronous exact-resource capture for test-owned cleanup, normal in-time success, and no retries, locks, serialization, background workers, or scheduler slack.
 
 ## 3. Verification And Delivery
 
