@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import io
 import json
 import os
 import sqlite3
 import statistics
 import subprocess
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -439,12 +441,12 @@ def measure_shape(
 
 
 def mutate_corrupt_row(database: Path) -> None:
-    """Introduce one invalid relation kind for the fail-closed read case."""
+    """Introduce one admitted malformed relation for the fail-closed read case."""
 
     connection = sqlite3.connect(database)
     try:
         connection.execute(
-            "UPDATE symbol_relations SET kind = 'invalid' WHERE rowid = "
+            "UPDATE symbol_relations SET line = 'invalid' WHERE rowid = "
             "(SELECT rowid FROM symbol_relations "
             "WHERE kind = 'calls' AND path = 'src/rust_caller_000.rs' LIMIT 1)"
         )
@@ -489,14 +491,13 @@ def failure_case(binary: Path, name: str, arm: str) -> dict[str, Any]:
         result = serialize_process(measured, root)
         result["case"] = name
         result["target"] = target_path
+        if name == "corrupt-relation":
+            if measured["returncode"] == 0:
+                raise AssertionError("malformed relation unexpectedly succeeded")
+            if measured["stdout"]:
+                raise AssertionError("malformed relation emitted partial JSON")
         if measured["returncode"] == 0:
             result["decoded_summary"] = json.loads(measured["stdout"])
-            if name == "corrupt-relation":
-                callers = result["decoded_summary"]["functions"][0]["called_by"]
-                if callers:
-                    raise AssertionError(
-                        "corrupt relation was published as a caller: " f"{callers!r}"
-                    )
         return result
 
 
@@ -577,6 +578,61 @@ def validate_input(path: Path, label: str) -> Path:
     return resolved
 
 
+def preflight_candidate_patch(candidate_patch: Path) -> dict[str, str]:
+    """Check the candidate patch against an exact exported baseline source."""
+
+    with tempfile.TemporaryDirectory(prefix="projectatlas-candidate-preflight-") as directory:
+        source_root = Path(directory)
+        archive_result = subprocess.run(
+            ["git", "archive", "--format=tar", "HEAD"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+        if archive_result.returncode != 0:
+            stderr = archive_result.stderr.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"baseline source export failed with {archive_result.returncode}: {stderr}"
+            )
+        with tarfile.open(fileobj=io.BytesIO(archive_result.stdout), mode="r:") as archive:
+            root = source_root.resolve()
+            for member in archive.getmembers():
+                extracted = (source_root / member.name).resolve()
+                if not extracted.is_relative_to(root):
+                    raise RuntimeError(f"baseline archive escaped its root: {member.name}")
+                archive.extract(member, source_root)
+        check = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source_root),
+                "apply",
+                "--check",
+                "--unidiff-zero",
+                "--unsafe-paths",
+                "--whitespace=nowarn",
+                str(candidate_patch),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+        if check.returncode != 0:
+            raise RuntimeError(
+                "candidate patch does not apply to the exported baseline: "
+                f"{check.stderr.strip()}"
+            )
+        baseline_source = source_root / "crates/projectatlas-service/src/import_aliases.rs"
+        return {
+            "status": "passed",
+            "repository_revision": git_revision(),
+            "baseline_source_sha256": sha256_file(baseline_source),
+        }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-binary", type=Path, required=True)
@@ -597,6 +653,7 @@ def main() -> None:
         parser.error("baseline and candidate binaries must be distinct")
     if not candidate_patch.is_relative_to(ROOT):
         parser.error("--candidate-patch must remain inside the repository")
+    candidate_patch_preflight = preflight_candidate_patch(candidate_patch)
 
     baseline: dict[str, Any] = {}
     candidate: dict[str, Any] = {}
@@ -633,7 +690,7 @@ def main() -> None:
         )
 
     result = {
-        "schema": "projectatlas.reverse-caller-performance.v2",
+        "schema": "projectatlas.reverse-caller-performance.v3",
         "issue": 342,
         "repository_revision": git_revision(),
         "repeats": args.repeats,
@@ -649,6 +706,7 @@ def main() -> None:
             },
             "fixtures": candidate,
         },
+        "candidate_patch_preflight": candidate_patch_preflight,
         "failure_cases": failures,
         "decision": decision(baseline, candidate, semantic_findings),
     }
