@@ -33534,6 +33534,29 @@ fn complete_mcp_test_after_shutdown<T>(
     Ok(value)
 }
 
+fn synchronize_prompt_exit_before_delayed_observation(
+    child: &mut Child,
+    label: &str,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(10))
+        .ok_or_else(|| io::Error::other("test child exit deadline overflowed"))?;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{label} did not exit before the delayed observer was released"),
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
+    }
+}
+
 #[test]
 fn mcp_test_shutdown_runs_after_primary_failure_without_hiding_it() -> Result<(), Box<dyn Error>> {
     let mut shutdown_attempted = false;
@@ -34334,6 +34357,13 @@ impl McpContractSession {
         if !hold_stdin_until_observation {
             self.stdin.take();
         }
+        if observer_delay.is_some() && !hold_stdin_until_observation {
+            let child = self
+                .child
+                .as_mut()
+                .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+            synchronize_prompt_exit_before_delayed_observation(child, "MCP contract server")?;
+        }
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
@@ -34860,6 +34890,10 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         stdin.take();
     }
     drop(response_receiver);
+
+    if observer_delay.is_some() && !hold_stdin_until_observation {
+        synchronize_prompt_exit_before_delayed_observation(&mut child, "projectatlas mcp")?;
+    }
 
     let deadline = Instant::now()
         .checked_add(timeout)
@@ -38806,6 +38840,9 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     handoff_live_child: Option<&mut dyn FnMut(Child)>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
+    if observer_delay.is_some() {
+        synchronize_prompt_exit_before_delayed_observation(&mut child, label)?;
+    }
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::other("plugin installer deadline overflowed"))?;
