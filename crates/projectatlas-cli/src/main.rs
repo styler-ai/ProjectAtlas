@@ -1886,6 +1886,13 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             content_selection,
         } => {
             let store = open_index_for_read(cli)?;
+            #[cfg(feature = "reverse-caller-benchmark")]
+            let benchmark_trace_path =
+                std::env::var_os("PROJECTATLAS_REVERSE_CALLER_TRACE").map(PathBuf::from);
+            #[cfg(feature = "reverse-caller-benchmark")]
+            if benchmark_trace_path.is_some() {
+                store.start_reverse_caller_benchmark_trace();
+            }
             let file_key = validated_indexed_file_key(&store, file)?;
             let content = read_indexed_file_content(&store, &file_key)?;
             let report = build_file_summary_from_source_with_selection(
@@ -1895,6 +1902,12 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 &content,
                 content_selection.unwrap_or_default(),
             )?;
+            #[cfg(feature = "reverse-caller-benchmark")]
+            if let Some(path) = benchmark_trace_path {
+                let trace = store.take_reverse_caller_benchmark_trace();
+                let encoded = serde_json::to_vec_pretty(&trace)?;
+                fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })?;
+            }
             let toon = render_file_summary(&report);
             print_tracked_output_text(
                 cli.format,

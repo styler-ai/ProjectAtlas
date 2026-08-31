@@ -1,0 +1,100 @@
+diff --git a/crates/projectatlas-service/src/import_aliases.rs b/crates/projectatlas-service/src/import_aliases.rs
+index 0c98028c..5ee67497 100644
+--- a/crates/projectatlas-service/src/import_aliases.rs
++++ b/crates/projectatlas-service/src/import_aliases.rs
+@@ -5 +5,3 @@ use projectatlas_db::{AtlasStore, StoredImportRelation};
+-use projectatlas_symbols::{ImportSyntax, parse_import_references, resolve_relative_import_path};
++use projectatlas_symbols::{
++    ImportReference, ImportSyntax, parse_import_references, resolve_relative_import_path,
++};
+@@ -27,0 +30,8 @@ pub(crate) type ImportAliasMap = HashMap<String, Vec<ImportCallAlias>>;
++/// One persisted import relation with its parser-owned references decoded once.
++struct ParsedImportRelation<'relation> {
++    /// Original persisted relation and source location.
++    relation: &'relation StoredImportRelation,
++    /// References reused for each displayed symbol.
++    references: Vec<ImportReference>,
++}
++
+@@ -84 +94,8 @@ fn import_alias_map(
+-    let local_alias_counts = import_local_alias_counts(import_relations);
++    let parsed_relations = import_relations
++        .iter()
++        .map(|relation| ParsedImportRelation {
++            relation,
++            references: parse_import_references(&relation.target_name),
++        })
++        .collect::<Vec<_>>();
++    let local_alias_counts = import_local_alias_counts(&parsed_relations);
+@@ -86 +103,2 @@ fn import_alias_map(
+-    for relation in import_relations {
++    for parsed_relation in &parsed_relations {
++        let relation = parsed_relation.relation;
+@@ -88 +106,6 @@ fn import_alias_map(
+-            for target_name in import_call_targets_for_symbol(relation, symbol, alias_counts) {
++            for target_name in import_call_targets_for_symbol(
++                relation,
++                &parsed_relation.references,
++                symbol,
++                alias_counts,
++            ) {
+@@ -128 +151 @@ fn import_local_alias_counts(
+-    import_relations: &[StoredImportRelation],
++    import_relations: &[ParsedImportRelation<'_>],
+@@ -131,3 +154,6 @@ fn import_local_alias_counts(
+-    for relation in import_relations {
+-        for alias in local_aliases_from_import(&relation.target_name) {
+-            *counts.entry((relation.path.clone(), alias)).or_insert(0) += 1;
++    for parsed_relation in import_relations {
++        for reference in &parsed_relation.references {
++            let alias = reference.local();
++            *counts
++                .entry((parsed_relation.relation.path.clone(), alias.to_string()))
++                .or_insert(0) += 1;
+@@ -168,11 +193,0 @@ fn local_alias_candidates(target_name: &str) -> Vec<String> {
+-/// Extract caller-local aliases declared by one import relation.
+-fn local_aliases_from_import(import_text: &str) -> Vec<String> {
+-    let mut aliases = parse_import_references(import_text)
+-        .into_iter()
+-        .map(|reference| reference.local().to_string())
+-        .collect::<Vec<_>>();
+-    aliases.sort();
+-    aliases.dedup();
+-    aliases
+-}
+-
+@@ -181,0 +197 @@ fn import_call_targets_for_symbol(
++    references: &[ImportReference],
+@@ -187 +203 @@ fn import_call_targets_for_symbol(
+-        rust_import_call_targets(import_text, symbol, alias_counts)
++        rust_import_call_targets(references, symbol, alias_counts)
+@@ -189 +205 @@ fn import_call_targets_for_symbol(
+-        typescript_import_call_targets(&relation.path, import_text, symbol, alias_counts)
++        typescript_import_call_targets(&relation.path, references, symbol, alias_counts)
+@@ -191 +207 @@ fn import_call_targets_for_symbol(
+-        python_import_call_targets(import_text, symbol, alias_counts)
++        python_import_call_targets(references, symbol, alias_counts)
+@@ -199 +215 @@ fn rust_import_call_targets(
+-    import_text: &str,
++    references: &[ImportReference],
+@@ -203,2 +219,2 @@ fn rust_import_call_targets(
+-    parse_import_references(import_text)
+-        .into_iter()
++    references
++        .iter()
+@@ -234 +250 @@ fn typescript_import_call_targets(
+-    import_text: &str,
++    references: &[ImportReference],
+@@ -238,2 +254,2 @@ fn typescript_import_call_targets(
+-    parse_import_references(import_text)
+-        .into_iter()
++    references
++        .iter()
+@@ -261 +277 @@ fn python_import_call_targets(
+-    import_text: &str,
++    references: &[ImportReference],
+@@ -265,2 +281,2 @@ fn python_import_call_targets(
+-    parse_import_references(import_text)
+-        .into_iter()
++    references
++        .iter()

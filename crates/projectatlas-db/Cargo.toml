@@ -8,6 +8,7 @@ homepage.workspace = true
 
 [features]
 sqlite-progress-test-observer = []
+reverse-caller-benchmark = []
 
 [dependencies]
 blake3.workspace = true

@@ -35,6 +35,7 @@ required-features = ["optional-parser-worker"]
 
 [features]
 default = ["cli"]
+reverse-caller-benchmark = ["cli-core", "projectatlas-db/reverse-caller-benchmark"]
 cli = [
     "cli-core",
     "derived-snapshot",

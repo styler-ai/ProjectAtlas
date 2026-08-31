@@ -149,6 +149,22 @@ const PURPOSE_CURATION_STATE_TOKEN_DOMAIN: &str = "projectatlas:purpose-curation
 const PURPOSE_CURATION_BATCH_KEY_DOMAIN: &str = "projectatlas:purpose-curation:batch:v1";
 /// Monotonic metadata revision for accepted authored-purpose mutations.
 const AUTHORED_PURPOSE_REVISION_KEY: &str = "purpose.authored_revision";
+/// Prepared import relation lookup used by reverse-caller alias resolution.
+const IMPORT_RELATIONS_MATCHING_TARGETS_SQL: &str = "
+    SELECT path, source_name, target_name, line
+    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
+    WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'
+    ORDER BY path, line, source_name, target_name
+    LIMIT ?2
+";
+/// Prepared exact caller-path lookup used by reverse-caller alias resolution.
+const IMPORT_RELATIONS_FOR_PATH_SQL: &str = "
+    SELECT path, source_name, target_name, line
+    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
+    WHERE kind = 'imports' AND path = ?1
+    ORDER BY path, line, source_name, target_name
+    LIMIT ?2
+";
 /// Select create capability only for a path proven absent by preflight.
 fn writable_open_flags(state: SchemaState, database_exists: bool) -> OpenFlags {
     match (state, database_exists) {
@@ -1041,6 +1057,89 @@ pub struct StoredImportRelation {
     pub line: usize,
 }
 
+/// One observed reverse-caller relation query from the benchmark-only build.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Clone, Debug, Serialize)]
+pub struct ReverseCallerBenchmarkQuery {
+    /// Position in the production query sequence.
+    pub sequence: usize,
+    /// Production-owned query family.
+    pub family: &'static str,
+    /// Exact term, path, or target-set binding used by the query.
+    pub binding: String,
+    /// Bound rows admitted for this query.
+    pub limit: usize,
+    /// Rows decoded by the production query.
+    pub rows: usize,
+    /// UTF-8 bytes retained by the decoded relation fields.
+    pub row_bytes: usize,
+    /// `EXPLAIN QUERY PLAN` details for the exact production SQL.
+    pub query_plan: Vec<String>,
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
+thread_local! {
+    static REVERSE_CALLER_BENCHMARK_QUERIES: RefCell<Vec<ReverseCallerBenchmarkQuery>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
+/// Read the planner output for one exact production query and binding set.
+fn reverse_caller_benchmark_query_plan(
+    connection: &Connection,
+    sql: &str,
+    values: &[Value],
+) -> DbResult<Vec<String>> {
+    let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+    let rows = statement.query_map(params_from_iter(values.iter()), |row| row.get(3))?;
+    Ok(rows.collect::<Result<Vec<String>, _>>()?)
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
+/// Append one bounded production query observation to the current summary.
+fn record_reverse_caller_benchmark_query(
+    family: &'static str,
+    binding: String,
+    limit: usize,
+    rows: usize,
+    row_bytes: usize,
+    query_plan: Vec<String>,
+) {
+    REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| {
+        let mut observations = observations.borrow_mut();
+        let sequence = observations.len() + 1;
+        observations.push(ReverseCallerBenchmarkQuery {
+            sequence,
+            family,
+            binding,
+            limit,
+            rows,
+            row_bytes,
+            query_plan,
+        });
+    });
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
+/// Count the bounded stored-import relation bytes retained by one query.
+fn stored_import_relation_bytes(relation: &StoredImportRelation) -> usize {
+    relation.path.len()
+        + relation.source_name.len()
+        + relation.target_name.len()
+        + std::mem::size_of::<usize>()
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
+/// Count the bounded symbol-relation bytes retained by one query.
+fn symbol_relation_bytes(relation: &SymbolRelation) -> usize {
+    relation.path.len()
+        + relation.source_name.len()
+        + relation.target_name.len()
+        + relation.context.len()
+        + relation.parser.to_string().len()
+        + std::mem::size_of::<usize>()
+}
+
 /// One unapproved purpose row bound to deterministic curator work.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PurposeCurationCandidate {
@@ -1697,6 +1796,19 @@ impl AtlasStore {
             Some(&expected_identity),
             ProjectIdentityRequirement::Required,
         )
+    }
+
+    /// Start collecting production-owned reverse-caller query observations.
+    #[cfg(feature = "reverse-caller-benchmark")]
+    pub fn start_reverse_caller_benchmark_trace(&self) {
+        REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow_mut().clear());
+    }
+
+    /// Take the production-owned reverse-caller query observations.
+    #[cfg(feature = "reverse-caller-benchmark")]
+    pub fn take_reverse_caller_benchmark_trace(&self) -> Vec<ReverseCallerBenchmarkQuery> {
+        REVERSE_CALLER_BENCHMARK_QUERIES
+            .with(|observations| std::mem::take(&mut *observations.borrow_mut()))
     }
 
     /// Open with an optional source-owned project identity.
@@ -3984,6 +4096,15 @@ impl AtlasStore {
                 && left.kind == right.kind
                 && left.line == right.line
         });
+        #[cfg(feature = "reverse-caller-benchmark")]
+        record_reverse_caller_benchmark_query(
+            "call-targets",
+            target_names.join("\u{1f}"),
+            limit_per_target.max(1),
+            relations.len(),
+            relations.iter().map(symbol_relation_bytes).sum(),
+            reverse_caller_benchmark_query_plan(&self.connection, &sql, &values)?,
+        );
         Ok(relations)
     }
 
@@ -4002,25 +4123,41 @@ impl AtlasStore {
         unique_terms.dedup();
         let mut relations = Vec::new();
         for term in unique_terms.iter().filter(|term| !term.trim().is_empty()) {
-            let mut statement = self.connection.prepare_cached(
-                "
-                SELECT path, source_name, target_name, line
-                FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
-                WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'
-                ORDER BY path, line, source_name, target_name
-                LIMIT ?2
-                ",
-            )?;
-            let rows = statement.query_map(
-                params![
-                    sqlite_like_pattern(term),
-                    usize_to_i64(limit_per_term.max(1))
+            let pattern = sqlite_like_pattern(term);
+            let limit = limit_per_term.max(1);
+            #[cfg(feature = "reverse-caller-benchmark")]
+            let query_plan = reverse_caller_benchmark_query_plan(
+                &self.connection,
+                IMPORT_RELATIONS_MATCHING_TARGETS_SQL,
+                &[
+                    Value::Text(pattern.clone()),
+                    Value::Integer(usize_to_i64(limit)),
                 ],
+            )?;
+            let mut statement = self
+                .connection
+                .prepare_cached(IMPORT_RELATIONS_MATCHING_TARGETS_SQL)?;
+            let rows = statement.query_map(
+                params![pattern, usize_to_i64(limit)],
                 stored_import_relation_from_row,
             )?;
+            let mut term_relations = Vec::new();
             for row in rows {
-                relations.push(row?);
+                term_relations.push(row?);
             }
+            #[cfg(feature = "reverse-caller-benchmark")]
+            record_reverse_caller_benchmark_query(
+                "import-targets",
+                term.clone(),
+                limit,
+                term_relations.len(),
+                term_relations
+                    .iter()
+                    .map(stored_import_relation_bytes)
+                    .sum(),
+                query_plan,
+            );
+            relations.extend(term_relations);
         }
         relations.sort_by(|left, right| {
             left.path
@@ -4048,23 +4185,36 @@ impl AtlasStore {
         path: &str,
         limit: usize,
     ) -> DbResult<Vec<StoredImportRelation>> {
-        let mut statement = self.connection.prepare_cached(
-            "
-            SELECT path, source_name, target_name, line
-            FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup
-            WHERE kind = 'imports' AND path = ?1
-            ORDER BY path, line, source_name, target_name
-            LIMIT ?2
-            ",
+        let bounded_limit = limit.max(1);
+        #[cfg(feature = "reverse-caller-benchmark")]
+        let query_plan = reverse_caller_benchmark_query_plan(
+            &self.connection,
+            IMPORT_RELATIONS_FOR_PATH_SQL,
+            &[
+                Value::Text(path.to_string()),
+                Value::Integer(usize_to_i64(bounded_limit)),
+            ],
         )?;
+        let mut statement = self
+            .connection
+            .prepare_cached(IMPORT_RELATIONS_FOR_PATH_SQL)?;
         let rows = statement.query_map(
-            params![path, usize_to_i64(limit.max(1))],
+            params![path, usize_to_i64(bounded_limit)],
             stored_import_relation_from_row,
         )?;
         let mut relations = Vec::new();
         for row in rows {
             relations.push(row?);
         }
+        #[cfg(feature = "reverse-caller-benchmark")]
+        record_reverse_caller_benchmark_query(
+            "import-caller-path",
+            path.to_string(),
+            bounded_limit,
+            relations.len(),
+            relations.iter().map(stored_import_relation_bytes).sum(),
+            query_plan,
+        );
         Ok(relations)
     }
 
