@@ -34115,6 +34115,99 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
     Ok(())
 }
 
+#[test]
+fn mcp_contract_shutdown_disconnects_saturated_responses_before_reader_join()
+-> Result<(), Box<dyn Error>> {
+    let executable = mcp_contract_executable();
+    let mut child = StdCommand::new(&executable)
+        .arg("--version")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("saturated-response fixture stdin was not piped"))?;
+    let (sender, responses) =
+        mpsc::sync_channel::<io::Result<String>>(MCP_CONTRACT_RESPONSE_CAPACITY);
+    let (state_sender, state_receiver) = mpsc::channel();
+    let stdout_reader = thread::spawn(move || {
+        for id in 0..MCP_CONTRACT_RESPONSE_CAPACITY {
+            if sender
+                .send(Ok(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {}
+                })
+                .to_string()))
+                .is_err()
+            {
+                return;
+            }
+        }
+        if state_sender.send("saturated").is_err() {
+            return;
+        }
+        let disconnected = sender
+            .send(Ok(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": MCP_CONTRACT_RESPONSE_CAPACITY,
+                "result": {}
+            })
+            .to_string()))
+            .is_err();
+        let _terminal_state = state_sender.send(if disconnected {
+            "disconnected"
+        } else {
+            "accepted"
+        });
+    });
+    let stderr_reader = thread::spawn(|| Ok(Vec::new()));
+    let session = McpContractSession {
+        child: Some(child),
+        stdin: Some(stdin),
+        responses,
+        stdout_reader: Some(stdout_reader),
+        stderr_reader: Some(stderr_reader),
+        next_request_id: 1,
+    };
+    let state = state_receiver.recv_timeout(Duration::from_secs(10))?;
+    if state != "saturated" {
+        return Err(io::Error::other(format!(
+            "response reader did not fill the bounded channel: {state}"
+        ))
+        .into());
+    }
+
+    let started = Instant::now();
+    let shutdown = session.shutdown_with_test_delay(Duration::ZERO, None, false);
+    let elapsed = started.elapsed();
+    let error = shutdown
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("saturated response shutdown was not timed out"))?;
+    let io_error = error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("saturated response shutdown lost its io error"))?;
+    if io_error.kind() != io::ErrorKind::TimedOut || elapsed > Duration::from_secs(5) {
+        return Err(io::Error::other(format!(
+            "saturated response shutdown was not bounded TimedOut: elapsed={elapsed:?} error={error}"
+        ))
+        .into());
+    }
+    let terminal_state = state_receiver.try_recv()?;
+    if terminal_state != "disconnected" {
+        return Err(io::Error::other(format!(
+            "stdout reader did not observe response disconnection: {terminal_state}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+const MCP_CONTRACT_RESPONSE_CAPACITY: usize = 64;
+
 /// Persistent real MCP session used by E2E contract clients.
 struct McpContractSession {
     child: Option<Child>,
@@ -34173,7 +34266,7 @@ impl McpContractSession {
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr was not piped"))?;
-        let (sender, responses) = mpsc::sync_channel(64);
+        let (sender, responses) = mpsc::sync_channel(MCP_CONTRACT_RESPONSE_CAPACITY);
         let stdout_reader = thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             loop {
@@ -34436,6 +34529,12 @@ impl McpContractSession {
         Ok(())
     }
 
+    /// Disconnect the bounded stdout sender before joining its reader.
+    fn disconnect_responses(&mut self) {
+        let (_sender, disconnected) = mpsc::channel();
+        self.responses = disconnected;
+    }
+
     /// Close stdin and require a clean bounded process exit.
     fn shutdown(self) -> Result<(), Box<dyn Error>> {
         self.shutdown_with_test_delay(Duration::from_secs(10), None, false)
@@ -34650,6 +34749,7 @@ impl McpContractSession {
         }
         self.stdin.take();
         let wait_result = child.wait();
+        self.disconnect_responses();
         let stdout_result = self.stdout_reader.take().map(|reader| {
             reader
                 .join()
@@ -34695,6 +34795,7 @@ impl Drop for McpContractSession {
             drop(child.wait());
         }
         self.child.take();
+        self.disconnect_responses();
         if let Some(reader) = self.stdout_reader.take() {
             drop(reader.join());
         }
