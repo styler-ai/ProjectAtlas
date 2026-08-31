@@ -33095,7 +33095,54 @@ fn assert_cli_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// Return the exact advertised inventory from a real release-candidate stdio process.
+/// Own a proven-live MCP contract process after its deadline observer returns.
+struct McpContractCleanupPacket {
+    child: Child,
+    stdout_reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+}
+
+struct McpContractCleanupOwner {
+    sender: mpsc::SyncSender<McpContractCleanupPacket>,
+}
+
+impl McpContractCleanupOwner {
+    fn new() -> io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("projectatlas-mcp-contract-cleanup".to_string())
+            .spawn(move || {
+                if let Ok(packet) = receiver.recv() {
+                    cleanup_mcp_contract_packet(packet);
+                }
+            })
+            .map(|_worker| Self { sender })
+            .map_err(|error| {
+                io::Error::other(format!("MCP cleanup owner could not start: {error}"))
+            })
+    }
+
+    fn handoff(&self, packet: McpContractCleanupPacket) {
+        if let Err(mpsc::SendError(packet)) = self.sender.send(packet) {
+            cleanup_mcp_contract_packet(packet);
+        }
+    }
+}
+
+fn cleanup_mcp_contract_packet(mut packet: McpContractCleanupPacket) {
+    packet.child.stdin.take();
+    if packet.child.try_wait().ok().flatten().is_none() {
+        drop(packet.child.kill());
+    }
+    drop(packet.child.wait());
+    if let Some(reader) = packet.stdout_reader {
+        drop(reader.join());
+    }
+    if let Some(reader) = packet.stderr_reader {
+        drop(reader.join());
+    }
+}
+
 fn run_mcp_contract_inventory(
     executable: &Path,
     cwd: &Path,
@@ -33139,6 +33186,7 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill(
     hold_stdin_until_observation: bool,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
 ) -> Result<String, Box<dyn Error>> {
+    let cleanup_owner = McpContractCleanupOwner::new()?;
     run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
         executable,
         cwd,
@@ -33147,7 +33195,9 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill(
         observer_delay,
         hold_stdin_until_observation,
         kill_child,
-        &mut |_child, _stdout_reader, _stderr_reader| Ok(()),
+        &mut |packet| {
+            cleanup_owner.handoff(packet);
+        },
     )
 }
 
@@ -33161,11 +33211,7 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
     observer_delay: Option<Duration>,
     hold_stdin_until_observation: bool,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
-    handoff_live_child: &mut impl FnMut(
-        Child,
-        thread::JoinHandle<()>,
-        thread::JoinHandle<io::Result<Vec<u8>>>,
-    ) -> io::Result<()>,
+    handoff_live_child: &mut impl FnMut(McpContractCleanupPacket),
 ) -> Result<String, Box<dyn Error>> {
     let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
@@ -33601,29 +33647,24 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let (session_cleanup_sender, session_cleanup_receiver) = mpsc::sync_channel(1);
+    let mut session_cleanup_packet = None;
     let mut injected_session_kill =
         |_child: &mut Child| Err(io::Error::other("injected session kill failure"));
-    let mut session_cleanup_handoff =
-        move |child: Child,
-              stdout_reader: thread::JoinHandle<()>,
-              stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
-            session_cleanup_sender
-                .send((child, stdout_reader, stderr_reader))
-                .map_err(|error| {
-                    io::Error::other(format!("session cleanup receiver was dropped: {error}"))
-                })
+    let injected_session_failure = {
+        let mut session_cleanup_handoff = |packet: McpContractCleanupPacket| {
+            session_cleanup_packet = Some(packet);
         };
-    let injected_session_failure = run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
-        &executable,
-        &repo,
-        &database,
-        Duration::ZERO,
-        None,
-        true,
-        &mut injected_session_kill,
-        &mut session_cleanup_handoff,
-    );
+        run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &database,
+            Duration::ZERO,
+            None,
+            true,
+            &mut injected_session_kill,
+            &mut session_cleanup_handoff,
+        )
+    };
     let injected_session_error = injected_session_failure
         .as_ref()
         .err()
@@ -33644,8 +33685,24 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let (mut session_child, session_stdout_reader, session_stderr_reader) =
-        session_cleanup_receiver.recv()?;
+    let mut session_cleanup_packet = session_cleanup_packet
+        .take()
+        .ok_or_else(|| io::Error::other("session cleanup was not synchronously transferred"))?;
+    let (session_stdout_reader, session_stderr_reader) = match (
+        session_cleanup_packet.stdout_reader.take(),
+        session_cleanup_packet.stderr_reader.take(),
+    ) {
+        (Some(stdout_reader), Some(stderr_reader)) => (stdout_reader, stderr_reader),
+        (stdout_reader, stderr_reader) => {
+            cleanup_mcp_contract_packet(McpContractCleanupPacket {
+                child: session_cleanup_packet.child,
+                stdout_reader,
+                stderr_reader,
+            });
+            return Err(io::Error::other("session readers were not transferred").into());
+        }
+    };
+    let mut session_child = session_cleanup_packet.child;
     drop(session_child.stdin.take());
     if session_child.try_wait()?.is_none() {
         session_child.kill()?;
@@ -33742,31 +33799,29 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let (stdio_cleanup_sender, stdio_cleanup_receiver) = mpsc::sync_channel(1);
+    let mut stdio_cleanup_packet = None;
     let mut injected_stdio_kill =
         |_child: &mut Child| Err(io::Error::other("injected stdio kill failure"));
-    let mut stdio_cleanup_handoff =
-        move |child: Child,
-              stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-              stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
-            stdio_cleanup_sender
-                .send((child, stdout_reader, stderr_reader))
-                .map_err(|error| {
-                    io::Error::other(format!("stdio cleanup receiver was dropped: {error}"))
-                })
-        };
-    let injected_stdio_failure = run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
-        &executable,
-        &repo,
-        &args,
-        &messages,
-        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
-        Duration::ZERO,
-        None,
-        true,
-        &mut injected_stdio_kill,
-        &mut stdio_cleanup_handoff,
-    );
+    let injected_stdio_failure = {
+        let mut stdio_cleanup_handoff =
+            |child: Child,
+             stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+                stdio_cleanup_packet = Some((child, stdout_reader, stderr_reader));
+            };
+        run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &args,
+            &messages,
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+            Duration::ZERO,
+            None,
+            true,
+            &mut injected_stdio_kill,
+            &mut stdio_cleanup_handoff,
+        )
+    };
     let injected_stdio_error = injected_stdio_failure
         .as_ref()
         .err()
@@ -33788,7 +33843,9 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         .into());
     }
     let (mut stdio_child, stdio_stdout_reader, stdio_stderr_reader) =
-        stdio_cleanup_receiver.recv()?;
+        stdio_cleanup_packet
+            .take()
+            .ok_or_else(|| io::Error::other("stdio cleanup was not synchronously transferred"))?;
     drop(stdio_child.stdin.take());
     if stdio_child.try_wait()?.is_none() {
         stdio_child.kill()?;
@@ -33872,15 +33929,13 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let (installer_cleanup_sender, installer_cleanup_receiver) = mpsc::sync_channel(1);
+    let mut installer_cleanup_child = None;
     let mut injected_installer_kill =
         |_child: &mut Child| Err(io::Error::other("injected installer kill failure"));
-    let mut installer_cleanup_handoff = move |child: Child| {
-        installer_cleanup_sender.send(child).map_err(|error| {
-            io::Error::other(format!("installer cleanup receiver was dropped: {error}"))
-        })
-    };
-    let injected_installer_failure =
+    let injected_installer_failure = {
+        let mut installer_cleanup_handoff = |child: Child| {
+            installer_cleanup_child = Some(child);
+        };
         wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             StdCommand::new(&executable)
                 .current_dir(&repo)
@@ -33896,7 +33951,8 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             None,
             &mut injected_installer_kill,
             &mut installer_cleanup_handoff,
-        );
+        )
+    };
     let injected_installer_error = injected_installer_failure
         .as_ref()
         .err()
@@ -33917,7 +33973,9 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let mut installer_child = installer_cleanup_receiver.recv()?;
+    let mut installer_child = installer_cleanup_child
+        .take()
+        .ok_or_else(|| io::Error::other("installer cleanup was not synchronously transferred"))?;
     drop(installer_child.stdin.take());
     if installer_child.try_wait()?.is_none() {
         installer_child.kill()?;
@@ -34279,12 +34337,15 @@ impl McpContractSession {
         hold_stdin_until_observation: bool,
         kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     ) -> Result<(), Box<dyn Error>> {
+        let cleanup_owner = McpContractCleanupOwner::new()?;
         self.shutdown_with_test_delay_and_kill_and_handoff(
             timeout,
             observer_delay,
             hold_stdin_until_observation,
             kill_child,
-            &mut |_child, _stdout_reader, _stderr_reader| Ok(()),
+            &mut |packet| {
+                cleanup_owner.handoff(packet);
+            },
         )
     }
 
@@ -34295,11 +34356,7 @@ impl McpContractSession {
         observer_delay: Option<Duration>,
         hold_stdin_until_observation: bool,
         kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
-        handoff_live_child: &mut impl FnMut(
-            Child,
-            thread::JoinHandle<()>,
-            thread::JoinHandle<io::Result<Vec<u8>>>,
-        ) -> io::Result<()>,
+        handoff_live_child: &mut impl FnMut(McpContractCleanupPacket),
     ) -> Result<(), Box<dyn Error>> {
         if !hold_stdin_until_observation {
             self.stdin.take();
@@ -34358,16 +34415,11 @@ impl McpContractSession {
                     Ok(status) => status,
                     Err(error) => {
                         self.stdin.take();
-                        let handoff_error =
-                            self.handoff_live_child(child, handoff_live_child).err();
-                        let mut diagnostic = format!(
-                            "MCP contract server did not exit after stdin closed: {} status=unknown (re-probe failed before termination attempt: {error}; stdout/stderr deferred to cleanup owner)",
+                        self.handoff_live_child(child, handoff_live_child);
+                        let diagnostic = format!(
+                            "MCP contract server did not exit after stdin closed: {} status=unknown (re-probe failed before termination attempt: {error}; stdout/stderr transferred to cleanup owner)",
                             timeout_reason.as_deref().unwrap_or("timeout")
                         );
-                        if let Some(handoff_error) = handoff_error {
-                            diagnostic.push_str("; cleanup handoff failed: ");
-                            diagnostic.push_str(&handoff_error.to_string());
-                        }
                         return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                     }
                 };
@@ -34380,19 +34432,14 @@ impl McpContractSession {
                     Ok(status) => status,
                     Err(error) => {
                         self.stdin.take();
-                        let handoff_error =
-                            self.handoff_live_child(child, handoff_live_child).err();
+                        self.handoff_live_child(child, handoff_live_child);
                         let mut diagnostic = format!(
-                            "MCP contract server did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; stdout/stderr deferred to cleanup owner)",
+                            "MCP contract server did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; stdout/stderr transferred to cleanup owner)",
                             timeout_reason.as_deref().unwrap_or("timeout")
                         );
                         if let Some(kill_error) = kill_result.as_ref().err() {
                             diagnostic.push_str("; termination failed: ");
                             diagnostic.push_str(&kill_error.to_string());
-                        }
-                        if let Some(handoff_error) = handoff_error {
-                            diagnostic.push_str("; cleanup handoff failed: ");
-                            diagnostic.push_str(&handoff_error.to_string());
                         }
                         return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                     }
@@ -34401,15 +34448,11 @@ impl McpContractSession {
                     && status_after_kill.is_none()
                 {
                     self.stdin.take();
-                    let handoff_error = self.handoff_live_child(child, handoff_live_child).err();
-                    let mut diagnostic = format!(
-                        "MCP contract server did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; stdout/stderr deferred to cleanup owner)",
+                    self.handoff_live_child(child, handoff_live_child);
+                    let diagnostic = format!(
+                        "MCP contract server did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; stdout/stderr transferred to cleanup owner)",
                         timeout_reason.as_deref().unwrap_or("timeout")
                     );
-                    if let Some(handoff_error) = handoff_error {
-                        diagnostic.push_str("; cleanup handoff failed: ");
-                        diagnostic.push_str(&handoff_error.to_string());
-                    }
                     return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                 }
             } else if timeout_reason.as_deref() == Some("still running at deadline") {
@@ -34459,21 +34502,13 @@ impl McpContractSession {
     fn handoff_live_child(
         &mut self,
         child: Child,
-        handoff: &mut impl FnMut(
-            Child,
-            thread::JoinHandle<()>,
-            thread::JoinHandle<io::Result<Vec<u8>>>,
-        ) -> io::Result<()>,
-    ) -> io::Result<()> {
-        let stdout_reader = self
-            .stdout_reader
-            .take()
-            .ok_or_else(|| io::Error::other("MCP contract stdout reader was consumed"))?;
-        let stderr_reader = self
-            .stderr_reader
-            .take()
-            .ok_or_else(|| io::Error::other("MCP contract stderr reader was consumed"))?;
-        handoff(child, stdout_reader, stderr_reader)
+        handoff: &mut impl FnMut(McpContractCleanupPacket),
+    ) {
+        handoff(McpContractCleanupPacket {
+            child,
+            stdout_reader: self.stdout_reader.take(),
+            stderr_reader: self.stderr_reader.take(),
+        });
     }
 }
 
@@ -34631,6 +34666,59 @@ fn run_mcp_stdio_with_env(
     )
 }
 
+struct McpStdioCleanupPacket {
+    child: Child,
+    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+}
+
+struct McpStdioCleanupOwner {
+    sender: mpsc::SyncSender<McpStdioCleanupPacket>,
+}
+
+impl McpStdioCleanupOwner {
+    fn new() -> io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("projectatlas-mcp-stdio-cleanup".to_string())
+            .spawn(move || {
+                if let Ok(packet) = receiver.recv() {
+                    cleanup_mcp_stdio_packet(packet);
+                }
+            })
+            .map(|_worker| Self { sender })
+            .map_err(|error| {
+                io::Error::other(format!("MCP stdio cleanup owner could not start: {error}"))
+            })
+    }
+
+    fn handoff(
+        &self,
+        child: Child,
+        stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+        stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    ) {
+        let packet = McpStdioCleanupPacket {
+            child,
+            stdout_reader,
+            stderr_reader,
+        };
+        if let Err(mpsc::SendError(packet)) = self.sender.send(packet) {
+            cleanup_mcp_stdio_packet(packet);
+        }
+    }
+}
+
+fn cleanup_mcp_stdio_packet(mut packet: McpStdioCleanupPacket) {
+    packet.child.stdin.take();
+    if packet.child.try_wait().ok().flatten().is_none() {
+        drop(packet.child.kill());
+    }
+    drop(packet.child.wait());
+    drop(packet.stdout_reader.join());
+    drop(packet.stderr_reader.join());
+}
+
 fn run_mcp_stdio_with_env_and_test_delay(
     executable: &std::path::Path,
     cwd: &std::path::Path,
@@ -34665,6 +34753,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill(
     hold_stdin_until_observation: bool,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
 ) -> Result<String, Box<dyn Error>> {
+    let cleanup_owner = McpStdioCleanupOwner::new()?;
     run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         executable,
         cwd,
@@ -34675,7 +34764,9 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill(
         observer_delay,
         hold_stdin_until_observation,
         kill_child,
-        &mut |_child, _stdout_reader, _stderr_reader| Ok(()),
+        &mut |child, stdout_reader, stderr_reader| {
+            cleanup_owner.handoff(child, stdout_reader, stderr_reader);
+        },
     )
 }
 
@@ -34695,7 +34786,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         Child,
         thread::JoinHandle<io::Result<Vec<u8>>>,
         thread::JoinHandle<io::Result<Vec<u8>>>,
-    ) -> io::Result<()>,
+    ),
 ) -> Result<String, Box<dyn Error>> {
     let mut expected_responses = BTreeSet::new();
     for message in messages {
@@ -34858,16 +34949,11 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
                 Ok(status) => status,
                 Err(error) => {
                     stdin.take();
-                    let handoff_error =
-                        handoff_live_child(child, stdout_reader, stderr_reader).err();
-                    let mut diagnostic = format!(
-                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed before termination attempt: {error}; stdout/stderr deferred to cleanup owner)",
+                    handoff_live_child(child, stdout_reader, stderr_reader);
+                    let diagnostic = format!(
+                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed before termination attempt: {error}; stdout/stderr transferred to cleanup owner)",
                         timeout_reason.as_deref().unwrap_or("timeout")
                     );
-                    if let Some(handoff_error) = handoff_error {
-                        diagnostic.push_str("; cleanup handoff failed: ");
-                        diagnostic.push_str(&handoff_error.to_string());
-                    }
                     return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                 }
             };
@@ -34880,19 +34966,14 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
                 Ok(status) => status,
                 Err(error) => {
                     stdin.take();
-                    let handoff_error =
-                        handoff_live_child(child, stdout_reader, stderr_reader).err();
+                    handoff_live_child(child, stdout_reader, stderr_reader);
                     let mut diagnostic = format!(
-                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; stdout/stderr deferred to cleanup owner)",
+                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; stdout/stderr transferred to cleanup owner)",
                         timeout_reason.as_deref().unwrap_or("timeout")
                     );
                     if let Some(kill_error) = kill_result.as_ref().err() {
                         diagnostic.push_str("; termination failed: ");
                         diagnostic.push_str(&kill_error.to_string());
-                    }
-                    if let Some(handoff_error) = handoff_error {
-                        diagnostic.push_str("; cleanup handoff failed: ");
-                        diagnostic.push_str(&handoff_error.to_string());
                     }
                     return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                 }
@@ -34901,15 +34982,11 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
                 && status_after_kill.is_none()
             {
                 stdin.take();
-                let handoff_error = handoff_live_child(child, stdout_reader, stderr_reader).err();
-                let mut diagnostic = format!(
-                    "projectatlas mcp did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; stdout/stderr deferred to cleanup owner)",
+                handoff_live_child(child, stdout_reader, stderr_reader);
+                let diagnostic = format!(
+                    "projectatlas mcp did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; stdout/stderr transferred to cleanup owner)",
                     timeout_reason.as_deref().unwrap_or("timeout")
                 );
-                if let Some(handoff_error) = handoff_error {
-                    diagnostic.push_str("; cleanup handoff failed: ");
-                    diagnostic.push_str(&handoff_error.to_string());
-                }
                 return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
             }
         } else if timeout_reason.as_deref() == Some("still running at deadline") {
@@ -38709,6 +38786,43 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     Ok(command)
 }
 
+struct PluginInstallerCleanupOwner {
+    sender: mpsc::SyncSender<Child>,
+}
+
+impl PluginInstallerCleanupOwner {
+    fn new() -> io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("projectatlas-plugin-installer-cleanup".to_string())
+            .spawn(move || {
+                if let Ok(child) = receiver.recv() {
+                    cleanup_plugin_installer_child(child);
+                }
+            })
+            .map(|_worker| Self { sender })
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "plugin installer cleanup owner could not start: {error}"
+                ))
+            })
+    }
+
+    fn handoff(&self, child: Child) {
+        if let Err(mpsc::SendError(child)) = self.sender.send(child) {
+            cleanup_plugin_installer_child(child);
+        }
+    }
+}
+
+fn cleanup_plugin_installer_child(mut child: Child) {
+    child.stdin.take();
+    if child.try_wait().ok().flatten().is_none() {
+        drop(child.kill());
+    }
+    drop(child.wait_with_output());
+}
+
 /// Collect one coordinated installer process under an explicit deadline.
 fn wait_for_plugin_installer_output(
     child: Child,
@@ -38724,13 +38838,20 @@ fn wait_for_plugin_installer_output_with_test_delay(
     timeout: Duration,
     observer_delay: Option<Duration>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
+    let cleanup_owner = match PluginInstallerCleanupOwner::new() {
+        Ok(owner) => owner,
+        Err(error) => {
+            cleanup_plugin_installer_child(child);
+            return Err(error.into());
+        }
+    };
     wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
         child,
         label,
         timeout,
         observer_delay,
         &mut |child| child.kill(),
-        &mut |_child| Ok(()),
+        &mut |child| cleanup_owner.handoff(child),
     )
 }
 
@@ -38742,7 +38863,7 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     timeout: Duration,
     observer_delay: Option<Duration>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
-    handoff_live_child: &mut impl FnMut(Child) -> io::Result<()>,
+    handoff_live_child: &mut impl FnMut(Child),
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let deadline = Instant::now()
         .checked_add(timeout)
@@ -38757,14 +38878,10 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                     Ok(status) => status,
                     Err(error) => {
                         child.stdin.take();
-                        let handoff_error = handoff_live_child(child).err();
-                        let mut diagnostic = format!(
-                            "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed before termination attempt: {error}; output deferred to cleanup owner)"
+                        handoff_live_child(child);
+                        let diagnostic = format!(
+                            "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed before termination attempt: {error}; output transferred to cleanup owner)"
                         );
-                        if let Some(handoff_error) = handoff_error {
-                            diagnostic.push_str("; cleanup handoff failed: ");
-                            diagnostic.push_str(&handoff_error.to_string());
-                        }
                         return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                     }
                 };
@@ -38778,17 +38895,13 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                     Ok(status) => status,
                     Err(error) => {
                         child.stdin.take();
-                        let handoff_error = handoff_live_child(child).err();
+                        handoff_live_child(child);
                         let mut diagnostic = format!(
-                            "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed after termination attempt: {error}; output deferred to cleanup owner)"
+                            "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed after termination attempt: {error}; output transferred to cleanup owner)"
                         );
                         if let Some(kill_error) = kill_result.as_ref().err() {
                             diagnostic.push_str("; termination failed: ");
                             diagnostic.push_str(&kill_error.to_string());
-                        }
-                        if let Some(handoff_error) = handoff_error {
-                            diagnostic.push_str("; cleanup handoff failed: ");
-                            diagnostic.push_str(&handoff_error.to_string());
                         }
                         return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                     }
@@ -38797,14 +38910,10 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                     && status_after_kill.is_none()
                 {
                     child.stdin.take();
-                    let handoff_error = handoff_live_child(child).err();
-                    let mut diagnostic = format!(
-                        "{label} plugin installer exceeded {timeout:?}: still running at deadline status=still-running at deadline (termination failed: {kill_error}; output deferred to cleanup owner)"
+                    handoff_live_child(child);
+                    let diagnostic = format!(
+                        "{label} plugin installer exceeded {timeout:?}: still running at deadline status=still-running at deadline (termination failed: {kill_error}; output transferred to cleanup owner)"
                     );
-                    if let Some(handoff_error) = handoff_error {
-                        diagnostic.push_str("; cleanup handoff failed: ");
-                        diagnostic.push_str(&handoff_error.to_string());
-                    }
                     return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                 }
             }
