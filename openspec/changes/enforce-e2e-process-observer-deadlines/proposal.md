@@ -5,7 +5,7 @@ Three generic E2E subprocess observers can accept a child that completed before 
 ## What Changes
 
 - Classify deadline expiry before accepting child completion in the shared MCP-session, MCP-process, and installer-output E2E observers.
-- Preserve bounded output collection, status validation, child termination/reaping, diagnostics, and all existing successful in-deadline behavior.
+- Preserve bounded output collection, status validation, diagnostics, and all existing successful in-deadline behavior; reap and join owned resources after successful termination or an observed-exit race, while returning a bounded timeout and transferring exact live-child cleanup when the operating system refuses termination.
 - Add causal delayed-observer regressions that distinguish completion time from observation time without retries, global locks, suite serialization, or extra scheduler slack.
 
 ## Capabilities
