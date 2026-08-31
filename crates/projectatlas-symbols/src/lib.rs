@@ -1031,7 +1031,13 @@ fn parse_php_tree<E>(
         }));
     };
     let first_content_start = content.find(|character: char| !character.is_whitespace());
-    if !mixed.root_node().has_error() && first_content_start == Some(first_tag_start) {
+    let first_tag_is_xml = content
+        .get(first_tag_start..)
+        .is_some_and(|suffix| suffix.starts_with("<?xml"));
+    if !mixed.root_node().has_error()
+        && first_content_start == Some(first_tag_start)
+        && !first_tag_is_xml
+    {
         return Ok(Some(PhpParse {
             tree: mixed,
             has_opening_tag: true,
@@ -1159,14 +1165,14 @@ fn tree_contains_php_tag_outside_literals<E>(
 /// Collect top-level literal/comment ranges from the PHP-only parse in source order.
 fn collect_php_only_opaque_ranges<E>(
     node: Node<'_>,
-    ranges: &mut Vec<(usize, usize)>,
+    ranges: &mut Vec<(usize, usize, bool)>,
     check: &mut impl FnMut() -> Result<(), E>,
     examined_nodes: &mut usize,
 ) -> Result<(), E> {
     *examined_nodes += 1;
     check_parser_iteration(*examined_nodes, check)?;
     if is_php_opaque_node(node.kind()) {
-        ranges.push((node.start_byte(), node.end_byte()));
+        ranges.push((node.start_byte(), node.end_byte(), node.kind() == "comment"));
         return Ok(());
     }
     let mut cursor = node.walk();
@@ -1179,7 +1185,7 @@ fn collect_php_only_opaque_ranges<E>(
 /// Return whether a mixed parse contains a tag outside the sorted opaque ranges.
 fn tree_contains_php_tag_outside_ranges<E>(
     node: Node<'_>,
-    opaque_ranges: &[(usize, usize)],
+    opaque_ranges: &[(usize, usize, bool)],
     next_opaque: &mut usize,
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
@@ -1187,17 +1193,24 @@ fn tree_contains_php_tag_outside_ranges<E>(
 ) -> Result<bool, E> {
     *examined_nodes += 1;
     check_parser_iteration(*examined_nodes, check)?;
-    if node.kind() == "php_tag" {
+    if node.kind() == "php_tag"
+        && !content
+            .get(node.start_byte()..)
+            .is_some_and(|suffix| suffix.starts_with("<?xml"))
+    {
         while *next_opaque < opaque_ranges.len()
             && opaque_ranges[*next_opaque].1 <= node.start_byte()
         {
             *next_opaque += 1;
         }
-        let outside_opaque_range = opaque_ranges.get(*next_opaque).is_none_or(|&(start, end)| {
-            start >= node.end_byte()
-                || end <= node.start_byte()
-                || is_php_inline_output_opening(node, content)
-        });
+        let outside_opaque_range =
+            opaque_ranges
+                .get(*next_opaque)
+                .is_none_or(|&(start, end, is_comment)| {
+                    start >= node.end_byte()
+                        || end <= node.start_byte()
+                        || (is_comment && is_php_inline_output_opening(node, content))
+                });
         if outside_opaque_range {
             return Ok(true);
         }
@@ -1221,7 +1234,8 @@ fn tree_contains_php_tag_outside_ranges<E>(
 /// Return whether inline output text directly precedes a PHP opening tag.
 fn is_php_inline_output_opening(node: Node<'_>, content: &str) -> bool {
     if node.kind() != "php_tag"
-        || !node_text(node, content).is_some_and(|tag| tag == "<?php" || tag == "<?=")
+        || !node_text(node, content)
+            .is_some_and(|tag| matches!(tag.as_str(), "<?" | "<?php" | "<?="))
     {
         return false;
     }
@@ -1883,7 +1897,12 @@ fn is_php_trait_use_declaration(node: Node<'_>) -> bool {
     node.kind() == "use_declaration"
         && has_ancestor_kind_any(
             node.parent(),
-            &["class_declaration", "trait_declaration", "enum_declaration"],
+            &[
+                "anonymous_class",
+                "class_declaration",
+                "trait_declaration",
+                "enum_declaration",
+            ],
         )
 }
 
@@ -5660,6 +5679,26 @@ class Service {
         assert!(!graph.symbols.iter().any(|symbol| {
             symbol.kind == SymbolKind::Import && symbol.parent.as_deref() == Some("Service")
         }));
+
+        let anonymous = extract_symbol_graph(
+            "src/AnonymousTraits.php",
+            Some("php"),
+            "<?php new class { use Auditable; };",
+        );
+        assert!(
+            anonymous
+                .symbols
+                .iter()
+                .all(|symbol| symbol.kind != SymbolKind::Import),
+            "anonymous-class trait use must not become a module import: {anonymous:?}"
+        );
+        assert!(
+            anonymous
+                .relations
+                .iter()
+                .all(|relation| relation.kind != RelationKind::Imports),
+            "unsupported anonymous-class trait composition must abstain: {anonymous:?}"
+        );
     }
 
     #[test]
@@ -5925,9 +5964,7 @@ class Owner {
     fn php_opening_tag_detection_ignores_literals_and_comments() {
         for source in [
             r#"function marker(): string { return "<?"; }"#,
-            "// <?\nfunction marker(): string { return 'marker'; }",
-            "# <?\nfunction marker(): string { return 'marker'; }",
-            "/* <? */ function marker(): string { return 'marker'; }",
+            r#"function marker(): string { return "<?php function fake(): void {}"; }"#,
             r"function marker(): string { return <<<TEXT
 <?
 TEXT;
@@ -5935,9 +5972,10 @@ TEXT;
             r"function marker(): string { return <<<'TEXT'
 <?
 TEXT;
-}",
+            }",
             "function marker(): string { return `echo <?`; }",
-            "// <?\rfunction marker(): string { return 'marker'; }",
+            "<?xml version=\"1.0\"?><root />",
+            "HTML<?xml version=\"1.0\"?><root />",
         ] {
             assert!(
                 !super::contains_php_opening_tag(source),
@@ -5953,6 +5991,26 @@ TEXT;
         for (source, symbol_name) in [
             ("<?php function tagged(): void {} ?>", "tagged"),
             ("<? function short_tagged(): void {} ?>", "short_tagged"),
+            (
+                "HTML // <? function short_after_output(): void {}",
+                "short_after_output",
+            ),
+            (
+                "//x<? function short_after_marker(): void {}",
+                "short_after_marker",
+            ),
+            (
+                "// <? function short_after_comment(): void {}",
+                "short_after_comment",
+            ),
+            (
+                "# <? function short_after_hash(): void {}",
+                "short_after_hash",
+            ),
+            (
+                "/* <? */ function short_after_block(): void {}",
+                "short_after_block",
+            ),
             (
                 "<?= $value ?><?php function after_echo(): void {} ?>",
                 "after_echo",
@@ -6040,6 +6098,20 @@ TEXT;
                 "function marker(): string { helper(); }",
                 14,
                 53,
+            ),
+            (
+                "HTML // <? function short_after_output(): string { helper(); }",
+                "short_after_output",
+                "function short_after_output(): string { helper(); }",
+                11,
+                62,
+            ),
+            (
+                "//x<? function short_after_marker(): string { helper(); }",
+                "short_after_marker",
+                "function short_after_marker(): string { helper(); }",
+                6,
+                57,
             ),
             (
                 "/* <?php function block_boot(): void { helper(); }",
@@ -6233,7 +6305,7 @@ function real(): void { helper(); }
         let mut checks = 0;
         let result = super::tree_contains_php_tag_outside_ranges(
             tree.root_node(),
-            &[(0, 6)],
+            &[(0, 6, true)],
             &mut next_opaque,
             &source,
             &mut || {
