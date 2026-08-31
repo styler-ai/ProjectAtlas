@@ -184,6 +184,44 @@ struct IdentityFactKey {
     fact_index: u64,
 }
 
+/// Exact membership key for one retained typed identity rejection detail.
+///
+/// The ordered key is kept beside the deterministic detail vector so replay
+/// checks do not scan every previously retained row.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct IdentityRejectionKey {
+    /// Repository-relative source path containing the rejected fact.
+    path: RepositoryNodePath,
+    /// Exact bounded source span of the rejected fact.
+    span: IdentitySpan,
+    /// Parser strategy that produced the rejected fact.
+    parser: u8,
+    /// Identity field that failed admission.
+    field: GraphIdentityField,
+    /// Stable rejection category.
+    reason: GraphIdentityRejectionReason,
+    /// Internal parser-fact ordinal.
+    fact_index: u64,
+}
+
+impl From<&GraphIdentityRejection> for IdentityRejectionKey {
+    fn from(rejection: &GraphIdentityRejection) -> Self {
+        Self {
+            path: rejection.path.clone(),
+            span: IdentitySpan {
+                start_line: rejection.span.start_line() as usize,
+                start_column: rejection.span.start_column() as usize,
+                end_line: rejection.span.end_line() as usize,
+                end_column: rejection.span.end_column() as usize,
+            },
+            parser: parser_fact_kind(rejection.parser),
+            field: rejection.field,
+            reason: rejection.reason,
+            fact_index: rejection.fact_index,
+        }
+    }
+}
+
 /// Map parser strategy to a compact local fact-key discriminator.
 fn parser_fact_kind(parser: ParserKind) -> u8 {
     match parser {
@@ -317,6 +355,31 @@ fn identity_fact_sets_retained_bytes(
     Ok(retained)
 }
 
+/// Count one retained rejection-membership key and its owned path text.
+fn identity_rejection_key_retained_bytes(path: &str) -> Result<u64, CliError> {
+    let path_bytes = u64::try_from(path.len()).map_err(|error| {
+        CliError::InvalidInput(format!(
+            "identity rejection path length overflowed: {error}"
+        ))
+    })?;
+    path_bytes
+        .checked_add(STAGED_GRAPH_ROW_BYTES)
+        .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))
+}
+
+/// Count the bounded keyed membership state for retained rejection details.
+fn identity_rejection_keys_retained_bytes(
+    keys: &BTreeSet<IdentityRejectionKey>,
+) -> Result<u64, CliError> {
+    keys.iter().try_fold(0_u64, |retained, key| {
+        retained
+            .checked_add(identity_rejection_key_retained_bytes(key.path.as_str())?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })
+    })
+}
+
 /// Count persisted per-path reconciliation maps and their bounded path keys.
 fn identity_reconciliation_retained_bytes(
     report: &GraphIdentityAdmission,
@@ -349,10 +412,12 @@ fn identity_reconciliation_retained_bytes(
 fn identity_admission_retained_bytes(report: &GraphIdentityAdmission) -> Result<u64, CliError> {
     let observed_bytes =
         identity_maps_retained_bytes(&report.observed_facts, &report.rejected_facts_by_path)?;
+    let rejection_key_bytes = identity_rejection_keys_retained_bytes(&report.rejection_keys)?;
     let reused_fact_bytes = identity_fact_sets_retained_bytes(&report.reused_rejection_facts)?;
     let reconciliation_bytes = identity_reconciliation_retained_bytes(report)?;
     observed_bytes
-        .checked_add(reused_fact_bytes)
+        .checked_add(rejection_key_bytes)
+        .and_then(|bytes| bytes.checked_add(reused_fact_bytes))
         .and_then(|bytes| bytes.checked_add(reconciliation_bytes))
         .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))
 }
@@ -397,6 +462,8 @@ pub(super) struct GraphIdentityAdmission {
     source_admitted: bool,
     /// Retained typed details, capped independently from the count.
     rejections: Vec<GraphIdentityRejection>,
+    /// Exact membership for the retained typed detail vector.
+    rejection_keys: BTreeSet<IdentityRejectionKey>,
     /// Number of parser facts rejected per source path.
     rejected_facts_by_path: BTreeMap<String, u64>,
     /// Every observed rejected parser fact, retained independently of detail
@@ -478,13 +545,44 @@ impl GraphIdentityAdmission {
             .observed_facts
             .get(&path_key)
             .is_none_or(|facts| !facts.contains(&fact_key));
+        let mut new_rejection_keys = Vec::new();
+        let remaining_detail_capacity =
+            MAX_GRAPH_IDENTITY_REJECTIONS.saturating_sub(self.rejections.len());
+        for (field, reason) in fields {
+            if new_rejection_keys.len() >= remaining_detail_capacity {
+                break;
+            }
+            let key = IdentityRejectionKey {
+                path: path.clone(),
+                span: fact_span,
+                parser: parser_fact_kind(parser),
+                field: *field,
+                reason: *reason,
+                fact_index,
+            };
+            if !self.rejection_keys.contains(&key)
+                && !new_rejection_keys.iter().any(|existing| existing == &key)
+            {
+                new_rejection_keys.push(key);
+                if new_rejection_keys.len() == remaining_detail_capacity {
+                    break;
+                }
+            }
+        }
+        let mut additional_bytes = if fact_is_new {
+            identity_fact_retained_bytes(path.as_str(), observed_path_is_new, count_path_is_new)?
+        } else {
+            0
+        };
+        for key in &new_rejection_keys {
+            additional_bytes = additional_bytes
+                .checked_add(identity_rejection_key_retained_bytes(key.path.as_str())?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
+        }
+        self.reserve_identity_bytes(additional_bytes, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
         if fact_is_new {
-            let additional_bytes = identity_fact_retained_bytes(
-                path.as_str(),
-                observed_path_is_new,
-                count_path_is_new,
-            )?;
-            self.reserve_identity_bytes(additional_bytes, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
             self.observed_facts
                 .entry(path_key.clone())
                 .or_default()
@@ -494,27 +592,16 @@ impl GraphIdentityAdmission {
                 CliError::InvalidInput("identity rejection count overflowed".to_string())
             })?;
         }
-        for (field, reason) in fields {
-            if self.rejections.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
-                continue;
-            }
-            let already_retained = self.rejections.iter().any(|existing| {
-                existing.path == path
-                    && existing.span == span
-                    && existing.parser == parser
-                    && existing.fact_index == fact_index
-                    && existing.reason == *reason
-                    && existing.field == *field
-            });
-            if already_retained {
-                continue;
-            }
+        for key in new_rejection_keys {
+            let field = key.field;
+            let reason = key.reason;
+            self.rejection_keys.insert(key);
             self.rejections.push(GraphIdentityRejection {
                 path: path.clone(),
                 span,
                 parser,
-                field: *field,
-                reason: *reason,
+                field,
+                reason,
                 fact_index,
             });
         }
@@ -690,7 +777,11 @@ impl GraphIdentityAdmission {
             }
         }
         control.check(IndexWorkStage::SymbolParsing)?;
-        extend_bounded_identity_rejections(&mut self.rejections, other.rejections);
+        extend_bounded_identity_rejections(
+            &mut self.rejections,
+            &mut self.rejection_keys,
+            other.rejections,
+        );
         self.resolution_projections
             .extend(other.resolution_projections);
         for (path, count) in other.reused_rejection_counts {
@@ -760,18 +851,24 @@ impl GraphIdentityAdmission {
             .filter(|(path, _facts)| paths.contains(*path))
             .map(|(path, facts)| (path.clone(), facts.clone()))
             .collect::<BTreeMap<_, _>>();
+        let rejections = self
+            .rejections
+            .iter()
+            .filter(|rejection| paths.contains(rejection.path.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let rejection_keys = identity_rejection_key_set(&rejections);
+        let observed_fact_bytes =
+            identity_maps_retained_bytes(&observed_facts, &rejected_facts_by_path)?
+                .checked_add(identity_rejection_keys_retained_bytes(&rejection_keys)?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
         Ok(Self {
-            rejections: self
-                .rejections
-                .iter()
-                .filter(|rejection| paths.contains(rejection.path.as_str()))
-                .cloned()
-                .collect(),
+            rejection_keys,
+            rejections,
             source_admitted: self.source_admitted,
-            observed_fact_bytes: identity_maps_retained_bytes(
-                &observed_facts,
-                &rejected_facts_by_path,
-            )?,
+            observed_fact_bytes,
             reused_rejection_facts: BTreeMap::new(),
             rejected_facts_by_path,
             observed_facts,
@@ -913,23 +1010,25 @@ impl GraphIdentityAdmission {
     }
 }
 
+/// Build keyed membership for a retained typed detail vector.
+fn identity_rejection_key_set(
+    rejections: &[GraphIdentityRejection],
+) -> BTreeSet<IdentityRejectionKey> {
+    rejections.iter().map(IdentityRejectionKey::from).collect()
+}
+
 /// Merge typed details under the one-publication storage ceiling.
 fn extend_bounded_identity_rejections(
     target: &mut Vec<GraphIdentityRejection>,
+    target_keys: &mut BTreeSet<IdentityRejectionKey>,
     incoming: impl IntoIterator<Item = GraphIdentityRejection>,
 ) {
     for rejection in incoming {
         if target.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
             break;
         }
-        if target.iter().any(|existing| {
-            existing.path == rejection.path
-                && existing.span == rejection.span
-                && existing.parser == rejection.parser
-                && existing.fact_index == rejection.fact_index
-                && existing.reason == rejection.reason
-                && existing.field == rejection.field
-        }) {
+        let key = IdentityRejectionKey::from(&rejection);
+        if !target_keys.insert(key) {
             continue;
         }
         target.push(rejection);
@@ -2414,6 +2513,7 @@ fn finish_projection_in_database_with_documents(
     )?);
     database.store_mut()?.replace_scan(nodes)?;
     let mut identity_rejections = identity_admission.rejections.clone();
+    let mut identity_rejection_keys = identity_rejection_key_set(&identity_rejections);
     {
         let mut staging = database
             .store_mut()?
@@ -2449,6 +2549,7 @@ fn finish_projection_in_database_with_documents(
             staged_rows.append(rows);
             extend_bounded_identity_rejections(
                 &mut identity_rejections,
+                &mut identity_rejection_keys,
                 staged_rows.identity_rejections.iter().cloned(),
             );
             staged_rows.identity_rejections.clear();
@@ -2576,6 +2677,7 @@ fn finish_projection_with_documents(
     let mut coverage = Vec::new();
     let mut document_unresolved_reasons = BTreeMap::new();
     let mut identity_rejections = identity_admission.rejections.clone();
+    let mut identity_rejection_keys = identity_rejection_key_set(&identity_rejections);
     for graph in graphs {
         let graph = graph.borrow();
         let rows = project_graph_rows(
@@ -2604,7 +2706,11 @@ fn finish_projection_with_documents(
             insert_document_unresolved_reason(&mut document_unresolved_reasons, key, reason)?;
         }
         coverage.extend(rows.coverage);
-        extend_bounded_identity_rejections(&mut identity_rejections, rows.identity_rejections);
+        extend_bounded_identity_rejections(
+            &mut identity_rejections,
+            &mut identity_rejection_keys,
+            rows.identity_rejections,
+        );
         entities.retained_bytes = rows
             .external_entities
             .iter()
@@ -4823,7 +4929,11 @@ fn hydrate_reused_identity_admission(
             continue;
         }
         control.check(IndexWorkStage::SymbolParsing)?;
-        extend_bounded_identity_rejections(&mut report.rejections, std::iter::once(rejection));
+        extend_bounded_identity_rejections(
+            &mut report.rejections,
+            &mut report.rejection_keys,
+            std::iter::once(rejection),
+        );
     }
     for (path, facts) in persisted_fact_counts {
         control.check(IndexWorkStage::SymbolParsing)?;
@@ -6135,6 +6245,91 @@ mod tests {
     }
 
     #[test]
+    fn rejection_membership_preserves_distinct_fields_across_replay_and_merge()
+    -> Result<(), Box<dyn Error>> {
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let span = super::IdentitySpan {
+            start_line: 7,
+            start_column: 0,
+            end_line: 7,
+            end_column: 0,
+        };
+        let failures = [
+            (
+                GraphIdentityField::RelationSource,
+                GraphIdentityRejectionReason::ControlCharacters,
+            ),
+            (
+                GraphIdentityField::RelationTarget,
+                GraphIdentityRejectionReason::ControlCharacters,
+            ),
+            (
+                GraphIdentityField::Parent,
+                GraphIdentityRejectionReason::ControlCharacters,
+            ),
+            (
+                GraphIdentityField::Signature,
+                GraphIdentityRejectionReason::ControlCharacters,
+            ),
+        ];
+        let mut admission = GraphIdentityAdmission::default();
+        admission.record(
+            "src/multi-field.ts",
+            span,
+            ParserKind::TreeSitter,
+            17,
+            &failures,
+            &control,
+        )?;
+        admission.record(
+            "src/multi-field.ts",
+            span,
+            ParserKind::TreeSitter,
+            17,
+            &failures,
+            &control,
+        )?;
+        require_eq(
+            &admission.rejections.len(),
+            &failures.len(),
+            "same-fact replay collapsed distinct rejection fields",
+        )?;
+        for &(field, reason) in &failures {
+            require(
+                admission
+                    .rejections
+                    .iter()
+                    .any(|rejection| rejection.field == field && rejection.reason == reason),
+                "same-fact rejection field was lost",
+            )?;
+        }
+
+        let mut aggregated = Vec::new();
+        let mut aggregated_keys = BTreeSet::new();
+        super::extend_bounded_identity_rejections(
+            &mut aggregated,
+            &mut aggregated_keys,
+            admission.rejections.iter().cloned(),
+        );
+        super::extend_bounded_identity_rejections(
+            &mut aggregated,
+            &mut aggregated_keys,
+            admission.rejections,
+        );
+        require_eq(
+            &aggregated.len(),
+            &failures.len(),
+            "bounded aggregation collapsed distinct rejection fields",
+        )?;
+        require_eq(
+            &aggregated_keys.len(),
+            &failures.len(),
+            "bounded aggregation membership did not deduplicate replay",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn admission_merge_deduplicates_replayed_observed_facts() -> Result<(), Box<dyn Error>> {
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let span = super::IdentitySpan {
@@ -6256,6 +6451,28 @@ mod tests {
             &super::MAX_GRAPH_IDENTITY_REJECTIONS,
             "new capped typed detail count",
         )?;
+        let mut aggregated = Vec::new();
+        let mut aggregated_keys = BTreeSet::new();
+        super::extend_bounded_identity_rejections(
+            &mut aggregated,
+            &mut aggregated_keys,
+            admission.rejections.iter().cloned(),
+        );
+        super::extend_bounded_identity_rejections(
+            &mut aggregated,
+            &mut aggregated_keys,
+            admission.rejections,
+        );
+        require_eq(
+            &aggregated.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "bounded aggregation changed the distinct detail cardinality",
+        )?;
+        require_eq(
+            &aggregated_keys.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "bounded aggregation membership lost a distinct detail",
+        )?;
         Ok(())
     }
 
@@ -6273,7 +6490,12 @@ mod tests {
             GraphIdentityField::RelationTarget,
             GraphIdentityRejectionReason::Empty,
         )];
-        let additional = super::identity_fact_retained_bytes(path, true, true)?;
+        let additional = super::identity_fact_retained_bytes(path, true, true)?
+            .checked_add(super::identity_rejection_key_retained_bytes(path)?)
+            .ok_or_else(|| io::Error::other("identity budget fixture overflowed"))?;
+        let next_fact_additional = super::STAGED_GRAPH_ROW_BYTES
+            .checked_add(super::identity_rejection_key_retained_bytes(path)?)
+            .ok_or_else(|| io::Error::other("identity budget fixture overflowed"))?;
 
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let mut below = GraphIdentityAdmission {
@@ -6350,7 +6572,7 @@ mod tests {
                     resource: IndexWorkResource::OutputBytes,
                     limit: MAX_IN_MEMORY_GRAPH_WORK_BYTES,
                     observed,
-                }) if observed == MAX_IN_MEMORY_GRAPH_WORK_BYTES + super::STAGED_GRAPH_ROW_BYTES
+                }) if observed == MAX_IN_MEMORY_GRAPH_WORK_BYTES + next_fact_additional
             ),
             "identity budget plus boundary did not return its typed refusal",
         )?;

@@ -84,6 +84,8 @@ const NEXT_REPORT_DEFAULT_LIMIT: usize = 3;
 const NEXT_REPORT_MAX_LIMIT: usize = 10;
 /// Maximum rows returned by one agent-facing coverage page.
 pub const COVERAGE_PAGE_MAX_LIMIT: u32 = 200;
+/// Maximum typed identity-rejection details retained by one coverage report.
+const COVERAGE_IDENTITY_REJECTION_LIMIT: u32 = COVERAGE_PAGE_MAX_LIMIT;
 /// Maximum elapsed work for one project-wide coverage discovery query.
 const COVERAGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum rows retained by one selected-file coverage digest.
@@ -513,6 +515,10 @@ pub struct CoverageDiscoveryReport {
     pub output_bytes: u32,
     /// Absolute encoded-output ceiling.
     pub max_output_bytes: u32,
+    /// Whether additional nested identity-rejection details were omitted.
+    pub identity_rejections_truncated: bool,
+    /// Maximum nested identity-rejection details retained by this report.
+    pub identity_rejections_limit: u32,
     /// Fully validated actionable rows.
     pub rows: Vec<CoverageDiscoveryRow>,
 }
@@ -634,14 +640,24 @@ pub fn load_coverage_discovery_controlled(
             CoverageScope::Project => None,
         })
         .collect::<Vec<_>>();
+    let identity_rejections_query_limit = COVERAGE_IDENTITY_REJECTION_LIMIT
+        .checked_add(1)
+        .ok_or_else(|| {
+            ServiceError::InvalidInput("coverage rejection limit overflowed".to_string())
+        })?;
     let rejections = store.repository_graph_identity_rejections(
         project,
         &paths,
-        GraphLimits::MAX_ROWS,
+        identity_rejections_query_limit,
         Some(&control),
     )?;
+    let identity_rejections_truncated =
+        rejections.len() > COVERAGE_IDENTITY_REJECTION_LIMIT as usize;
     let mut rejections_by_path = HashMap::<String, Vec<GraphIdentityRejection>>::new();
-    for rejection in rejections {
+    for rejection in rejections
+        .into_iter()
+        .take(COVERAGE_IDENTITY_REJECTION_LIMIT as usize)
+    {
         rejections_by_path
             .entry(rejection.path.as_str().to_owned())
             .or_default()
@@ -676,6 +692,8 @@ pub fn load_coverage_discovery_controlled(
         total,
         output_bytes: 0,
         max_output_bytes: GraphLimits::MAX_OUTPUT_BYTES,
+        identity_rejections_truncated,
+        identity_rejections_limit: COVERAGE_IDENTITY_REJECTION_LIMIT,
         rows,
     })
 }
@@ -4536,6 +4554,88 @@ mod tests {
             &exhausted.total,
             &CoverageTotalState::Unknown,
             "exhausted nonzero continuation total",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn coverage_discovery_bounds_long_identity_rejection_details() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("bounded-coverage-service");
+        fs::create_dir_all(&root)?;
+        let db_path = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bounded coverage fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let long_path = format!("src/{}/entry.ts", "segment".repeat(400));
+        let path = RepositoryNodePath::new(Path::new(&long_path))?;
+        let coverage = CoverageRecord::new(
+            CoverageScope::Path { path: path.clone() },
+            None,
+            CoverageState::Partial,
+            10_000,
+            10_000,
+            generation,
+            Some(GraphIdentityText::new("identity details retained")?),
+            Some(GraphLimitKind::Rows),
+        )?;
+        let rejections = (0..GraphLimits::MAX_ROWS)
+            .map(|fact_index| {
+                Ok(GraphIdentityRejection {
+                    path: path.clone(),
+                    span: SourceSpan::new(fact_index + 1, 0, fact_index + 1, 1)?,
+                    parser: ParserKind::TreeSitter,
+                    field: GraphIdentityField::Symbol,
+                    reason: GraphIdentityRejectionReason::Empty,
+                    fact_index: u64::from(fact_index),
+                })
+            })
+            .collect::<Result<Vec<_>, projectatlas_core::graph::GraphContractError>>()?;
+        {
+            let mut publication = store.begin_index_publication("bounded-coverage")?;
+            publication.begin_scan_replacement()?;
+            publication
+                .upsert_scan_node_batch(&[test_node(&long_path, "bounded-coverage-hash")])?;
+            publication.finish_scan_replacement()?;
+            publication.replace_repository_graph(project, &[], &[], &[], &[coverage])?;
+            publication.replace_graph_identity_rejections(project, &rejections)?;
+            publication.complete()?;
+        }
+        let query = RepositoryCoverageQuery {
+            start_index: 0,
+            limit: 1,
+            path_prefix: None,
+            parser: None,
+            provider: None,
+            relation: None,
+            state: None,
+            reason: None,
+        };
+        let first = load_coverage_discovery(&store, query.clone())?;
+        let second = load_coverage_discovery(&store, query)?;
+        require_eq(&first, &second, "bounded coverage determinism")?;
+        require_eq(&first.returned, &1, "bounded coverage row count")?;
+        require_eq(
+            &first.rows[0].identity_rejections.len(),
+            &(COVERAGE_IDENTITY_REJECTION_LIMIT as usize),
+            "bounded identity rejection detail count",
+        )?;
+        require_eq(
+            &first.identity_rejections_limit,
+            &COVERAGE_IDENTITY_REJECTION_LIMIT,
+            "bounded identity rejection detail limit",
+        )?;
+        require_eq(
+            &first.identity_rejections_truncated,
+            &true,
+            "bounded identity rejection truncation state",
+        )?;
+        let encoded = serde_json::to_vec(&first)?;
+        require(
+            encoded.len() <= GraphLimits::MAX_OUTPUT_BYTES as usize,
+            "bounded coverage exceeded the encoded-output ceiling",
         )?;
         Ok(())
     }

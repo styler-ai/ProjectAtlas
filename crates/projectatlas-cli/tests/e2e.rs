@@ -14,9 +14,10 @@ use projectatlas_cli::parser_supervisor::{
 use projectatlas_core::IndexCancellation;
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, EntitySelector,
-    ExtendedRelationKind, ExternalSelector, GraphEntity, GraphIdentityText, GraphLimitKind,
-    GraphRelationKind, LogicalRelation, PackageSelector, RelationResolution, RepositoryFilePath,
-    RepositoryNodePath,
+    ExtendedRelationKind, ExternalSelector, GraphEntity, GraphIdentityField,
+    GraphIdentityRejection, GraphIdentityRejectionReason, GraphIdentityText, GraphLimitKind,
+    GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector, RelationResolution,
+    RepositoryFilePath, RepositoryNodePath, SourceSpan,
 };
 use projectatlas_core::language::{BROAD_SOURCE_EXTENSIONS, detect_language_for_path};
 #[cfg(all(
@@ -23662,6 +23663,227 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
         return Err(
             io::Error::other("MCP coverage serialized the rejected raw identity value").into(),
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"bounded-identity-coverage\"\nversion = \"0.1.0\"\n",
+    )?;
+    let long_path = (0..4)
+        .map(|_| "segment".repeat(7))
+        .collect::<Vec<_>>()
+        .join("/");
+    let relative_path = format!("src/{long_path}/bounded_identity_coverage.ts");
+    fs::create_dir_all(
+        repo.join(
+            Path::new(&relative_path)
+                .parent()
+                .ok_or_else(|| io::Error::other("bounded coverage path has no parent"))?,
+        ),
+    )?;
+    fs::write(
+        repo.join(&relative_path),
+        "export function bounded_identity_coverage() {}\n",
+    )?;
+    let db = temp.path().join("projectatlas.db");
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["init", "--no-scan"])
+        .assert()
+        .success();
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .assert()
+        .success();
+
+    let mut store = AtlasStore::open(&db)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or_else(|| io::Error::other("bounded coverage project identity is missing"))?;
+    let current = store
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("bounded coverage publication is missing"))?;
+    let fingerprint = current
+        .contract_fingerprint
+        .clone()
+        .ok_or_else(|| io::Error::other("bounded coverage fingerprint is missing"))?;
+    let generation = current
+        .generation
+        .checked_next()
+        .ok_or_else(|| io::Error::other("bounded coverage generation overflow"))?;
+    let path = RepositoryNodePath::new(Path::new(&relative_path))?;
+    let coverage = CoverageRecord::new(
+        CoverageScope::Path { path: path.clone() },
+        None,
+        CoverageState::Partial,
+        10_000,
+        10_000,
+        generation,
+        Some(GraphIdentityText::new("bounded identity details")?),
+        Some(GraphLimitKind::Rows),
+    )?;
+    let rejections = (0..GraphLimits::MAX_ROWS)
+        .map(|fact_index| {
+            Ok(GraphIdentityRejection {
+                path: path.clone(),
+                span: SourceSpan::new(fact_index + 1, 0, fact_index + 1, 1)?,
+                parser: ParserKind::TreeSitter,
+                field: GraphIdentityField::Symbol,
+                reason: GraphIdentityRejectionReason::Empty,
+                fact_index: u64::from(fact_index),
+            })
+        })
+        .collect::<Result<Vec<_>, projectatlas_core::graph::GraphContractError>>()?;
+    let nodes = store
+        .load_nodes()?
+        .into_iter()
+        .map(|node| node.node)
+        .collect::<Vec<_>>();
+    {
+        let mut publication = store.begin_index_publication(&fingerprint)?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&nodes)?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(project, &[], &[], &[], &[coverage])?;
+        publication.replace_graph_identity_rejections(project, &rejections)?;
+        publication.complete()?;
+    }
+    drop(store);
+
+    let json_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            &relative_path,
+            "--limit",
+            "1",
+        ])
+        .output()?;
+    if !json_output.status.success() {
+        return Err(io::Error::other(format!(
+            "bounded JSON coverage failed: {}",
+            String::from_utf8_lossy(&json_output.stderr)
+        ))
+        .into());
+    }
+    let json_report: Value = serde_json::from_slice(&json_output.stdout)?;
+    let json_rejections = json_report["rows"][0]["identity_rejections"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("bounded JSON coverage omitted rejection details"))?;
+    if json_rejections.len() != 200
+        || json_report["identity_rejections_truncated"] != true
+        || json_report["identity_rejections_limit"] != 200
+        || json_report["output_bytes"] != json_output.stdout.len()
+        || json_output.stdout.len() > GraphLimits::MAX_OUTPUT_BYTES as usize
+    {
+        return Err(io::Error::other(format!(
+            "bounded JSON coverage was not truthful or exceeded its output bound: {json_report}"
+        ))
+        .into());
+    }
+
+    let toon_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("toon")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            &relative_path,
+            "--limit",
+            "1",
+        ])
+        .output()?;
+    if !toon_output.status.success() {
+        return Err(io::Error::other(format!(
+            "bounded TOON coverage failed: {}",
+            String::from_utf8_lossy(&toon_output.stderr)
+        ))
+        .into());
+    }
+    let toon_text = String::from_utf8(toon_output.stdout)?;
+    let toon_report: Value = toon_format::decode_default(&toon_text)?;
+    let toon_rejections = toon_report["coverage"]["rows"][0]["identity_rejections"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("bounded TOON coverage omitted rejection details"))?;
+    if toon_rejections.len() != 200
+        || toon_report["coverage"]["identity_rejections_truncated"] != true
+        || toon_report["coverage"]["identity_rejections_limit"] != 200
+        || toon_report["coverage"]["output_bytes"] != toon_text.len()
+        || toon_text.len() > GraphLimits::MAX_OUTPUT_BYTES as usize
+    {
+        return Err(io::Error::other(format!(
+            "bounded TOON coverage was not truthful or exceeded its output bound: {toon_report}"
+        ))
+        .into());
+    }
+
+    let messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"bounded-identity-coverage-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_health",
+                "arguments": {
+                    "coverage": true,
+                    "path_prefix": relative_path,
+                    "limit": 1
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let mcp_stdout = run_mcp_stdio(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &messages,
+    )?;
+    let mcp_text = mcp_tool_text(&mcp_stdout, 2)?;
+    let mcp_report: Value = toon_format::decode_default(&mcp_text)?;
+    let mcp_rejections = mcp_report["coverage"]["rows"][0]["identity_rejections"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("bounded MCP coverage omitted rejection details"))?;
+    if mcp_rejections.len() != 200
+        || mcp_report["coverage"]["identity_rejections_truncated"] != true
+        || mcp_report["coverage"]["identity_rejections_limit"] != 200
+        || mcp_report["coverage"]["output_bytes"] != mcp_text.len()
+        || mcp_text.len() > GraphLimits::MAX_OUTPUT_BYTES as usize
+    {
+        return Err(io::Error::other(format!(
+            "bounded MCP coverage was not truthful or exceeded its output bound: {mcp_report}"
+        ))
+        .into());
     }
     Ok(())
 }
