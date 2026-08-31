@@ -8045,6 +8045,39 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn schema_eight_project_binding_requires_native_identity_on_unix() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("schema-eight.db");
+        write_schema_eight_fixture(&database, &root)?;
+        let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+        let before = fs::read(&database)?;
+        let parent = database
+            .parent()
+            .ok_or_else(|| io::Error::other("schema-eight fixture has no parent"))?;
+        let inventory = directory_entry_names(parent)?;
+
+        let preflight = preflight_for_project(&database, &expected_identity);
+        if !matches!(preflight, Err(DbError::ProjectRootIdentityMissing)) {
+            return Err(
+                io::Error::other(format!("legacy Unix preflight returned {preflight:?}")).into(),
+            );
+        }
+        let Err(error) = AtlasStore::open_for_project(&database, &root) else {
+            return Err(io::Error::other("legacy Unix open unexpectedly succeeded").into());
+        };
+        if !matches!(error, DbError::ProjectRootIdentityMissing) {
+            return Err(io::Error::other(format!("legacy Unix open returned {error}")).into());
+        }
+        require_unchanged(parent, &database, &before, &inventory)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
     #[test]
     fn late_migration_failure_rolls_back_graph_schema_and_authored_state()
     -> Result<(), Box<dyn Error>> {
@@ -8201,6 +8234,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_ten_telemetry_migration_rolls_back_malformed_rows_and_retries()
     -> Result<(), Box<dyn Error>> {
@@ -8554,6 +8588,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_ten_migration_preserves_exact_totals_above_runtime_baseline_capacity() {
         let result = (|| -> Result<(), Box<dyn Error>> {
