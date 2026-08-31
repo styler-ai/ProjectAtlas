@@ -159,8 +159,6 @@ new_atlas_forwarder_capability() {
     *) return 1 ;;
   esac
   [ "${#capability}" -eq 64 ] || return 1
-  expected_content=$(atlas_forwarder_state_content "$forwarder" "$verified" "$capability") || return 1
-  [ "$(cat "$state_path" 2>/dev/null || true)" = "$expected_content" ] || return 1
   printf '%s\n' "$capability"
 }
 

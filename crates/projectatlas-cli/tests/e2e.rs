@@ -10469,6 +10469,11 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     fs::remove_file(&forwarder)?;
 
+    #[cfg(unix)]
+    require(
+        !home.join(TEST_POSIX_INSTALLER_STATE_DIR).exists(),
+        "POSIX forwarder lifecycle fixture must begin without installer state",
+    )?;
     let first_output = run_install()?;
     require(
         first_output.status.success(),
