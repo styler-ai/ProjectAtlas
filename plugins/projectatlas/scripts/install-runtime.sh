@@ -440,6 +440,15 @@ inject_atlas_forwarder_publication_race() {
   printf '%s\n' '# foreign publication race collision' >"$1"
 }
 
+inject_atlas_forwarder_provenance_publication_race() {
+  race_path=${PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH:-}
+  [ -n "$race_path" ] && [ "$(canonical_file "$race_path")" = "$(canonical_file "$1")" ] || return 0
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    return 0
+  fi
+  printf '%s\n' '# foreign provenance publication race collision' >"$1"
+}
+
 write_atlas_forwarder() {
   verified=$(canonical_file "$1") || return 1
   forwarder=$(atlas_forwarder_path "$verified")
@@ -494,7 +503,10 @@ write_atlas_forwarder() {
       return 1
     fi
   else
-    if ! ln "$temporary_provenance" "$provenance"; then
+    if ! inject_atlas_forwarder_provenance_publication_race "$provenance" || ! ln "$temporary_provenance" "$provenance"; then
+      if [ "$state_published" -eq 1 ]; then
+        remove_atlas_forwarder_state "$forwarder" "$verified" || true
+      fi
       rm -f "$temporary" "$temporary_provenance"
       printf '%s\n' "ProjectAtlas atlas forwarder provenance publication collided; refusing to overwrite: $provenance" >&2
       return 1

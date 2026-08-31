@@ -10356,6 +10356,23 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .env("PATH", &run_path);
         Ok(command.output()?)
     };
+    #[cfg(unix)]
+    let run_install_with_env =
+        |key: &str, value: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                &runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &run_path)
+                .env(key, value);
+            Ok(command.output()?)
+        };
     let run_uninstall = || -> Result<std::process::Output, Box<dyn Error>> {
         let mut command = if cfg!(windows) {
             let mut command = StdCommand::new("powershell");
@@ -10538,6 +10555,52 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         ),
     )?;
     let installer_state = installer_states[0].path();
+
+    #[cfg(unix)]
+    {
+        let unrelated_state = installer_state_dir.join("unrelated-state");
+        let unrelated_state_content = b"unrelated installer state\n";
+        fs::write(&unrelated_state, unrelated_state_content)?;
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let provenance_collision = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
+            &provenance,
+        )?;
+        let provenance_collision_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&provenance_collision.stdout),
+            String::from_utf8_lossy(&provenance_collision.stderr)
+        );
+        let remaining_states = installer_state_dir
+            .read_dir()?
+            .collect::<Result<Vec<_>, io::Error>>()?;
+        require(
+            !provenance_collision.status.success()
+                && provenance_collision_text.contains("provenance publication collided")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance publication race collision\n"
+                && !installer_state.exists()
+                && remaining_states.len() == 1
+                && remaining_states[0].path() == unrelated_state
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "provenance publication collision retained orphaned or unrelated state:\n{provenance_collision_text}"
+            ),
+        )?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&unrelated_state)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "installer could not recover after provenance publication collision:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+    }
 
     let direct_database = temp.path().join("direct database with spaces.db");
     let alias_database = temp.path().join("alias database with spaces.db");
