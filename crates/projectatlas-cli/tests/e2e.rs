@@ -33173,6 +33173,7 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill(
         observer_delay,
         hold_stdin_until_observation,
         None,
+        None,
         kill_child,
         None,
     )
@@ -33188,6 +33189,7 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
     observer_delay: Option<Duration>,
     hold_stdin_until_observation: bool,
     exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
 ) -> Result<String, Box<dyn Error>> {
@@ -33211,6 +33213,7 @@ fn run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
             observer_delay,
             hold_stdin_until_observation,
             exit_probe_error,
+            cleanup_probe_error,
             kill_child,
             handoff_live_child,
         )
@@ -33589,7 +33592,7 @@ fn require_injected_exit_probe_failure<T>(
     Ok(())
 }
 
-fn require_reaped_post_kill_probe_failure<T>(
+fn require_reaped_probe_failure<T>(
     result: &Result<T, Box<dyn Error>>,
     owner: &str,
     cause: &str,
@@ -33690,6 +33693,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             Some(FIRST_OBSERVATION_DELAY),
             false,
             Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+            None,
             &mut |child| child.kill(),
             Some(&mut session_probe_cleanup_handoff),
         )
@@ -33741,6 +33745,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             Duration::ZERO,
             None,
             true,
+            None,
             None,
             &mut injected_session_kill,
             Some(&mut session_cleanup_handoff),
@@ -33881,6 +33886,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             Some(FIRST_OBSERVATION_DELAY),
             false,
             Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+            None,
             &mut |child| child.kill(),
             Some(&mut stdio_probe_cleanup_handoff),
         )
@@ -33941,6 +33947,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             Duration::ZERO,
             None,
             true,
+            None,
             None,
             &mut injected_stdio_kill,
             Some(&mut stdio_cleanup_handoff),
@@ -34030,6 +34037,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             OBSERVER_TIMEOUT,
             Some(FIRST_OBSERVATION_DELAY),
             Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+            None,
             &mut |child| child.kill(),
             Some(&mut installer_probe_cleanup_handoff),
         )
@@ -34094,6 +34102,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
                 .spawn()?,
             "injected-installer",
             Duration::ZERO,
+            None,
             None,
             None,
             &mut injected_installer_kill,
@@ -34162,11 +34171,12 @@ fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
             None,
             true,
             Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
             &mut |child| child.kill(),
             Some(&mut handoff),
         )
     };
-    require_reaped_post_kill_probe_failure(
+    require_reaped_probe_failure(
         &session_result,
         "MCP session observer",
         INJECTED_REPROBE_FAILURE,
@@ -34206,11 +34216,12 @@ fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
             None,
             true,
             Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
             &mut |child| child.kill(),
             Some(&mut handoff),
         )
     };
-    require_reaped_post_kill_probe_failure(
+    require_reaped_probe_failure(
         &stdio_result,
         "MCP stdio observer",
         INJECTED_REPROBE_FAILURE,
@@ -34241,11 +34252,12 @@ fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
             Duration::ZERO,
             None,
             Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
             &mut |child| child.kill(),
             Some(&mut handoff),
         )
     };
-    require_reaped_post_kill_probe_failure(
+    require_reaped_probe_failure(
         &installer_result,
         "installer observer",
         INJECTED_REPROBE_FAILURE,
@@ -34255,6 +34267,123 @@ fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
         return Err(
             io::Error::other("installer detached after a successful injected termination").into(),
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn e2e_process_observers_attempt_termination_when_cleanup_reprobe_fails()
+-> Result<(), Box<dyn Error>> {
+    const INJECTED_REPROBE_FAILURE: &str = "injected pre-termination exit probe failure";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+
+    let mut session_kill_attempted = false;
+    let mut session_was_live = false;
+    let session_result = run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &database,
+        Duration::ZERO,
+        None,
+        true,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            session_kill_attempted = true;
+            session_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &session_result,
+        "MCP session observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !session_kill_attempted || !session_was_live {
+        return Err(io::Error::other(
+            "MCP session cleanup probe failure skipped termination of a live child",
+        )
+        .into());
+    }
+
+    let args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let mut stdio_kill_attempted = false;
+    let mut stdio_was_live = false;
+    let stdio_result = run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &args,
+        &[] as &[String],
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        Duration::ZERO,
+        None,
+        true,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            stdio_kill_attempted = true;
+            stdio_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &stdio_result,
+        "MCP stdio observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !stdio_kill_attempted || !stdio_was_live {
+        return Err(io::Error::other(
+            "MCP stdio cleanup probe failure skipped termination of a live child",
+        )
+        .into());
+    }
+
+    let mut installer_kill_attempted = false;
+    let mut installer_was_live = false;
+    let installer_result = wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "installer pre-termination probe",
+        Duration::ZERO,
+        None,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            installer_kill_attempted = true;
+            installer_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &installer_result,
+        "installer observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !installer_kill_attempted || !installer_was_live {
+        return Err(io::Error::other(
+            "installer cleanup probe failure skipped termination of a live child",
+        )
+        .into());
     }
     Ok(())
 }
@@ -34708,6 +34837,7 @@ impl McpContractSession {
             observer_delay,
             hold_stdin_until_observation,
             None,
+            None,
             kill_child,
             None,
         )
@@ -34720,10 +34850,12 @@ impl McpContractSession {
         observer_delay: Option<Duration>,
         hold_stdin_until_observation: bool,
         exit_probe_error: Option<io::Error>,
+        cleanup_probe_error: Option<io::Error>,
         kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
         handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
     ) -> Result<(), Box<dyn Error>> {
         let mut exit_probe_error = exit_probe_error;
+        let mut cleanup_probe_error = cleanup_probe_error;
         if !hold_stdin_until_observation {
             self.stdin.take();
         }
@@ -34811,29 +34943,22 @@ impl McpContractSession {
             .child
             .take()
             .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+        let mut pre_termination_probe_error = None;
         let mut post_termination_probe_error = None;
         if timeout_reason.is_some() {
             let (status, observed_at) = {
-                let status = match child.try_wait() {
-                    Ok(status) => status,
-                    Err(error) => {
-                        self.stdin.take();
-                        let packet = McpContractCleanupPacket {
-                            child,
-                            stdout_reader: self.stdout_reader.take(),
-                            stderr_reader: self.stderr_reader.take(),
-                        };
-                        if let Some(handoff) = handoff_live_child {
-                            handoff(packet);
-                        } else {
-                            drop(packet);
-                        }
-                        let diagnostic = format!(
-                            "MCP contract server did not exit after stdin closed: {} status=unknown (re-probe failed before termination attempt: {error}; cleanup incomplete: child/readers detached)",
-                            timeout_reason.as_deref().unwrap_or("timeout")
-                        );
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                let status = match cleanup_probe_error.take() {
+                    Some(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
                     }
+                    None => match child.try_wait() {
+                        Ok(status) => status,
+                        Err(error) => {
+                            pre_termination_probe_error = Some(error);
+                            None
+                        }
+                    },
                 };
                 let observed_at = Instant::now();
                 (status, observed_at)
@@ -34916,6 +35041,12 @@ impl McpContractSession {
         if let Some(reason) = timeout_reason {
             let mut diagnostic =
                 format!("MCP contract server did not exit after stdin closed: {reason}");
+            if let Some(error) = pre_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed before termination attempt: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
             if let Some(error) = post_termination_probe_error {
                 diagnostic
                     .push_str(" status=unknown (re-probe failed after successful termination: ");
@@ -35168,6 +35299,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill(
         observer_delay,
         hold_stdin_until_observation,
         None,
+        None,
         kill_child,
         None,
     )
@@ -35185,6 +35317,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
     observer_delay: Option<Duration>,
     hold_stdin_until_observation: bool,
     exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     handoff_live_child: Option<
         &mut dyn FnMut(
@@ -35195,6 +35328,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
     >,
 ) -> Result<String, Box<dyn Error>> {
     let mut exit_probe_error = exit_probe_error;
+    let mut cleanup_probe_error = cleanup_probe_error;
     let mut expected_responses = BTreeSet::new();
     for message in messages {
         let request: Value = serde_json::from_str(message.as_ref())?;
@@ -35340,6 +35474,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
     }
     let mut timeout_reason = None;
     let mut accepted_completion = false;
+    let mut pre_termination_probe_error = None;
     let mut post_termination_probe_error = None;
     loop {
         if Instant::now() >= deadline {
@@ -35375,23 +35510,18 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
 
     if timeout_reason.is_some() {
         let (status, observed_at) = {
-            let status = match child.try_wait() {
-                Ok(status) => status,
-                Err(error) => {
-                    stdin.take();
-                    if let Some(handoff) = handoff_live_child {
-                        handoff(child, stdout_reader, stderr_reader);
-                    } else {
-                        drop(child);
-                        drop(stdout_reader);
-                        drop(stderr_reader);
-                    }
-                    let diagnostic = format!(
-                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed before termination attempt: {error}; cleanup incomplete: child/readers detached)",
-                        timeout_reason.as_deref().unwrap_or("timeout")
-                    );
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+            let status = match cleanup_probe_error.take() {
+                Some(error) => {
+                    pre_termination_probe_error = Some(error);
+                    None
                 }
+                None => match child.try_wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
+                    }
+                },
             };
             let observed_at = Instant::now();
             (status, observed_at)
@@ -35461,6 +35591,11 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
     if let Some(reason) = timeout_reason {
         let mut diagnostic = format!("projectatlas mcp did not exit after stdin closed: {reason}");
+        if let Some(error) = pre_termination_probe_error {
+            diagnostic.push_str(" status=unknown (re-probe failed before termination attempt: ");
+            diagnostic.push_str(&error.to_string());
+            diagnostic.push(')');
+        }
         if let Some(error) = post_termination_probe_error {
             diagnostic.push_str(" status=unknown (re-probe failed after successful termination: ");
             diagnostic.push_str(&error.to_string());
@@ -39277,6 +39412,7 @@ fn wait_for_plugin_installer_output_with_test_delay(
         timeout,
         observer_delay,
         None,
+        None,
         &mut |child| child.kill(),
         None,
     )
@@ -39290,10 +39426,12 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     timeout: Duration,
     observer_delay: Option<Duration>,
     exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     handoff_live_child: Option<&mut dyn FnMut(Child)>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let mut exit_probe_error = exit_probe_error;
+    let mut cleanup_probe_error = cleanup_probe_error;
     if observer_delay.is_some()
         && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
             &mut child,
@@ -39320,21 +39458,20 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     }
     loop {
         if Instant::now() >= deadline {
+            let mut pre_termination_probe_error = None;
             let (status, _observed_at) = {
-                let status = match child.try_wait() {
-                    Ok(status) => status,
-                    Err(error) => {
-                        child.stdin.take();
-                        if let Some(handoff) = handoff_live_child {
-                            handoff(child);
-                        } else {
-                            drop(child);
-                        }
-                        let diagnostic = format!(
-                            "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed before termination attempt: {error}; cleanup incomplete: child detached)"
-                        );
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                let status = match cleanup_probe_error.take() {
+                    Some(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
                     }
+                    None => match child.try_wait() {
+                        Ok(status) => status,
+                        Err(error) => {
+                            pre_termination_probe_error = Some(error);
+                            None
+                        }
+                    },
                 };
                 let observed_at = Instant::now();
                 (status, observed_at)
@@ -39397,6 +39534,12 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             if let Some(error) = post_termination_probe_error {
                 diagnostic
                     .push_str(" status=unknown (re-probe failed after successful termination: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Some(error) = pre_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed before termination attempt: ");
                 diagnostic.push_str(&error.to_string());
                 diagnostic.push(')');
             }
