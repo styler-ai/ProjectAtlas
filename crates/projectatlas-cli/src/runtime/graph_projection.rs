@@ -304,6 +304,24 @@ fn identity_fact_set_retained_bytes(
         .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))
 }
 
+/// Count one observed-fact map path and its retained facts.
+fn identity_observed_path_retained_bytes(path: &str, fact_count: usize) -> Result<u64, CliError> {
+    let path_bytes = u64::try_from(path.len()).map_err(|error| {
+        CliError::InvalidInput(format!(
+            "identity rejection path length overflowed: {error}"
+        ))
+    })?;
+    let fact_bytes = STAGED_GRAPH_ROW_BYTES
+        .checked_mul(u64::try_from(fact_count).map_err(|error| {
+            CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+        })?)
+        .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))?;
+    path_bytes
+        .checked_add(STAGED_GRAPH_ROW_BYTES)
+        .and_then(|bytes| bytes.checked_add(fact_bytes))
+        .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))
+}
+
 /// Count the bounded map/set entries retained for observed identity facts.
 fn identity_maps_retained_bytes(
     observed_facts: &BTreeMap<String, BTreeSet<IdentityFactKey>>,
@@ -311,22 +329,8 @@ fn identity_maps_retained_bytes(
 ) -> Result<u64, CliError> {
     let mut retained = 0_u64;
     for (path, facts) in observed_facts {
-        let path_bytes = u64::try_from(path.len()).map_err(|error| {
-            CliError::InvalidInput(format!(
-                "identity rejection path length overflowed: {error}"
-            ))
-        })?;
-        let fact_bytes = STAGED_GRAPH_ROW_BYTES
-            .checked_mul(u64::try_from(facts.len()).map_err(|error| {
-                CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
-            })?)
-            .ok_or_else(|| {
-                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
-            })?;
         retained = retained
-            .checked_add(path_bytes)
-            .and_then(|bytes| bytes.checked_add(STAGED_GRAPH_ROW_BYTES))
-            .and_then(|bytes| bytes.checked_add(fact_bytes))
+            .checked_add(identity_observed_path_retained_bytes(path, facts.len())?)
             .ok_or_else(|| {
                 CliError::InvalidInput("identity rejection bytes overflowed".to_string())
             })?;
@@ -337,20 +341,6 @@ fn identity_maps_retained_bytes(
             .ok_or_else(|| {
                 CliError::InvalidInput("identity rejection bytes overflowed".to_string())
             })?;
-    }
-    Ok(retained)
-}
-
-/// Count persisted fact identities retained for exact reuse reconciliation.
-fn identity_fact_sets_retained_bytes(
-    fact_sets: &BTreeMap<String, BTreeSet<IdentityFactKey>>,
-) -> Result<u64, CliError> {
-    let mut retained = 0_u64;
-    for (path, facts) in fact_sets {
-        let fact_bytes = identity_fact_set_retained_bytes(path, facts)?;
-        retained = retained.checked_add(fact_bytes).ok_or_else(|| {
-            CliError::InvalidInput("identity rejection bytes overflowed".to_string())
-        })?;
     }
     Ok(retained)
 }
@@ -380,46 +370,9 @@ fn identity_rejection_keys_retained_bytes(
     })
 }
 
-/// Count persisted per-path reconciliation maps and their bounded path keys.
-fn identity_reconciliation_retained_bytes(
-    report: &GraphIdentityAdmission,
-) -> Result<u64, CliError> {
-    let mut retained = 0_u64;
-    for paths in [
-        report.reused_rejection_counts.keys(),
-        report.reused_parser_rejection_counts.keys(),
-        report.reused_rejection_detail_counts.keys(),
-    ] {
-        for path in paths {
-            retained = retained
-                .checked_add(identity_count_path_retained_bytes(path)?)
-                .ok_or_else(|| {
-                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
-                })?;
-        }
-    }
-    for path in &report.reused_rejection_details_incomplete {
-        retained = retained
-            .checked_add(identity_count_path_retained_bytes(path)?)
-            .ok_or_else(|| {
-                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
-            })?;
-    }
-    Ok(retained)
-}
-
-/// Count all identity state retained by one admission report.
-fn identity_admission_retained_bytes(report: &GraphIdentityAdmission) -> Result<u64, CliError> {
-    let observed_bytes =
-        identity_maps_retained_bytes(&report.observed_facts, &report.rejected_facts_by_path)?;
-    let rejection_key_bytes = identity_rejection_keys_retained_bytes(&report.rejection_keys)?;
-    let reused_fact_bytes = identity_fact_sets_retained_bytes(&report.reused_rejection_facts)?;
-    let reconciliation_bytes = identity_reconciliation_retained_bytes(report)?;
-    observed_bytes
-        .checked_add(rejection_key_bytes)
-        .and_then(|bytes| bytes.checked_add(reused_fact_bytes))
-        .and_then(|bytes| bytes.checked_add(reconciliation_bytes))
-        .ok_or_else(|| CliError::InvalidInput("identity rejection bytes overflowed".to_string()))
+/// Return the exact incremental identity-state total owned by one report.
+fn identity_admission_retained_bytes(report: &GraphIdentityAdmission) -> u64 {
+    report.observed_fact_bytes
 }
 
 /// Return the typed graph-work limit reached before retaining identity state.
@@ -445,7 +398,7 @@ fn checked_identity_admission_budget(
     limit: u64,
 ) -> Result<u64, CliError> {
     control.check(IndexWorkStage::SymbolParsing)?;
-    let retained_bytes = identity_admission_retained_bytes(report)?;
+    let retained_bytes = identity_admission_retained_bytes(report);
     if retained_bytes > limit {
         return Err(identity_fact_budget_failure_for_limit(
             limit,
@@ -469,8 +422,8 @@ pub(super) struct GraphIdentityAdmission {
     /// Every observed rejected parser fact, retained independently of detail
     /// rows so the global detail ceiling cannot make replays overcount.
     observed_facts: BTreeMap<String, BTreeSet<IdentityFactKey>>,
-    /// Conservative transient bytes retained by the observed fact and count
-    /// maps, charged to the graph-work budget before each insertion.
+    /// Exact bytes retained by every identity map, detail key, and
+    /// reconciliation entry, charged to the graph-work budget incrementally.
     observed_fact_bytes: u64,
     /// Persisted typed fact identities retained separately from current
     /// observations so removed outcomes can be subtracted exactly.
@@ -632,6 +585,134 @@ impl GraphIdentityAdmission {
         Ok(())
     }
 
+    /// Adjust the cached identity-state total when a merge replaces entries.
+    fn adjust_identity_bytes(&mut self, before: u64, after: u64) -> Result<(), CliError> {
+        if after >= before {
+            self.observed_fact_bytes = self
+                .observed_fact_bytes
+                .checked_add(after - before)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
+        } else {
+            self.observed_fact_bytes = self
+                .observed_fact_bytes
+                .checked_sub(before - after)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes underflowed".to_string())
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Merge one incoming observed-fact/count path without recounting the
+    /// existing report.
+    fn merge_observed_identity_path(
+        &mut self,
+        path: &str,
+        incoming_facts: Option<&BTreeSet<IdentityFactKey>>,
+        incoming_total: u64,
+        control: &IndexWorkControl,
+    ) -> Result<(), CliError> {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        let existing_total = self.rejected_facts_by_path.get(path).copied().unwrap_or(0);
+        let existing_observed = self.observed_facts.get(path).map_or(0, BTreeSet::len);
+        let existing_unobserved = existing_total
+            .checked_sub(u64::try_from(existing_observed).map_err(|error| {
+                CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+            })?)
+            .ok_or_else(|| {
+                CliError::InvalidInput(
+                    "observed identity facts exceeded rejection count".to_string(),
+                )
+            })?;
+        let incoming_observed = incoming_facts.map_or(0, BTreeSet::len);
+        let incoming_unobserved = incoming_total
+            .checked_sub(u64::try_from(incoming_observed).map_err(|error| {
+                CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+            })?)
+            .ok_or_else(|| {
+                CliError::InvalidInput(
+                    "observed identity facts exceeded rejection count".to_string(),
+                )
+            })?;
+        let new_observed = incoming_facts.map_or(0, |facts| {
+            facts
+                .iter()
+                .filter(|fact| {
+                    self.observed_facts
+                        .get(path)
+                        .is_none_or(|existing| !existing.contains(*fact))
+                })
+                .count()
+        });
+        let observed = existing_observed
+            .checked_add(new_observed)
+            .ok_or_else(|| CliError::InvalidInput("identity fact count overflowed".to_string()))?;
+        let total = u64::try_from(observed)
+            .map_err(|error| {
+                CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
+            })?
+            .checked_add(existing_unobserved)
+            .and_then(|count| count.checked_add(incoming_unobserved))
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection count overflowed".to_string())
+            })?;
+
+        let mut before_bytes = 0_u64;
+        if self.observed_facts.contains_key(path) {
+            before_bytes = before_bytes
+                .checked_add(identity_observed_path_retained_bytes(
+                    path,
+                    existing_observed,
+                )?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
+        }
+        if self.rejected_facts_by_path.contains_key(path) {
+            before_bytes = before_bytes
+                .checked_add(identity_count_path_retained_bytes(path)?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
+        }
+        let mut after_bytes = 0_u64;
+        if observed > 0 {
+            after_bytes = after_bytes
+                .checked_add(identity_observed_path_retained_bytes(path, observed)?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
+        }
+        if total > 0 {
+            after_bytes = after_bytes
+                .checked_add(identity_count_path_retained_bytes(path)?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
+        }
+        self.adjust_identity_bytes(before_bytes, after_bytes)?;
+
+        if observed == 0 {
+            self.observed_facts.remove(path);
+        } else if let Some(facts) = incoming_facts
+            && !facts.is_empty()
+        {
+            self.observed_facts
+                .entry(path.to_string())
+                .or_default()
+                .extend(facts.iter().cloned());
+        }
+        if total == 0 {
+            self.rejected_facts_by_path.remove(path);
+            self.observed_facts.remove(path);
+        } else {
+            self.rejected_facts_by_path.insert(path.to_string(), total);
+        }
+        Ok(())
+    }
+
     /// Reserve a per-path reconciliation entry before retaining its path key.
     fn reserve_reused_path_bytes(
         &mut self,
@@ -677,18 +758,14 @@ impl GraphIdentityAdmission {
     /// Merge one report while retaining the global detail bound.
     fn merge(&mut self, other: Self, control: &IndexWorkControl) -> Result<(), CliError> {
         control.check(IndexWorkStage::SymbolParsing)?;
-        let current_retained_bytes =
-            identity_admission_retained_bytes(self)?.max(self.observed_fact_bytes);
-        let incoming_retained_bytes =
-            identity_admission_retained_bytes(&other)?.max(other.observed_fact_bytes);
-        let peak_retained_bytes = current_retained_bytes
-            .checked_add(incoming_retained_bytes)
-            .ok_or_else(|| identity_fact_budget_failure(current_retained_bytes))?;
+        let peak_retained_bytes = self
+            .observed_fact_bytes
+            .checked_add(other.observed_fact_bytes)
+            .ok_or_else(|| identity_fact_budget_failure(self.observed_fact_bytes))?;
         if peak_retained_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
             return Err(identity_fact_budget_failure(peak_retained_bytes));
         }
         self.source_admitted |= other.source_admitted;
-        self.observed_fact_bytes = current_retained_bytes;
         if other
             .resolution_projections
             .keys()
@@ -701,68 +778,47 @@ impl GraphIdentityAdmission {
         let other_observed_facts = other.observed_facts;
         let other_rejected_facts_by_path = other.rejected_facts_by_path;
         let other_reused_rejection_facts = other.reused_rejection_facts;
-        let mut rejection_paths = self
-            .rejected_facts_by_path
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        rejection_paths.extend(other_rejected_facts_by_path.keys().cloned());
-        for path in rejection_paths {
-            control.check(IndexWorkStage::SymbolParsing)?;
-            let existing_total = self.rejected_facts_by_path.get(&path).copied().unwrap_or(0);
-            let existing_observed = self.observed_facts.get(&path).map_or(0, BTreeSet::len);
-            let existing_unobserved = existing_total
-                .checked_sub(u64::try_from(existing_observed).map_err(|error| {
-                    CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
-                })?)
-                .ok_or_else(|| {
-                    CliError::InvalidInput(
-                        "observed identity facts exceeded rejection count".to_string(),
-                    )
-                })?;
-            let incoming_total = other_rejected_facts_by_path
-                .get(&path)
-                .copied()
-                .unwrap_or(0);
-            let incoming_observed = other_observed_facts.get(&path).map_or(0, BTreeSet::len);
-            let incoming_unobserved = incoming_total
-                .checked_sub(u64::try_from(incoming_observed).map_err(|error| {
-                    CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
-                })?)
-                .ok_or_else(|| {
-                    CliError::InvalidInput(
-                        "observed identity facts exceeded rejection count".to_string(),
-                    )
-                })?;
-            if let Some(facts) = other_observed_facts.get(&path) {
-                self.observed_facts
-                    .entry(path.clone())
-                    .or_default()
-                    .extend(facts.iter().cloned());
-            }
-            let observed = self.observed_facts.get(&path).map_or(0, BTreeSet::len);
-            let total = u64::try_from(observed)
-                .map_err(|error| {
-                    CliError::InvalidInput(format!("identity fact count overflowed: {error}"))
-                })?
-                .checked_add(existing_unobserved)
-                .and_then(|count| count.checked_add(incoming_unobserved))
-                .ok_or_else(|| {
-                    CliError::InvalidInput("identity rejection count overflowed".to_string())
-                })?;
-            if total == 0 {
-                self.rejected_facts_by_path.remove(&path);
-                self.observed_facts.remove(&path);
-            } else {
-                self.rejected_facts_by_path.insert(path, total);
+        for (path, incoming_total) in &other_rejected_facts_by_path {
+            self.merge_observed_identity_path(
+                path,
+                other_observed_facts.get(path),
+                *incoming_total,
+                control,
+            )?;
+        }
+        for (path, facts) in &other_observed_facts {
+            if !other_rejected_facts_by_path.contains_key(path) {
+                self.merge_observed_identity_path(path, Some(facts), 0, control)?;
             }
         }
         for (path, facts) in other_reused_rejection_facts {
             control.check(IndexWorkStage::SymbolParsing)?;
-            self.reused_rejection_facts
-                .entry(path)
-                .or_default()
-                .extend(facts);
+            let existing_facts = self.reused_rejection_facts.get(&path);
+            let existing_count = existing_facts.map_or(0, BTreeSet::len);
+            let new_count = facts
+                .iter()
+                .filter(|fact| existing_facts.is_none_or(|existing| !existing.contains(*fact)))
+                .count();
+            let after_count = existing_count.checked_add(new_count).ok_or_else(|| {
+                CliError::InvalidInput("identity fact count overflowed".to_string())
+            })?;
+            let before_bytes = existing_facts.map_or(Ok(0), |facts| {
+                identity_fact_set_retained_bytes(&path, facts)
+            })?;
+            let after_bytes = if after_count == 0 {
+                0
+            } else {
+                identity_observed_path_retained_bytes(&path, after_count)?
+            };
+            self.adjust_identity_bytes(before_bytes, after_bytes)?;
+            if after_count == 0 {
+                self.reused_rejection_facts.remove(&path);
+            } else {
+                self.reused_rejection_facts
+                    .entry(path)
+                    .or_default()
+                    .extend(facts);
+            }
         }
         for (path, indices) in other.relation_fact_indices {
             control.check(IndexWorkStage::SymbolParsing)?;
@@ -777,53 +833,92 @@ impl GraphIdentityAdmission {
             }
         }
         control.check(IndexWorkStage::SymbolParsing)?;
-        extend_bounded_identity_rejections(
+        let rejection_key_bytes = extend_bounded_identity_rejections(
             &mut self.rejections,
             &mut self.rejection_keys,
             other.rejections,
-        );
+        )?;
+        self.observed_fact_bytes = self
+            .observed_fact_bytes
+            .checked_add(rejection_key_bytes)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
         self.resolution_projections
             .extend(other.resolution_projections);
         for (path, count) in other.reused_rejection_counts {
             control.check(IndexWorkStage::SymbolParsing)?;
-            if self.reused_rejection_counts.insert(path, count).is_some() {
+            let new_path = !self.reused_rejection_counts.contains_key(&path);
+            let path_bytes = if new_path {
+                identity_count_path_retained_bytes(&path)?
+            } else {
+                0
+            };
+            if self
+                .reused_rejection_counts
+                .insert(path.clone(), count)
+                .is_some()
+            {
                 return Err(CliError::InvalidInput(
                     "duplicate reused identity rejection count".to_string(),
                 ));
             }
+            if new_path {
+                self.reserve_identity_bytes(path_bytes, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
+            }
         }
         for (path, count) in other.reused_parser_rejection_counts {
             control.check(IndexWorkStage::SymbolParsing)?;
+            let new_path = !self.reused_parser_rejection_counts.contains_key(&path);
+            let path_bytes = if new_path {
+                identity_count_path_retained_bytes(&path)?
+            } else {
+                0
+            };
             if self
                 .reused_parser_rejection_counts
-                .insert(path, count)
+                .insert(path.clone(), count)
                 .is_some()
             {
                 return Err(CliError::InvalidInput(
                     "duplicate reused parser rejection count".to_string(),
                 ));
             }
+            if new_path {
+                self.reserve_identity_bytes(path_bytes, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
+            }
         }
         for (path, count) in other.reused_rejection_detail_counts {
             control.check(IndexWorkStage::SymbolParsing)?;
+            let new_path = !self.reused_rejection_detail_counts.contains_key(&path);
+            let path_bytes = if new_path {
+                identity_count_path_retained_bytes(&path)?
+            } else {
+                0
+            };
             if self
                 .reused_rejection_detail_counts
-                .insert(path, count)
+                .insert(path.clone(), count)
                 .is_some()
             {
                 return Err(CliError::InvalidInput(
                     "duplicate reused identity rejection detail count".to_string(),
                 ));
             }
+            if new_path {
+                self.reserve_identity_bytes(path_bytes, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
+            }
         }
         control.check(IndexWorkStage::SymbolParsing)?;
-        self.reused_rejection_details_incomplete
-            .extend(other.reused_rejection_details_incomplete);
-        let retained_bytes = identity_admission_retained_bytes(self)?;
-        if retained_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
-            return Err(identity_fact_budget_failure(retained_bytes));
+        for path in other.reused_rejection_details_incomplete {
+            let path_bytes = identity_count_path_retained_bytes(&path)?;
+            if self.reused_rejection_details_incomplete.insert(path) {
+                self.reserve_identity_bytes(path_bytes, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
+            }
         }
-        self.observed_fact_bytes = retained_bytes;
+        if self.observed_fact_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+            return Err(identity_fact_budget_failure(self.observed_fact_bytes));
+        }
         #[cfg(test)]
         for (key, count) in other.resolution_derivations {
             let entry = self.resolution_derivations.entry(key).or_default();
@@ -857,7 +952,12 @@ impl GraphIdentityAdmission {
             .filter(|rejection| paths.contains(rejection.path.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        let rejection_keys = identity_rejection_key_set(&rejections);
+        let rejection_keys = self
+            .rejection_keys
+            .iter()
+            .filter(|key| paths.contains(key.path.as_str()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let observed_fact_bytes =
             identity_maps_retained_bytes(&observed_facts, &rejected_facts_by_path)?
                 .checked_add(identity_rejection_keys_retained_bytes(&rejection_keys)?)
@@ -1022,7 +1122,8 @@ fn extend_bounded_identity_rejections(
     target: &mut Vec<GraphIdentityRejection>,
     target_keys: &mut BTreeSet<IdentityRejectionKey>,
     incoming: impl IntoIterator<Item = GraphIdentityRejection>,
-) {
+) -> Result<u64, CliError> {
+    let mut retained_bytes = 0_u64;
     for rejection in incoming {
         if target.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
             break;
@@ -1031,8 +1132,16 @@ fn extend_bounded_identity_rejections(
         if !target_keys.insert(key) {
             continue;
         }
+        retained_bytes = retained_bytes
+            .checked_add(identity_rejection_key_retained_bytes(
+                rejection.path.as_str(),
+            )?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
         target.push(rejection);
     }
+    Ok(retained_bytes)
 }
 
 /// One graph mutation staged outside the database writer transaction.
@@ -2551,7 +2660,7 @@ fn finish_projection_in_database_with_documents(
                 &mut identity_rejections,
                 &mut identity_rejection_keys,
                 staged_rows.identity_rejections.iter().cloned(),
-            );
+            )?;
             staged_rows.identity_rejections.clear();
             if staged_rows.row_count() < GRAPH_STAGE_ROW_BATCH_SIZE {
                 continue;
@@ -2710,7 +2819,7 @@ fn finish_projection_with_documents(
             &mut identity_rejections,
             &mut identity_rejection_keys,
             rows.identity_rejections,
-        );
+        )?;
         entities.retained_bytes = rows
             .external_entities
             .iter()
@@ -4929,11 +5038,16 @@ fn hydrate_reused_identity_admission(
             continue;
         }
         control.check(IndexWorkStage::SymbolParsing)?;
-        extend_bounded_identity_rejections(
+        let rejection_key_bytes = extend_bounded_identity_rejections(
             &mut report.rejections,
             &mut report.rejection_keys,
             std::iter::once(rejection),
-        );
+        )?;
+        report.reserve_identity_bytes(
+            rejection_key_bytes,
+            control,
+            MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+        )?;
     }
     for (path, facts) in persisted_fact_counts {
         control.check(IndexWorkStage::SymbolParsing)?;
@@ -6310,12 +6424,12 @@ mod tests {
             &mut aggregated,
             &mut aggregated_keys,
             admission.rejections.iter().cloned(),
-        );
+        )?;
         super::extend_bounded_identity_rejections(
             &mut aggregated,
             &mut aggregated_keys,
             admission.rejections,
-        );
+        )?;
         require_eq(
             &aggregated.len(),
             &failures.len(),
@@ -6457,12 +6571,12 @@ mod tests {
             &mut aggregated,
             &mut aggregated_keys,
             admission.rejections.iter().cloned(),
-        );
+        )?;
         super::extend_bounded_identity_rejections(
             &mut aggregated,
             &mut aggregated_keys,
             admission.rejections,
-        );
+        )?;
         require_eq(
             &aggregated.len(),
             &super::MAX_GRAPH_IDENTITY_REJECTIONS,
@@ -6472,6 +6586,91 @@ mod tests {
             &aggregated_keys.len(),
             &super::MAX_GRAPH_IDENTITY_REJECTIONS,
             "bounded aggregation membership lost a distinct detail",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn admission_merges_many_graphs_with_incremental_retained_bytes() -> Result<(), Box<dyn Error>>
+    {
+        const GRAPH_COUNT: usize = 1_000;
+        const FACTS_PER_GRAPH: usize = 10;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let span = super::IdentitySpan {
+            start_line: 7,
+            start_column: 0,
+            end_line: 7,
+            end_column: 0,
+        };
+        let failure = [(
+            GraphIdentityField::RelationTarget,
+            GraphIdentityRejectionReason::Empty,
+        )];
+        let mut admission = GraphIdentityAdmission::default();
+        let mut expected_bytes = 0_u64;
+        for graph_index in 0..GRAPH_COUNT {
+            let path = format!("src/many-graphs-{graph_index}.ts");
+            let mut graph = GraphIdentityAdmission::default();
+            for fact_index in 0..FACTS_PER_GRAPH {
+                graph.record(
+                    &path,
+                    span,
+                    ParserKind::TreeSitter,
+                    super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, fact_index),
+                    &failure,
+                    &control,
+                )?;
+            }
+            admission.merge(graph, &control)?;
+            let key_bytes = super::identity_rejection_key_retained_bytes(&path)?
+                .checked_mul(u64::try_from(FACTS_PER_GRAPH)?)
+                .ok_or_else(|| io::Error::other("many-graph identity bytes overflowed"))?;
+            let graph_bytes = super::identity_observed_path_retained_bytes(&path, FACTS_PER_GRAPH)?
+                .checked_add(super::identity_count_path_retained_bytes(&path)?)
+                .and_then(|bytes| bytes.checked_add(key_bytes))
+                .ok_or_else(|| io::Error::other("many-graph identity bytes overflowed"))?;
+            expected_bytes = expected_bytes
+                .checked_add(graph_bytes)
+                .ok_or_else(|| io::Error::other("many-graph identity bytes overflowed"))?;
+            require_eq(
+                &admission.observed_fact_bytes,
+                &expected_bytes,
+                "incremental identity byte cache",
+            )?;
+        }
+        require_eq(
+            &admission.rejections.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "many-graph retained detail ceiling",
+        )?;
+        require_eq(
+            &admission.rejection_keys.len(),
+            &super::MAX_GRAPH_IDENTITY_REJECTIONS,
+            "many-graph keyed detail ceiling",
+        )?;
+        require_eq(
+            &super::identity_admission_retained_bytes(&admission),
+            &expected_bytes,
+            "incremental identity byte cache remained authoritative",
+        )?;
+
+        let replay_path = "src/many-graphs-999.ts";
+        let mut replay = GraphIdentityAdmission::default();
+        for fact_index in 0..FACTS_PER_GRAPH {
+            replay.record(
+                replay_path,
+                span,
+                ParserKind::TreeSitter,
+                super::parser_fact_index(super::RELATION_FACT_INDEX_NAMESPACE, fact_index),
+                &failure,
+                &control,
+            )?;
+        }
+        admission.merge(replay, &control)?;
+        require_eq(
+            &admission.observed_fact_bytes,
+            &expected_bytes,
+            "replayed graph did not inflate identity byte cache",
         )?;
         Ok(())
     }
@@ -6631,8 +6830,17 @@ mod tests {
     fn reused_reconciliation_paths_charge_all_maps_at_injected_boundaries()
     -> Result<(), Box<dyn Error>> {
         let mut report = GraphIdentityAdmission::default();
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
         for index in 0..32 {
             let path = format!("src/reused-{index}.ts");
+            for _ in 0..4 {
+                report.reserve_reused_path_bytes(
+                    &path,
+                    false,
+                    &control,
+                    MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                )?;
+            }
             report.reused_rejection_counts.insert(path.clone(), 2);
             report
                 .reused_parser_rejection_counts
@@ -6642,12 +6850,11 @@ mod tests {
                 .insert(path.clone(), 0);
             report.reused_rejection_details_incomplete.insert(path);
         }
-        let retained = super::identity_admission_retained_bytes(&report)?;
+        let retained = super::identity_admission_retained_bytes(&report);
         require(
             retained > 0,
             "reused reconciliation bytes were not retained",
         )?;
-        let control = IndexWorkControl::new(IndexCancellation::new(), None);
 
         let below = retained - 1;
         let error = super::checked_identity_admission_budget(&report, &control, below)
@@ -6746,6 +6953,14 @@ mod tests {
             GraphIdentityRejectionReason::Oversized,
         )];
         let mut admission = GraphIdentityAdmission::default();
+        for _ in 0..2 {
+            admission.reserve_reused_path_bytes(
+                path,
+                false,
+                &control,
+                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+            )?;
+        }
         admission
             .reused_rejection_counts
             .insert(path.to_string(), 3);
@@ -6767,14 +6982,19 @@ mod tests {
                 &control,
             )?;
         }
-        admission.reused_rejection_facts.insert(
-            path.to_string(),
-            admission
-                .observed_facts
-                .get(path)
-                .cloned()
-                .ok_or("persisted identity fact keys are missing")?,
-        );
+        let persisted_facts = admission
+            .observed_facts
+            .get(path)
+            .cloned()
+            .ok_or("persisted identity fact keys are missing")?;
+        admission.reserve_identity_bytes(
+            super::identity_fact_set_retained_bytes(path, &persisted_facts)?,
+            &control,
+            MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+        )?;
+        admission
+            .reused_rejection_facts
+            .insert(path.to_string(), persisted_facts);
         require_eq(
             &admission.rejected_facts_for_graph(path, &GraphIdentityAdmission::default())?,
             &3,
@@ -6802,6 +7022,14 @@ mod tests {
         )?;
 
         let mut removed = GraphIdentityAdmission::default();
+        for _ in 0..2 {
+            removed.reserve_reused_path_bytes(
+                path,
+                false,
+                &control,
+                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+            )?;
+        }
         removed.reused_rejection_counts.insert(path.to_string(), 2);
         removed
             .reused_rejection_detail_counts
@@ -6814,6 +7042,16 @@ mod tests {
                 .cloned()
                 .ok_or("persisted identity fact keys are missing")?,
         );
+        let persisted_facts = removed
+            .reused_rejection_facts
+            .get(path)
+            .cloned()
+            .ok_or("persisted identity fact keys are missing")?;
+        removed.reserve_identity_bytes(
+            super::identity_fact_set_retained_bytes(path, &persisted_facts)?,
+            &control,
+            MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+        )?;
         removed.record(
             path,
             super::IdentitySpan {
