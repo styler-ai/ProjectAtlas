@@ -47,7 +47,7 @@ No state migration is required. Land the three local corrections and causal regr
 
 ## Dependencies / Cross-Issue Impact
 
-#518's accepted shared `e2e.rs` baseline is already on `main`, so #523 has no remaining native blocker. #523 owns only the three named generic observers and their causal regressions. If #487's accepted test split lands afterward, it must refresh onto #523 and retain exactly one final helper owner without weakening these assertions. #523 remains one direct child and blocker of release owner #492; no product, schema, installer, or MCP dependency is introduced.
+#518's accepted shared `e2e.rs` baseline is already on `main`. #523 owns only the three named generic observers and their causal regressions. #525's Windows runtime-bound proof consumes the corrected installer observer's outer deadline, so its declarative release-graph entry is blocked by #523. If #487's accepted test split lands afterward, it must refresh onto #523 and retain exactly one final helper owner without weakening these assertions. #523 remains one direct child and blocker of release owner #492; no product, schema, installer, or MCP dependency is introduced.
 
 ## Open Questions
 

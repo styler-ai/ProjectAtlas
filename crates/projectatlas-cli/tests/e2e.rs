@@ -33101,6 +33101,22 @@ fn run_mcp_contract_inventory(
     cwd: &Path,
     database: &Path,
 ) -> Result<String, Box<dyn Error>> {
+    run_mcp_contract_inventory_with_test_delay(
+        executable,
+        cwd,
+        database,
+        Duration::from_secs(10),
+        None,
+    )
+}
+
+fn run_mcp_contract_inventory_with_test_delay(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+) -> Result<String, Box<dyn Error>> {
     let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
         cwd,
@@ -33115,7 +33131,9 @@ fn run_mcp_contract_inventory(
             serde_json::to_string(&tools)?
         ))
     })();
-    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
+    complete_mcp_test_after_shutdown(operation_result, || {
+        session.shutdown_with_test_delay(timeout, observer_delay)
+    })
 }
 
 /// Execute one advertised tool through its own real stdio process.
@@ -33461,6 +33479,149 @@ fn mcp_test_shutdown_runs_after_primary_failure_without_hiding_it() -> Result<()
     }
 }
 
+#[test]
+fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
+-> Result<(), Box<dyn Error>> {
+    const OBSERVER_TIMEOUT: Duration = Duration::from_secs(2);
+    const FIRST_OBSERVATION_DELAY: Duration = Duration::from_secs(3);
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        None,
+    )?;
+    let late_shutdown = run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+    );
+    let late_shutdown_text = late_shutdown
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_shutdown.is_ok()
+        || !late_shutdown_text.contains("completed after deadline")
+        || late_shutdown_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not distinguish late completion from a running timeout: {late_shutdown:?}"
+        ))
+        .into());
+    }
+
+    let args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let messages = vec![
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-process-observer-deadlines", "version": "0.1.0"}
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+    ];
+    let in_time_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        None,
+    )?;
+    if mcp_response(&in_time_mcp, 1)?.get("result").is_none() {
+        return Err(io::Error::other("in-time MCP observer omitted initialize result").into());
+    }
+    let late_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+    );
+    let late_mcp_text = late_mcp
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_mcp.is_ok()
+        || !late_mcp_text.contains("completed after deadline")
+        || late_mcp_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not distinguish late completion from a running timeout: {late_mcp:?}"
+        ))
+        .into());
+    }
+
+    let in_time_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "in-time",
+        OBSERVER_TIMEOUT,
+        None,
+    )?;
+    if !in_time_installer.status.success() {
+        return Err(io::Error::other("in-time installer observer rejected --version").into());
+    }
+    let late_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "late",
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+    );
+    let late_installer_text = late_installer
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_installer.is_ok()
+        || !late_installer_text.contains("completed after deadline")
+        || late_installer_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "installer observer did not distinguish late completion from a running timeout: {late_installer:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Persistent real MCP session used by E2E contract clients.
 struct McpContractSession {
     child: Option<Child>,
@@ -33783,46 +33944,109 @@ impl McpContractSession {
     }
 
     /// Close stdin and require a clean bounded process exit.
-    fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
+    fn shutdown(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown_with_test_delay(Duration::from_secs(10), None)
+    }
+
+    fn shutdown_with_test_delay(
+        mut self,
+        timeout: Duration,
+        observer_delay: Option<Duration>,
+    ) -> Result<(), Box<dyn Error>> {
         self.stdin.take();
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(10))
+            .checked_add(timeout)
             .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
-        let status = loop {
-            let child = self
-                .child
-                .as_mut()
-                .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
+        if let Some(delay) = observer_delay {
+            thread::sleep(delay);
+        }
+        let mut timeout_reason = None;
+        let mut accepted_completion = false;
+        loop {
             if Instant::now() >= deadline {
-                child.kill()?;
-                let _status = child.wait()?;
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "MCP contract server did not exit after stdin closed",
-                )
-                .into());
+                timeout_reason = Some("still running at deadline".to_string());
+                break;
             }
-            thread::sleep(Duration::from_millis(25));
-        };
-        self.child.take();
-        if let Some(reader) = self.stdout_reader.take() {
+            let (status, observed_at) = {
+                let child = self
+                    .child
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+                let status = child.try_wait()?;
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            match status {
+                Some(_) if observed_at < deadline => {
+                    accepted_completion = true;
+                    break;
+                }
+                Some(_) => {
+                    timeout_reason = Some(format!(
+                        "completed after deadline (observed_at={observed_at:?})"
+                    ));
+                    break;
+                }
+                None => {
+                    let remaining = deadline.saturating_duration_since(observed_at);
+                    if remaining.is_zero() {
+                        timeout_reason = Some("still running at deadline".to_string());
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(25).min(remaining));
+                }
+            }
+        }
+
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+        if timeout_reason.is_some() {
+            let (status, observed_at) = {
+                let status = child.try_wait()?;
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            if status.is_none() {
+                drop(child.kill());
+            } else if timeout_reason.as_deref() == Some("still running at deadline") {
+                timeout_reason = Some(format!(
+                    "completed after deadline (observed_at={observed_at:?})"
+                ));
+            }
+        }
+        let wait_result = child.wait();
+        let stdout_result = self.stdout_reader.take().map(|reader| {
             reader
                 .join()
-                .map_err(|_panic| io::Error::other("MCP contract stdout reader panicked"))?;
-        }
-        let stderr = self
+                .map_err(|_panic| io::Error::other("MCP contract stdout reader panicked"))
+        });
+        let stderr_result = self
             .stderr_reader
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr reader was consumed"))?
             .join()
             .map_err(|_panic| io::Error::other("MCP contract stderr reader panicked"))??;
-        if !status.success() {
+        if let Some(reason) = timeout_reason {
+            let mut diagnostic =
+                format!("MCP contract server did not exit after stdin closed: {reason}");
+            if let Ok(status) = &wait_result {
+                diagnostic.push_str(" status=");
+                diagnostic.push_str(&status.to_string());
+            }
+            if !stderr_result.is_empty() {
+                diagnostic.push_str(" stderr=");
+                diagnostic.push_str(&String::from_utf8_lossy(&stderr_result));
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+        }
+        let status = wait_result?;
+        stdout_result.transpose()?;
+        if !accepted_completion || !status.success() {
             return Err(io::Error::other(format!(
                 "MCP contract server failed: {}",
-                String::from_utf8_lossy(&stderr)
+                String::from_utf8_lossy(&stderr_result)
             ))
             .into());
         }
@@ -33971,6 +34195,26 @@ fn run_mcp_stdio_with_env(
     messages: &[impl AsRef<str>],
     environment: &[(&str, Option<&str>)],
 ) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env_and_test_delay(
+        executable,
+        cwd,
+        args,
+        messages,
+        environment,
+        Duration::from_secs(10),
+        None,
+    )
+}
+
+fn run_mcp_stdio_with_env_and_test_delay(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+) -> Result<String, Box<dyn Error>> {
     let mut expected_responses = BTreeSet::new();
     for message in messages {
         let request: Value = serde_json::from_str(message.as_ref())?;
@@ -34079,33 +34323,82 @@ fn run_mcp_stdio_with_env(
     drop(stdin);
     drop(response_receiver);
 
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("MCP process deadline overflowed"))?;
+    if let Some(delay) = observer_delay {
+        thread::sleep(delay);
+    }
+    let mut timeout_reason = None;
+    let mut accepted_completion = false;
+    loop {
+        if Instant::now() >= deadline {
+            timeout_reason = Some("still running at deadline".to_string());
+            break;
         }
-        if started.elapsed() > Duration::from_secs(10) {
-            if child.try_wait()?.is_none() {
-                child.kill()?;
+        let (status, observed_at) = {
+            let status = child.try_wait()?;
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        match status {
+            Some(_) if observed_at < deadline => {
+                accepted_completion = true;
+                break;
             }
-            let _status = child.wait()?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "projectatlas mcp did not exit after stdin closed",
-            )
-            .into());
+            Some(_) => {
+                timeout_reason = Some(format!(
+                    "completed after deadline (observed_at={observed_at:?})"
+                ));
+                break;
+            }
+            None => {
+                let remaining = deadline.saturating_duration_since(observed_at);
+                if remaining.is_zero() {
+                    timeout_reason = Some("still running at deadline".to_string());
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100).min(remaining));
+            }
         }
-        thread::sleep(Duration::from_millis(100));
-    };
+    }
 
+    if timeout_reason.is_some() {
+        let (status, observed_at) = {
+            let status = child.try_wait()?;
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        if status.is_none() {
+            drop(child.kill());
+        } else if timeout_reason.as_deref() == Some("still running at deadline") {
+            timeout_reason = Some(format!(
+                "completed after deadline (observed_at={observed_at:?})"
+            ));
+        }
+    }
+    let wait_result = child.wait();
     let stdout = stdout_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
     let stderr = stderr_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+    if let Some(reason) = timeout_reason {
+        let mut diagnostic = format!("projectatlas mcp did not exit after stdin closed: {reason}");
+        if let Ok(status) = &wait_result {
+            diagnostic.push_str(" status=");
+            diagnostic.push_str(&status.to_string());
+        }
+        if !stderr.is_empty() {
+            diagnostic.push_str(" stderr=");
+            diagnostic.push_str(&String::from_utf8_lossy(&stderr));
+        }
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+    }
     response_result?;
-    if !status.success() {
+    let status = wait_result?;
+    if !accepted_completion || !status.success() {
         return Err(io::Error::other(format!(
             "projectatlas mcp failed: {}",
             String::from_utf8_lossy(&stderr)
@@ -37876,26 +38169,77 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
 
 /// Collect one coordinated installer process under an explicit deadline.
 fn wait_for_plugin_installer_output(
-    mut child: Child,
+    child: Child,
     label: &str,
     timeout: Duration,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    let deadline = Instant::now() + timeout;
+    wait_for_plugin_installer_output_with_test_delay(child, label, timeout, None)
+}
+
+fn wait_for_plugin_installer_output_with_test_delay(
+    mut child: Child,
+    label: &str,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("plugin installer deadline overflowed"))?;
+    if let Some(delay) = observer_delay {
+        thread::sleep(delay);
+    }
     loop {
-        if child.try_wait()?.is_some() {
-            return Ok(child.wait_with_output()?);
-        }
         if Instant::now() >= deadline {
-            drop(child.kill());
+            let (status, _observed_at) = {
+                let status = child.try_wait()?;
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            let still_running = status.is_none();
+            if still_running {
+                drop(child.kill());
+            }
             let output = child.wait_with_output()?;
-            return Err(io::Error::other(format!(
-                "{label} plugin installer exceeded {timeout:?}\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ))
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{label} plugin installer exceeded {timeout:?}: {}\nstdout:\n{}\nstderr:\n{}",
+                    if still_running {
+                        "still running at deadline"
+                    } else {
+                        "completed after deadline"
+                    },
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
             .into());
         }
-        thread::sleep(Duration::from_millis(25));
+        let (status, observed_at) = {
+            let status = child.try_wait()?;
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        if let Some(_status) = status {
+            if observed_at < deadline {
+                return Ok(child.wait_with_output()?);
+            }
+            let output = child.wait_with_output()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{label} plugin installer exceeded {timeout:?}: completed after deadline (observed_at={observed_at:?})\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
+            .into());
+        }
+        let remaining = deadline.saturating_duration_since(observed_at);
+        if remaining.is_zero() {
+            continue;
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
     }
 }
 
