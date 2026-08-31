@@ -611,6 +611,75 @@ def run_summary(
     return result
 
 
+def multi_binding_alias_case(binary: Path, arm: str) -> dict[str, Any]:
+    """Prove one Python import relation deduplicates repeated local aliases."""
+
+    with tempfile.TemporaryDirectory(
+        prefix=f"projectatlas-multi-binding-alias-{arm}-"
+    ) as directory:
+        root = Path(directory)
+        target_path = Path("src/package/py_target.py")
+        caller_path = root / "src/py_caller.py"
+        (root / "src/package").mkdir(parents=True, exist_ok=True)
+        (root / target_path).write_text(
+            "def a():\n    pass\n\ndef b():\n    pass\n",
+            encoding="utf-8",
+        )
+        caller_path.write_text(
+            "from package.py_target import a as shared, b as shared\n"
+            "def caller():\n"
+            "    shared()\n",
+            encoding="utf-8",
+        )
+        setup_fixture(binary, root)
+        trace_path = root.parent / f"{root.name}-trace-multi-binding-{arm}.json"
+        measured = run_process(
+            [
+                str(binary),
+                "--format",
+                "json",
+                "summary",
+                target_path.as_posix(),
+                "--limit",
+                "1",
+            ],
+            root,
+            trace_path=trace_path,
+        )
+        result = serialize_process(measured, root)
+        result["case"] = "python-multi-binding-same-local-alias"
+        result["target"] = target_path.as_posix()
+        result["limit"] = 1
+        trace = {"queries": [], "allocations": None}
+        if trace_path.is_file():
+            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            trace_path.unlink()
+            attach_query_plans(root / ".projectatlas" / "projectatlas.db", trace)
+        result["allocation_metrics"] = trace.get("allocations")
+        result["query_observations"] = trace.get("queries", [])
+        if measured["returncode"] != 0:
+            raise AssertionError(
+                "Python multi-binding alias summary failed: "
+                f"{measured['stderr'].decode('utf-8', errors='replace')}"
+            )
+        payload = json.loads(measured["stdout"])
+        functions = {
+            item["name"]: item for item in payload.get("functions", [])
+        }
+        if payload.get("truncated") is not True:
+            raise AssertionError(
+                "Python multi-binding alias case did not exercise summary truncation"
+            )
+        expected = ["src/py_caller.py::caller"]
+        if functions.get("a", {}).get("called_by") != expected:
+            raise AssertionError(
+                "same-relation Python alias was treated as ambiguous: "
+                f"{functions.get('a', {}).get('called_by')!r} != {expected!r}"
+            )
+        result["decoded_summary"] = payload
+        return result
+
+
 def setup_fixture(binary: Path, root: Path) -> dict[str, Any]:
     """Initialize and scan one isolated fixture with the real CLI."""
 
@@ -1045,6 +1114,17 @@ def main() -> None:
             )
         )
 
+    multi_binding_alias = {
+        "baseline": multi_binding_alias_case(baseline_binary, "baseline"),
+        "candidate": multi_binding_alias_case(candidate_binary, "candidate"),
+    }
+    semantic_findings.extend(
+        f"python-multi-binding-same-local-alias: {finding}"
+        for finding in compare_raw_runs(
+            multi_binding_alias["baseline"], multi_binding_alias["candidate"]
+        )
+    )
+
     cancellation = {
         "baseline": cancellation_case(baseline_binary, "baseline"),
         "candidate": cancellation_case(candidate_binary, "candidate"),
@@ -1075,6 +1155,7 @@ def main() -> None:
         },
         "candidate_patch_preflight": candidate_patch_preflight,
         "failure_cases": failures,
+        "multi_binding_alias": multi_binding_alias,
         "cancellation": cancellation,
         "decision": decision(baseline, candidate, semantic_findings),
     }

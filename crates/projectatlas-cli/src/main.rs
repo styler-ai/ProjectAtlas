@@ -2019,10 +2019,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             );
             #[cfg(feature = "reverse-caller-benchmark")]
             if let Some(path) = benchmark_trace_path {
+                let allocation_metrics = reverse_caller_benchmark::snapshot();
                 let trace = store.take_reverse_caller_benchmark_trace();
                 let encoded = serde_json::to_vec_pretty(&json!({
                     "queries": trace,
-                    "allocations": reverse_caller_benchmark::snapshot(),
+                    "allocations": allocation_metrics,
                 }))?;
                 fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })?;
             }
