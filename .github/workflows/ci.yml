@@ -179,7 +179,7 @@ jobs:
 
       - name: Causal E2E process observer deadline regression
         timeout-minutes: 10
-        run: cargo test --locked -p projectatlas-cli --test e2e e2e_process_observers_reject_late_completion_and_preserve_in_time_success -- --exact --nocapture
+        run: cargo test --locked -p projectatlas-cli --test e2e e2e_process_observers_ -- --nocapture
 
       - name: Graph, symbol, purpose, and viewport regressions
         timeout-minutes: 10
