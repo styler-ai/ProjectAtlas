@@ -1368,6 +1368,9 @@ fn declaration_is_method_context(node: Node<'_>) -> bool {
 
 /// Return whether this declaration node should become its own symbol row.
 fn should_emit_declaration_symbol(node: Node<'_>, content: &str) -> bool {
+    if is_inside_php_anonymous_class(node) {
+        return false;
+    }
     if is_php_trait_use_declaration(node) {
         return false;
     }
@@ -1582,6 +1585,11 @@ fn has_ancestor_kind_any(mut node: Option<Node<'_>>, kinds: &[&str]) -> bool {
     false
 }
 
+/// Return whether a PHP node belongs to an unsupported anonymous class.
+fn is_inside_php_anonymous_class(node: Node<'_>) -> bool {
+    has_ancestor_kind(node.parent(), "anonymous_class")
+}
+
 /// Return the nearest ancestor with the requested tree-sitter kind.
 fn nearest_ancestor_kind<'tree>(mut node: Option<Node<'tree>>, kind: &str) -> Option<Node<'tree>> {
     while let Some(current) = node {
@@ -1753,6 +1761,9 @@ fn symbol_parent(
     content: &str,
     php_namespace_context: Option<&mut PhpNamespaceContext>,
 ) -> Option<String> {
+    if is_inside_php_anonymous_class(node) {
+        return None;
+    }
     if let Some(owner) = object_literal_method_owner(node, content) {
         return Some(owner.name);
     }
@@ -1946,6 +1957,9 @@ fn php_trait_use_targets(node: Node<'_>, content: &str) -> Vec<String> {
 
 /// Publish exact trait-composition targets under their owning PHP type.
 fn push_php_trait_use_relations(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+    if is_inside_php_anonymous_class(node) {
+        return;
+    }
     let Some(owner) = php_trait_use_owner(node, content) else {
         return;
     };
@@ -2192,6 +2206,9 @@ fn has_direct_child_kind(node: Node<'_>, kind: &str) -> bool {
 
 /// Push an import relation from an import node.
 fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+    if is_php_language(graph.language.as_deref()) && is_inside_php_anonymous_class(node) {
+        return;
+    }
     if node.kind() == "namespace_use_declaration" {
         for import_text in php_namespace_use_targets(node, content) {
             if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
@@ -2246,6 +2263,9 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
 
 /// Push a call relation from a call node.
 fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+    if is_php_language(graph.language.as_deref()) && is_inside_php_anonymous_class(node) {
+        return;
+    }
     if is_php_language(graph.language.as_deref())
         && node
             .child_by_field_name("arguments")
@@ -2923,6 +2943,9 @@ fn compact_documentation(value: &str) -> Option<String> {
 /// Find the nearest containing declaration symbol name.
 fn enclosing_symbol_name(mut node: Option<Node<'_>>, content: &str) -> Option<String> {
     while let Some(current) = node {
+        if current.kind() == "anonymous_class" {
+            return None;
+        }
         if declaration_kind(current.kind()).is_some()
             && let Some(name) = node_name(current, content)
         {
@@ -6352,6 +6375,95 @@ class ClassLoader {
         }));
         assert!(graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Calls && relation.target_name == "findFile"
+        }));
+    }
+
+    #[test]
+    fn php_anonymous_class_members_do_not_inherit_named_owners() {
+        let source = r"<?php
+namespace Outer;
+
+trait Auditable {}
+
+function factory(): object {
+    return new class {
+        use Auditable;
+        public string $anonymous_property;
+        public const ANONYMOUS_CONSTANT = 1;
+        public function __construct(public string $anonymous_promoted) {}
+        public function anonymous_method(): void { anonymous_helper(); }
+    };
+}
+
+class NamedOwner {
+    public string $named_property;
+    public const NAMED_CONSTANT = 1;
+    public function named_method(): void { named_helper(); }
+    public function make(): object {
+        return new class {
+            use Auditable;
+            public string $nested_property;
+            public const NESTED_CONSTANT = 1;
+            public function __construct(public string $nested_promoted) {}
+            public function nested_method(): void { nested_helper(); }
+        };
+    }
+}
+";
+        let graph = extract_symbol_graph("src/AnonymousMembers.php", Some("php"), source);
+
+        for name in [
+            "factory",
+            "NamedOwner",
+            "named_property",
+            "NAMED_CONSTANT",
+            "named_method",
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == name),
+                "named PHP symbol disappeared: {name}: {graph:?}"
+            );
+        }
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.name == "factory" && symbol.parent.as_deref() == Some("Outer")
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.name == "named_method" && symbol.parent.as_deref() == Some("NamedOwner")
+        }));
+
+        for name in [
+            "anonymous_property",
+            "ANONYMOUS_CONSTANT",
+            "anonymous_promoted",
+            "anonymous_method",
+            "nested_property",
+            "NESTED_CONSTANT",
+            "nested_promoted",
+            "nested_method",
+        ] {
+            assert!(
+                graph.symbols.iter().all(|symbol| symbol.name != name),
+                "unsupported anonymous PHP member leaked as a symbol: {name}: {graph:?}"
+            );
+            assert!(
+                graph.relations.iter().all(|relation| {
+                    relation.source_name != name && relation.target_name != name
+                })
+            );
+        }
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Calls
+                && relation.source_name == "named_method"
+                && relation.target_name == "named_helper"
+        }));
+        assert!(graph.relations.iter().all(|relation| {
+            !matches!(
+                relation.target_name.as_str(),
+                "anonymous_helper" | "nested_helper"
+            )
+        }));
+        assert!(!graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports && relation.target_name == "Auditable"
         }));
     }
 }
