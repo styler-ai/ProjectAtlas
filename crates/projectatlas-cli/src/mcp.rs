@@ -3538,6 +3538,7 @@ struct McpRequestCancellationBridge {
     /// Direct request probe retained for synchronous cancellation fences.
     probe: Arc<dyn Fn() -> bool + Send + Sync>,
     /// Whether the request token reached the shared work control.
+    #[cfg(feature = "reverse-caller-benchmark")]
     cancellation_observed: Arc<std::sync::atomic::AtomicBool>,
     /// Whether the benchmark-only terminal observation was written.
     #[cfg(feature = "reverse-caller-benchmark")]
@@ -3560,15 +3561,18 @@ impl McpRequestCancellationBridge {
         P: Fn() -> bool + Send + Sync + 'static,
     {
         let probe: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(probe);
+        #[cfg(feature = "reverse-caller-benchmark")]
         let cancellation_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if probe() {
             control.cancel();
+            #[cfg(feature = "reverse-caller-benchmark")]
             cancellation_observed.store(true, Ordering::Release);
         }
         let observed_control = control.clone();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let monitor_stop = Arc::clone(&stop);
         let monitor_probe = Arc::clone(&probe);
+        #[cfg(feature = "reverse-caller-benchmark")]
         let monitor_cancellation_observed = Arc::clone(&cancellation_observed);
         let monitor = thread::Builder::new()
             .name(MCP_CANCELLATION_MONITOR_THREAD_NAME.to_string())
@@ -3576,6 +3580,7 @@ impl McpRequestCancellationBridge {
                 while !monitor_stop.load(Ordering::Acquire) {
                     if monitor_probe() {
                         observed_control.cancel();
+                        #[cfg(feature = "reverse-caller-benchmark")]
                         monitor_cancellation_observed.store(true, Ordering::Release);
                         break;
                     }
@@ -3591,6 +3596,7 @@ impl McpRequestCancellationBridge {
             stop,
             monitor: Some(monitor),
             probe,
+            #[cfg(feature = "reverse-caller-benchmark")]
             cancellation_observed,
             #[cfg(feature = "reverse-caller-benchmark")]
             terminal_recorded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
