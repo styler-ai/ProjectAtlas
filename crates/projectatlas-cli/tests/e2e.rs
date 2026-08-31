@@ -33107,6 +33107,7 @@ fn run_mcp_contract_inventory(
         database,
         Duration::from_secs(10),
         None,
+        false,
     )
 }
 
@@ -33116,6 +33117,7 @@ fn run_mcp_contract_inventory_with_test_delay(
     database: &Path,
     timeout: Duration,
     observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
 ) -> Result<String, Box<dyn Error>> {
     let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
@@ -33132,7 +33134,7 @@ fn run_mcp_contract_inventory_with_test_delay(
         ))
     })();
     complete_mcp_test_after_shutdown(operation_result, || {
-        session.shutdown_with_test_delay(timeout, observer_delay)
+        session.shutdown_with_test_delay(timeout, observer_delay, hold_stdin_until_observation)
     })
 }
 
@@ -33497,6 +33499,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         &database,
         OBSERVER_TIMEOUT,
         None,
+        false,
     )?;
     let late_shutdown = run_mcp_contract_inventory_with_test_delay(
         &executable,
@@ -33504,6 +33507,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         &database,
         OBSERVER_TIMEOUT,
         Some(FIRST_OBSERVATION_DELAY),
+        false,
     );
     let late_shutdown_text = late_shutdown
         .as_ref()
@@ -33519,14 +33523,15 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    // A zero-length private deadline drives each real owner through its
-    // running-child cleanup path without changing process-global state.
+    // Keep the real MCP server's owned pipe open so its stdio future is
+    // causally pending when the zero-length deadline probe runs.
     let still_running_shutdown = run_mcp_contract_inventory_with_test_delay(
         &executable,
         &repo,
         &database,
         Duration::ZERO,
         None,
+        true,
     );
     let still_running_shutdown_text = still_running_shutdown
         .as_ref()
@@ -33575,6 +33580,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
         OBSERVER_TIMEOUT,
         None,
+        false,
     )?;
     if mcp_response(&in_time_mcp, 1)?.get("result").is_none() {
         return Err(io::Error::other("in-time MCP observer omitted initialize result").into());
@@ -33587,6 +33593,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
         OBSERVER_TIMEOUT,
         Some(FIRST_OBSERVATION_DELAY),
+        false,
     );
     let late_mcp_text = late_mcp
         .as_ref()
@@ -33610,6 +33617,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
         Duration::ZERO,
         None,
+        true,
     );
     let still_running_mcp_text = still_running_mcp
         .as_ref()
@@ -33665,10 +33673,14 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
+    // The held stdio pipe keeps this real MCP child running until the observer
+    // kills this exact process and wait_with_output drains both streams.
     let still_running_installer = wait_for_plugin_installer_output_with_test_delay(
         StdCommand::new(&executable)
             .current_dir(&repo)
-            .arg("--version")
+            .arg("--db")
+            .arg(&database)
+            .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -34019,15 +34031,18 @@ impl McpContractSession {
 
     /// Close stdin and require a clean bounded process exit.
     fn shutdown(self) -> Result<(), Box<dyn Error>> {
-        self.shutdown_with_test_delay(Duration::from_secs(10), None)
+        self.shutdown_with_test_delay(Duration::from_secs(10), None, false)
     }
 
     fn shutdown_with_test_delay(
         mut self,
         timeout: Duration,
         observer_delay: Option<Duration>,
+        hold_stdin_until_observation: bool,
     ) -> Result<(), Box<dyn Error>> {
-        self.stdin.take();
+        if !hold_stdin_until_observation {
+            self.stdin.take();
+        }
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
@@ -34090,6 +34105,7 @@ impl McpContractSession {
                 ));
             }
         }
+        self.stdin.take();
         let wait_result = child.wait();
         let stdout_result = self.stdout_reader.take().map(|reader| {
             reader
@@ -34277,6 +34293,7 @@ fn run_mcp_stdio_with_env(
         environment,
         Duration::from_secs(10),
         None,
+        false,
     )
 }
 
@@ -34288,6 +34305,7 @@ fn run_mcp_stdio_with_env_and_test_delay(
     environment: &[(&str, Option<&str>)],
     timeout: Duration,
     observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
 ) -> Result<String, Box<dyn Error>> {
     let mut expected_responses = BTreeSet::new();
     for message in messages {
@@ -34319,10 +34337,12 @@ fn run_mcp_stdio_with_env_and_test_delay(
         }
     }
     let mut child = command.spawn()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?;
+    let mut stdin = Some(
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?,
+    );
     let mut stdout_pipe = child
         .stdout
         .take()
@@ -34352,6 +34372,9 @@ fn run_mcp_stdio_with_env_and_test_delay(
     });
 
     let response_result = (|| -> Result<(), Box<dyn Error>> {
+        let stdin = stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("mcp stdin was closed before requests were sent"))?;
         stdin.write_all(input.as_bytes())?;
         stdin.flush()?;
         let mut response_deadline = Instant::now()
@@ -34394,7 +34417,9 @@ fn run_mcp_stdio_with_env_and_test_delay(
         }
         Ok(())
     })();
-    drop(stdin);
+    if !hold_stdin_until_observation {
+        stdin.take();
+    }
     drop(response_receiver);
 
     let deadline = Instant::now()
@@ -34451,6 +34476,7 @@ fn run_mcp_stdio_with_env_and_test_delay(
             ));
         }
     }
+    stdin.take();
     let wait_result = child.wait();
     let stdout = stdout_reader
         .join()
