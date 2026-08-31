@@ -498,29 +498,15 @@ impl GraphIdentityAdmission {
             if self.rejections.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
                 continue;
             }
-            let existing_index = self
-                .rejections
-                .iter()
-                .enumerate()
-                .find(|(_, existing)| {
-                    existing.path == path
-                        && existing.span == span
-                        && existing.parser == parser
-                        && existing.fact_index == fact_index
-                        && existing.reason == *reason
-                })
-                .map(|(position, _)| position);
-            if let Some(existing) = existing_index.and_then(|index| self.rejections.get_mut(index))
-            {
-                // One parser fact can surface the same invalid identity through
-                // its symbol and relation projections. Keep one stable detail,
-                // preferring the relation field that owns import diagnostics.
-                if *field == GraphIdentityField::RelationTarget
-                    || (*field == GraphIdentityField::ResolutionKey
-                        && existing.field != GraphIdentityField::RelationTarget)
-                {
-                    existing.field = *field;
-                }
+            let already_retained = self.rejections.iter().any(|existing| {
+                existing.path == path
+                    && existing.span == span
+                    && existing.parser == parser
+                    && existing.fact_index == fact_index
+                    && existing.reason == *reason
+                    && existing.field == *field
+            });
+            if already_retained {
                 continue;
             }
             self.rejections.push(GraphIdentityRejection {
@@ -936,22 +922,17 @@ fn extend_bounded_identity_rejections(
         if target.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
             break;
         }
-        if let Some(existing) = target.iter_mut().find(|existing| {
+        if target.iter().any(|existing| {
             existing.path == rejection.path
                 && existing.span == rejection.span
                 && existing.parser == rejection.parser
                 && existing.fact_index == rejection.fact_index
                 && existing.reason == rejection.reason
+                && existing.field == rejection.field
         }) {
-            if rejection.field == GraphIdentityField::RelationTarget
-                || (rejection.field == GraphIdentityField::ResolutionKey
-                    && existing.field != GraphIdentityField::RelationTarget)
-            {
-                existing.field = rejection.field;
-            }
-        } else {
-            target.push(rejection);
+            continue;
         }
+        target.push(rejection);
     }
 }
 
@@ -12054,8 +12035,19 @@ mod tests {
             test_file_node("src/one.rs", "rust"),
             test_file_node("tests/two.rs", "rust"),
         ];
+        let mut first_graph =
+            identity_sibling_graph("src/one.rs", GraphIdentityField::RelationTarget);
+        first_graph.relations.push(SymbolRelation {
+            path: "src/one.rs".to_string(),
+            source_name: "bad\u{0}source".to_string(),
+            target_name: "bad\u{0}target".to_string(),
+            kind: RelationKind::Calls,
+            line: 4,
+            context: "identity admission dual-field fixture".to_string(),
+            parser: ParserKind::TreeSitter,
+        });
         let graphs = vec![
-            identity_sibling_graph("src/one.rs", GraphIdentityField::RelationTarget),
+            first_graph,
             identity_sibling_graph("tests/two.rs", GraphIdentityField::RelationSource),
         ];
         let symbols = symbol_build_stage_for_graphs(graphs);
@@ -12072,8 +12064,53 @@ mod tests {
         )?;
         require_eq(
             &staged.identity_rejections.len(),
-            &2,
+            &4,
             "full-stage typed rejection count",
+        )?;
+        let staged_dual_rejections = staged
+            .identity_rejections
+            .iter()
+            .filter(|row| {
+                row.path.as_str() == "src/one.rs"
+                    && row.span.start_line() == 4
+                    && row.reason == GraphIdentityRejectionReason::ControlCharacters
+            })
+            .collect::<Vec<_>>();
+        require_eq(
+            &staged_dual_rejections.len(),
+            &2,
+            "full-stage dual-field rejection details",
+        )?;
+        require(
+            staged_dual_rejections
+                .iter()
+                .any(|row| row.field == GraphIdentityField::RelationSource)
+                && staged_dual_rejections
+                    .iter()
+                    .any(|row| row.field == GraphIdentityField::RelationTarget),
+            "full-stage dual-field rejection lost source or target provenance",
+        )?;
+        require(
+            staged_dual_rejections
+                .iter()
+                .map(|row| row.fact_index)
+                .all(|fact_index| fact_index == staged_dual_rejections[0].fact_index),
+            "full-stage dual-field rejection lost parser fact identity",
+        )?;
+        let staged_first_coverage = staged
+            .coverage
+            .iter()
+            .find(|coverage| {
+                matches!(
+                    coverage.scope(),
+                    CoverageScope::Path { path } if path.as_str() == "src/one.rs"
+                )
+            })
+            .ok_or("full-stage first coverage row is missing")?;
+        require_eq(
+            &staged_first_coverage.omitted(),
+            &2,
+            "full-stage dual-field rejection counted once per parser fact",
         )?;
         let canceled = IndexWorkControl::new(IndexCancellation::new(), None);
         canceled.cancel();
@@ -12119,12 +12156,45 @@ mod tests {
             reopened.repository_graph_identity_rejections(project, &rejection_paths, 16, None)?;
         require_eq(
             &reopened_rejections.len(),
-            &2,
+            &4,
             "reopened full-stage typed rejection count",
+        )?;
+        let reopened_dual_rejections = reopened_rejections
+            .iter()
+            .filter(|row| {
+                row.path.as_str() == "src/one.rs"
+                    && row.span.start_line() == 4
+                    && row.reason == GraphIdentityRejectionReason::ControlCharacters
+            })
+            .collect::<Vec<_>>();
+        require_eq(
+            &reopened_dual_rejections.len(),
+            &2,
+            "reopened dual-field rejection details",
+        )?;
+        require(
+            reopened_dual_rejections
+                .iter()
+                .any(|row| row.field == GraphIdentityField::RelationSource)
+                && reopened_dual_rejections
+                    .iter()
+                    .any(|row| row.field == GraphIdentityField::RelationTarget),
+            "reopened dual-field rejection lost source or target provenance",
+        )?;
+        require(
+            reopened_dual_rejections
+                .iter()
+                .map(|row| row.fact_index)
+                .all(|fact_index| fact_index == reopened_dual_rejections[0].fact_index),
+            "reopened dual-field rejection lost parser fact identity",
         )?;
         let target_rejection = reopened_rejections
             .iter()
-            .find(|row| row.field == GraphIdentityField::RelationTarget)
+            .find(|row| {
+                row.field == GraphIdentityField::RelationTarget
+                    && row.path.as_str() == "src/one.rs"
+                    && row.span.start_line() == 3
+            })
             .ok_or("relation-target rejection is missing")?;
         require_eq(
             &target_rejection.path.as_str(),
@@ -12153,7 +12223,10 @@ mod tests {
         )?;
         let source_rejection = reopened_rejections
             .iter()
-            .find(|row| row.field == GraphIdentityField::RelationSource)
+            .find(|row| {
+                row.field == GraphIdentityField::RelationSource
+                    && row.path.as_str() == "tests/two.rs"
+            })
             .ok_or("relation-source rejection is missing")?;
         require_eq(
             &source_rejection.path.as_str(),

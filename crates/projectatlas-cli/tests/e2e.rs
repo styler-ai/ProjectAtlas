@@ -23371,7 +23371,7 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
     if reused_report["rows"][0]["omitted"] != 2
         || reused_report["rows"][0]["identity_rejections"]
             .as_array()
-            .is_none_or(|rows| rows.len() != 2)
+            .is_none_or(|rows| rows.len() != 6)
     {
         return Err(io::Error::other(format!(
             "reused full scan lost typed identity coverage: {reused_report}"
@@ -23405,7 +23405,7 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
     if reused_toon_report["coverage"]["rows"][0]["omitted"] != 2
         || reused_toon_report["coverage"]["rows"][0]["identity_rejections"]
             .as_array()
-            .is_none_or(|rows| rows.len() != 2)
+            .is_none_or(|rows| rows.len() != 6)
     {
         return Err(io::Error::other(format!(
             "reused full scan lost typed TOON identity coverage: {reused_toon_report}"
@@ -23445,7 +23445,7 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
     if reused_mcp_report["coverage"]["rows"][0]["omitted"] != 2
         || reused_mcp_report["coverage"]["rows"][0]["identity_rejections"]
             .as_array()
-            .is_none_or(|rows| rows.len() != 2)
+            .is_none_or(|rows| rows.len() != 6)
         || reused_mcp_text.contains("LeakedIdentity")
     {
         return Err(io::Error::other(format!(
@@ -23537,16 +23537,24 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
     if cli_report["returned"] != 1
         || cli_report["rows"][0]["reason"] != "parser does not prove complete relationship coverage"
         || cli_report["rows"][0]["omitted"] != 2
-        || identity_rejections.len() != 2
+        || identity_rejections.len() != 6
         || !has_first_import_rejection
         || !has_second_import_rejection
         || !identity_rejections.iter().all(|row| {
             row["path"] == relative_path
-                && row["field"] == "relation.target"
                 && row["reason"] == "control-characters"
                 && row["parser"] == "tree-sitter"
                 && matches!(row["span"]["start_line"].as_u64(), Some(1 | 2))
         })
+        || !["relation.target", "signature", "symbol"]
+            .into_iter()
+            .all(|field| {
+                identity_rejections
+                    .iter()
+                    .filter(|row| row["field"] == field)
+                    .count()
+                    == 2
+            })
     {
         return Err(io::Error::other(format!(
             "CLI coverage omitted typed identity rejection detail: {cli_report}"
@@ -23592,7 +23600,7 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
             ))
         })?;
     if toon_coverage["rows"][0]["omitted"] != 2
-        || toon_rejections.len() != 2
+        || toon_rejections.len() != 6
         || toon_rejections != identity_rejections
     {
         return Err(io::Error::other(format!(
@@ -23640,7 +23648,7 @@ fn typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage() -> Result<
         .as_array()
         .ok_or_else(|| io::Error::other("MCP coverage omitted identity rejection rows"))?;
     if mcp_coverage["rows"][0]["omitted"] != 2
-        || mcp_rejections.len() != 2
+        || mcp_rejections.len() != 6
         || mcp_rejections != identity_rejections
         || mcp_coverage["rows"][0]["reason"]
             != "parser does not prove complete relationship coverage"

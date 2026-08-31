@@ -8051,6 +8051,8 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo");
         fs::create_dir_all(&root)?;
+        let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+        let expected_root = expected_identity.display_string()?;
         let db_path = temp.path().join("projectatlas.db");
         write_schema_eight_fixture(&db_path, &root)?;
         let connection = Connection::open(&db_path)?;
@@ -8074,8 +8076,11 @@ mod tests {
             END;
             ",
         ))?;
-        let Err(error) = initialize(&connection, Some(&normalize_native_path_display(&root)))
-        else {
+        let Err(error) = initialize_with_project_root(
+            &connection,
+            Some(&expected_root),
+            Some(&expected_identity),
+        ) else {
             return Err(io::Error::other("late migration failure unexpectedly committed").into());
         };
         if !matches!(error, DbError::Sqlite(_)) {
@@ -8161,7 +8166,7 @@ mod tests {
             return Err(io::Error::other("failed migration changed project root identity").into());
         }
         connection.execute_batch("DROP TRIGGER abort_final_schema_version")?;
-        initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+        initialize_with_project_root(&connection, Some(&expected_root), Some(&expected_identity))?;
         if read_metadata(&connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string()) {
             return Err(io::Error::other("retry did not advance the final schema version").into());
         }
@@ -8202,6 +8207,8 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo");
         fs::create_dir_all(&root)?;
+        let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+        let expected_root = expected_identity.display_string()?;
         let db_path = temp.path().join("projectatlas.db");
         let connection = Connection::open(&db_path)?;
         configure_writable(&connection)?;
@@ -8239,8 +8246,11 @@ mod tests {
             |row| row.get::<_, Vec<u8>>(0),
         )?;
 
-        let Err(error) = initialize(&connection, Some(&normalize_native_path_display(&root)))
-        else {
+        let Err(error) = initialize_with_project_root(
+            &connection,
+            Some(&expected_root),
+            Some(&expected_identity),
+        ) else {
             return Err(io::Error::other("malformed telemetry unexpectedly migrated").into());
         };
         if !matches!(error, DbError::InvalidEnum { .. }) {
@@ -8336,7 +8346,7 @@ mod tests {
              )",
             [],
         )?;
-        initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+        initialize_with_project_root(&connection, Some(&expected_root), Some(&expected_identity))?;
         let migrated = connection.query_row(
             "SELECT
                  (SELECT COUNT(*) FROM usage_events),
@@ -8553,6 +8563,8 @@ mod tests {
             let temp = tempfile::tempdir()?;
             let root = temp.path().join("repo");
             fs::create_dir_all(&root)?;
+            let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+            let expected_root = expected_identity.display_string()?;
             let connection = Connection::open(temp.path().join("projectatlas.db"))?;
             configure_writable(&connection)?;
             create_released_schema_eight(&connection)?;
@@ -8601,7 +8613,11 @@ mod tests {
             insert.execute(params![distinct_identity, distinct_fingerprint])?;
             drop(insert);
 
-            initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+            initialize_with_project_root(
+                &connection,
+                Some(&expected_root),
+                Some(&expected_identity),
+            )?;
             let migrated = connection.query_row(
                 "SELECT
                  (SELECT COUNT(*) FROM usage_events),
