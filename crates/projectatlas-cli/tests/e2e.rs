@@ -33680,33 +33680,36 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let mut session_probe_cleanup_packet = None;
-    let session_probe_failure = {
-        let mut session_probe_cleanup_handoff = |packet: McpContractCleanupPacket| {
-            session_probe_cleanup_packet = Some(packet);
-        };
-        run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
-            &executable,
-            &repo,
-            &database,
-            OBSERVER_TIMEOUT,
-            Some(FIRST_OBSERVATION_DELAY),
-            false,
-            Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
-            None,
-            &mut |child| child.kill(),
-            Some(&mut session_probe_cleanup_handoff),
-        )
-    };
+    let mut session_probe_kill_attempted = false;
+    let mut session_probe_was_live = false;
+    let session_probe_failure = run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        true,
+        Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+        None,
+        &mut |child| {
+            session_probe_kill_attempted = true;
+            session_probe_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
     require_injected_exit_probe_failure(
         &session_probe_failure,
         "MCP session observer",
         INJECTED_EXIT_PROBE_FAILURE,
-        "cleanup incomplete: child/readers detached",
+        "cleanup complete: child reaped and readers joined",
     )?;
-    reap_mcp_contract_packet(session_probe_cleanup_packet.take().ok_or_else(|| {
-        io::Error::other("session exit-probe ownership was not synchronously transferred")
-    })?)?;
+    if !session_probe_kill_attempted || !session_probe_was_live {
+        return Err(io::Error::other(
+            "MCP session synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
     // Keep the real MCP server's owned pipe open so its stdio future is
     // causally pending when the zero-length deadline probe runs.
     let still_running_shutdown = run_mcp_contract_inventory_with_test_delay(
@@ -33864,42 +33867,38 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let mut stdio_probe_cleanup_packet = None;
-    let stdio_probe_failure = {
-        let mut stdio_probe_cleanup_handoff =
-            |child: Child,
-             stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
-                stdio_probe_cleanup_packet = Some(McpStdioCleanupPacket {
-                    child,
-                    stdout_reader,
-                    stderr_reader,
-                });
-            };
-        run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
-            &executable,
-            &repo,
-            &args,
-            &messages,
-            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
-            OBSERVER_TIMEOUT,
-            Some(FIRST_OBSERVATION_DELAY),
-            false,
-            Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
-            None,
-            &mut |child| child.kill(),
-            Some(&mut stdio_probe_cleanup_handoff),
-        )
-    };
+    let mut stdio_probe_kill_attempted = false;
+    let mut stdio_probe_was_live = false;
+    let stdio_probe_failure = run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        true,
+        Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+        None,
+        &mut |child| {
+            stdio_probe_kill_attempted = true;
+            stdio_probe_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
     require_injected_exit_probe_failure(
         &stdio_probe_failure,
         "MCP stdio observer",
         INJECTED_EXIT_PROBE_FAILURE,
-        "cleanup incomplete: child/readers detached",
+        "cleanup complete: child reaped and readers joined",
     )?;
-    reap_mcp_stdio_packet(stdio_probe_cleanup_packet.take().ok_or_else(|| {
-        io::Error::other("stdio exit-probe ownership was not synchronously transferred")
-    })?)?;
+    if !stdio_probe_kill_attempted || !stdio_probe_was_live {
+        return Err(io::Error::other(
+            "MCP stdio synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
     let still_running_mcp = run_mcp_stdio_with_env_and_test_delay(
         &executable,
         &repo,
@@ -34021,15 +34020,16 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let mut installer_probe_cleanup_child = None;
-    let installer_probe_failure = {
-        let mut installer_probe_cleanup_handoff = |child: Child| {
-            installer_probe_cleanup_child = Some(child);
-        };
+    let mut installer_probe_kill_attempted = false;
+    let mut installer_probe_was_live = false;
+    let installer_probe_failure =
         wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             StdCommand::new(&executable)
                 .current_dir(&repo)
-                .arg("--version")
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()?,
@@ -34038,19 +34038,25 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
             Some(FIRST_OBSERVATION_DELAY),
             Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
             None,
-            &mut |child| child.kill(),
-            Some(&mut installer_probe_cleanup_handoff),
-        )
-    };
+            &mut |child| {
+                installer_probe_kill_attempted = true;
+                installer_probe_was_live = child.try_wait()?.is_none();
+                child.kill()
+            },
+            None,
+        );
     require_injected_exit_probe_failure(
         &installer_probe_failure,
         "installer observer",
         INJECTED_EXIT_PROBE_FAILURE,
-        "cleanup incomplete: child detached",
+        "cleanup complete: child reaped and output drained",
     )?;
-    reap_plugin_installer_child(installer_probe_cleanup_child.take().ok_or_else(|| {
-        io::Error::other("installer exit-probe ownership was not synchronously transferred")
-    })?)?;
+    if !installer_probe_kill_attempted || !installer_probe_was_live {
+        return Err(io::Error::other(
+            "installer synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
     // The held stdio pipe keeps this real MCP child running until the observer
     // kills this exact process and wait_with_output drains both streams.
     let still_running_installer = wait_for_plugin_installer_output_with_test_delay(
@@ -34859,7 +34865,8 @@ impl McpContractSession {
         if !hold_stdin_until_observation {
             self.stdin.take();
         }
-        if observer_delay.is_some() && !hold_stdin_until_observation {
+        if observer_delay.is_some() && (!hold_stdin_until_observation || exit_probe_error.is_some())
+        {
             let synchronization = self.child.as_mut().map_or_else(
                 || Err(io::Error::other("MCP contract child was consumed")),
                 |child| {
@@ -34874,7 +34881,13 @@ impl McpContractSession {
                 self.stdin.take();
                 let stdout_reader = self.stdout_reader.take();
                 let stderr_reader = self.stderr_reader.take();
-                if let Some(child) = self.child.take() {
+                let mut child = self
+                    .child
+                    .take()
+                    .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+                let kill_result = kill_child(&mut child);
+                let status_after_kill = child.try_wait();
+                if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
                     let packet = McpContractCleanupPacket {
                         child,
                         stdout_reader,
@@ -34885,12 +34898,33 @@ impl McpContractSession {
                     } else {
                         drop(packet);
                     }
-                } else {
-                    drop(stdout_reader);
-                    drop(stderr_reader);
+                    let mut diagnostic = format!(
+                        "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+                    );
+                    if let Some(kill_error) = kill_result.as_ref().err() {
+                        diagnostic.push_str("; termination failed: ");
+                        diagnostic.push_str(&kill_error.to_string());
+                    }
+                    if let Err(probe_error) = status_after_kill {
+                        diagnostic.push_str("; re-probe failed after termination attempt: ");
+                        diagnostic.push_str(&probe_error.to_string());
+                    }
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+                let status = child.wait()?;
+                self.disconnect_responses();
+                if let Some(reader) = stdout_reader {
+                    reader.join().map_err(|_panic| {
+                        io::Error::other("MCP contract stdout reader panicked")
+                    })?;
+                }
+                if let Some(reader) = stderr_reader {
+                    reader.join().map_err(|_panic| {
+                        io::Error::other("MCP contract stderr reader panicked")
+                    })??;
                 }
                 let diagnostic = format!(
-                    "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+                    "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
                 );
                 return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
             }
@@ -35445,7 +35479,7 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
     drop(response_receiver);
 
     if observer_delay.is_some()
-        && !hold_stdin_until_observation
+        && (!hold_stdin_until_observation || exit_probe_error.is_some())
         && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
             &mut child,
             "projectatlas mcp",
@@ -35453,16 +35487,40 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         )
     {
         stdin.take();
-        if let Some(handoff) = handoff_live_child {
-            handoff(child, stdout_reader, stderr_reader);
-        } else {
-            drop(child);
-            drop(stdout_reader);
-            drop(stderr_reader);
+        let kill_result = kill_child(&mut child);
+        let status_after_kill = child.try_wait();
+        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+            if let Some(handoff) = handoff_live_child {
+                handoff(child, stdout_reader, stderr_reader);
+            } else {
+                drop(child);
+                drop(stdout_reader);
+                drop(stderr_reader);
+            }
+            let mut diagnostic = format!(
+                "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+            );
+            if let Some(kill_error) = kill_result.as_ref().err() {
+                diagnostic.push_str("; termination failed: ");
+                diagnostic.push_str(&kill_error.to_string());
+            }
+            if let Err(probe_error) = status_after_kill {
+                diagnostic.push_str("; re-probe failed after termination attempt: ");
+                diagnostic.push_str(&probe_error.to_string());
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
+        let status = child.wait()?;
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
         let diagnostic = format!(
-            "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+            "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
         );
+        let _ = (stdout, stderr);
         return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
     }
 
@@ -39440,13 +39498,31 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
         )
     {
         child.stdin.take();
-        if let Some(handoff) = handoff_live_child {
-            handoff(child);
-        } else {
-            drop(child);
+        let kill_result = kill_child(&mut child);
+        let status_after_kill = child.try_wait();
+        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+            if let Some(handoff) = handoff_live_child {
+                handoff(child);
+            } else {
+                drop(child);
+            }
+            let mut diagnostic = format!(
+                "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup incomplete: child detached"
+            );
+            if let Some(kill_error) = kill_result.as_ref().err() {
+                diagnostic.push_str("; termination failed: ");
+                diagnostic.push_str(&kill_error.to_string());
+            }
+            if let Err(probe_error) = status_after_kill {
+                diagnostic.push_str("; re-probe failed after termination attempt: ");
+                diagnostic.push_str(&probe_error.to_string());
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
+        let output = child.wait_with_output()?;
         let diagnostic = format!(
-            "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup incomplete: child detached"
+            "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and output drained status={}",
+            output.status
         );
         return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
     }
