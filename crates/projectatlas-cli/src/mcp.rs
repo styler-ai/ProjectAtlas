@@ -3629,7 +3629,7 @@ impl McpRequestCancellationBridge {
             "result_was_canceled": result_was_canceled,
             "outcome": outcome,
         });
-        self.write_benchmark_stage(payload)?;
+        Self::write_benchmark_stage(&payload)?;
         self.terminal_recorded.store(true, Ordering::Release);
         Ok(())
     }
@@ -3637,7 +3637,7 @@ impl McpRequestCancellationBridge {
     /// Persist one benchmark-only cancellation lifecycle stage.
     #[cfg(feature = "reverse-caller-benchmark")]
     fn record_benchmark_stage(&self, stage: &str) -> Result<(), CliError> {
-        self.write_benchmark_stage(serde_json::json!({
+        Self::write_benchmark_stage(&serde_json::json!({
             "stage": stage,
             "request_cancellation_observed": (self.probe)(),
             "work_cancellation_observed": self.cancellation_observed.load(Ordering::Acquire),
@@ -3646,7 +3646,7 @@ impl McpRequestCancellationBridge {
 
     /// Write one feature-only benchmark stage when a trace path is configured.
     #[cfg(feature = "reverse-caller-benchmark")]
-    fn write_benchmark_stage(&self, payload: serde_json::Value) -> Result<(), CliError> {
+    fn write_benchmark_stage(payload: &serde_json::Value) -> Result<(), CliError> {
         let Some(path) = std::env::var_os("PROJECTATLAS_REVERSE_CALLER_CANCELLATION_TRACE") else {
             return Ok(());
         };
@@ -3666,7 +3666,7 @@ impl Drop for McpRequestCancellationBridge {
         if self.cancellation_observed.load(Ordering::Acquire)
             && !self.terminal_recorded.load(Ordering::Acquire)
         {
-            drop(self.write_benchmark_stage(serde_json::json!({
+            drop(Self::write_benchmark_stage(&serde_json::json!({
                 "stage": "terminal",
                 "request_cancellation_observed": (self.probe)(),
                 "work_cancellation_observed": true,
