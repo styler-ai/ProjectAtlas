@@ -34098,7 +34098,24 @@ impl McpContractSession {
                 (status, observed_at)
             };
             if status.is_none() {
-                drop(child.kill());
+                let kill_result = child.kill();
+                let status_after_kill = match child.try_wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        self.stdin.take();
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = kill_result {
+                    if status_after_kill.is_none() {
+                        self.stdin.take();
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!("MCP contract server termination failed: {error}"),
+                        )
+                        .into());
+                    }
+                }
             } else if timeout_reason.as_deref() == Some("still running at deadline") {
                 timeout_reason = Some(format!(
                     "completed after deadline (observed_at={observed_at:?})"
@@ -34469,7 +34486,24 @@ fn run_mcp_stdio_with_env_and_test_delay(
             (status, observed_at)
         };
         if status.is_none() {
-            drop(child.kill());
+            let kill_result = child.kill();
+            let status_after_kill = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    stdin.take();
+                    return Err(error.into());
+                }
+            };
+            if let Err(error) = kill_result {
+                if status_after_kill.is_none() {
+                    stdin.take();
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("projectatlas mcp termination failed: {error}"),
+                    )
+                    .into());
+                }
+            }
         } else if timeout_reason.as_deref() == Some("still running at deadline") {
             timeout_reason = Some(format!(
                 "completed after deadline (observed_at={observed_at:?})"
