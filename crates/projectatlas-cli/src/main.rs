@@ -86,6 +86,8 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(feature = "reverse-caller-benchmark")]
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -94,6 +96,8 @@ use std::os::fd::AsFd;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "reverse-caller-benchmark")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
@@ -105,6 +109,116 @@ use token_tui::{
 };
 #[cfg(test)]
 use token_tui::{render_token_dashboard, render_token_dashboard_with_atlas_at_width};
+
+/// Process-local allocation counters used only by the reverse-caller benchmark binary.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[allow(unsafe_code)]
+#[allow(clippy::missing_docs_in_private_items)]
+mod reverse_caller_benchmark {
+    use super::{AtomicU64, GlobalAlloc, Layout, Ordering, System};
+    use serde::Serialize;
+
+    static ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
+    static ALLOCATION_BYTES: AtomicU64 = AtomicU64::new(0);
+    static DEALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
+    static DEALLOCATION_BYTES: AtomicU64 = AtomicU64::new(0);
+    static REALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
+    static REALLOCATION_BYTES: AtomicU64 = AtomicU64::new(0);
+
+    /// Standard allocator wrapper that records only successfully requested operations.
+    struct CountingAllocator;
+
+    // SAFETY: Every operation is delegated to the standard system allocator without
+    // changing its pointer, layout, or ownership contract. The counters are atomic.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: The caller provides the layout required by the GlobalAlloc contract.
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                record_allocation(layout.size());
+            }
+            pointer
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: The caller provides the layout required by the GlobalAlloc contract.
+            let pointer = unsafe { System.alloc_zeroed(layout) };
+            if !pointer.is_null() {
+                record_allocation(layout.size());
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            // SAFETY: The caller provides the pointer and layout returned by this allocator.
+            unsafe { System.dealloc(pointer, layout) };
+            DEALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
+            DEALLOCATION_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: The caller provides the pointer, old layout, and new size required by
+            // the GlobalAlloc contract.
+            let replacement = unsafe { System.realloc(pointer, layout, new_size) };
+            if !replacement.is_null() {
+                REALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
+                REALLOCATION_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+            }
+            replacement
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: CountingAllocator = CountingAllocator;
+
+    /// Raw allocation totals captured around one public summary operation.
+    #[derive(Clone, Copy, Debug, Serialize)]
+    pub(crate) struct AllocationMetrics {
+        /// Successful `alloc` and `alloc_zeroed` calls.
+        pub allocation_calls: u64,
+        /// Requested bytes for successful `alloc` and `alloc_zeroed` calls.
+        pub allocation_bytes: u64,
+        /// Successful `realloc` calls, reported separately from fresh allocations.
+        pub reallocation_calls: u64,
+        /// New sizes requested by successful `realloc` calls.
+        pub reallocation_bytes: u64,
+        /// `dealloc` calls observed during the operation.
+        pub deallocation_calls: u64,
+        /// Bytes described by observed `dealloc` calls.
+        pub deallocation_bytes: u64,
+    }
+
+    /// Reset counters immediately before the measured public operation.
+    pub(crate) fn reset() {
+        for counter in [
+            &ALLOCATION_CALLS,
+            &ALLOCATION_BYTES,
+            &DEALLOCATION_CALLS,
+            &DEALLOCATION_BYTES,
+            &REALLOCATION_CALLS,
+            &REALLOCATION_BYTES,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Snapshot counters immediately after the measured public operation.
+    pub(crate) fn snapshot() -> AllocationMetrics {
+        AllocationMetrics {
+            allocation_calls: ALLOCATION_CALLS.load(Ordering::Relaxed),
+            allocation_bytes: ALLOCATION_BYTES.load(Ordering::Relaxed),
+            reallocation_calls: REALLOCATION_CALLS.load(Ordering::Relaxed),
+            reallocation_bytes: REALLOCATION_BYTES.load(Ordering::Relaxed),
+            deallocation_calls: DEALLOCATION_CALLS.load(Ordering::Relaxed),
+            deallocation_bytes: DEALLOCATION_BYTES.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_allocation(bytes: usize) {
+        ALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATION_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+}
 
 /// Default relative path for the `SQLite` index.
 const DEFAULT_DB_PATH: &str = ".projectatlas/projectatlas.db";
@@ -1889,25 +2003,30 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             #[cfg(feature = "reverse-caller-benchmark")]
             let benchmark_trace_path =
                 std::env::var_os("PROJECTATLAS_REVERSE_CALLER_TRACE").map(PathBuf::from);
+            let file_key = validated_indexed_file_key(&store, file)?;
+            let content = read_indexed_file_content(&store, &file_key)?;
             #[cfg(feature = "reverse-caller-benchmark")]
             if benchmark_trace_path.is_some() {
                 store.start_reverse_caller_benchmark_trace();
+                reverse_caller_benchmark::reset();
             }
-            let file_key = validated_indexed_file_key(&store, file)?;
-            let content = read_indexed_file_content(&store, &file_key)?;
-            let report = build_file_summary_from_source_with_selection(
+            let report_result = build_file_summary_from_source_with_selection(
                 &store,
                 Path::new(&file_key),
                 *limit,
                 &content,
                 content_selection.unwrap_or_default(),
-            )?;
+            );
             #[cfg(feature = "reverse-caller-benchmark")]
             if let Some(path) = benchmark_trace_path {
                 let trace = store.take_reverse_caller_benchmark_trace();
-                let encoded = serde_json::to_vec_pretty(&trace)?;
+                let encoded = serde_json::to_vec_pretty(&json!({
+                    "queries": trace,
+                    "allocations": reverse_caller_benchmark::snapshot(),
+                }))?;
                 fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })?;
             }
+            let report = report_result?;
             let toon = render_file_summary(&report);
             print_tracked_output_text(
                 cli.format,

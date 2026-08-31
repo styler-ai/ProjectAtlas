@@ -9,11 +9,13 @@ import hashlib
 import io
 import json
 import os
+import queue
 import sqlite3
 import statistics
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -124,7 +126,10 @@ def require_success(measured: dict[str, Any], label: str) -> None:
 def sanitize_text(value: bytes, fixture_root: Path) -> str:
     """Redact temporary fixture paths without changing comparison bytes."""
 
-    return value.decode("utf-8", errors="replace").replace(str(fixture_root), "<fixture>")
+    text = value.decode("utf-8", errors="replace")
+    return text.replace(str(fixture_root), "<fixture>").replace(
+        fixture_root.as_posix(), "<fixture>"
+    )
 
 
 def serialize_process(measured: dict[str, Any], fixture_root: Path) -> dict[str, Any]:
@@ -145,6 +150,175 @@ def serialize_process(measured: dict[str, Any], fixture_root: Path) -> dict[str,
         "stderr_sha256": sha256_bytes(stderr),
         "stderr_base64": base64.b64encode(stderr).decode("ascii"),
         "stderr_text": sanitize_text(stderr, fixture_root),
+    }
+
+
+def run_mcp_cancellation(
+    binary: Path,
+    root: Path,
+    target: str,
+) -> dict[str, Any]:
+    """Cancel one real MCP summary request through the supported request boundary."""
+
+    process = subprocess.Popen(
+        [str(binary), "mcp"],
+        cwd=root,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout = bytearray()
+    responses: dict[int, queue.Queue[dict[str, Any] | BaseException]] = {}
+    response_lock = threading.Lock()
+
+    def read_responses() -> None:
+        assert process.stdout is not None
+        try:
+            for line in iter(process.stdout.readline, b""):
+                stdout.extend(line)
+                try:
+                    response = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                request_id = response.get("id")
+                if isinstance(request_id, int):
+                    with response_lock:
+                        response_queue = responses.get(request_id)
+                    if response_queue is not None:
+                        response_queue.put(response)
+        except BaseException as error:
+            with response_lock:
+                response_queues = list(responses.values())
+            for response_queue in response_queues:
+                response_queue.put(error)
+
+    reader = threading.Thread(
+        target=read_responses,
+        name="projectatlas-reverse-caller-mcp-reader",
+        daemon=True,
+    )
+    reader.start()
+
+    def request(request_id: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        response_queue: queue.Queue[dict[str, Any] | BaseException] = queue.Queue(maxsize=1)
+        with response_lock:
+            responses[request_id] = response_queue
+        assert process.stdin is not None
+        process.stdin.write(
+            (json.dumps(
+                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+                separators=(",", ":"),
+            ) + "\n").encode("utf-8")
+        )
+        process.stdin.flush()
+        response: dict[str, Any] | BaseException | None = None
+        try:
+            response = response_queue.get(timeout=RUN_TIMEOUT_SECONDS)
+        finally:
+            with response_lock:
+                responses.pop(request_id, None)
+        if response is None:
+            raise RuntimeError(f"MCP response {request_id} was empty")
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    def notify(method: str, params: dict[str, Any]) -> None:
+        assert process.stdin is not None
+        process.stdin.write(
+            (json.dumps(
+                {"jsonrpc": "2.0", "method": method, "params": params},
+                separators=(",", ":"),
+            ) + "\n").encode("utf-8")
+        )
+        process.stdin.flush()
+
+    stderr = b""
+    cleanup_error: BaseException | None = None
+    try:
+        initialize = request(
+            1,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "projectatlas-reverse-caller-benchmark", "version": "1"},
+            },
+        )
+        if initialize.get("error") is not None:
+            raise RuntimeError(f"MCP initialize failed: {initialize['error']}")
+        notify("notifications/initialized", {})
+        response_queue: queue.Queue[dict[str, Any] | BaseException] = queue.Queue(maxsize=1)
+        ping_queue: queue.Queue[dict[str, Any] | BaseException] = queue.Queue(maxsize=1)
+        with response_lock:
+            responses[2] = response_queue
+            responses[3] = ping_queue
+        assert process.stdin is not None
+        process.stdin.write(
+            (json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "atlas_file_summary",
+                        "arguments": {"file": target, "limit": SUMMARY_LIMIT},
+                    },
+                },
+                separators=(",", ":"),
+            ) + "\n").encode("utf-8")
+        )
+        process.stdin.flush()
+        # MCP cancellation is a notification for the in-flight request, not process teardown.
+        notify(
+            "notifications/cancelled",
+            {"requestId": 2, "reason": "reverse-caller benchmark cancellation"},
+        )
+        # A live ping proves the server stayed up while rmcp suppressed the
+        # canceled request's response; a response for id=2 would be a failure.
+        request(3, "ping", {})
+        time.sleep(0.3)
+        if not response_queue.empty():
+            raise AssertionError("canceled MCP summary emitted a response")
+        with response_lock:
+            responses.pop(2, None)
+            responses.pop(3, None)
+    except BaseException as error:
+        cleanup_error = error
+    finally:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        reader.join(timeout=5)
+        if reader.is_alive() and cleanup_error is None:
+            cleanup_error = RuntimeError("MCP response reader did not stop")
+        if process.stderr is not None:
+            stderr = process.stderr.read()
+    if cleanup_error is not None:
+        raise cleanup_error
+    response_text = json.dumps(
+        {"canceled_request_response": None, "ping": "ok"},
+        sort_keys=True,
+    )
+    return {
+        "returncode": process.returncode,
+        "stdout_bytes": len(stdout),
+        "stdout_sha256": sha256_bytes(bytes(stdout)),
+        "stdout_base64": base64.b64encode(bytes(stdout)).decode("ascii"),
+        "stdout_text": sanitize_text(bytes(stdout), root),
+        "stderr_bytes": len(stderr),
+        "stderr_sha256": sha256_bytes(stderr),
+        "stderr_base64": base64.b64encode(stderr).decode("ascii"),
+        "stderr_text": sanitize_text(stderr, root),
+        "response_sha256": sha256_bytes(response_text.encode("utf-8")),
+        "response_text": response_text,
+        "response_is_error": False,
+        "outcome": "canceled",
+        "partial_success": False,
     }
 
 
@@ -254,6 +428,19 @@ def write_fixture(root: Path, shape: str) -> list[dict[str, Any]]:
     return targets
 
 
+def write_cancellation_fixture(root: Path) -> dict[str, Any]:
+    """Create one bounded high-symbol fixture that leaves time for MCP cancellation."""
+
+    target = next(
+        item for item in write_fixture(root, "high-symbol") if item["language"] == "rust"
+    )
+    target["symbol_count"] = 10_000
+    (root / target["path"]).write_text(
+        source_for("rust", target["symbol_count"]), encoding="utf-8"
+    )
+    return target
+
+
 def expected_called_by(target: dict[str, Any], shape: str, symbol: int) -> list[str]:
     """Return the exact semantic caller list for one generated target symbol."""
 
@@ -333,6 +520,12 @@ def run_summary(
     result = serialize_process(measured, root)
     result["target"] = target["path"]
     result["limit"] = limit
+    trace = {"queries": [], "allocations": None}
+    if trace_path.is_file():
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        trace_path.unlink()
+    result["allocation_metrics"] = trace.get("allocations")
+    result["query_observations"] = trace.get("queries", [])
     if measured["returncode"] == 0:
         try:
             payload = json.loads(measured["stdout"])
@@ -340,12 +533,8 @@ def run_summary(
             raise AssertionError(f"summary emitted invalid JSON: {error}") from error
         assert_semantics(payload, target, shape)
         result["decoded_summary"] = payload
-        if not trace_path.is_file():
-            raise AssertionError(f"successful summary did not retain {trace_path}")
-        result["query_observations"] = json.loads(trace_path.read_text(encoding="utf-8"))
-        trace_path.unlink()
-    else:
-        result["query_observations"] = []
+        if result["allocation_metrics"] is None:
+            raise AssertionError("successful summary did not retain allocation metrics")
     return result
 
 
@@ -390,9 +579,6 @@ def aggregate_queries(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "events": observations,
         "by_family": by_family,
-        "allocation_proxy_bytes": sum(
-            observation["row_bytes"] for observation in observations
-        ),
     }
 
 
@@ -431,6 +617,19 @@ def measure_shape(
             key: statistics.median(run[key] for run in runs)
             for key in ("wall_ms", "cpu_ms", "peak_rss_bytes", "stdout_bytes")
         }
+        allocation_runs = [
+            run["allocation_metrics"]
+            for run in runs
+            if isinstance(run.get("allocation_metrics"), dict)
+        ]
+        if len(allocation_runs) != len(runs):
+            raise AssertionError(f"{arm} {shape} did not retain allocation metrics for every run")
+        metrics["allocation_calls"] = statistics.median(
+            run["allocation_calls"] for run in allocation_runs
+        )
+        metrics["allocation_bytes"] = statistics.median(
+            run["allocation_bytes"] for run in allocation_runs
+        )
         return {
             "targets": targets,
             "setup": setup,
@@ -455,6 +654,20 @@ def mutate_corrupt_row(database: Path) -> None:
         connection.close()
 
 
+def cancellation_case(binary: Path, arm: str) -> dict[str, Any]:
+    """Compare one supported MCP summary cancellation against the other arm."""
+
+    with tempfile.TemporaryDirectory(prefix=f"projectatlas-cancellation-{arm}-") as directory:
+        root = Path(directory)
+        (root / "src").mkdir(parents=True, exist_ok=True)
+        target = write_cancellation_fixture(root)
+        setup_fixture(binary, root)
+        result = run_mcp_cancellation(binary, root, target["path"])
+        result["case"] = "mcp-summary-cancellation"
+        result["target"] = target["path"]
+        return result
+
+
 def failure_case(binary: Path, name: str, arm: str) -> dict[str, Any]:
     """Capture one negative or failure result through the same CLI boundary."""
 
@@ -476,6 +689,7 @@ def failure_case(binary: Path, name: str, arm: str) -> dict[str, Any]:
             )
         else:
             raise ValueError(name)
+        trace_path = root.parent / f"{root.name}-trace-failure-{arm}.json"
         measured = run_process(
             [
                 str(binary),
@@ -487,10 +701,17 @@ def failure_case(binary: Path, name: str, arm: str) -> dict[str, Any]:
                 str(SUMMARY_LIMIT),
             ],
             root,
+            trace_path=trace_path,
         )
         result = serialize_process(measured, root)
         result["case"] = name
         result["target"] = target_path
+        trace = {"queries": [], "allocations": None}
+        if trace_path.is_file():
+            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            trace_path.unlink()
+        result["allocation_metrics"] = trace.get("allocations")
+        result["query_observations"] = trace.get("queries", [])
         if name == "corrupt-relation":
             if measured["returncode"] == 0:
                 raise AssertionError("malformed relation unexpectedly succeeded")
@@ -517,6 +738,32 @@ def compare_raw_runs(
         findings.append("decoded summary drift")
     if baseline.get("query_observations") != candidate.get("query_observations"):
         findings.append("production query observation drift")
+    return findings
+
+
+def compare_cancellation_runs(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+) -> list[str]:
+    """Compare cancellation outcome and complete MCP process streams."""
+
+    findings: list[str] = []
+    for field in (
+        "returncode",
+        "outcome",
+        "response_is_error",
+        "partial_success",
+        "stdout_base64",
+        "stderr_base64",
+        "response_text",
+    ):
+        if baseline.get(field) != candidate.get(field):
+            findings.append(f"cancellation {field} drift")
+    for label, run in (("baseline", baseline), ("candidate", candidate)):
+        if run.get("outcome") != "canceled":
+            findings.append(f"{label} cancellation was not observed")
+        if run.get("partial_success"):
+            findings.append(f"{label} cancellation emitted a successful summary")
     return findings
 
 
@@ -689,8 +936,19 @@ def main() -> None:
             )
         )
 
+    cancellation = {
+        "baseline": cancellation_case(baseline_binary, "baseline"),
+        "candidate": cancellation_case(candidate_binary, "candidate"),
+    }
+    semantic_findings.extend(
+        f"mcp-summary-cancellation: {finding}"
+        for finding in compare_cancellation_runs(
+            cancellation["baseline"], cancellation["candidate"]
+        )
+    )
+
     result = {
-        "schema": "projectatlas.reverse-caller-performance.v3",
+        "schema": "projectatlas.reverse-caller-performance.v4",
         "issue": 342,
         "repository_revision": git_revision(),
         "repeats": args.repeats,
@@ -708,6 +966,7 @@ def main() -> None:
         },
         "candidate_patch_preflight": candidate_patch_preflight,
         "failure_cases": failures,
+        "cancellation": cancellation,
         "decision": decision(baseline, candidate, semantic_findings),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
