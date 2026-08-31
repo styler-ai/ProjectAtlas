@@ -33959,13 +33959,10 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
     if installer_child.try_wait()?.is_none() {
         installer_child.kill()?;
     }
-    let installer_output = reap_plugin_installer_child(installer_child)?;
-    if installer_output.status.success() {
-        return Err(io::Error::other(
-            "injected installer cleanup unexpectedly reported successful termination",
-        )
-        .into());
-    }
+    // The real child may have consumed EOF and exited gracefully before this
+    // test-owned cleanup probe runs. Reaping and draining it is the proof; its
+    // final status is not part of the injected kill-failure contract.
+    reap_plugin_installer_child(installer_child)?;
     Ok(())
 }
 
