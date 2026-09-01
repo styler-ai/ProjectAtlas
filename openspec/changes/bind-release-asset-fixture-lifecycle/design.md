@@ -6,8 +6,8 @@
 
 **Goals:**
 
-- Make the server and installer follow one four-minute absolute operation deadline created before either is launched, with one minute reserved for cleanup under the existing five-minute CI step.
-- Retain exact archive/checksum path and payload validation and deterministic thread/process cleanup.
+- Make the server and installer follow one four-minute absolute operation deadline created before either is launched; keep the existing five-minute workflow step as an independent outer kill boundary without claiming a fixed cleanup reserve.
+- Retain the current archive/checksum suffix routing, exact payload validation, two-request completion rule, and deterministic thread/process cleanup.
 - Causally cover success, delayed startup, installer failure, missing or invalid requests, absolute-deadline cleanup, and the shared POSIX checksum caller.
 
 **Non-Goals:**
@@ -20,15 +20,15 @@
 
 ### Use one absolute owner deadline
 
-Create `RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT` as four minutes and compute its checked absolute deadline before binding the listener or spawning the installer. Four minutes is derived from the existing five-minute focused CI step and leaves the former one-minute allowance as explicit headroom for child termination, server join, diagnostics, and harness teardown; it is not another server-local request allowance.
+Create `RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT` as four minutes and compute its checked absolute deadline before binding the listener or spawning the installer. This removes the independent one-minute server clock. The existing five-minute workflow step starts before compilation and harness setup, so it remains an independent outer cap and does not guarantee a fixed cleanup reserve.
 
-Keep the current local listener and exact two-request validation. Spawn the installer and pass only the absolute deadline's remaining duration to the existing `wait_for_plugin_installer_output` owner, rather than using synchronous unbounded `.output()`. Give the server one `std::sync::mpsc::sync_channel(1)` completion/cancellation signal so it can distinguish an installer that is still able to request assets from one that has completed or failed. The caller captures the installer result, signals owner completion on every terminal path, and always joins the server before returning.
+Keep the current local listener, suffix-based archive/checksum routing, exact payload validation, and two-request completion rule. Spawn the installer and pass only the absolute deadline's remaining duration to the existing `wait_for_plugin_installer_output` owner, rather than using synchronous unbounded `.output()`. Give the server one `std::sync::mpsc::sync_channel(1)` completion/cancellation signal so it can distinguish an installer that is still able to request assets from one that has completed or failed. The caller captures the installer result, signals owner completion on every terminal path, and always joins the server before returning.
 
-This removes the independent pre-request deadline instead of increasing it or adding a retry. The five-minute workflow step remains an outer kill boundary, not the fixture's lifecycle authority.
+This removes the independent pre-request deadline instead of increasing it or adding a retry. The five-minute workflow step remains an outer kill boundary, not the fixture's lifecycle authority, and may preempt the local deadline when earlier workflow work consumes the step budget.
 
 ### Preserve original failure and cleanup truth
 
-When installer spawn, observation, execution, or cleanup fails, or the installer completes without both valid requests, signal the server causally and report both the initiating failure and any server/request-validation failure without leaving a thread or process behind. Deadline expiry uses the existing installer observer to terminate and reap the owned process before the server join. Successful callers still require both exact requests.
+When installer spawn, observation, execution, or cleanup fails, or the installer completes without both valid request kinds, signal the server causally and report both the initiating failure and any server/request-validation failure without leaving a thread or process behind. Deadline expiry uses the existing installer observer to terminate and reap the owned process before the server join. Successful callers still require the archive and checksum requests.
 
 ### Preserve the shared compatibility caller
 
@@ -40,9 +40,9 @@ The change remains in the current CLI delivery E2E owner and follows #487's acce
 
 ## Risks / Trade-offs
 
-- [Risk] The server or installer outlives the accepted operation. -> Start one four-minute absolute deadline before both launches, use the existing installer observer with its remaining budget, signal completion, and always join within the one-minute cleanup reserve.
+- [Risk] The server or installer outlives the accepted local operation. -> Start one four-minute absolute deadline before both launches, use the existing installer observer with its remaining budget, then signal and join promptly after owner termination; keep the workflow timeout as an independent outer cap.
 - [Risk] Cleanup hides the initiating installer failure. -> Retain both failures in the test diagnostic instead of replacing the first error.
-- [Risk] A partial request sequence is accepted. -> Keep the existing exact archive-plus-checksum completion condition unchanged.
+- [Risk] A partial request sequence is accepted. -> Keep the existing archive-plus-checksum two-request completion condition unchanged.
 - [Risk] A Windows fix regresses the helper's POSIX checksum caller. -> Run the exact POSIX checksum-mismatch fixture on Linux and macOS alongside the focused lifecycle and Windows installer proofs.
 
 ## Migration Plan

@@ -4,9 +4,9 @@ The shared installer E2E release-asset server starts a one-minute deadline befor
 
 ## What Changes
 
-- Bind the shared local release-asset fixture to one four-minute absolute operation deadline created before listener and installer launch, leaving one minute for cleanup under the existing five-minute CI step.
+- Bind the shared local release-asset fixture to one four-minute absolute operation deadline created before listener and installer launch; keep the existing five-minute workflow step as an independent outer kill boundary without claiming a fixed cleanup reserve.
 - Observe the installer through the existing bounded installer helper with the remaining operation budget, give the server one bounded standard-library completion signal, and preserve both owner and request failures on every terminal path.
-- Preserve exact archive and checksum request validation, deterministic cleanup, and existing installer/product behavior.
+- Preserve the current archive/checksum suffix routing, exact payload validation, two-request completion rule, deterministic cleanup, and existing installer/product behavior.
 - Cover delayed download, installer failure, missing or invalid requests, the shared POSIX checksum caller, and ordinary parallel execution without retry or suite serialization.
 - Keep this as backlog specification work until the packet is published on `main`; after publication #533 is one direct child and blocker of #492, has no direct blocker, unlocks only #492, and is operationally sequenced after the active shared-file owner without a native dependency edge.
 
@@ -14,6 +14,7 @@ Non-goals:
 
 - Changing installer download, runtime, PATH, MCP, database, or release behavior.
 - Raising or retaining an independent pre-request helper deadline, or relying on the five-minute CI step as the only bound.
+- Hardening the current suffix-based fixture routing into full-path validation.
 - Adding a process-test framework, dependency, global lock, or generic server abstraction.
 
 ## Capabilities
