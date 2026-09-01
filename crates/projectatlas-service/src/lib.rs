@@ -633,10 +633,13 @@ pub fn load_coverage_discovery_controlled(
     let control = control.with_timeout_ceiling(COVERAGE_DISCOVERY_TIMEOUT);
     let page = store.repository_coverage_page_controlled(project, &query, Some(&control))?;
     let page_rows = page.rows;
+    let mut selected_paths = HashSet::new();
     let paths = page_rows
         .iter()
         .filter_map(|row| match row.coverage.scope() {
-            CoverageScope::Path { path } => Some(path.clone()),
+            CoverageScope::Path { path } => {
+                selected_paths.insert(path.clone()).then_some(path.clone())
+            }
             CoverageScope::Project => None,
         })
         .collect::<Vec<_>>();
@@ -651,15 +654,30 @@ pub fn load_coverage_discovery_controlled(
         identity_rejections_query_limit,
         Some(&control),
     )?;
-    // Graph-scoped `rows` is the publication-time, path-owned marker for a
-    // distinct identity detail evicted by the global detail ceiling. Reading
-    // it from the selected page keeps unrelated paths from tainting a report.
+    // Relation-free graph coverage owns the publication-time, path-scoped
+    // marker for a distinct identity detail evicted by the global detail
+    // ceiling. The public page may filter that companion row by relation,
+    // reason, parser, provider, or state, so hydrate all selected paths in one
+    // bounded set query. This keeps unrelated paths from tainting a report
+    // without changing the page's filtering or pagination semantics.
+    let companion_coverage = if paths.is_empty() {
+        Vec::new()
+    } else {
+        store
+            .repository_graph_path_coverage(project, &paths, Some(&control))?
+            .rows
+    };
     let identity_rejections_truncated = rejections.len()
         > COVERAGE_IDENTITY_REJECTION_LIMIT as usize
         || page_rows.iter().any(|row| {
             matches!(row.coverage.scope(), CoverageScope::Path { .. })
                 && row.coverage.relation().is_none()
                 && row.coverage.reached_limit() == Some(GraphLimitKind::Rows)
+        })
+        || companion_coverage.iter().any(|coverage| {
+            matches!(coverage.scope(), CoverageScope::Path { .. })
+                && coverage.relation().is_none()
+                && coverage.reached_limit() == Some(GraphLimitKind::Rows)
         });
     let mut rejections_by_path = HashMap::<String, Vec<GraphIdentityRejection>>::new();
     for rejection in rejections
@@ -4603,6 +4621,18 @@ mod tests {
             Some(GraphIdentityText::new("identity details evicted")?),
             Some(GraphLimitKind::Rows),
         )?;
+        let later_documents_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: later_path.clone(),
+            },
+            Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+            CoverageState::Partial,
+            1,
+            1,
+            generation,
+            Some(GraphIdentityText::new("identity details evicted")?),
+            None,
+        )?;
         let complete_coverage = CoverageRecord::new(
             CoverageScope::Path {
                 path: complete_path.clone(),
@@ -4648,7 +4678,12 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                &[coverage, later_coverage, complete_coverage],
+                &[
+                    coverage,
+                    later_coverage,
+                    later_documents_coverage,
+                    complete_coverage,
+                ],
             )?;
             publication.replace_graph_identity_rejections(project, &rejections)?;
             publication.complete()?;
@@ -4710,6 +4745,33 @@ mod tests {
             &later.identity_rejections_truncated,
             &true,
             "publication-cap causal coverage truncation state",
+        )?;
+        let later_documents = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some(later_path.as_str().to_string()),
+                parser: None,
+                provider: None,
+                relation: Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                state: None,
+                reason: Some("identity details evicted".to_string()),
+            },
+        )?;
+        require_eq(
+            &later_documents.returned,
+            &1,
+            "relation-filtered publication-cap coverage row",
+        )?;
+        require(
+            later_documents.rows[0].identity_rejections.is_empty(),
+            "relation-filtered publication-cap path unexpectedly retained rejection details",
+        )?;
+        require_eq(
+            &later_documents.identity_rejections_truncated,
+            &true,
+            "relation-filtered publication-cap coverage lost companion truncation marker",
         )?;
         let complete = load_coverage_discovery(
             &store,

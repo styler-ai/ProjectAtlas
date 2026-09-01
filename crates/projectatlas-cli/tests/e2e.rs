@@ -23786,6 +23786,18 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         Some(GraphIdentityText::new("bounded identity details evicted")?),
         Some(GraphLimitKind::Rows),
     )?;
+    let later_documents_coverage = CoverageRecord::new(
+        CoverageScope::Path {
+            path: later_path.clone(),
+        },
+        Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+        CoverageState::Partial,
+        1,
+        1,
+        generation,
+        Some(GraphIdentityText::new("bounded identity details evicted")?),
+        None,
+    )?;
     let rejections = (0..GraphLimits::MAX_ROWS)
         .map(|fact_index| {
             Ok(GraphIdentityRejection {
@@ -23820,7 +23832,7 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
             &[],
             &[],
             &[],
-            &[coverage, later_coverage],
+            &[coverage, later_coverage, later_documents_coverage],
         )?;
         publication.replace_graph_identity_rejections(project, &rejections)?;
         publication.complete()?;
@@ -23876,6 +23888,10 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
             "--coverage",
             "--path-prefix",
             &later_relative_path,
+            "--relation",
+            "documents",
+            "--reason",
+            "bounded identity details evicted",
             "--limit",
             "1",
         ])
@@ -23922,6 +23938,50 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         return Err(io::Error::other(format!(
             "bounded TOON coverage failed: {}",
             String::from_utf8_lossy(&toon_output.stderr)
+        ))
+        .into());
+    }
+
+    let later_toon_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("toon")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            &later_relative_path,
+            "--relation",
+            "documents",
+            "--reason",
+            "bounded identity details evicted",
+            "--limit",
+            "1",
+        ])
+        .output()?;
+    if !later_toon_output.status.success() {
+        return Err(io::Error::other(format!(
+            "publication-cap TOON coverage failed: {}",
+            String::from_utf8_lossy(&later_toon_output.stderr)
+        ))
+        .into());
+    }
+    let later_toon_text = String::from_utf8(later_toon_output.stdout)?;
+    let later_toon_report: Value = toon_format::decode_default(&later_toon_text)?;
+    let later_toon_has_rejections = later_toon_report["coverage"]["rows"][0]
+        .get("identity_rejections")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| !rows.is_empty());
+    if later_toon_has_rejections
+        || later_toon_report["coverage"]["identity_rejections_truncated"] != true
+        || later_toon_report["coverage"]["identity_rejections_limit"] != 200
+        || later_toon_report["coverage"]["output_bytes"] != later_toon_text.len()
+        || later_toon_text.len() > GraphLimits::MAX_OUTPUT_BYTES as usize
+    {
+        return Err(io::Error::other(format!(
+            "publication-cap TOON coverage was not truthful: {later_toon_report}"
         ))
         .into());
     }
@@ -24000,6 +24060,8 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
                 "arguments": {
                     "coverage": true,
                     "path_prefix": later_relative_path,
+                    "relation": "documents",
+                    "reason": "bounded identity details evicted",
                     "limit": 1
                 }
             }
