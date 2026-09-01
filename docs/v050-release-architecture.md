@@ -190,16 +190,27 @@ flowchart LR
 ## Invalid graph identity admission
 
 ```mermaid
-flowchart LR
-  Source["Parsed file and exact spans"] --> Admit{"Source identity admission"}
-  Admit -->|valid| Strict["GraphIdentityText remains strict"]
-  Admit -->|invalid| Coverage["Typed coverage/unresolved row<br/>file + span + parser + field + reason"]
-  Strict --> Rows["Valid symbol/relation rows"]
-  Coverage --> Tx["One generation transaction"]
-  Rows --> Tx
+flowchart TB
+  Parser["Parser facts and exact spans"] --> SourceAdmit{"Source identity admission"}
+  SourceAdmit -->|valid| SourceRows["Valid source, symbol, and relation facts"]
+  SourceAdmit -->|invalid| SourceReject["Typed source rejection detail<br/>file + span + parser + field + reason"]
+  SourceRows --> Derive["Derive resolution keys"]
+  Derive -->|valid| KeyRows["Valid resolution-key projection"]
+  Derive -->|contract failure| KeyReject["Typed resolution-key rejection detail"]
+  SourceRows --> Partial["Partial valid projection + bounded typed detail"]
+  SourceReject --> Partial
+  KeyRows --> Partial
+  KeyReject --> Partial
+  Partial --> Tx["One generation transaction"]
   Tx -->|all writes succeed| Current["Publish complete current generation"]
   Tx -->|fault or cancellation| Rollback["Rollback; previous generation remains current"]
 ```
+
+The coarse `graph_coverage.reason` remains a stable compatibility category;
+bounded identity detail is generation-owned in the existing publication
+transaction and is read through structured coverage rows. Rejected identity
+text is never persisted, and a fault or cancellation leaves both the detail
+rows and valid graph rows at the previous complete generation.
 
 ## Built-in PHP parser and graph publication
 

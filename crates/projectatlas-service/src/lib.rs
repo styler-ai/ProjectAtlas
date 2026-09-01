@@ -30,8 +30,8 @@ use agent_efficiency::load_agent_efficiency_comparison as load_agent_efficiency_
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::graph::{
-    CoverageScope, CoverageState, ExtendedRelationKind, GraphLimitKind, GraphLimits,
-    GraphRelationKind,
+    CoverageScope, CoverageState, ExtendedRelationKind, GraphIdentityRejection, GraphLimitKind,
+    GraphLimits, GraphRelationKind,
 };
 use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::outline::estimate_tokens;
@@ -84,6 +84,8 @@ const NEXT_REPORT_DEFAULT_LIMIT: usize = 3;
 const NEXT_REPORT_MAX_LIMIT: usize = 10;
 /// Maximum rows returned by one agent-facing coverage page.
 pub const COVERAGE_PAGE_MAX_LIMIT: u32 = 200;
+/// Maximum typed identity-rejection details retained by one coverage report.
+const COVERAGE_IDENTITY_REJECTION_LIMIT: u32 = COVERAGE_PAGE_MAX_LIMIT;
 /// Maximum elapsed work for one project-wide coverage discovery query.
 const COVERAGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum rows retained by one selected-file coverage digest.
@@ -483,6 +485,9 @@ pub struct CoverageDiscoveryRow {
     pub parser: Option<ParserKind>,
     /// Fact provider pass for path-scoped coverage.
     pub provider: Option<ParserKind>,
+    /// Bounded typed identity rejections for this path.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub identity_rejections: Vec<GraphIdentityRejection>,
     /// Existing selected-file summary or health surface to call next.
     pub next_call: NavigationNextCall,
 }
@@ -510,6 +515,10 @@ pub struct CoverageDiscoveryReport {
     pub output_bytes: u32,
     /// Absolute encoded-output ceiling.
     pub max_output_bytes: u32,
+    /// Whether additional nested identity-rejection details were omitted.
+    pub identity_rejections_truncated: bool,
+    /// Maximum nested identity-rejection details retained by this report.
+    pub identity_rejections_limit: u32,
     /// Fully validated actionable rows.
     pub rows: Vec<CoverageDiscoveryRow>,
 }
@@ -623,10 +632,66 @@ pub fn load_coverage_discovery_controlled(
         .ok_or(ServiceError::SelectedProjectUnavailable)?;
     let control = control.with_timeout_ceiling(COVERAGE_DISCOVERY_TIMEOUT);
     let page = store.repository_coverage_page_controlled(project, &query, Some(&control))?;
-    let rows = page
-        .rows
+    let page_rows = page.rows;
+    let mut selected_paths = HashSet::new();
+    let paths = page_rows
+        .iter()
+        .filter_map(|row| match row.coverage.scope() {
+            CoverageScope::Path { path } => {
+                selected_paths.insert(path.clone()).then_some(path.clone())
+            }
+            CoverageScope::Project => None,
+        })
+        .collect::<Vec<_>>();
+    let identity_rejections_query_limit = COVERAGE_IDENTITY_REJECTION_LIMIT
+        .checked_add(1)
+        .ok_or_else(|| {
+            ServiceError::InvalidInput("coverage rejection limit overflowed".to_string())
+        })?;
+    let rejections = store.repository_graph_identity_rejections(
+        project,
+        &paths,
+        identity_rejections_query_limit,
+        Some(&control),
+    )?;
+    // Relation-free graph coverage owns the publication-time, path-scoped
+    // marker for a distinct identity detail evicted by the global detail
+    // ceiling. The public page may filter that companion row by relation,
+    // reason, parser, provider, or state, so hydrate all selected paths in one
+    // bounded set query. This keeps unrelated paths from tainting a report
+    // without changing the page's filtering or pagination semantics.
+    let companion_coverage = if paths.is_empty() {
+        Vec::new()
+    } else {
+        store
+            .repository_graph_path_coverage(project, &paths, Some(&control))?
+            .rows
+    };
+    let identity_rejections_truncated = rejections.len()
+        > COVERAGE_IDENTITY_REJECTION_LIMIT as usize
+        || page_rows.iter().any(|row| {
+            matches!(row.coverage.scope(), CoverageScope::Path { .. })
+                && row.coverage.relation().is_none()
+                && row.coverage.reached_limit() == Some(GraphLimitKind::Rows)
+        })
+        || companion_coverage.iter().any(|coverage| {
+            matches!(coverage.scope(), CoverageScope::Path { .. })
+                && coverage.relation().is_none()
+                && coverage.reached_limit() == Some(GraphLimitKind::Rows)
+        });
+    let mut rejections_by_path = HashMap::<String, Vec<GraphIdentityRejection>>::new();
+    for rejection in rejections
         .into_iter()
-        .map(coverage_discovery_row)
+        .take(COVERAGE_IDENTITY_REJECTION_LIMIT as usize)
+    {
+        rejections_by_path
+            .entry(rejection.path.as_str().to_owned())
+            .or_default()
+            .push(rejection);
+    }
+    let rows = page_rows
+        .into_iter()
+        .map(|row| coverage_discovery_row(row, &mut rejections_by_path))
         .collect::<Vec<_>>();
     let returned = u32::try_from(rows.len()).map_err(|error| {
         ServiceError::InvalidInput(format!("coverage row count did not fit u32: {error}"))
@@ -653,18 +718,24 @@ pub fn load_coverage_discovery_controlled(
         total,
         output_bytes: 0,
         max_output_bytes: GraphLimits::MAX_OUTPUT_BYTES,
+        identity_rejections_truncated,
+        identity_rejections_limit: COVERAGE_IDENTITY_REJECTION_LIMIT,
         rows,
     })
 }
 
 /// Project one validated storage row into the agent-facing coverage contract.
-fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
+fn coverage_discovery_row(
+    row: RepositoryCoverageRow,
+    rejections_by_path: &mut HashMap<String, Vec<GraphIdentityRejection>>,
+) -> CoverageDiscoveryRow {
     let coverage = row.coverage;
     let path = match coverage.scope() {
         CoverageScope::Project => ".".to_string(),
         CoverageScope::Path { path } => path.as_str().to_string(),
     };
     let relation = coverage.relation();
+    let identity_rejections = rejections_by_path.remove(&path).unwrap_or_default();
     CoverageDiscoveryRow {
         next_call: NavigationNextCall {
             capability: if matches!(coverage.scope(), CoverageScope::Path { .. }) {
@@ -691,6 +762,7 @@ fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
         active_generation: coverage.generation(),
         parser: row.parser,
         provider: row.provider,
+        identity_rejections,
     }
 }
 
@@ -4067,7 +4139,8 @@ fn exported_symbol_names(symbols: &[CodeSymbol]) -> Vec<String> {
 mod tests {
     use super::*;
     use projectatlas_core::graph::{
-        CoverageRecord, GraphIdentityText, GraphLimitKind, RepositoryNodePath,
+        CoverageRecord, GraphIdentityField, GraphIdentityRejectionReason, GraphIdentityText,
+        GraphLimitKind, RepositoryNodePath, SourceSpan,
     };
     use projectatlas_core::symbols::{ParserKind, SymbolGraph};
     use projectatlas_core::telemetry::{
@@ -4383,6 +4456,17 @@ mod tests {
             )?);
         }
         publication.replace_repository_graph(project, &[], &[], &[], &coverage)?;
+        publication.replace_graph_identity_rejections(
+            project,
+            &[GraphIdentityRejection {
+                path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+                span: SourceSpan::new(1, 0, 1, 2)?,
+                parser: ParserKind::TreeSitter,
+                field: GraphIdentityField::Symbol,
+                reason: GraphIdentityRejectionReason::Empty,
+                fact_index: 0,
+            }],
+        )?;
         publication.complete()?;
         drop(store);
 
@@ -4472,6 +4556,13 @@ mod tests {
             "truncated coverage lower bound",
         )?;
         require_eq(&truncated.continuation, &Some(1), "coverage continuation")?;
+        require(
+            truncated
+                .rows
+                .iter()
+                .any(|row| row.path == "src/lib.rs" && row.identity_rejections.len() == 1),
+            "structured coverage omitted typed identity rejection details",
+        )?;
         let exhausted = load_coverage_discovery(
             &store,
             RepositoryCoverageQuery {
@@ -4489,6 +4580,216 @@ mod tests {
             &exhausted.total,
             &CoverageTotalState::Unknown,
             "exhausted nonzero continuation total",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn coverage_discovery_bounds_long_identity_rejection_details() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("bounded-coverage-service");
+        fs::create_dir_all(&root)?;
+        let db_path = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bounded coverage fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let long_path = format!("src/{}/entry.ts", "segment".repeat(400));
+        let path = RepositoryNodePath::new(Path::new(&long_path))?;
+        let later_path = RepositoryNodePath::new(Path::new("src/later.ts"))?;
+        let complete_path = RepositoryNodePath::new(Path::new("src/complete.ts"))?;
+        let coverage = CoverageRecord::new(
+            CoverageScope::Path { path: path.clone() },
+            None,
+            CoverageState::Partial,
+            10_000,
+            10_000,
+            generation,
+            Some(GraphIdentityText::new("identity details retained")?),
+            None,
+        )?;
+        let later_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: later_path.clone(),
+            },
+            None,
+            CoverageState::Partial,
+            1,
+            1,
+            generation,
+            Some(GraphIdentityText::new("identity details evicted")?),
+            Some(GraphLimitKind::Rows),
+        )?;
+        let later_documents_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: later_path.clone(),
+            },
+            Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+            CoverageState::Partial,
+            1,
+            1,
+            generation,
+            Some(GraphIdentityText::new("identity details evicted")?),
+            None,
+        )?;
+        let complete_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: complete_path.clone(),
+            },
+            None,
+            CoverageState::Complete,
+            1,
+            0,
+            generation,
+            None,
+            None,
+        )?;
+        let rejections = (0..GraphLimits::MAX_ROWS)
+            .map(|fact_index| {
+                Ok(GraphIdentityRejection {
+                    path: path.clone(),
+                    span: SourceSpan::new(fact_index + 1, 0, fact_index + 1, 1)?,
+                    parser: ParserKind::TreeSitter,
+                    field: GraphIdentityField::Symbol,
+                    reason: GraphIdentityRejectionReason::Empty,
+                    fact_index: u64::from(fact_index),
+                })
+            })
+            .collect::<Result<Vec<_>, projectatlas_core::graph::GraphContractError>>()?;
+        {
+            let mut publication = store.begin_index_publication("bounded-coverage")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&[
+                test_node(&long_path, "bounded-coverage-hash"),
+                test_node("src/later.ts", "later-coverage-hash"),
+                test_node("src/complete.ts", "complete-coverage-hash"),
+            ])?;
+            publication.finish_scan_replacement()?;
+            publication.replace_symbol_graph(&SymbolGraph {
+                path: later_path.as_str().to_string(),
+                language: Some("typescript".to_string()),
+                parser: ParserKind::TreeSitter,
+                symbols: Vec::new(),
+                relations: Vec::new(),
+            })?;
+            publication.replace_repository_graph(
+                project,
+                &[],
+                &[],
+                &[],
+                &[
+                    coverage,
+                    later_coverage,
+                    later_documents_coverage,
+                    complete_coverage,
+                ],
+            )?;
+            publication.replace_graph_identity_rejections(project, &rejections)?;
+            publication.complete()?;
+        }
+        let query = RepositoryCoverageQuery {
+            start_index: 0,
+            limit: 1,
+            path_prefix: Some(long_path),
+            parser: None,
+            provider: None,
+            relation: None,
+            state: None,
+            reason: None,
+        };
+        let first = load_coverage_discovery(&store, query.clone())?;
+        let second = load_coverage_discovery(&store, query)?;
+        require_eq(&first, &second, "bounded coverage determinism")?;
+        require_eq(&first.returned, &1, "bounded coverage row count")?;
+        require_eq(
+            &first.rows[0].identity_rejections.len(),
+            &(COVERAGE_IDENTITY_REJECTION_LIMIT as usize),
+            "bounded identity rejection detail count",
+        )?;
+        require_eq(
+            &first.identity_rejections_limit,
+            &COVERAGE_IDENTITY_REJECTION_LIMIT,
+            "bounded identity rejection detail limit",
+        )?;
+        require_eq(
+            &first.identity_rejections_truncated,
+            &true,
+            "bounded identity rejection truncation state",
+        )?;
+        let encoded = serde_json::to_vec(&first)?;
+        require(
+            encoded.len() <= GraphLimits::MAX_OUTPUT_BYTES as usize,
+            "bounded coverage exceeded the encoded-output ceiling",
+        )?;
+
+        let later = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some(later_path.as_str().to_string()),
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(&later.returned, &1, "publication-cap causal coverage row")?;
+        require(
+            later.rows[0].identity_rejections.is_empty(),
+            "publication-cap causal path unexpectedly retained rejection details",
+        )?;
+        require_eq(
+            &later.identity_rejections_truncated,
+            &true,
+            "publication-cap causal coverage truncation state",
+        )?;
+        let later_documents = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some(later_path.as_str().to_string()),
+                parser: None,
+                provider: None,
+                relation: Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                state: None,
+                reason: Some("identity details evicted".to_string()),
+            },
+        )?;
+        require_eq(
+            &later_documents.returned,
+            &1,
+            "relation-filtered publication-cap coverage row",
+        )?;
+        require(
+            later_documents.rows[0].identity_rejections.is_empty(),
+            "relation-filtered publication-cap path unexpectedly retained rejection details",
+        )?;
+        require_eq(
+            &later_documents.identity_rejections_truncated,
+            &true,
+            "relation-filtered publication-cap coverage lost companion truncation marker",
+        )?;
+        let complete = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some(complete_path.as_str().to_string()),
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(
+            &complete.identity_rejections_truncated,
+            &false,
+            "unrelated identity-detail overflow marked a complete path",
         )?;
         Ok(())
     }

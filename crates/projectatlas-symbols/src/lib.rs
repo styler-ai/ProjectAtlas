@@ -21,8 +21,10 @@ pub use markdown::{
     extract_markdown_facts, extract_markdown_facts_controlled,
 };
 pub use resolution_keys::{
-    ImportReference, ImportSyntax, MAX_RESOLUTION_KEYS_PER_FACT, RelationResolutionKeys,
-    ResolutionKeyProjection, ResolutionProjectionContext, ResolutionProjectionError,
+    ImportReference, ImportSyntax, MAX_RESOLUTION_KEYS_PER_FACT,
+    MAX_RESOLUTION_PROJECTION_FAILURES, RelationResolutionKeys, ResolutionKeyProjection,
+    ResolutionProjectionContext, ResolutionProjectionError, ResolutionProjectionFact,
+    ResolutionProjectionFactFailure, ResolutionProjectionFailure,
     SEMANTIC_RESOLUTION_CONTRACT_VERSION, SymbolResolutionKeys, derive_resolution_keys,
     derive_resolution_keys_with_context, module_aliases_for_path, parse_import_references,
     resolve_relative_import_path, semantic_resolution_contract_digest, source_stems_for_path,
