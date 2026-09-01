@@ -1235,7 +1235,7 @@ fn tree_contains_php_tag_outside_ranges<E>(
 fn is_php_inline_output_opening(node: Node<'_>, content: &str) -> bool {
     if node.kind() != "php_tag"
         || !node_text(node, content)
-            .is_some_and(|tag| matches!(tag.as_str(), "<?" | "<?php" | "<?="))
+            .is_some_and(|tag| tag == "<?" || tag == "<?=" || tag.eq_ignore_ascii_case("<?php"))
     {
         return false;
     }
@@ -2016,6 +2016,7 @@ fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
     }
     let target = match expression.kind() {
         "string" | "encapsed_string" => php_static_string_target(expression, content)?,
+        "nowdoc" => php_static_nowdoc_target(expression, content)?,
         _ => return None,
     };
     Some(target).filter(|target| {
@@ -2023,6 +2024,43 @@ fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
             && target.chars().count() <= MAX_SNIPPET_CHARS
             && GraphIdentityText::new(target.clone()).is_ok()
     })
+}
+
+/// Return the exact non-interpolating value of a PHP nowdoc literal.
+fn php_static_nowdoc_target(node: Node<'_>, content: &str) -> Option<String> {
+    let value = node.child_by_field_name("value")?;
+    let value = node_text(value, content)?;
+    let value = value
+        .strip_prefix("\r\n")
+        .or_else(|| value.strip_prefix('\n'))
+        .or_else(|| value.strip_prefix('\r'))?;
+    let end_tag = node.child_by_field_name("end_tag")?;
+    let line_start = content[..end_tag.start_byte()]
+        .rfind(['\n', '\r'])
+        .map_or(0, |newline| newline + 1);
+    let indentation = content.get(line_start..end_tag.start_byte())?;
+    if !indentation
+        .as_bytes()
+        .iter()
+        .all(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        return None;
+    }
+    let mut target = String::with_capacity(value.len());
+    for line in value.split_inclusive('\n') {
+        let (line, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |line| (line, "\n"));
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let blank = line.bytes().all(|byte| matches!(byte, b' ' | b'\t'));
+        if !indentation.is_empty() && !blank && !line.starts_with(indentation) {
+            return None;
+        }
+        let line = line.strip_prefix(indentation).unwrap_or(line);
+        target.push_str(line);
+        target.push_str(newline);
+    }
+    Some(target)
 }
 
 /// Return the plain content of a PHP string literal when it has no interpolation.
@@ -5627,6 +5665,72 @@ require 'dir  bootstrap.php';
     }
 
     #[test]
+    fn php_static_nowdoc_includes_decode_indentation_and_reject_dynamic_forms() {
+        let graph = extract_symbol_graph(
+            "src/NowdocIncludes.php",
+            Some("php"),
+            r"<?php
+require <<<'PATH'
+bootstrap.php
+PATH;
+require <<<'PATH'
+    indented.php
+    PATH;
+",
+        );
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        for (target, line) in [("bootstrap.php", 2), ("indented.php", 5)] {
+            assert!(
+                imports
+                    .iter()
+                    .any(|relation| relation.target_name == target && relation.line == line),
+                "missing static nowdoc include {target}: {imports:?}"
+            );
+            if let Some(relation) = imports
+                .iter()
+                .find(|relation| relation.target_name == target && relation.line == line)
+            {
+                assert_eq!(relation.path, "src/NowdocIncludes.php");
+                assert_eq!(relation.context, target);
+                assert_eq!(relation.parser, ParserKind::TreeSitter);
+            }
+        }
+
+        let graph = extract_symbol_graph(
+            "src/NowdocIncludes.php",
+            Some("php"),
+            r"<?php
+require <<<'PATH'
+first.php
+second.php
+PATH;
+require <<<PATH
+heredoc.php
+PATH;
+require $dynamic;
+",
+        );
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        assert!(imports.iter().all(|relation| {
+            !matches!(
+                relation.target_name.as_str(),
+                "first.php\nsecond.php" | "heredoc.php" | "$dynamic"
+            )
+        }));
+    }
+
+    #[test]
     fn php_call_targets_use_character_bounds_for_unicode_names() {
         let target = "é".repeat(MAX_SNIPPET_CHARS / 2 + 1);
         assert!(target.chars().count() <= MAX_SNIPPET_CHARS);
@@ -6143,6 +6247,13 @@ TEXT;
                 "function marker(): string { helper(); }",
                 9,
                 48,
+            ),
+            (
+                "//x<?PHP function mixed_case(): string { helper(); }",
+                "mixed_case",
+                "function mixed_case(): string { helper(); }",
+                9,
+                52,
             ),
             (
                 "HTML // <?php function marker(): string { helper(); }",
