@@ -34875,7 +34875,6 @@ impl McpContractSession {
                 },
             );
             if let Err(error) = synchronization {
-                self.stdin.take();
                 let stdout_reader = self.stdout_reader.take();
                 let stderr_reader = self.stderr_reader.take();
                 let mut child = self
@@ -34883,6 +34882,7 @@ impl McpContractSession {
                     .take()
                     .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
                 let kill_result = kill_child(&mut child);
+                self.stdin.take();
                 let status_after_kill = child.try_wait();
                 if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
                     let packet = McpContractCleanupPacket {
@@ -35483,8 +35483,8 @@ fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
             exit_probe_error.take(),
         )
     {
-        stdin.take();
         let kill_result = kill_child(&mut child);
+        stdin.take();
         let status_after_kill = child.try_wait();
         if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
             if let Some(handoff) = handoff_live_child {
@@ -39527,8 +39527,8 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             exit_probe_error.take(),
         )
     {
-        child.stdin.take();
         let kill_result = kill_child(&mut child);
+        child.stdin.take();
         let status_after_kill = child.try_wait();
         if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
             if let Some(handoff) = handoff_live_child {
