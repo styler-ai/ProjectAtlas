@@ -202,6 +202,25 @@ def require_definitive_cancellation(observation: dict[str, Any]) -> None:
         )
 
 
+def require_successful_ping(response: dict[str, Any]) -> None:
+    """Require the benchmark server's JSON-RPC ping success response."""
+
+    if (
+        response.get("jsonrpc") != "2.0"
+        or response.get("id") != 3
+        or "error" in response
+        or response.get("result") != {}
+    ):
+        raise AssertionError(f"MCP ping response was not successful: {response!r}")
+
+
+def require_clean_process_exit(returncode: int | None) -> None:
+    """Require the benchmark MCP process to exit successfully."""
+
+    if returncode != 0:
+        raise AssertionError(f"MCP cancellation process exited with {returncode!r}")
+
+
 def run_mcp_cancellation(
     binary: Path,
     root: Path,
@@ -304,10 +323,8 @@ def run_mcp_cancellation(
             raise RuntimeError(f"MCP initialize failed: {initialize['error']}")
         notify("notifications/initialized", {})
         response_queue: queue.Queue[dict[str, Any] | BaseException] = queue.Queue(maxsize=1)
-        ping_queue: queue.Queue[dict[str, Any] | BaseException] = queue.Queue(maxsize=1)
         with response_lock:
             responses[2] = response_queue
-            responses[3] = ping_queue
         assert process.stdin is not None
         process.stdin.write(
             (json.dumps(
@@ -336,10 +353,9 @@ def run_mcp_cancellation(
         require_definitive_cancellation(terminal_observation)
         # A live ping proves the server stayed up while rmcp suppressed the
         # canceled request's response; a response for id=2 would be a failure.
-        request(3, "ping", {})
+        require_successful_ping(request(3, "ping", {}))
         with response_lock:
             responses.pop(2, None)
-            responses.pop(3, None)
     except BaseException as error:
         cleanup_error = error
     finally:
@@ -371,6 +387,7 @@ def run_mcp_cancellation(
             ) from error
     if any(response.get("id") == 2 for response in stream_responses):
         raise AssertionError("canceled MCP summary emitted a response")
+    require_clean_process_exit(process.returncode)
     response_text = json.dumps(
         {"canceled_request_response": None, "ping": "ok"},
         sort_keys=True,
