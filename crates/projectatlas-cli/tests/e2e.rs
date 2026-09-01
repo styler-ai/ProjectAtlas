@@ -236,7 +236,12 @@ const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DEL
 const REAL_HOST_READER_TIMEOUT: Duration = Duration::from_millis(250);
 // Parallel workspace test binaries can delay the owned child identity write;
 // retain a bounded capture window without making cleanup depend on scheduling.
+#[cfg(windows)]
 const REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(windows)]
+const REAL_HOST_READER_PROCESS_TREE_MAX_DEPTH: usize = 8;
+#[cfg(windows)]
+const REAL_HOST_READER_PROCESS_TREE_MAX_PROCESSES: usize = 32;
 // The direct host is reaped under the same bounded five-second envelope on every platform.
 const REAL_HOST_READER_REAP_BUDGET: Duration = Duration::from_secs(5);
 const REAL_HOST_SPECIAL_PATH_COMPONENT: &str = "host reader path with space-\u{00fc}";
@@ -11456,8 +11461,8 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
     compile_obsolete_projectatlas_fixture(&runtime)?;
     // This controlled native-host fixture intentionally uses the existing #523 owner fixture
     // contract: it publishes one exact descendant identity, then waits while that MCP child is
-    // live. The timeout path therefore exercises the same real-host runner used by Claude Code
-    // and OpenCode, including its identity-safe descendant cleanup seam.
+    // live. Exercise both the retained-identity seam and the real-host process-tree path used by
+    // Claude Code and OpenCode so the latter cannot regress to direct-shell-only cleanup.
     let native_host_fixture = temp.path().join("native-host-owner.exe");
     compile_codex_mcp_owner_fixture(&native_host_fixture)?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -11466,54 +11471,68 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
     fs::create_dir_all(&repo)?;
     fs::create_dir_all(&host_root)?;
 
-    let identity_file = temp.path().join("native-host-owned.pid");
-    let arguments = vec![
-        identity_file.to_string_lossy().into_owned(),
-        runtime.to_string_lossy().into_owned(),
-        database.to_string_lossy().into_owned(),
-    ];
-    let started = Instant::now();
-    let timeout_result = run_real_host_command_with_environment(
-        &native_host_fixture,
-        &repo,
-        &host_root,
-        None,
-        &arguments,
-        &[],
-        Some((&identity_file, &runtime)),
-    );
-    let elapsed = started.elapsed();
-    let timeout_text = timeout_result
-        .as_ref()
-        .err()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    require(
-        timeout_result.is_err()
-            && timeout_text.contains("real host reader plugin installer exceeded")
-            && timeout_text.contains("status "),
-        format!(
-            "native host runner timeout did not preserve bounded timeout classification: {timeout_result:?}"
-        ),
-    )?;
-    let complete_bound = REAL_HOST_READER_TIMEOUT
-        + REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET
-        + CODEX_OWNER_CHILD_STOP_BUDGET
-        + REAL_HOST_READER_REAP_BUDGET;
-    require(
-        elapsed <= complete_bound,
-        format!(
-            "native host runner timeout exceeded its complete cleanup bound: elapsed={elapsed:?} bound={complete_bound:?}"
-        ),
-    )?;
-    let child_identity =
-        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
-    require(
-        !windows_process_is_alive(&child_identity)?,
-        format!(
-            "native host runner timeout left its matching owned descendant alive: child={child_identity:?}"
-        ),
-    )?;
+    for (mode, use_retained_identity) in [("retained-identity", true), ("process-tree", false)] {
+        let identity_file = temp.path().join(format!("native-host-owned-{mode}.pid"));
+        let arguments = vec![
+            identity_file.to_string_lossy().into_owned(),
+            runtime.to_string_lossy().into_owned(),
+            database.to_string_lossy().into_owned(),
+        ];
+        let started = Instant::now();
+        let timeout_result = if use_retained_identity {
+            run_real_host_command_with_environment(
+                &native_host_fixture,
+                &repo,
+                &host_root,
+                None,
+                &arguments,
+                &[],
+                Some((&identity_file, &runtime)),
+            )
+        } else {
+            run_real_host_command_with_test_timeout(
+                &native_host_fixture,
+                &repo,
+                &host_root,
+                None,
+                &arguments,
+                &[],
+                REAL_HOST_READER_TIMEOUT,
+            )
+        };
+        let elapsed = started.elapsed();
+        let timeout_text = timeout_result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        require(
+            timeout_result.is_err()
+                && timeout_text.contains("real host reader plugin installer exceeded")
+                && timeout_text.contains("status "),
+            format!(
+                "native host runner timeout did not preserve bounded timeout classification ({mode}): {timeout_result:?}"
+            ),
+        )?;
+        let complete_bound = REAL_HOST_READER_TIMEOUT
+            + REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET
+            + CODEX_OWNER_CHILD_STOP_BUDGET
+            + REAL_HOST_READER_REAP_BUDGET;
+        require(
+            elapsed <= complete_bound,
+            format!(
+                "native host runner timeout exceeded its complete cleanup bound ({mode}): elapsed={elapsed:?} bound={complete_bound:?}"
+            ),
+        )?;
+        let child_identity =
+            read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
+        require(
+            !windows_process_is_alive(&child_identity)?,
+            format!(
+                "native host runner timeout left its matching owned descendant alive ({mode}): child={child_identity:?}"
+            ),
+        )?;
+    }
     Ok(())
 }
 
@@ -11743,6 +11762,29 @@ fn run_real_host_command_with_environment(
         arguments,
         environment,
         owned_descendant,
+        Duration::from_secs(30),
+    )
+}
+
+#[cfg(windows)]
+fn run_real_host_command_with_test_timeout(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    opencode_config: Option<&Path>,
+    arguments: &[String],
+    environment: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    run_real_host_command_inner(
+        executable,
+        repo,
+        host_root,
+        opencode_config,
+        arguments,
+        environment,
+        None,
+        timeout,
     )
 }
 
@@ -11754,6 +11796,7 @@ fn run_real_host_command_inner(
     arguments: &[String],
     environment: &[(&str, &str)],
     owned_descendant: Option<(&Path, &Path)>,
+    timeout: Duration,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let mut command = host_command(executable);
     command
@@ -11774,8 +11817,12 @@ fn run_real_host_command_inner(
         );
     }
     #[cfg(not(windows))]
-    let _ = owned_descendant;
-    run_bounded_output(command, "real host reader")
+    {
+        let _ = owned_descendant;
+        return run_bounded_output(command, "real host reader");
+    }
+    #[cfg(windows)]
+    return run_bounded_output_with_real_host_process_tree(command, "real host reader", timeout);
 }
 
 fn host_output_text(output: &std::process::Output) -> String {
@@ -41385,6 +41432,190 @@ fn stop_windows_fixture_process_until(
     Ok(())
 }
 
+#[cfg(windows)]
+fn stop_windows_real_host_process_tree_until(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+) -> Result<(), Box<dyn Error>> {
+    let process_tree_script = r#"
+$root = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue
+if ($null -eq $root) { exit 2 }
+$result = 0
+$seen = @{}
+$seen[[uint32]$root.Id] = $true
+$frontier = @([uint32]$root.Id)
+$processes = @()
+try {
+    $rootCreation = $root.StartTime.ToUniversalTime().ToFileTimeUtc()
+    $rootPath = [System.IO.Path]::GetFullPath($root.Path)
+    if ($rootCreation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or `
+        -not [string]::Equals(
+            $rootPath,
+            [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        exit 3
+    }
+    for ($depth = 0; $depth -lt [int]$env:PROJECTATLAS_REAL_HOST_TREE_MAX_DEPTH; $depth++) {
+        if ($frontier.Count -eq 0) { break }
+        $next = @()
+        foreach ($parentId in $frontier) {
+            $children = @(
+                CimCmdlets\Get-CimInstance `
+                    -ClassName Win32_Process `
+                    -Filter ("ParentProcessId = {0}" -f $parentId) `
+                    -OperationTimeoutSec 1
+            )
+            foreach ($candidate in $children) {
+                $processId = [uint32]$candidate.ProcessId
+                $candidateParentId = [uint32]$candidate.ParentProcessId
+                if ($processId -eq 0 -or $candidateParentId -ne [uint32]$parentId) {
+                    $result = 4
+                    break
+                }
+                if ($seen.ContainsKey($processId)) { continue }
+                if ($processes.Count -ge [int]$env:PROJECTATLAS_REAL_HOST_TREE_MAX_PROCESSES) {
+                    $result = 5
+                    break
+                }
+                $candidateProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+                if ($null -eq $candidateProcess) { continue }
+                try {
+                    $candidateCreation = $candidateProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
+                    $candidatePath = [System.IO.Path]::GetFullPath($candidateProcess.Path)
+                    $seen[$processId] = $true
+                    $processes += [pscustomobject]@{
+                        process_id = $processId
+                        parent_id = $candidateParentId
+                        creation = $candidateCreation
+                        executable_path = $candidatePath
+                    }
+                    $next += $processId
+                } catch {
+                    $result = 4
+                } finally {
+                    $candidateProcess.Dispose()
+                }
+                if ($result -ne 0) { break }
+            }
+            if ($result -ne 0) { break }
+        }
+        if ($result -ne 0) { break }
+        $frontier = @($next)
+    }
+    if ($result -eq 0 -and $frontier.Count -gt 0) { $result = 6 }
+    if ($result -eq 0) {
+        for ($index = $processes.Count - 1; $index -ge 0; $index--) {
+            $entry = $processes[$index]
+            $process = Get-Process -Id $entry.process_id -ErrorAction SilentlyContinue
+            if ($null -eq $process) { continue }
+            try {
+                $current = @(
+                CimCmdlets\Get-CimInstance `
+                        -ClassName Win32_Process `
+                        -Filter ("ProcessId = {0}" -f $entry.process_id) `
+                        -OperationTimeoutSec 1
+                )
+                if ($current.Count -eq 0 -or $process.HasExited) { continue }
+                $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc()
+                $path = [System.IO.Path]::GetFullPath($process.Path)
+                if ($current.Count -ne 1 `
+                    -or [uint32]$current[0].ParentProcessId -ne [uint32]$entry.parent_id `
+                    -or $creation -ne [long]$entry.creation `
+                    -or -not [string]::Equals(
+                        $path,
+                        [string]$entry.executable_path,
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    )) {
+                    $result = 3
+                } elseif (-not $process.HasExited) {
+                    $process.Kill()
+                    if (-not $process.WaitForExit(1000)) { $result = 7 }
+                }
+            } catch {
+                $result = 4
+            } finally {
+                $process.Dispose()
+            }
+            if ($result -ne 0) { break }
+        }
+    }
+    if ($result -eq 0) {
+        $root = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue
+        if ($null -eq $root) {
+            $result = 2
+        } else {
+            try {
+                $rootCreation = $root.StartTime.ToUniversalTime().ToFileTimeUtc()
+                $rootPath = [System.IO.Path]::GetFullPath($root.Path)
+                if ($rootCreation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or `
+                    -not [string]::Equals(
+                        $rootPath,
+                        [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH),
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    )) {
+                    $result = 3
+                } elseif (-not $root.HasExited) {
+                    $root.Kill()
+                    if (-not $root.WaitForExit(1000)) { $result = 7 }
+                }
+            } catch {
+                $result = 4
+            } finally {
+                $root.Dispose()
+            }
+        }
+    }
+} catch {
+    $result = 4
+} finally {
+    if ($null -ne $root) { $root.Dispose() }
+}
+exit $result
+"#;
+    let mut command = StdCommand::new("powershell");
+    command
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(process_tree_script)
+        .env("PROJECTATLAS_FIXTURE_PID", identity.process_id.to_string())
+        .env(
+            "PROJECTATLAS_FIXTURE_CREATION",
+            identity.creation_file_time_utc.to_string(),
+        )
+        .env("PROJECTATLAS_FIXTURE_PATH", &identity.executable_path)
+        .env(
+            "PROJECTATLAS_REAL_HOST_TREE_MAX_DEPTH",
+            REAL_HOST_READER_PROCESS_TREE_MAX_DEPTH.to_string(),
+        )
+        .env(
+            "PROJECTATLAS_REAL_HOST_TREE_MAX_PROCESSES",
+            REAL_HOST_READER_PROCESS_TREE_MAX_PROCESSES.to_string(),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut cleanup = command.spawn()?;
+    let status = match wait_for_child_exit_until(&mut cleanup, deadline) {
+        Ok(status) => status,
+        Err(error) => {
+            let kill_result = cleanup.kill();
+            let wait_result = cleanup.wait();
+            return Err(io::Error::other(format!(
+                "real host process-tree cleanup helper timed out: {error}; kill={kill_result:?} wait={wait_result:?}"
+            ))
+            .into());
+        }
+    };
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "refused real host process-tree cleanup without its exact captured identity: status={status}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 #[test]
 #[cfg(windows)]
 fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
@@ -42213,6 +42444,47 @@ fn run_bounded_output(
 ) -> Result<std::process::Output, Box<dyn Error>> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     wait_for_plugin_installer_output(command.spawn()?, label, Duration::from_secs(30))
+}
+
+#[cfg(windows)]
+fn run_bounded_output_with_real_host_process_tree(
+    mut command: StdCommand,
+    label: &str,
+    timeout: Duration,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut stop_real_host_process_tree = |host: &mut Child| -> io::Result<()> {
+        let identity = capture_windows_process_identity_with_timeout(
+            host.id(),
+            REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET,
+            None,
+            None,
+        )
+        .map_err(|error| io::Error::other(format!("real host identity capture failed: {error}")))?;
+        let cleanup_deadline = Instant::now()
+            .checked_add(CODEX_OWNER_CHILD_STOP_BUDGET)
+            .ok_or_else(|| {
+                io::Error::other("real host process-tree cleanup deadline overflowed")
+            })?;
+        stop_windows_real_host_process_tree_until(&identity, cleanup_deadline).map_err(
+            |error| io::Error::other(format!("real host process-tree cleanup failed: {error}")),
+        )?;
+        match host.kill() {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            Err(error) => Err(error),
+        }
+    };
+    wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+        command.spawn()?,
+        label,
+        timeout,
+        None,
+        None,
+        None,
+        &mut stop_real_host_process_tree,
+        None,
+    )
 }
 
 #[cfg(windows)]
