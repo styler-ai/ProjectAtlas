@@ -232,6 +232,9 @@ const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
 #[cfg(windows)]
 const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS";
 #[cfg(windows)]
+const REAL_HOST_READER_TIMEOUT: Duration = Duration::from_millis(250);
+const REAL_HOST_SPECIAL_PATH_COMPONENT: &str = "host reader path with space-\u{00fc}";
+#[cfg(windows)]
 const OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME: &str = "obsolete-projectatlas.cs";
 #[cfg(windows)]
 const OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME: &str = "obsolete-projectatlas.exe";
@@ -10273,6 +10276,20 @@ struct RealHostFixture {
     source_marker: String,
 }
 
+fn copy_runtime_into_special_path(
+    runtime: &Path,
+    temp_root: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let runtime_directory = temp_root.join(REAL_HOST_SPECIAL_PATH_COMPONENT);
+    fs::create_dir_all(&runtime_directory)?;
+    let runtime_name = runtime
+        .file_name()
+        .ok_or_else(|| io::Error::other("ProjectAtlas runtime path omitted its file name"))?;
+    let copied_runtime = runtime_directory.join(runtime_name);
+    fs::copy(runtime, &copied_runtime)?;
+    Ok(copied_runtime)
+}
+
 fn prepare_real_host_fixture(
     temp_root: &Path,
     name: &str,
@@ -11059,17 +11076,20 @@ fn value_contains_string(value: &Value, expected: &str) -> bool {
 #[ignore = "runs installed Claude Code/OpenCode readers; missing hosts are typed skips"]
 fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let host_root = temp.path().join("isolated-host");
+    let host_root = temp
+        .path()
+        .join(format!("isolated-{REAL_HOST_SPECIAL_PATH_COMPONENT}"));
     fs::create_dir_all(&host_root)?;
 
     let runtime = mcp_contract_executable();
+    let special_runtime = copy_runtime_into_special_path(&runtime, temp.path())?;
     let workspace_root = workspace_root()?;
     let fixtures = [
         prepare_real_host_fixture(
             temp.path(),
-            "repo-a",
+            format!("repo-a-{REAL_HOST_SPECIAL_PATH_COMPONENT}").as_str(),
             "host-reader-fixture-a",
-            &runtime,
+            &special_runtime,
             &workspace_root,
             &host_root,
         )?,
@@ -11084,56 +11104,106 @@ fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(
     ];
     let claude = find_host_executable("claude");
     let opencode = find_host_executable("opencode");
-    let availability = [
-        ("claude", claude.is_some()),
-        ("opencode", opencode.is_some()),
-    ]
-    .into_iter()
-    .map(|(name, installed)| (name, NativeHostAvailability::from_installed(installed)))
-    .collect::<Vec<_>>();
+    let hosts = [
+        ("Claude Code", "claude", claude.as_deref()),
+        ("OpenCode", "opencode", opencode.as_deref()),
+    ];
+    let availability = hosts
+        .iter()
+        .map(|(_, name, executable)| {
+            (
+                *name,
+                NativeHostAvailability::from_installed(executable.is_some()),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut host_versions = Vec::new();
     let mut host_statuses = Vec::new();
-    if let Some(claude) = claude.as_deref() {
-        let claude_version = host_version(claude, &host_root)?;
-        require_exact_host_version("Claude Code", &claude_version, "2.1.201")?;
-        host_versions.push(("Claude Code", claude_version));
-    }
-    if let Some(opencode) = opencode.as_deref() {
-        let opencode_version = host_version(opencode, &host_root)?;
-        require_exact_host_version("OpenCode", &opencode_version, "1.18.10")?;
-        host_versions.push(("OpenCode", opencode_version));
+    for &(label, harness, executable) in &hosts {
+        if let Some(executable) = executable {
+            let version = host_version(executable, &host_root)?;
+            let expected = if harness == "claude" {
+                "2.1.201"
+            } else {
+                "1.18.10"
+            };
+            require_exact_host_version(label, &version, expected)?;
+            host_versions.push((label, version));
+        }
     }
     for fixture in &fixtures {
         let project_before = snapshot_real_host_tree(&fixture.repo)?;
         let claude_config = read_json_file(&fixture.claude_config)?;
         let opencode_config = read_json_file(&fixture.opencode_config)?;
         let (claude_runtime, claude_arguments) = generated_host_launch(&claude_config, "claude")?;
-        let _ = generated_host_launch(&opencode_config, "opencode")?;
-
-        if let Some(claude) = claude.as_deref() {
-            let status = verify_claude_native_reader(
-                claude,
-                &fixture.claude_config,
+        let (opencode_runtime, opencode_arguments) =
+            generated_host_launch(&opencode_config, "opencode")?;
+        if fixture.name.contains(REAL_HOST_SPECIAL_PATH_COMPONENT) {
+            let project_config = fixture.repo.join(ATLAS_DIR_NAME).join("config.toml");
+            for path in [
                 &fixture.repo,
+                &special_runtime,
                 &fixture.database,
-                &fixture.source_marker,
+                &project_config,
+            ] {
+                require(
+                    path.to_string_lossy()
+                        .contains(REAL_HOST_SPECIAL_PATH_COMPONENT),
+                    format!(
+                        "special real-host fixture path omitted whitespace/non-ASCII component: {}",
+                        path.display()
+                    ),
+                )?;
+            }
+            let rendered_claude = serde_json::to_string(&claude_config)?;
+            let rendered_opencode = serde_json::to_string(&opencode_config)?;
+            for (harness, rendered, runtime, arguments) in [
+                (
+                    "Claude Code",
+                    rendered_claude,
+                    &claude_runtime,
+                    &claude_arguments,
+                ),
+                (
+                    "OpenCode",
+                    rendered_opencode,
+                    &opencode_runtime,
+                    &opencode_arguments,
+                ),
+            ] {
+                require(
+                    rendered.contains(&runtime.to_string_lossy().replace('\\', "\\\\"))
+                        || rendered.contains(&runtime.to_string_lossy().to_string()),
+                    format!("{harness} generated config omitted special runtime path: {rendered}"),
+                )?;
+                require(
+                    arguments.iter().any(|argument| {
+                        argument.contains(fixture.database.to_string_lossy().as_ref())
+                            && argument.contains(REAL_HOST_SPECIAL_PATH_COMPONENT)
+                    }),
+                    format!("{harness} generated config omitted special database path"),
+                )?;
+                require(
+                    arguments.iter().any(|argument| {
+                        argument.contains(project_config.to_string_lossy().as_ref())
+                            && argument.contains(REAL_HOST_SPECIAL_PATH_COMPONENT)
+                    }),
+                    format!("{harness} generated config omitted special config path"),
+                )?;
+            }
+        }
+
+        for &(label, harness, executable) in &hosts {
+            let status = run_native_host_reader(
+                label,
+                harness,
+                executable,
+                fixture,
                 &host_root,
                 &claude_runtime,
                 &claude_arguments,
             )?;
-            host_statuses.push(("Claude Code", fixture.name.as_str(), status));
-        }
-
-        if let Some(opencode) = opencode.as_deref() {
-            let status = verify_opencode_native_reader(
-                opencode,
-                &fixture.opencode_config,
-                &fixture.repo,
-                &fixture.database,
-                &fixture.source_marker,
-                &host_root,
-            )?;
-            host_statuses.push(("OpenCode", fixture.name.as_str(), status));
+            host_statuses.push((label, fixture.name.as_str(), status));
         }
         let project_after = snapshot_real_host_tree(&fixture.repo)?;
         require(
@@ -11150,22 +11220,52 @@ fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(
         )?;
     }
 
-    let installed_host_count = availability
-        .iter()
-        .filter(|(_, status)| matches!(status, NativeHostAvailability::Installed))
-        .count();
     require(
-        host_statuses
-            .iter()
-            .all(|(_, _, status)| status.is_connected()),
-        format!(
-            "real-host reader statuses were not connected: statuses={host_statuses:?}, availability={availability:?}, versions={host_versions:?}"
-        ),
-    )?;
-    require(
-        host_statuses.len() == installed_host_count * fixtures.len(),
+        host_statuses.len() == hosts.len() * fixtures.len(),
         format!(
             "real-host availability did not account for each fixture: statuses={host_statuses:?}, availability={availability:?}, versions={host_versions:?}"
+        ),
+    )?;
+    let mut connected = 0;
+    let mut skipped = 0;
+    for (label, fixture, status) in &host_statuses {
+        match status {
+            NativeHostStatus::Connected { .. } => {
+                connected += 1;
+                require(
+                    status.is_connected(),
+                    format!("connected native host outcome was not connected: {label}/{fixture}"),
+                )?;
+            }
+            NativeHostStatus::Skipped {
+                host,
+                fixture: skipped_fixture,
+                reason: _,
+            } => {
+                skipped += 1;
+                require(
+                    host == label && skipped_fixture == fixture,
+                    format!(
+                        "native host skip lost its host/fixture identity: expected={label}/{fixture}, outcome={status:?}"
+                    ),
+                )?;
+            }
+        }
+    }
+    let installed_fixture_count = availability
+        .iter()
+        .filter(|(_, status)| matches!(status, NativeHostAvailability::Installed))
+        .count()
+        * fixtures.len();
+    let missing_fixture_count = availability
+        .iter()
+        .filter(|(_, status)| matches!(status, NativeHostAvailability::Missing))
+        .count()
+        * fixtures.len();
+    require(
+        connected == installed_fixture_count && skipped == missing_fixture_count,
+        format!(
+            "real-host runner outcomes did not match discovered availability: connected={connected} expected_connected={installed_fixture_count} skipped={skipped} expected_skipped={missing_fixture_count} statuses={host_statuses:?} availability={availability:?} versions={host_versions:?}"
         ),
     )?;
     Ok(())
@@ -11195,19 +11295,21 @@ impl NativeHostAvailability {
     }
 }
 
-#[test]
-fn missing_real_host_is_reported_without_native_acceptance() {
-    assert_eq!(
-        NativeHostAvailability::from_installed(false),
-        NativeHostAvailability::Missing
-    );
-}
-
 #[derive(Debug)]
 enum NativeHostStatus {
     Connected {
         source_evidence: NativeHostSourceEvidence,
     },
+    Skipped {
+        host: String,
+        fixture: String,
+        reason: NativeHostSkipReason,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum NativeHostSkipReason {
+    ExecutableNotInstalled,
 }
 
 impl NativeHostStatus {
@@ -11222,6 +11324,190 @@ impl NativeHostStatus {
             } if !source_marker.is_empty() && !tool_name.is_empty()
         )
     }
+}
+
+fn run_native_host_reader(
+    host: &str,
+    harness: &str,
+    executable: Option<&Path>,
+    fixture: &RealHostFixture,
+    host_root: &Path,
+    claude_runtime: &Path,
+    claude_arguments: &[String],
+) -> Result<NativeHostStatus, Box<dyn Error>> {
+    let Some(executable) = executable else {
+        let status = NativeHostStatus::Skipped {
+            host: host.to_owned(),
+            fixture: fixture.name.clone(),
+            reason: NativeHostSkipReason::ExecutableNotInstalled,
+        };
+        writeln!(
+            io::stderr(),
+            "real host reader skipped: host={host} fixture={} reason=executable-not-installed",
+            fixture.name
+        )?;
+        return Ok(status);
+    };
+    match harness {
+        "claude" => verify_claude_native_reader(
+            executable,
+            &fixture.claude_config,
+            &fixture.repo,
+            &fixture.database,
+            &fixture.source_marker,
+            host_root,
+            claude_runtime,
+            claude_arguments,
+        ),
+        "opencode" => verify_opencode_native_reader(
+            executable,
+            &fixture.opencode_config,
+            &fixture.repo,
+            &fixture.database,
+            &fixture.source_marker,
+            host_root,
+        ),
+        other => Err(io::Error::other(format!("unsupported native host harness {other}")).into()),
+    }
+}
+
+#[test]
+fn missing_real_host_is_reported_without_native_acceptance() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let fixture = RealHostFixture {
+        name: "missing-host-fixture".to_owned(),
+        repo: temp.path().join(TEST_REPO_DIR),
+        database: temp.path().join("projectatlas.db"),
+        claude_config: temp.path().join("claude.json"),
+        opencode_config: temp.path().join("opencode.json"),
+        source_marker: "missing-host-marker".to_owned(),
+    };
+    for (host, harness) in [("Claude Code", "claude"), ("OpenCode", "opencode")] {
+        let outcome = run_native_host_reader(
+            host,
+            harness,
+            None,
+            &fixture,
+            temp.path(),
+            Path::new("unused-runtime"),
+            &[],
+        )?;
+        match outcome {
+            NativeHostStatus::Skipped {
+                host: outcome_host,
+                fixture: outcome_fixture,
+                reason: NativeHostSkipReason::ExecutableNotInstalled,
+            } if outcome_host == host && outcome_fixture == fixture.name => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "missing real host did not produce its visible typed skip outcome: host={host} harness={harness} outcome={other:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_obsolete_projectatlas_fixture(&runtime)?;
+    // This controlled native-host fixture intentionally uses the existing #523 owner fixture
+    // contract: it publishes one exact descendant identity, then waits while that MCP child is
+    // live. The timeout path therefore exercises the accepted identity-safe ownership helpers.
+    let native_host_fixture = temp.path().join("native-host-owner.exe");
+    compile_codex_mcp_owner_fixture(&native_host_fixture)?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let database = temp.path().join("projectatlas.db");
+    fs::create_dir_all(&repo)?;
+
+    for attempt in 0..2 {
+        let identity_file = temp.path().join(format!("native-host-owned-{attempt}.pid"));
+        let (parent, child_identity) = spawn_codex_owned_obsolete_mcp(
+            &native_host_fixture,
+            &runtime,
+            &database,
+            None,
+            &identity_file,
+            None,
+            None,
+        )?;
+        let parent_identity = capture_windows_process_identity(parent.id())?;
+        require(
+            windows_process_is_alive(&parent_identity)?
+                && windows_process_is_alive(&child_identity)?,
+            format!(
+                "native host timeout fixture did not establish a live owned tree before attempt {attempt}"
+            ),
+        )?;
+
+        let mut descendant_cleanup = None;
+        let mut parent_kill_attempted = false;
+        let mut owned_parent = Some(parent);
+        let timeout_result = {
+            let parent = owned_parent.take().ok_or_else(|| {
+                io::Error::other("native host timeout parent was already consumed")
+            })?;
+            wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+                parent,
+                "real host reader",
+                REAL_HOST_READER_TIMEOUT,
+                None,
+                None,
+                None,
+                &mut |parent| {
+                    let descendant_result =
+                        stop_windows_fixture_process(&child_identity).map_err(|error| {
+                            io::Error::other(format!(
+                                "native host timeout descendant cleanup failed: {error}"
+                            ))
+                        });
+                    descendant_cleanup = Some(descendant_result);
+                    parent_kill_attempted = true;
+                    parent.kill()
+                },
+                None,
+            )
+        };
+        let timeout_text = timeout_result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let cleanup_result = descendant_cleanup
+            .take()
+            .ok_or_else(|| io::Error::other("native host timeout skipped descendant cleanup"))?;
+        if let Some(parent) = owned_parent {
+            let fallback = cleanup_codex_owner_processes(parent, &child_identity);
+            return Err(io::Error::other(format!(
+                "native host timeout did not consume and reap its owned parent: result={timeout_result:?} fallback_cleanup={fallback:?}"
+            ))
+            .into());
+        }
+        cleanup_result?;
+        require(
+            parent_kill_attempted
+                && timeout_result.is_err()
+                && timeout_text.contains("real host reader plugin installer exceeded")
+                && timeout_text.contains("status "),
+            format!(
+                "native host timeout did not preserve bounded timeout classification: {timeout_result:?}"
+            ),
+        )?;
+        require(
+            !windows_process_is_alive(&child_identity)?
+                && !windows_process_is_alive(&parent_identity)?,
+            format!(
+                "native host timeout left a matching owned descendant or parent alive on attempt {attempt}: child={child_identity:?} parent={parent_identity:?}"
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 fn require_exact_host_version(
