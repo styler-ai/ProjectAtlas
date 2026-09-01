@@ -1,18 +1,19 @@
 ## Why
 
-The Windows installer E2E release-asset server starts a one-minute deadline before the owned installer process reaches its download phase. Under ordinary parallel workspace load, the server can expire first and report `timed out waiting for release asset request` even though the focused installer test succeeds. This makes the release gate depend on unrelated scheduling delay instead of the owned installer lifecycle.
+The shared installer E2E release-asset server starts a one-minute deadline before the owned Windows installer process reaches its download phase. Under ordinary parallel workspace load, the server can expire first and report `timed out waiting for release asset request` even though the focused Windows installer test succeeds. This makes the release gate depend on unrelated scheduling delay instead of the owned installer lifecycle; changing the shared helper must also preserve its POSIX checksum-mismatch caller.
 
 ## What Changes
 
-- Bind the local release-asset fixture lifetime to the owned installer operation and one explicit overall test bound.
+- Bind the shared local release-asset fixture to one four-minute absolute operation deadline created before listener and installer launch, leaving one minute for cleanup under the existing five-minute CI step.
+- Observe the installer through the existing bounded installer helper with the remaining operation budget, give the server one bounded standard-library completion signal, and preserve both owner and request failures on every terminal path.
 - Preserve exact archive and checksum request validation, deterministic cleanup, and existing installer/product behavior.
-- Cover delayed download, installer failure, missing request, and ordinary parallel execution without another timeout increase, retry, or suite serialization.
-- Keep this as backlog specification work until the packet is published on `main`; only then may #533 enter `v0.5.0-00` and implementation routing.
+- Cover delayed download, installer failure, missing or invalid requests, the shared POSIX checksum caller, and ordinary parallel execution without retry or suite serialization.
+- Keep this as backlog specification work until the packet is published on `main`; after publication #533 is one direct child and blocker of #492, has no direct blocker, unlocks only #492, and is operationally sequenced after the active shared-file owner without a native dependency edge.
 
 Non-goals:
 
 - Changing installer download, runtime, PATH, MCP, database, or release behavior.
-- Raising the one-minute helper deadline again.
+- Raising or retaining an independent pre-request helper deadline, or relying on the five-minute CI step as the only bound.
 - Adding a process-test framework, dependency, global lock, or generic server abstraction.
 
 ## Capabilities
@@ -27,6 +28,6 @@ None.
 
 ## Impact
 
-- Windows-only CLI E2E fixture code in the existing delivery-test owner.
+- The shared CLI E2E release-asset helper in the existing delivery-test owner, including four Windows installer callers and POSIX checksum-mismatch compatibility.
 - OpenSpec/IssueOps mapping and the v0.5 release graph after published readiness.
 - No Rust product source, SQLite schema, dependency, workflow, installer contract, or public payload change is expected.

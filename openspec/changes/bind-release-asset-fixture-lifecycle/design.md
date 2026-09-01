@@ -1,42 +1,49 @@
 ## Context
 
-`serve_release_assets` starts a nonblocking loop with a fixed one-minute deadline, then its callers launch an installer and join the server thread. The deadline includes all scheduler and installer startup work before the archive and checksum requests. A full parallel workspace run exhausted that lifetime, while the exact focused test passed in 68 seconds. The fixture therefore has two unrelated clocks and can fail before the owned operation proves whether requests were missing.
+`serve_release_assets` starts a nonblocking loop with a fixed one-minute deadline, then its callers launch an installer and join the server thread. The deadline includes all scheduler and installer startup work before the archive and checksum requests. A full parallel workspace run exhausted that lifetime, while the exact focused test passed in 68 seconds. The fixture therefore has two unrelated clocks and can fail before the owned operation proves whether requests were missing. The helper is shared by four Windows installer tests and `posix_release_binary_installer_rejects_checksum_mismatch`, so its lifecycle change has one cross-platform compatibility caller even though the reported release-gate bug is Windows-specific.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Make the server lifetime follow the owned installer operation and one bounded completion contract.
+- Make the server and installer follow one four-minute absolute operation deadline created before either is launched, with one minute reserved for cleanup under the existing five-minute CI step.
 - Retain exact archive/checksum path and payload validation and deterministic thread/process cleanup.
-- Causally cover success, delayed startup, installer failure, and missing or invalid requests.
+- Causally cover success, delayed startup, installer failure, missing or invalid requests, absolute-deadline cleanup, and the shared POSIX checksum caller.
 
 **Non-Goals:**
 
-- New process infrastructure, dependencies, retries, suite serialization, or larger timeouts.
+- New process infrastructure, dependencies, retries, suite serialization, an independent pre-request timeout, or an unbounded local fallback to the five-minute CI step.
 - Product installer, runtime, PATH, MCP, database, CLI, or payload changes.
 - A generic local HTTP server abstraction.
 
 ## Decisions
 
-### Reuse the existing owned-operation boundary
+### Use one absolute owner deadline
 
-Keep the current local listener and exact two-request validation. Give the server the smallest owner signal needed to distinguish an installer that is still running from one that has completed without satisfying the request contract. The owner applies one explicit overall bound and always joins the server before returning.
+Create `RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT` as four minutes and compute its checked absolute deadline before binding the listener or spawning the installer. Four minutes is derived from the existing five-minute focused CI step and leaves the former one-minute allowance as explicit headroom for child termination, server join, diagnostics, and harness teardown; it is not another server-local request allowance.
 
-This removes the independent pre-request deadline instead of increasing it or adding a retry.
+Keep the current local listener and exact two-request validation. Spawn the installer and pass only the absolute deadline's remaining duration to the existing `wait_for_plugin_installer_output` owner, rather than using synchronous unbounded `.output()`. Give the server one `std::sync::mpsc::sync_channel(1)` completion/cancellation signal so it can distinguish an installer that is still able to request assets from one that has completed or failed. The caller captures the installer result, signals owner completion on every terminal path, and always joins the server before returning.
+
+This removes the independent pre-request deadline instead of increasing it or adding a retry. The five-minute workflow step remains an outer kill boundary, not the fixture's lifecycle authority.
 
 ### Preserve original failure and cleanup truth
 
-When installer execution fails, stops, or completes without both valid requests, stop the server causally and report both the initiating failure and any server/request-validation failure without leaving a thread or process behind. Successful callers still require both exact requests.
+When installer spawn, observation, execution, or cleanup fails, or the installer completes without both valid requests, signal the server causally and report both the initiating failure and any server/request-validation failure without leaving a thread or process behind. Deadline expiry uses the existing installer observer to terminate and reap the owned process before the server join. Successful callers still require both exact requests.
+
+### Preserve the shared compatibility caller
+
+Apply the same owner deadline and terminal-path join to all five current `serve_release_assets` callers. Keep the user-facing capability Windows-specific, but require `posix_release_binary_installer_rejects_checksum_mismatch` on Linux and macOS so the common helper cannot regress its POSIX checksum contract.
 
 ### Keep the existing ownership boundary
 
-The change remains in the current Windows delivery E2E owner and follows #487's accepted move if that structural branch lands first. No product module, shared framework, workflow, schema, or architecture diagram change is expected.
+The change remains in the current CLI delivery E2E owner and follows #487's accepted move if that structural branch lands first. No product module, shared framework, workflow, schema, or architecture diagram change is expected.
 
 ## Risks / Trade-offs
 
-- [Risk] The server waits forever after installer completion. -> Use the existing owner completion path and one explicit overall operation bound, then always join.
+- [Risk] The server or installer outlives the accepted operation. -> Start one four-minute absolute deadline before both launches, use the existing installer observer with its remaining budget, signal completion, and always join within the one-minute cleanup reserve.
 - [Risk] Cleanup hides the initiating installer failure. -> Retain both failures in the test diagnostic instead of replacing the first error.
 - [Risk] A partial request sequence is accepted. -> Keep the existing exact archive-plus-checksum completion condition unchanged.
+- [Risk] A Windows fix regresses the helper's POSIX checksum caller. -> Run the exact POSIX checksum-mismatch fixture on Linux and macOS alongside the focused lifecycle and Windows installer proofs.
 
 ## Migration Plan
 
@@ -44,7 +51,7 @@ No data or schema migration. Land the causal fixture lifetime and its focused fa
 
 ## Dependencies / Cross-Issue Impact
 
-The source currently shares `e2e.rs` with #518 and #525, so implementation must start from their accepted merged baseline or the final accepted #487 test-owner move. This is source ownership sequencing, not a product prerequisite.
+After publication, #533 is one direct child and blocker of release owner #492, has no direct blocker, and unlocks only #492. Current main already contains the accepted #518 and #523 shared-process baseline. Implementation must start only after the active shared-file owner resolves and use the latest accepted main; if #487 lands first, follow its accepted move into `e2e_delivery.rs`. Shared-file sequencing with #525 or #487 is operational ownership, not a native dependency edge or product prerequisite.
 
 ## Open Questions
 
