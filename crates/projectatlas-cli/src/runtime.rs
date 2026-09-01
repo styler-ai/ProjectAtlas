@@ -2539,6 +2539,10 @@ pub(crate) fn run_init_bootstrap(
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
     let root = canonical_source_project_root(root)?;
+    if db_path.is_file() {
+        AtlasStore::repair_missing_project_root_identity(db_path, &root)
+            .map_err(project_store_error)?;
+    }
     preflight_existing_project_binding(db_path, &root)?;
     let project_dir = root.join(".projectatlas");
     let config_file = init_config_path(&root, config_path);
@@ -3149,7 +3153,7 @@ fn publish_index_batch(
         text_paths,
         text,
         content_classifications,
-        symbols,
+        mut symbols,
         graph,
         structural_summaries,
     } = batch;
@@ -3200,7 +3204,7 @@ fn publish_index_batch(
         || Ok(PurposeImportReport::default()),
         |snapshot| apply_purpose_import_snapshot(&publication, &indexed_nodes, &snapshot, control),
     )?;
-    apply_symbol_build_stage(&mut publication, &symbols, control)?;
+    apply_symbol_build_stage(&mut publication, &mut symbols, control)?;
     graph.apply(&mut publication, control)?;
     apply_structural_summary_stage(&mut publication, &structural_summaries, control)?;
     complete_index_publication(publication, control)?;
@@ -3389,7 +3393,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
             .saturating_add(staged_node_bytes(&nodes));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let staged = stage_symbols_for_nodes_with_limits(
+    let mut staged = stage_symbols_for_nodes_with_limits(
         store,
         &plan.root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -3422,7 +3426,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     control.check(IndexWorkStage::Publication)?;
     let mut publication =
         store.begin_index_projection_refresh_from(&contract_fingerprint, base_generation)?;
-    apply_symbol_build_stage(&mut publication, &staged, control)?;
+    apply_symbol_build_stage(&mut publication, &mut staged, control)?;
     graph.apply(&mut publication, control)?;
     complete_index_publication(publication, control)?;
     Ok(staged.report)
@@ -4923,6 +4927,8 @@ struct SymbolBuildStage {
     changes: Vec<SymbolProjectionChange>,
     /// Retained parser-output string bytes admitted by the resource boundary.
     retained_bytes: u64,
+    /// Source identity details captured while sanitizing parser output.
+    identity_admission: graph_projection::GraphIdentityAdmission,
 }
 
 /// One closed symbol projection mutation.
@@ -6158,7 +6164,8 @@ fn build_symbols_for_paths_with_limits(
         control,
         limits,
     )?;
-    apply_symbol_build_stage(store, &staged, control)?;
+    let mut staged = staged;
+    apply_symbol_build_stage(store, &mut staged, control)?;
     Ok(staged.report)
 }
 
@@ -6395,11 +6402,14 @@ fn stage_symbols_for_nodes_with_limits(
         }
     }
     control.check(IndexWorkStage::SymbolParsing)?;
-    Ok(SymbolBuildStage {
+    let mut staged = SymbolBuildStage {
         report,
         changes,
         retained_bytes: output_bytes,
-    })
+        identity_admission: graph_projection::GraphIdentityAdmission::default(),
+    };
+    staged.identity_admission = graph_projection::admit_symbol_build_stage(&mut staged, control)?;
+    Ok(staged)
 }
 
 /// Parse all built-in symbol jobs in bounded Rayon batches.
@@ -6421,9 +6431,12 @@ fn parse_symbol_job_batches_controlled(
 /// Apply prepared symbol mutations inside the parent publication transaction.
 fn apply_symbol_build_stage(
     store: &mut AtlasStore,
-    staged: &SymbolBuildStage,
+    staged: &mut SymbolBuildStage,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
+    if !staged.identity_admission.source_admitted() {
+        staged.identity_admission = graph_projection::admit_symbol_build_stage(staged, control)?;
+    }
     for change in &staged.changes {
         control.check(IndexWorkStage::Publication)?;
         match change {
@@ -8872,6 +8885,7 @@ mod tests {
             let connection = rusqlite::Connection::open(&database)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
+                 DROP TABLE IF EXISTS graph_identity_rejections;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
         }
@@ -8949,6 +8963,94 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn init_repairs_current_missing_root_identity_from_bound_metadata() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("incomplete-binding-root");
+        let database = temp.path().join("incomplete-binding.db");
+        fs::create_dir(&root)?;
+        let project_instance_id = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store
+                .project_instance_id()?
+                .ok_or_else(|| io::Error::other("incomplete binding project identity is missing"))?
+        };
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.execute("DELETE FROM project_root_identity", [])?;
+        drop(connection);
+
+        let ordinary_error = AtlasStore::open_for_project(&database, &root)
+            .err()
+            .ok_or_else(|| io::Error::other("ordinary open repaired incomplete binding"))?;
+        require_eq(
+            &matches!(ordinary_error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "ordinary open returned the wrong incomplete-binding error",
+        )?;
+
+        let wrong_root = temp.path().join("incomplete-binding-wrong-root");
+        fs::create_dir(&wrong_root)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let wrong_result = run_init_bootstrap(
+            &wrong_root,
+            &database,
+            None,
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        );
+        require_eq(
+            &matches!(wrong_result, Err(CliError::ProjectMismatch(_))),
+            &true,
+            "incomplete-binding init accepted a different root",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "wrong-root incomplete-binding init changed database bytes",
+        )?;
+        require_eq(
+            &["wal", "shm", "journal"]
+                .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok()),
+            &sidecars_before,
+            "wrong-root incomplete-binding init changed SQLite sidecars",
+        )?;
+
+        let report = run_init_bootstrap(
+            &root,
+            &database,
+            None,
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        )?;
+        require_eq(
+            &report.ok,
+            &true,
+            "explicit init did not repair the incomplete binding",
+        )?;
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project_instance_id),
+            "explicit init changed the project identity while repairing the root",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(projectatlas_core::CanonicalProjectRoot::from_path(&root)?),
+            "explicit init did not restore the native root identity",
+        )?;
+        Ok(())
+    }
+
     #[cfg(windows)]
     #[test]
     fn init_rejects_predecessor_wrong_root_before_project_writes() -> Result<(), Box<dyn Error>> {
@@ -8964,6 +9066,7 @@ mod tests {
             let connection = rusqlite::Connection::open(&database)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
+                 DROP TABLE IF EXISTS graph_identity_rejections;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
         }
@@ -9030,6 +9133,7 @@ mod tests {
             let connection = rusqlite::Connection::open(&database)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
+                 DROP TABLE IF EXISTS graph_identity_rejections;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
             connection.execute(
@@ -10529,10 +10633,11 @@ mod tests {
             "approved-purpose suggestion suppression",
         )?;
         let retained_bytes = symbol_parse_output_bytes(&parsed);
-        let symbols = SymbolBuildStage {
+        let mut symbols = SymbolBuildStage {
             report: empty_symbol_build_report(),
             changes: vec![SymbolProjectionChange::Parsed(parsed)],
             retained_bytes,
+            identity_admission: graph_projection::GraphIdentityAdmission::default(),
         };
         let protected_purpose_paths = HashSet::from(["package.json".to_string()]);
         let control = standalone_index_work_control();
@@ -10561,7 +10666,7 @@ mod tests {
             "duplicate structural mutations",
         )?;
 
-        apply_symbol_build_stage(&mut store, &symbols, &control)?;
+        apply_symbol_build_stage(&mut store, &mut symbols, &control)?;
         apply_structural_summary_stage(&mut store, &structural, &control)?;
         let indexed = store
             .load_node_by_path("package.json")?
