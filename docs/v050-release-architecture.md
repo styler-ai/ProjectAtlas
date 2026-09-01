@@ -350,12 +350,12 @@ flowchart TB
     suite[Parallel Windows E2E] --> owner[Spawn compiled Codex owner]
     owner --> child[Start obsolete MCP child]
     child --> publish[Atomically publish PID, start time, and path]
-    owner --> poll{Readiness state within named 30 s bound}
+    owner --> poll{Publication and identity readiness within one named 30 s deadline}
     publish --> poll
     poll -->|exit or deadline| fail[Typed failure and owned cleanup]
     poll -->|not ready| pause[Wait 25 ms]
     pause --> poll
-    poll -->|ready| validate{Exact identity valid?}
+    poll -->|published before same deadline| validate{Exact identity valid before same deadline?}
     validate -->|no| fail
     validate -->|yes| installer[Run existing installer handoff assertions]
     installer --> cleanup[Owned parent and child cleanup]
