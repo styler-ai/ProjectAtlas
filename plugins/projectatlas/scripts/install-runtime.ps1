@@ -2086,6 +2086,57 @@ function Get-ProjectAtlasAtlasForwarderStatePath {
     return Join-Path (Get-ProjectAtlasAtlasForwarderStateRoot) ("atlas-forwarder-$digest.state")
 }
 
+function Enter-ProjectAtlasAtlasForwarderLifecycleLock {
+    param(
+        [string]$ForwarderPath
+    )
+    $mutex = $null
+    try {
+        $canonicalForwarderPath = Get-NormalizedPathEntry $ForwarderPath
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($canonicalForwarderPath.ToLowerInvariant())
+        $digest = Get-ProjectAtlasSha256FromBytes $bytes
+        $mutex = [System.Threading.Mutex]::new(
+            $false,
+            "Global\ProjectAtlas-AtlasForwarderLifecycle-$digest"
+        )
+        $acquired = $false
+        try {
+            $acquired = $mutex.WaitOne([System.TimeSpan]::FromSeconds(30))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            throw "ProjectAtlas atlas forwarder lifecycle is busy; another installer owns the bounded lock for $canonicalForwarderPath."
+        }
+        return [pscustomobject]@{
+            Mutex = $mutex
+            ForwarderPath = $canonicalForwarderPath
+        }
+    }
+    catch {
+        if ($mutex) {
+            $mutex.Dispose()
+        }
+        throw
+    }
+}
+
+function Exit-ProjectAtlasAtlasForwarderLifecycleLock {
+    param(
+        [object]$Lock
+    )
+    if (-not $Lock -or -not $Lock.Mutex) {
+        return
+    }
+    try {
+        $Lock.Mutex.ReleaseMutex()
+    }
+    finally {
+        $Lock.Mutex.Dispose()
+    }
+}
+
 function New-ProjectAtlasAtlasForwarderCapability {
     $bytes = New-Object byte[] 32
     $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -2426,6 +2477,21 @@ function Move-ProjectAtlasManagedAtlasForwarder {
         [string]$VerifiedPath,
         [switch]$AllowSameTarget
     )
+    $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLock $FilePath
+    try {
+        Move-ProjectAtlasManagedAtlasForwarderLocked $FilePath $VerifiedPath -AllowSameTarget:$AllowSameTarget
+    }
+    finally {
+        Exit-ProjectAtlasAtlasForwarderLifecycleLock $lifecycleLock
+    }
+}
+
+function Move-ProjectAtlasManagedAtlasForwarderLocked {
+    param(
+        [string]$FilePath,
+        [string]$VerifiedPath,
+        [switch]$AllowSameTarget
+    )
     $target = Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath
     if (-not $target -or ((-not $AllowSameTarget) -and (Get-NormalizedPathEntry $target) -ieq (Get-NormalizedPathEntry $VerifiedPath))) {
         return $false
@@ -2575,6 +2641,20 @@ function Invoke-ProjectAtlasAtlasForwarderStateRetirementFailure {
     throw "ProjectAtlas atlas forwarder installer state retirement was intentionally failed for lifecycle proof."
 }
 
+function Invoke-ProjectAtlasAtlasForwarderStatePublicationPause {
+    $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_PUBLISHED_GATE
+    if ([string]::IsNullOrWhiteSpace($gate)) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        "$gate.ready",
+        "ready`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    while (Test-Path -LiteralPath $gate) {
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Assert-ProjectAtlasAtlasForwarderCollisionFree {
     param(
         [string]$VerifiedPath
@@ -2614,6 +2694,20 @@ function Write-ProjectAtlasAtlasForwarder {
     param(
         [string]$VerifiedPath
     )
+    $forwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
+    $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLock $forwarder
+    try {
+        Write-ProjectAtlasAtlasForwarderLocked $VerifiedPath
+    }
+    finally {
+        Exit-ProjectAtlasAtlasForwarderLifecycleLock $lifecycleLock
+    }
+}
+
+function Write-ProjectAtlasAtlasForwarderLocked {
+    param(
+        [string]$VerifiedPath
+    )
     $previousCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
     $previousPath = if ($previousCommand) {
         if ($previousCommand.Path) { $previousCommand.Path } else { $previousCommand.Source }
@@ -2639,6 +2733,9 @@ function Write-ProjectAtlasAtlasForwarder {
             throw "ProjectAtlas atlas forwarder staging was intentionally failed for lifecycle proof."
         }
         $statePublished = Ensure-ProjectAtlasAtlasForwarderState $forwarder $VerifiedPath
+        if ($statePublished) {
+            Invoke-ProjectAtlasAtlasForwarderStatePublicationPause
+        }
         if (Test-Path -LiteralPath $provenancePath) {
             if (-not (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath)) {
                 throw "ProjectAtlas atlas forwarder provenance collision; refusing to overwrite: $provenancePath"
@@ -2750,12 +2847,18 @@ function Remove-ProjectAtlasAtlasForwarders {
         else {
             $candidate -replace "\\atlas\.cmd$", "\\projectatlas.exe"
         }
-        if (-not (Test-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath)) {
-            throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
+        $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLock $candidate
+        try {
+            if (-not (Test-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath)) {
+                throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
+            }
+            Assert-ProjectAtlasDirectFilePath $candidate "ProjectAtlas atlas forwarder"
+            if (-not (Move-ProjectAtlasManagedAtlasForwarderLocked $candidate $verifiedPath -AllowSameTarget)) {
+                throw "ProjectAtlas atlas uninstall could not retire the owned forwarder safely: $candidate"
+            }
         }
-        Assert-ProjectAtlasDirectFilePath $candidate "ProjectAtlas atlas forwarder"
-        if (-not (Move-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath -AllowSameTarget)) {
-            throw "ProjectAtlas atlas uninstall could not retire the owned forwarder safely: $candidate"
+        finally {
+            Exit-ProjectAtlasAtlasForwarderLifecycleLock $lifecycleLock
         }
         Write-Output "ProjectAtlas atlas forwarder removed: $candidate"
     }

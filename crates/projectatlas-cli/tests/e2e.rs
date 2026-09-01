@@ -10657,6 +10657,125 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     };
     fs::write(&unrelated_state, unrelated_state_content)?;
 
+    // A second live installer must not retire the first installer's capability
+    // state while that owner is between state and provenance publication. Kill
+    // the exact paused owner to prove the native lifecycle lock is released by
+    // interruption before the contender safely repairs and completes the pair.
+    fs::remove_file(&forwarder)?;
+    fs::remove_file(&provenance)?;
+    fs::remove_file(&installer_state)?;
+    let lifecycle_gate = temp.path().join("atlas-forwarder-lifecycle.gate");
+    let lifecycle_ready = PathBuf::from(format!("{}.ready", lifecycle_gate.display()));
+    fs::write(&lifecycle_gate, b"hold\n")?;
+    let mut paused_install = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        None,
+        Some(&home),
+    )?;
+    paused_install
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .env("PATH", &run_path)
+        .env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_PUBLISHED_GATE",
+            &lifecycle_gate,
+        );
+    let mut paused_install = paused_install.spawn()?;
+    let ready_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if lifecycle_ready.is_file() {
+            break;
+        }
+        if paused_install.try_wait()?.is_some() {
+            let output = paused_install.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "paused installer exited before publishing capability state\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if Instant::now() >= ready_deadline {
+            drop(paused_install.kill());
+            let output = paused_install.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "paused installer did not publish capability state within 30 seconds\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    require(
+        installer_state.is_file() && !forwarder.exists() && !provenance.exists(),
+        "paused installer did not stop between capability-state and provenance publication",
+    )?;
+    let state_during_lifecycle_race = fs::read(&installer_state)?;
+
+    let mut contending_install = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        None,
+        Some(&home),
+    )?;
+    contending_install
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .env("PATH", &run_path);
+    let mut contending_install = contending_install.spawn()?;
+    let contention_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if contending_install.try_wait()?.is_some() {
+            let output = contending_install.wait_with_output()?;
+            drop(paused_install.kill());
+            drop(paused_install.wait());
+            return Err(io::Error::other(format!(
+                "contending installer bypassed the live forwarder lock\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if Instant::now() >= contention_deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    require(
+        fs::read(&installer_state)? == state_during_lifecycle_race
+            && !forwarder.exists()
+            && !provenance.exists(),
+        "contending installer changed live capability state before the owner released its lock",
+    )?;
+    paused_install.kill()?;
+    let paused_output = paused_install.wait_with_output()?;
+    fs::remove_file(&lifecycle_gate)?;
+    fs::remove_file(&lifecycle_ready)?;
+    let contending_output = wait_for_plugin_installer_output(
+        contending_install,
+        "contending forwarder lifecycle",
+        Duration::from_secs(35),
+    )?;
+    require(
+        !paused_output.status.success()
+            && contending_output.status.success()
+            && forwarder.is_file()
+            && provenance.is_file()
+            && installer_state.is_file()
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        format!(
+            "interrupted forwarder owner did not release a recoverable lifecycle lock:\npaused stdout:\n{}\npaused stderr:\n{}\ncontender stdout:\n{}\ncontender stderr:\n{}",
+            String::from_utf8_lossy(&paused_output.stdout),
+            String::from_utf8_lossy(&paused_output.stderr),
+            String::from_utf8_lossy(&contending_output.stdout),
+            String::from_utf8_lossy(&contending_output.stderr)
+        ),
+    )?;
+
     #[cfg(unix)]
     {
         fs::remove_file(&forwarder)?;

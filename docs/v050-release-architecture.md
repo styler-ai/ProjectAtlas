@@ -432,6 +432,7 @@ flowchart TB
   collision -->|unmanaged| reject[Typed collision; no overwrite]
   collision -->|owned current| stage[Stage shim and provenance]
   collision -->|owned prior target| stage
+  collision -->|absent| stage
   stage --> state[Publish private capability state]
   state --> provenance{Publish provenance no-clobber succeeds?}
   provenance -->|no| state_cleanup[Quarantine and verify newly owned state]
