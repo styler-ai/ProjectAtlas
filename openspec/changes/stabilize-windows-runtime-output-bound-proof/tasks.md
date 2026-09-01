@@ -10,5 +10,5 @@
 
 ## 3. Verification And Delivery
 
-- [ ] 3.1 Run PowerShell syntax/static checks, the focused Windows installer E2E, repeated ordinary parallel locked workspace proof with explicit timeouts, formatting/diff checks, and all affected Rust/workspace gates; preserve bounded CPU, memory, output, process, and wall-time behavior.
+- [x] 3.1 Run PowerShell syntax/static checks, the focused Windows installer E2E, repeated ordinary parallel locked workspace proof with explicit timeouts, formatting/diff checks, and all affected Rust/workspace gates; preserve bounded CPU, memory, output, process, and wall-time behavior.
 - [ ] 3.2 Refresh onto the accepted shared E2E baseline, pass strict OpenSpec and live IssueOps, resolve every exact-head review finding, pass hosted Windows and required cross-platform checks, and reconcile the final source, test owner, issue tasks, architecture link, and #492 release graph.
