@@ -250,6 +250,8 @@ const REAL_HOST_READER_CIM_DISCOVERY_FAILURE: &str = "discovery";
 const REAL_HOST_READER_CIM_REVALIDATION_FAILURE: &str = "revalidation";
 // The direct host is reaped under the same bounded five-second envelope on every platform.
 const REAL_HOST_READER_REAP_BUDGET: Duration = Duration::from_secs(5);
+const REAL_HOST_ROOT_DIR_NAME: &str = "host-root";
+const REAL_HOST_TIMEOUT_PID_FILE_NAME: &str = "timeout.pid";
 const REAL_HOST_SPECIAL_PATH_COMPONENT: &str = "host reader path with space-\u{00fc}";
 #[cfg(windows)]
 const OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME: &str = "obsolete-projectatlas.cs";
@@ -11473,7 +11475,7 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
     compile_codex_mcp_owner_fixture(&native_host_fixture)?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let database = temp.path().join("projectatlas.db");
-    let host_root = temp.path().join("host-root");
+    let host_root = temp.path().join(REAL_HOST_ROOT_DIR_NAME);
     fs::create_dir_all(&repo)?;
     fs::create_dir_all(&host_root)?;
 
@@ -11586,6 +11588,89 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
         host_cleanup?;
         host_wait?;
     }
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn real_host_reader_posix_process_group_reaps_owned_descendants() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let fixture = temp.path().join("real-host-posix-fixture");
+    write_executable_script(
+        &fixture,
+        r#"#!/bin/sh
+set -eu
+mode=$1
+pid_file=$2
+if [ "$mode" = "success" ]; then
+    exit 0
+fi
+(sleep 300) &
+child=$!
+printf '%s\n' "$child" > "$pid_file"
+while :; do
+    sleep 1
+done
+"#,
+    )?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let host_root = temp.path().join(REAL_HOST_ROOT_DIR_NAME);
+    fs::create_dir_all(&repo)?;
+    fs::create_dir_all(&host_root)?;
+
+    let success_pid_file = temp.path().join("success.pid");
+    let success_pid_file_text = success_pid_file.to_string_lossy().into_owned();
+    let success = run_real_host_command_with_test_timeout(
+        &fixture,
+        &repo,
+        &host_root,
+        None,
+        &["success".to_owned(), success_pid_file_text],
+        &[],
+        REAL_HOST_READER_TIMEOUT,
+    )?;
+    require(
+        success.status.success(),
+        format!(
+            "POSIX real host reader completed fixture unsuccessfully: status={} stderr={}",
+            success.status,
+            String::from_utf8_lossy(&success.stderr)
+        ),
+    )?;
+
+    let timeout_pid_file = temp.path().join(REAL_HOST_TIMEOUT_PID_FILE_NAME);
+    let timeout_pid_file_text = timeout_pid_file.to_string_lossy().into_owned();
+    let timeout_result = run_real_host_command_with_test_timeout(
+        &fixture,
+        &repo,
+        &host_root,
+        None,
+        &["timeout".to_owned(), timeout_pid_file_text],
+        &[],
+        REAL_HOST_READER_TIMEOUT,
+    );
+    let timeout_text = timeout_result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    require(
+        timeout_result.is_err()
+            && timeout_text.contains("real host reader plugin installer exceeded")
+            && timeout_text.contains("status "),
+        format!(
+            "POSIX real host reader timeout did not preserve bounded classification: {timeout_result:?}"
+        ),
+    )?;
+    let child_pid = fs::read_to_string(&timeout_pid_file)?
+        .trim()
+        .parse::<u32>()?;
+    wait_for_posix_process_exit(
+        child_pid,
+        Instant::now()
+            .checked_add(REAL_HOST_READER_REAP_BUDGET)
+            .ok_or_else(|| io::Error::other("POSIX descendant reap deadline overflowed"))?,
+    )?;
     Ok(())
 }
 
@@ -11819,7 +11904,7 @@ fn run_real_host_command_with_environment(
     )
 }
 
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 fn run_real_host_command_with_test_timeout(
     executable: &Path,
     repo: &Path,
@@ -11871,8 +11956,15 @@ fn run_real_host_command_inner(
     }
     #[cfg(not(windows))]
     {
-        let _ = (owned_descendant, timeout);
-        return run_bounded_output(command, "real host reader");
+        #[cfg(unix)]
+        let _ = owned_descendant;
+        #[cfg(unix)]
+        return run_bounded_output_with_posix_process_group(command, "real host reader", timeout);
+        #[cfg(not(unix))]
+        {
+            let _ = (owned_descendant, timeout);
+            return run_bounded_output(command, "real host reader");
+        }
     }
     #[cfg(windows)]
     return run_bounded_output_with_real_host_process_tree(command, "real host reader", timeout);
@@ -41123,7 +41215,7 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         .into());
     }
 
-    let identity_file = temp.path().join("timeout.pid");
+    let identity_file = temp.path().join(REAL_HOST_TIMEOUT_PID_FILE_NAME);
     let timeout_started = Instant::now();
     let result = spawn_codex_owned_obsolete_mcp(
         &codex_fixture,
@@ -42285,6 +42377,29 @@ fn wait_for_plugin_installer_output_with_test_delay(
 /// Test-only variant that transfers a proven-live child to the caller when
 /// injected termination cannot safely reap it here.
 fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+    child: Child,
+    label: &str,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    handoff_live_child: Option<&mut dyn FnMut(Child)>,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    wait_for_plugin_installer_output_with_cleanup_policy(
+        child,
+        label,
+        timeout,
+        observer_delay,
+        exit_probe_error,
+        cleanup_probe_error,
+        kill_child,
+        handoff_live_child,
+        false,
+    )
+}
+
+fn wait_for_plugin_installer_output_with_cleanup_policy(
     mut child: Child,
     label: &str,
     timeout: Duration,
@@ -42293,6 +42408,7 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     cleanup_probe_error: Option<io::Error>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
     handoff_live_child: Option<&mut dyn FnMut(Child)>,
+    cleanup_failure_is_fatal: bool,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let mut exit_probe_error = exit_probe_error;
     let mut cleanup_probe_error = cleanup_probe_error;
@@ -42390,8 +42506,28 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                     }
                 };
                 if let Err(kill_error) = kill_result
-                    && status_after_kill.is_none()
+                    && (status_after_kill.is_none() || cleanup_failure_is_fatal)
                 {
+                    if cleanup_failure_is_fatal {
+                        child.stdin.take();
+                        drop(child.stdout.take());
+                        drop(child.stderr.take());
+                        let reap_deadline = Instant::now()
+                            .checked_add(REAL_HOST_READER_REAP_BUDGET)
+                            .ok_or_else(|| {
+                                io::Error::other(
+                                    "real host reader cleanup failure reap deadline overflowed",
+                                )
+                            })?;
+                        let status = wait_for_child_exit_until(&mut child, reap_deadline);
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "{label} plugin installer exceeded {timeout:?}: cleanup failed after termination attempt ({kill_error}); direct-child reap={status:?}"
+                            ),
+                        )
+                        .into());
+                    }
                     child.stdin.take();
                     if let Some(handoff) = handoff_live_child {
                         handoff(child);
@@ -42505,6 +42641,31 @@ fn wait_for_child_exit_until(
     }
 }
 
+#[cfg(unix)]
+fn posix_process_is_alive(pid: u32) -> io::Result<bool> {
+    Ok(StdCommand::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()?
+        .success())
+}
+
+#[cfg(unix)]
+fn wait_for_posix_process_exit(pid: u32, deadline: Instant) -> io::Result<()> {
+    loop {
+        if !posix_process_is_alive(pid)? {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("POSIX process {pid} remained alive at its bounded reap deadline"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
+    }
+}
+
 /// Run one external reader with bounded stdout/stderr collection.
 fn run_bounded_output(
     mut command: StdCommand,
@@ -42512,6 +42673,60 @@ fn run_bounded_output(
 ) -> Result<std::process::Output, Box<dyn Error>> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     wait_for_plugin_installer_output(command.spawn()?, label, Duration::from_secs(30))
+}
+
+#[cfg(unix)]
+fn terminate_posix_real_host_process_group(child: &mut Child) -> io::Result<()> {
+    let process_group = format!("-{}", child.id());
+    let termination = match StdCommand::new("kill")
+        .args(["-KILL", &process_group])
+        .status()
+    {
+        Ok(status) => status,
+        Err(error) => {
+            let direct_termination = child.kill();
+            return Err(io::Error::other(format!(
+                "POSIX real host process-group termination could not run: {error}; direct-child termination result: {direct_termination:?}"
+            )));
+        }
+    };
+    if termination.success() {
+        return Ok(());
+    }
+    let child_status = child.try_wait()?;
+    let direct_termination = if child_status.is_none() {
+        Some(child.kill())
+    } else {
+        None
+    };
+    Err(io::Error::other(format!(
+        "POSIX real host process-group termination failed with {termination}; direct-child status: {child_status:?}; direct-child termination result: {direct_termination:?}"
+    )))
+}
+
+#[cfg(unix)]
+fn run_bounded_output_with_posix_process_group(
+    mut command: StdCommand,
+    label: &str,
+    timeout: Duration,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    use std::os::unix::process::CommandExt as _;
+
+    command.process_group(0);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut stop_real_host_process_group =
+        |host: &mut Child| terminate_posix_real_host_process_group(host);
+    wait_for_plugin_installer_output_with_cleanup_policy(
+        command.spawn()?,
+        label,
+        timeout,
+        None,
+        None,
+        None,
+        &mut stop_real_host_process_group,
+        None,
+        true,
+    )
 }
 
 #[cfg(windows)]
