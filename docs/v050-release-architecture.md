@@ -187,6 +187,24 @@ flowchart LR
     limits -->|exceeded or canceled| bounded[Typed bounded failure; no complete claim]
 ```
 
+The document boundary pins `pdf-extract` `0.12.0`, `quick-xml` `0.42.0`, and
+`zip` `0.6.6`.
+PDF admission requires a `%PDF-` header and extracts only page text; DOCX
+admission requires a ZIP header, rejects unsafe or duplicate parts, and passes
+only `word/document.xml` to the parser. Each result carries a page/text-span or
+part/paragraph/run/text-span locator plus parser provenance and a complete
+coverage marker. The boundary caps input/compressed package bytes at 8 MiB,
+expanded package bytes at 32 MiB, the source/parser staging envelope at 96 MiB,
+retained output at 4 MiB, and package entries and evidence facts at 256 and
+4,096 respectively; embedded-document recursion is limited to zero (the outer
+document depth is one). It never executes macros,
+scripts, external references, OCR, or embedded documents. Valid text is reused
+by the existing `file_texts` FTS projection and locator-bearing blocks by the
+existing graph publication transaction; no document-specific SQLite schema is
+needed. Any malformed, mismatched, encrypted, over-limit, canceled, or
+source-changed operation fails before publication, preserving the last complete
+generation.
+
 ## Invalid graph identity admission
 
 ```mermaid

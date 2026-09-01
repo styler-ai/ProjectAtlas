@@ -8,10 +8,14 @@ homepage.workspace = true
 
 [dependencies]
 blake3.workspace = true
+pdf-extract.workspace = true
 projectatlas-core.workspace = true
 pulldown-cmark.workspace = true
+quick-xml.workspace = true
 regex.workspace = true
 toml.workspace = true
+thiserror.workspace = true
+zip.workspace = true
 tree-sitter.workspace = true
 tree-sitter-c.workspace = true
 tree-sitter-c-sharp.workspace = true

@@ -139,6 +139,7 @@ rmcp = { workspace = true, features = ["client"] }
 serde_json.workspace = true
 tar.workspace = true
 tempfile.workspace = true
+zip.workspace = true
 zstd.workspace = true
 
 [lints]

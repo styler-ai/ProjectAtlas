@@ -92,7 +92,9 @@ use projectatlas_service::{
     validate_federated_root_count,
 };
 use projectatlas_symbols::{
-    MarkdownFacts, extract_markdown_facts_controlled, extract_symbol_graph_controlled,
+    DocumentExtractionError, DocumentLimit, MarkdownFacts, document_format_for_path,
+    extract_document_graph_controlled, extract_document_text_controlled,
+    extract_markdown_facts_controlled, extract_symbol_graph_controlled,
     semantic_resolution_contract_digest,
 };
 use rayon::ThreadPoolBuilder;
@@ -6063,6 +6065,13 @@ pub(crate) enum SymbolParseOutcome {
         /// Repository-relative file path.
         path: String,
     },
+    /// A supported document failed its typed format, archive, or parser boundary.
+    InvalidInput {
+        /// Repository-relative file path.
+        path: String,
+        /// Bounded extraction diagnostic.
+        message: String,
+    },
     /// Source bytes changed after the staged filesystem scan.
     SourceChanged {
         /// Repository-relative file path.
@@ -6391,6 +6400,11 @@ fn stage_symbols_for_nodes_with_limits(
                     changes.push(SymbolProjectionChange::Clear { path, language });
                     report.binary_or_non_utf8 += 1;
                 }
+                SymbolParseOutcome::InvalidInput { path, message } => {
+                    return Err(CliError::InvalidInput(format!(
+                        "document extraction failed for {path}: {message}"
+                    )));
+                }
                 SymbolParseOutcome::SourceChanged { path } => {
                     return Err(source_changed_during_derivation(&root, &path));
                 }
@@ -6567,19 +6581,27 @@ fn parse_symbol_job_controlled(
     if let Err(failure) = control.check(IndexWorkStage::SymbolParsing) {
         return SymbolParseOutcome::IndexWork(failure);
     }
-    let content = match admit_symbol_job_source(job, options, control) {
-        Ok(content) => content,
+    let bytes = match admit_symbol_job_bytes(job, options, control) {
+        Ok(bytes) => bytes,
         Err(outcome) => return *outcome,
+    };
+    if document_format_for_path(&job.path, job.language.as_deref()).is_some() {
+        return parse_document_symbol_job(job, &bytes, options, control);
+    }
+    let Ok(content) = String::from_utf8(bytes) else {
+        return SymbolParseOutcome::BinaryOrNonUtf8 {
+            path: job.path.clone(),
+        };
     };
     parse_admitted_symbol_job(job, &content, None, options, control)
 }
 
-/// Read, bound, hash-check, and decode one source exactly once for symbol staging.
-fn admit_symbol_job_source(
+/// Read, bound, and hash-check one source exactly once for symbol staging.
+fn admit_symbol_job_bytes(
     job: &SymbolParseJob,
     options: &SymbolBuildOptions,
     control: &IndexWorkControl,
-) -> Result<String, Box<SymbolParseOutcome>> {
+) -> Result<Vec<u8>, Box<SymbolParseOutcome>> {
     let bytes = match read_source_bytes_controlled(
         &job.native_path,
         options.max_bytes,
@@ -6615,12 +6637,97 @@ fn admit_symbol_job_source(
             path: job.path.clone(),
         }));
     }
-    let Ok(content) = String::from_utf8(bytes) else {
-        return Err(Box::new(SymbolParseOutcome::BinaryOrNonUtf8 {
-            path: job.path.clone(),
-        }));
-    };
-    Ok(content)
+    Ok(bytes)
+}
+
+/// Parse one admitted PDF/DOCX byte stream into the existing publication shape.
+fn parse_document_symbol_job(
+    job: &SymbolParseJob,
+    bytes: &[u8],
+    _options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+) -> SymbolParseOutcome {
+    let graph =
+        match extract_document_graph_controlled(bytes, &job.path, job.language.as_deref(), control)
+        {
+            Ok(graph) => graph,
+            Err(error) => return document_parse_error_outcome(&job.path, error),
+        };
+    let summary = summarize_symbol_graph(&graph, job.fallback_summary.as_deref());
+    let purpose_suggestion = job
+        .purpose_needs_suggestion
+        .then(|| suggest_file_purpose(&job.path, &summary));
+    SymbolParseOutcome::Parsed(SymbolParseSuccess {
+        path: job.path.clone(),
+        graph,
+        markdown_facts: None,
+        source_parser: ParserKind::Structural,
+        summary,
+        summary_is_structural: false,
+        purpose_suggestion,
+    })
+}
+
+/// Preserve typed cancellation/resource failures while surfacing malformed documents as input errors.
+fn document_parse_error_outcome(path: &str, error: DocumentExtractionError) -> SymbolParseOutcome {
+    match error {
+        DocumentExtractionError::Work(failure) => SymbolParseOutcome::IndexWork(failure),
+        DocumentExtractionError::ResourceLimit {
+            limit,
+            observed,
+            maximum,
+        } => {
+            let resource = match limit {
+                DocumentLimit::FactCount => IndexWorkResource::SymbolRows,
+                DocumentLimit::OutputBytes => IndexWorkResource::OutputBytes,
+                DocumentLimit::EntryCount => IndexWorkResource::Entries,
+                DocumentLimit::InputBytes
+                | DocumentLimit::CompressedBytes
+                | DocumentLimit::ExpandedBytes
+                | DocumentLimit::MemoryBytes => IndexWorkResource::SourceBytes,
+            };
+            SymbolParseOutcome::IndexWork(IndexWorkFailure::resource_limit(
+                IndexWorkStage::SymbolParsing,
+                resource,
+                maximum as u64,
+                observed as u64,
+            ))
+        }
+        other => SymbolParseOutcome::InvalidInput {
+            path: path.to_owned(),
+            message: other.to_string(),
+        },
+    }
+}
+
+/// Map one document extraction failure to the navigation boundary's typed error contract.
+fn document_navigation_error(path: &str, error: DocumentExtractionError) -> CliError {
+    match error {
+        DocumentExtractionError::Work(failure) => failure.into(),
+        DocumentExtractionError::ResourceLimit {
+            limit,
+            observed,
+            maximum,
+        } => {
+            let resource = match limit {
+                DocumentLimit::FactCount => IndexWorkResource::SymbolRows,
+                DocumentLimit::OutputBytes => IndexWorkResource::OutputBytes,
+                DocumentLimit::EntryCount => IndexWorkResource::Entries,
+                DocumentLimit::InputBytes
+                | DocumentLimit::CompressedBytes
+                | DocumentLimit::ExpandedBytes
+                | DocumentLimit::MemoryBytes => IndexWorkResource::SourceBytes,
+            };
+            IndexWorkFailure::resource_limit(
+                IndexWorkStage::TextIndex,
+                resource,
+                maximum as u64,
+                observed as u64,
+            )
+            .into()
+        }
+        other => CliError::InvalidInput(format!("document extraction failed for {path}: {other}")),
+    }
 }
 
 /// Extract conservative facts from admitted source and retain independent source provenance.
@@ -7373,6 +7480,16 @@ pub(crate) fn read_indexed_file_content(
             modified: 1,
             sample_paths: vec![file_key.to_string()],
         })));
+    }
+    if document_format_for_path(file_key, indexed.node.language.as_deref()).is_some() {
+        return extract_document_text_controlled(
+            &bytes,
+            file_key,
+            indexed.node.language.as_deref(),
+            &standalone_index_work_control(),
+        )
+        .map(|facts| facts.text)
+        .map_err(|error| document_navigation_error(file_key, error));
     }
     String::from_utf8(bytes).map_err(|source| {
         CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
@@ -8664,15 +8781,44 @@ fn indexed_file_texts_for_nodes_with_limit(
         if node.content_hash.as_deref() != Some(current_hash.as_str()) {
             return Err(source_changed_during_derivation(root, &node.path));
         }
-        let Ok(content) = String::from_utf8(bytes) else {
-            rows.push(TextIndexRow {
-                path: node.path.clone(),
-                text: None,
-                reason: TextIndexSkipReason::BinaryOrNonUtf8,
-            });
-            continue;
+        let content = if document_format_for_path(&node.path, node.language.as_deref()).is_some() {
+            match extract_document_text_controlled(
+                &bytes,
+                &node.path,
+                node.language.as_deref(),
+                control,
+            ) {
+                Ok(facts) => facts.text,
+                Err(DocumentExtractionError::Work(failure)) => return Err(failure.into()),
+                Err(error) => {
+                    return Err(CliError::InvalidInput(format!(
+                        "document extraction failed for {}: {error}",
+                        node.path
+                    )));
+                }
+            }
+        } else {
+            let Ok(content) = String::from_utf8(bytes) else {
+                rows.push(TextIndexRow {
+                    path: node.path.clone(),
+                    text: None,
+                    reason: TextIndexSkipReason::BinaryOrNonUtf8,
+                });
+                continue;
+            };
+            content
         };
-        staged_bytes = staged_bytes.saturating_add(content.len() as u64);
+        let next_staged_bytes = staged_bytes.saturating_add(content.len() as u64);
+        if next_staged_bytes > max_staged_bytes {
+            return Err(IndexWorkFailure::resource_limit(
+                IndexWorkStage::TextIndex,
+                IndexWorkResource::TextBytes,
+                max_staged_bytes,
+                next_staged_bytes,
+            )
+            .into());
+        }
+        staged_bytes = next_staged_bytes;
         rows.push(TextIndexRow {
             path: node.path.clone(),
             reason: TextIndexSkipReason::Indexed,
@@ -13131,6 +13277,92 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &changes.paths,
             &HashSet::from([source]),
             "native Unix watcher paths",
+        )?;
+        Ok(())
+    }
+
+    fn runtime_pdf_fixture() -> Vec<u8> {
+        let objects = [
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".as_slice(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".as_slice(),
+            b"4 0 obj\n<< /Length 42 >>\nstream\nBT /F1 12 Tf 72 720 Td (Runtime PDF) Tj ET\nendstream\nendobj\n".as_slice(),
+            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for object in objects {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(object);
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn document_bytes_reach_text_and_symbol_publication_paths() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("guide.pdf");
+        let bytes = runtime_pdf_fixture();
+        fs::write(&path, &bytes)?;
+        let node = Node {
+            path: "guide.pdf".to_owned(),
+            kind: NodeKind::File,
+            parent_path: None,
+            extension: Some(".pdf".to_owned()),
+            language: Some("pdf".to_owned()),
+            size_bytes: Some(bytes.len() as u64),
+            mtime_ns: Some(1),
+            content_hash: Some(blake3::hash(&bytes).to_hex().to_string()),
+        };
+        let rows = indexed_file_texts_for_nodes(
+            temp.path(),
+            std::slice::from_ref(&node),
+            TextIndexOptions::new(projectatlas_symbols::MAX_DOCUMENT_OUTPUT_BYTES as u64),
+        )?;
+        require_eq(&rows.len(), &1, "document text row count")?;
+        require_eq(
+            &rows[0].text.as_ref().map(|text| text.content.as_str()),
+            &Some("Runtime PDF"),
+            "document text content",
+        )?;
+        let SymbolParseOutcome::Parsed(parsed) = parse_symbol_job(
+            &SymbolParseJob {
+                path: node.path,
+                native_path: path,
+                expected_content_hash: node.content_hash.unwrap_or_default(),
+                language: node.language,
+                fallback_summary: None,
+                purpose_needs_suggestion: false,
+            },
+            &SymbolBuildOptions::new(
+                projectatlas_symbols::MAX_DOCUMENT_OUTPUT_BYTES as u64,
+                Some(1),
+                None,
+            ),
+            Instant::now(),
+        ) else {
+            return Err(io::Error::other("document symbol job did not parse").into());
+        };
+        require_eq(&parsed.graph.symbols.len(), &1, "document symbol count")?;
+        require_eq(
+            &parsed.graph.symbols[0]
+                .signature
+                .contains("pdf:page=1;text-span="),
+            &true,
+            "document locator persisted in graph symbol",
         )?;
         Ok(())
     }

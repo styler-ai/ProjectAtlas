@@ -154,6 +154,7 @@ fn core_pipeline(capability: &LanguageCapability) -> LanguagePipeline {
             SymbolParserOwner::Vue => "vue-structural",
             SymbolParserOwner::PowerShell => "powershell-structural",
             SymbolParserOwner::Markdown => "markdown-structural",
+            SymbolParserOwner::Document => "documents",
             SymbolParserOwner::Fallback => "fallback",
             SymbolParserOwner::Unavailable => "none",
         }
@@ -239,6 +240,7 @@ fn assert_runtime_semantics(fixture: &RuntimeSemanticsFixture) {
         .map(core_pipeline)
         .collect::<Vec<_>>();
     let mut historical_pipelines = pipelines.clone();
+    historical_pipelines.retain(|pipeline| !matches!(pipeline.language.as_str(), "pdf" | "docx"));
     if let Some(markdown) = historical_pipelines
         .iter_mut()
         .find(|pipeline| pipeline.language == "markdown")

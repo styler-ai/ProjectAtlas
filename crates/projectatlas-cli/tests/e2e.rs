@@ -73,6 +73,8 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use yaml_rust2::{Yaml, YamlLoader};
+use zip::ZipWriter;
+use zip::write::FileOptions;
 
 const TEST_REPO_DIR: &str = "repo";
 const SRC_DIR_NAME: &str = "src";
@@ -2007,7 +2009,8 @@ fn installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability
         }
         Ok(())
     })();
-    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())?;
+    Ok(())
 }
 
 #[cfg(feature = "optional-parser-supervisor")]
@@ -26479,7 +26482,281 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
         }
         Ok(())
     })();
-    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())?;
+
+    Ok(())
+}
+
+#[test]
+fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("bounded-document-navigation");
+    let docs = repo.join("docs");
+    fs::create_dir_all(&docs)?;
+
+    let pdf_objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".as_slice(),
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".as_slice(),
+        b"4 0 obj\n<< /Length 42 >>\nstream\nBT /F1 12 Tf 72 720 Td (Runtime PDF) Tj ET\nendstream\nendobj\n".as_slice(),
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
+    ];
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for object in pdf_objects {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(object);
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", pdf_objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            pdf_objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    fs::write(docs.join("guide.pdf"), pdf)?;
+
+    let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
+        let docx_file = fs::File::create(path)?;
+        let mut docx = ZipWriter::new(docx_file);
+        docx.start_file("word/document.xml", FileOptions::default())?;
+        write!(
+            docx,
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"
+        )?;
+        docx.finish()?;
+        Ok(())
+    };
+    let docx_path = docs.join("guide.docx");
+    write_docx(&docx_path, "DOCX evidence marker")?;
+
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&repo, &database)?;
+    let executable = mcp_contract_executable();
+
+    let files = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "files".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/*".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    let files_text = serde_json::to_string(&files)?;
+    for expected_path in ["docs/guide.pdf", "docs/guide.docx"] {
+        if !files_text.contains(expected_path) {
+            return Err(io::Error::other(format!(
+                "CLI files navigation omitted {expected_path}: {files_text}"
+            ))
+            .into());
+        }
+    }
+
+    let search = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "search".to_owned(),
+            "DOCX evidence marker".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/*.docx".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    let search_text = serde_json::to_string(&search)?;
+    if !search_text.contains("docs/guide.docx") || !search_text.contains("DOCX evidence marker") {
+        return Err(io::Error::other(format!(
+            "CLI document search omitted indexed DOCX evidence: {search_text}"
+        ))
+        .into());
+    }
+
+    let summary = json_summary_command(&repo, &database, "docs/guide.docx")?;
+    require_json_string(&summary, &["parser_kind"], "structural-symbol-graph")?;
+    require_json_contains(&summary, &["content_summary"], "docx document")?;
+    require_json_usize(&summary, &["symbol_count"], 1)?;
+
+    let symbols = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "symbols".to_owned(),
+            "list".to_owned(),
+            "--file".to_owned(),
+            "docs/guide.docx".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+            "--limit".to_owned(),
+            "10".to_owned(),
+        ],
+    )?;
+    let symbols_text = serde_json::to_string(&symbols)?;
+    if !symbols_text.contains("document-block-1")
+        || !symbols_text.contains("docx:part=word/document.xml;paragraph=1;run=1")
+    {
+        return Err(io::Error::other(format!(
+            "CLI symbols omitted exact DOCX locator evidence: {symbols_text}"
+        ))
+        .into());
+    }
+
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let operation_result = (|| -> Result<(), Box<dyn Error>> {
+        let files = session.call_tool(
+            "atlas_files",
+            &json!({
+                "project_path": repo.as_path(),
+                "file_pattern": "docs/*",
+                "content_selection": "documentation",
+                "limit": 10
+            }),
+        )?;
+        if !files.contains("docs/guide.pdf") || !files.contains("docs/guide.docx") {
+            return Err(io::Error::other(format!(
+                "MCP files navigation omitted bounded documents: {files}"
+            ))
+            .into());
+        }
+        let summary = session.call_tool(
+            "atlas_file_summary",
+            &json!({
+                "project_path": repo.as_path(),
+                "file": "docs/guide.docx",
+                "content_selection": "documentation",
+                "limit": 10
+            }),
+        )?;
+        if !summary.contains("docx document") {
+            return Err(io::Error::other(format!(
+                "MCP summary omitted DOCX text or structural summary: {summary}"
+            ))
+            .into());
+        }
+        let symbols = session.call_tool(
+            "atlas_symbols",
+            &json!({
+                "project_path": repo.as_path(),
+                "file": "docs/guide.docx",
+                "content_selection": "documentation",
+                "limit": 10
+            }),
+        )?;
+        if !symbols.contains("document-block-1")
+            || !symbols.contains("docx:part=word/document.xml;paragraph=1;run=1")
+        {
+            return Err(io::Error::other(format!(
+                "MCP symbols omitted exact DOCX locator evidence: {symbols}"
+            ))
+            .into());
+        }
+        let search = session.call_tool(
+            "atlas_search",
+            &json!({
+                "project_path": repo.as_path(),
+                "pattern": "DOCX evidence marker",
+                "file_pattern": "docs/*.docx",
+                "content_selection": "documentation",
+                "limit": 10
+            }),
+        )?;
+        if !search.contains("docs/guide.docx") || !search.contains("DOCX evidence marker") {
+            return Err(io::Error::other(format!(
+                "MCP document search omitted indexed DOCX evidence: {search}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())?;
+
+    write_docx(&docx_path, "DOCX replacement marker")?;
+    run_scan(&repo, &database)?;
+    let replacement_search = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "search".to_owned(),
+            "DOCX replacement marker".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/*.docx".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    let replacement_text = serde_json::to_string(&replacement_search)?;
+    if !replacement_text.contains("docs/guide.docx")
+        || !replacement_text.contains("DOCX replacement marker")
+        || replacement_text.contains("DOCX evidence marker")
+    {
+        return Err(io::Error::other(format!(
+            "incremental DOCX replacement did not replace indexed text: {replacement_text}"
+        ))
+        .into());
+    }
+
+    fs::remove_file(docs.join("guide.pdf"))?;
+    run_scan(&repo, &database)?;
+    let files_after_delete = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "files".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/*".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    let files_after_delete_text = serde_json::to_string(&files_after_delete)?;
+    if files_after_delete_text.contains("docs/guide.pdf")
+        || !files_after_delete_text.contains("docs/guide.docx")
+    {
+        return Err(io::Error::other(format!(
+            "incremental document delete left stale navigation rows: {files_after_delete_text}"
+        ))
+        .into());
+    }
+
+    let before_failed_refresh = mcp_database_snapshot(&database)?;
+    fs::write(&docx_path, b"PK\x03\x04truncated-document")?;
+    let failed_refresh = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .output()?;
+    if failed_refresh.status.success() {
+        return Err(io::Error::other("malformed DOCX refresh was published").into());
+    }
+    let after_failed_refresh = mcp_database_snapshot(&database)?;
+    if before_failed_refresh != after_failed_refresh {
+        return Err(io::Error::other(
+            "malformed DOCX refresh changed the last complete SQLite publication",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[test]

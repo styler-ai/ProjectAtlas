@@ -47,6 +47,9 @@ const OVERVIEW_KEYS: &[&str] = &[
 ];
 /// Source extensions scanned for Purpose metadata by default.
 const DEFAULT_SOURCE_EXTENSIONS: &[&str] = BROAD_SOURCE_EXTENSIONS;
+/// Document extensions admitted by the bounded document parser in addition to
+/// the frozen v0.3.26 broad-source compatibility set.
+const DOCUMENT_SOURCE_EXTENSIONS: &[&str] = &[".pdf", ".docx"];
 /// Directory names excluded from scans even when config is hand-edited.
 const REQUIRED_EXCLUDE_DIR_NAMES: &[&str] = &[".git", ".projectatlas"];
 /// Directory names excluded from scans by default.
@@ -1297,12 +1300,10 @@ fn normalize_config(
         purpose_filename: project
             .purpose_filename
             .unwrap_or_else(|| DEFAULT_LEGACY_PURPOSE_FILENAME.to_string()),
-        source_extensions: normalize_set(scan.source_extensions.unwrap_or_else(|| {
-            DEFAULT_SOURCE_EXTENSIONS
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })),
+        source_extensions: normalize_set(
+            scan.source_extensions
+                .unwrap_or_else(default_source_extensions),
+        ),
         exclude_dir_names: exclude_dir_name_set(scan.exclude_dir_names),
         exclude_dir_suffixes: string_set(scan.exclude_dir_suffixes, &[".egg-info"]),
         exclude_path_prefixes: normalize_prefix_set(scan.exclude_path_prefixes)?,
@@ -2906,7 +2907,12 @@ fn resolve_config_parent(parent: &Path) -> PathBuf {
 
 /// Build default config text with the supplied project root value.
 fn default_config_text_with_root(root_value: &str) -> String {
-    let source_extensions = toml_array(DEFAULT_SOURCE_EXTENSIONS);
+    let default_source_extensions = default_source_extensions();
+    let source_extension_refs = default_source_extensions
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let source_extensions = toml_array(&source_extension_refs);
     [
         "[project]",
         &format!(
@@ -2948,6 +2954,15 @@ fn default_config_text_with_root(root_value: &str) -> String {
         "",
     ]
     .join("\n")
+}
+
+/// Return the normal source-extension defaults plus supported document files.
+fn default_source_extensions() -> Vec<String> {
+    DEFAULT_SOURCE_EXTENSIONS
+        .iter()
+        .chain(DOCUMENT_SOURCE_EXTENSIONS)
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Default `.gitignore` text created only by the explicit setup helper.

@@ -27,7 +27,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **THEN** guidance explicitly abstains or selects lexical/fallback evidence and does not generalize PHP into a plural language campaign
 
 ### Requirement: v0.5 document extraction supports only PDF and DOCX
-#465 SHALL pin and audit `pdf-extract` 0.12.0 and `docx-lite` 0.2.0 plus their exact locked transitive trees. It SHALL admit only PDF content streams and DOCX `word/document.xml`, with no OCR, legacy DOC, spreadsheet/presentation formats, macros, scripts, remote references, arbitrary processes, or embedded recursive parsers.
+#465 SHALL pin and audit `pdf-extract` 0.12.0, `quick-xml` 0.42.0, and `zip` 0.6.6 plus their exact locked transitive trees. It SHALL admit only PDF content streams and DOCX `word/document.xml`, with no OCR, legacy DOC, spreadsheet/presentation formats, macros, scripts, remote references, arbitrary processes, or embedded recursive parsers.
 
 #### Scenario: Valid PDF
 - **WHEN** PDF magic and all input/time/memory/output limits pass
