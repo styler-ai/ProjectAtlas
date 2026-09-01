@@ -2535,6 +2535,25 @@ function Invoke-ProjectAtlasAtlasForwarderPublicationRace {
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Invoke-ProjectAtlasAtlasForwarderProvenancePublicationRace {
+    param(
+        [string]$ProvenancePath
+    )
+    if ([string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH)) {
+        return
+    }
+    if ((Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH) -ine (Get-NormalizedPathEntry $ProvenancePath)) {
+        return
+    }
+    if (Test-Path -LiteralPath $ProvenancePath) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        $ProvenancePath,
+        "# foreign provenance publication race collision`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Assert-ProjectAtlasAtlasForwarderCollisionFree {
     param(
         [string]$VerifiedPath
@@ -2605,7 +2624,13 @@ function Write-ProjectAtlasAtlasForwarder {
             }
         }
         else {
-            Publish-ProjectAtlasFileNoClobber $temporaryProvenance $provenancePath
+            Invoke-ProjectAtlasAtlasForwarderProvenancePublicationRace $provenancePath
+            try {
+                Publish-ProjectAtlasFileNoClobber $temporaryProvenance $provenancePath
+            }
+            catch {
+                throw "ProjectAtlas atlas forwarder provenance publication collided; refusing to overwrite: $provenancePath. $($_.Exception.Message)"
+            }
             $provenancePublished = $true
         }
         Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath | Out-Null

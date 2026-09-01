@@ -10356,7 +10356,6 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .env("PATH", &run_path);
         Ok(command.output()?)
     };
-    #[cfg(unix)]
     let run_install_with_env =
         |key: &str, value: &Path| -> Result<std::process::Output, Box<dyn Error>> {
             let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
@@ -10373,6 +10372,49 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 .env(key, value);
             Ok(command.output()?)
         };
+    #[cfg(unix)]
+    let run_install_with_provenance_and_state_failure =
+        |provenance_path: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                &runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &run_path)
+                .env(
+                    "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_CHECK_RACE_PATH",
+                    provenance_path,
+                )
+                .env(
+                    "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+                    "1",
+                );
+            Ok(command.output()?)
+        };
+    #[cfg(unix)]
+    let run_install_with_state_failure = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &run_path)
+            .env(
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+                "1",
+            );
+        Ok(command.output()?)
+    };
     let run_uninstall = || -> Result<std::process::Output, Box<dyn Error>> {
         let mut command = if cfg!(windows) {
             let mut command = StdCommand::new("powershell");
@@ -10556,41 +10598,79 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     let installer_state = installer_states[0].path();
 
+    let unrelated_state = installer_state_dir.join("unrelated-state");
+    let unrelated_state_content = if cfg!(windows) {
+        b"unrelated installer state\r\n".as_slice()
+    } else {
+        b"unrelated installer state\n".as_slice()
+    };
+    fs::write(&unrelated_state, unrelated_state_content)?;
+
     #[cfg(unix)]
     {
-        let unrelated_state = installer_state_dir.join("unrelated-state");
-        let unrelated_state_content = b"unrelated installer state\n";
-        fs::write(&unrelated_state, unrelated_state_content)?;
         fs::remove_file(&forwarder)?;
         fs::remove_file(&provenance)?;
         fs::remove_file(&installer_state)?;
-        let provenance_collision = run_install_with_env(
-            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
+        let early_collision = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_CHECK_RACE_PATH",
             &provenance,
         )?;
-        let provenance_collision_text = format!(
+        let early_collision_text = format!(
             "{}\n{}",
-            String::from_utf8_lossy(&provenance_collision.stdout),
-            String::from_utf8_lossy(&provenance_collision.stderr)
+            String::from_utf8_lossy(&early_collision.stdout),
+            String::from_utf8_lossy(&early_collision.stderr)
         );
         let remaining_states = installer_state_dir
             .read_dir()?
             .collect::<Result<Vec<_>, io::Error>>()?;
         require(
-            !provenance_collision.status.success()
-                && provenance_collision_text.contains("provenance publication collided")
+            !early_collision.status.success()
+                && early_collision_text.contains("provenance collision")
                 && !forwarder.exists()
-                && fs::read(&provenance)? == b"# foreign provenance publication race collision\n"
+                && fs::read(&provenance)? == b"# foreign provenance check race collision\n"
                 && !installer_state.exists()
                 && remaining_states.len() == 1
                 && remaining_states[0].path() == unrelated_state
                 && fs::read(&unrelated_state)? == unrelated_state_content,
             format!(
-                "provenance publication collision retained orphaned or unrelated state:\n{provenance_collision_text}"
+                "early provenance collision retained orphaned or unrelated state:\n{early_collision_text}"
             ),
         )?;
         fs::remove_file(&provenance)?;
-        fs::remove_file(&unrelated_state)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "installer could not recover after early provenance collision:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let publication_collision = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
+            &provenance,
+        )?;
+        let publication_collision_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&publication_collision.stdout),
+            String::from_utf8_lossy(&publication_collision.stderr)
+        );
+        require(
+            !publication_collision.status.success()
+                && publication_collision_text.contains("provenance publication collided")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance publication race collision\n"
+                && !installer_state.exists()
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "provenance publication collision retained orphaned or unrelated state:\n{publication_collision_text}"
+            ),
+        )?;
+        fs::remove_file(&provenance)?;
         let repaired_output = run_install()?;
         require(
             repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
@@ -10600,7 +10680,101 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 String::from_utf8_lossy(&repaired_output.stderr)
             ),
         )?;
+
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let cleanup_failure = run_install_with_provenance_and_state_failure(&provenance)?;
+        let cleanup_failure_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&cleanup_failure.stdout),
+            String::from_utf8_lossy(&cleanup_failure.stderr)
+        );
+        require(
+            !cleanup_failure.status.success()
+                && cleanup_failure_text.contains("provenance collision")
+                && cleanup_failure_text.contains("could not retire newly published")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance check race collision\n"
+                && installer_state.is_file()
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "state cleanup failure did not retain only exact orphaned state:\n{cleanup_failure_text}"
+            ),
+        )?;
+        let retained_state_content = fs::read(&installer_state)?;
+        fs::remove_file(&provenance)?;
+        let retained_state = run_install_with_state_failure()?;
+        let retained_state_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&retained_state.stdout),
+            String::from_utf8_lossy(&retained_state.stderr)
+        );
+        require(
+            !retained_state.status.success()
+                && retained_state_text.contains("retained without a managed forwarder")
+                && !forwarder.exists()
+                && !provenance.exists()
+                && installer_state.is_file()
+                && fs::read(&installer_state)? == retained_state_content
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!("retained state was reused after cleanup failure:\n{retained_state_text}"),
+        )?;
+        fs::remove_file(&installer_state)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "installer could not recover after retained-state cleanup failure:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
     }
+
+    #[cfg(windows)]
+    {
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let publication_collision = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
+            &provenance,
+        )?;
+        let publication_collision_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&publication_collision.stdout),
+            String::from_utf8_lossy(&publication_collision.stderr)
+        );
+        let remaining_states = installer_state_dir
+            .read_dir()?
+            .collect::<Result<Vec<_>, io::Error>>()?;
+        require(
+            !publication_collision.status.success()
+                && publication_collision_text.contains("provenance publication")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance publication race collision\r\n"
+                && !installer_state.exists()
+                && remaining_states.len() == 1
+                && remaining_states[0].path() == unrelated_state
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "Windows provenance publication collision retained orphaned or unrelated state:\n{publication_collision_text}"
+            ),
+        )?;
+        fs::remove_file(&provenance)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "Windows installer could not recover after provenance publication collision:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+    }
+
+    fs::remove_file(&unrelated_state)?;
 
     let direct_database = temp.path().join("direct database with spaces.db");
     let alias_database = temp.path().join("alias database with spaces.db");

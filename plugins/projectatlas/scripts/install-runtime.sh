@@ -205,7 +205,13 @@ ensure_atlas_forwarder_state() {
       printf '%s\n' "ProjectAtlas atlas forwarder installer state is missing, mismatched, or linked: $state_path" >&2
       return 1
     }
-    return 0
+    if is_managed_atlas_forwarder "$forwarder" "$verified"; then
+      return 0
+    fi
+    if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+      printf '%s\n' "ProjectAtlas atlas forwarder installer state is retained without a managed forwarder; refusing to reuse: $state_path" >&2
+      return 1
+    fi
   fi
   state_root=$(atlas_forwarder_state_root)
   mkdir -p -- "$state_root" || return 1
@@ -332,6 +338,10 @@ remove_atlas_forwarder_state() {
     rm -f -- "$quarantine"
     return 1
   fi
+  if ! inject_atlas_forwarder_state_retirement_failure; then
+    restore_atlas_forwarder_quarantine "$quarantine" "$state_path"
+    return 1
+  fi
   expected=$(atlas_forwarder_state_content "$forwarder" "$verified" "$capability") || return 1
   actual=$(cat "$quarantine" 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
@@ -449,6 +459,20 @@ inject_atlas_forwarder_provenance_publication_race() {
   printf '%s\n' '# foreign provenance publication race collision' >"$1"
 }
 
+inject_atlas_forwarder_provenance_check_race() {
+  race_path=${PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_CHECK_RACE_PATH:-}
+  [ -n "$race_path" ] && [ "$(canonical_file "$race_path")" = "$(canonical_file "$1")" ] || return 0
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    return 0
+  fi
+  printf '%s\n' '# foreign provenance check race collision' >"$1"
+}
+
+inject_atlas_forwarder_state_retirement_failure() {
+  [ -n "${PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE:-}" ] || return 0
+  return 1
+}
+
 write_atlas_forwarder() {
   verified=$(canonical_file "$1") || return 1
   forwarder=$(atlas_forwarder_path "$verified")
@@ -496,8 +520,12 @@ write_atlas_forwarder() {
   fi
   state_published=$ATLAS_FORWARDER_STATE_PUBLISHED
   provenance_published=0
+  inject_atlas_forwarder_provenance_check_race "$provenance"
   if [ -e "$provenance" ] || [ -L "$provenance" ]; then
     if ! is_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
+      if [ "$state_published" -eq 1 ] && ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+        printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
+      fi
       rm -f "$temporary" "$temporary_provenance"
       printf '%s\n' "ProjectAtlas atlas forwarder provenance collision; refusing to overwrite: $provenance" >&2
       return 1
@@ -505,7 +533,9 @@ write_atlas_forwarder() {
   else
     if ! inject_atlas_forwarder_provenance_publication_race "$provenance" || ! ln "$temporary_provenance" "$provenance"; then
       if [ "$state_published" -eq 1 ]; then
-        remove_atlas_forwarder_state "$forwarder" "$verified" || true
+        if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+          printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
+        fi
       fi
       rm -f "$temporary" "$temporary_provenance"
       printf '%s\n' "ProjectAtlas atlas forwarder provenance publication collided; refusing to overwrite: $provenance" >&2
@@ -516,10 +546,14 @@ write_atlas_forwarder() {
   fi
   if ! ensure_atlas_forwarder_collision_free "$forwarder" "$verified"; then
     if [ "$provenance_published" -eq 1 ]; then
-      remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"
+      if ! remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
+        printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder provenance: $provenance" >&2
+      fi
     fi
     if [ "$state_published" -eq 1 ]; then
-      remove_atlas_forwarder_state "$forwarder" "$verified" || true
+      if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+        printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
+      fi
     fi
     rm -f "$temporary"
     return 1
@@ -527,10 +561,14 @@ write_atlas_forwarder() {
   if [ ! -e "$forwarder" ] && [ ! -L "$forwarder" ]; then
     if ! inject_atlas_forwarder_publication_race "$forwarder" || ! ln "$temporary" "$forwarder"; then
       if [ "$provenance_published" -eq 1 ]; then
-        remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"
+        if ! remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
+          printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder provenance: $provenance" >&2
+        fi
       fi
       if [ "$state_published" -eq 1 ]; then
-        remove_atlas_forwarder_state "$forwarder" "$verified" || true
+        if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+          printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
+        fi
       fi
       rm -f "$temporary"
       printf '%s\n' "ProjectAtlas atlas forwarder publication collided; refusing to overwrite: $forwarder" >&2
@@ -542,10 +580,14 @@ write_atlas_forwarder() {
   fi
   if ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
     if [ "$provenance_published" -eq 1 ]; then
-      remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified" || true
+      if ! remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
+        printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder provenance: $provenance" >&2
+      fi
     fi
     if [ "$state_published" -eq 1 ]; then
-      remove_atlas_forwarder_state "$forwarder" "$verified" || true
+      if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+        printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
+      fi
     fi
     rm -f -- "$temporary"
     printf '%s\n' "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder" >&2
