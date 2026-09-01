@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "status": "locked_for_final_measurement",
+  "purpose": "Bounded #358 all-route publication identity replay; it does not claim a complete scale measurement.",
+  "measurement_inputs": {
+    "docs/benchmarks/harness/system_scale.py": "e6ba952322c502c707b953aae586fa653d1963c59c8614e4669505c32eb05bc0",
+    "docs/benchmarks/harness/mcp_composition.py": "e602209ba4cb04363074cb7d336374b1decf4dd63952f2524856b18eb8519a03",
+    "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
+    "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
+  },
+  "candidate": {
+    "required_version": "0.4.5",
+    "runtime_sha256": "6231c837435ad9b34b0c0a9e8ab1ac56bc682e726f472f8d219f8cc25033a51d",
+    "mcp_tools_sha256": "c364a97710088181c61ebf3ba57573fae5cf26b0eb21fe12f49d956a18ad6fcd",
+    "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+    "skill_sha256": "72fcae24cfc5284cbe69f67afe96ada1102e813f307076009afaf0d1f4238605",
+    "skill_bytes": 33136
+  },
+  "thresholds": {
+    "all": {
+      "mcp_request_timeout_seconds": 30
+    }
+  },
+  "corpora": {
+    "medium": {
+      "caller_files": 1024
+    }
+  }
+}

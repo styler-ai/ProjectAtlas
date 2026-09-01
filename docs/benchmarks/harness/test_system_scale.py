@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import inspect
 import json
@@ -224,6 +225,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
+            required_version="0.4.0",
             runtime_sha256="other-runtime",
             mcp_tools_sha256="other-tools",
             skill_sha256="other-skill",
@@ -287,6 +289,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
+            required_version="0.4.0",
             runtime_sha256="runtime",
             mcp_tools_sha256="tools",
             skill_sha256="skill",
@@ -302,6 +305,122 @@ class SystemScaleHarnessTests(unittest.TestCase):
             measurement_errors=[],
         )
         self.assertEqual(errors, [])
+
+    def test_all_route_preflight_threads_effective_version_into_mcp_identity(
+        self,
+    ) -> None:
+        effective_version = "0.4.5"
+        tools = [{"name": "atlas_runtime_info"}]
+        tool_digest = hashlib.sha256(
+            json.dumps(tools, separators=(",", ":"), ensure_ascii=False).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "projectatlas.exe"
+            runtime.write_bytes(b"runtime")
+            runtime_digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+            preregistration = {
+                "status": "locked_for_final_measurement",
+                "candidate": {
+                    "required_version": "0.4.0",
+                    "runtime_sha256": runtime_digest,
+                    "mcp_tools_sha256": tool_digest,
+                    "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+                    "skill_sha256": "skill",
+                    "skill_bytes": 5,
+                },
+                "thresholds": {"all": {"mcp_request_timeout_seconds": 1}},
+            }
+            process = mock.Mock(
+                returncode=0,
+                stderr="",
+                stdout=json.dumps(
+                    {
+                        "project": "ProjectAtlas",
+                        "version": effective_version,
+                        "capabilities": ["mcp", "sqlite", "toon"],
+                        "text_format": "TOON",
+                        "mcp_tools": [f"tool-{index}" for index in range(43)],
+                    }
+                ),
+            )
+            client = mock.Mock()
+            client.tools.return_value = (tools, 1.0)
+            with (
+                mock.patch.object(
+                    system_scale,
+                    "candidate_file_identity",
+                    return_value={"path": "skill", "sha256": "skill", "bytes": 5},
+                ),
+                mock.patch.object(
+                    system_scale.subprocess,
+                    "run",
+                    return_value=process,
+                ) as run,
+                mock.patch.object(
+                    system_scale.subprocess,
+                    "check_output",
+                    side_effect=["", "head\n"],
+                ),
+                mock.patch.object(
+                    system_scale,
+                    "measurement_input_errors",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    system_scale,
+                    "McpClient",
+                    return_value=client,
+                ) as mcp_client,
+            ):
+                identity, source = system_scale.validate_publication_identity(
+                    runtime,
+                    preregistration,
+                    Path(system_scale.ROOT) / "preregistration.json",
+                    required_version=effective_version,
+                )
+
+            self.assertEqual(
+                run.call_args.args[0][1:3], ["--require-version", effective_version]
+            )
+            self.assertEqual(
+                mcp_client.call_args.kwargs["required_version"], effective_version
+            )
+            self.assertEqual(identity["runtime_info"]["version"], effective_version)
+            self.assertEqual(source["checkout_head"], "head")
+
+    def test_all_route_preflight_passes_effective_version_to_publication_identity(
+        self,
+    ) -> None:
+        root = Path(system_scale.ROOT)
+        args = argparse.Namespace(
+            runtime=root
+            / "target/benchmarks/issue-358-candidate-build/debug/projectatlas.exe",
+            preregistration=root
+            / "docs/benchmarks/v0.4-system-scale-preregistration.json",
+            work_root=root / "target/benchmarks/system-scale/issue-358-preflight-test",
+            output=root / "target/benchmarks/system-scale/issue-358-preflight-test.json",
+            corpus_cache=root / "target/benchmarks/system-scale/corpus-cache",
+            required_version="0.4.5",
+            caller_files=1024,
+            small_variant=None,
+            only="all",
+            preflight_only=True,
+        )
+        with mock.patch.object(
+            system_scale,
+            "validate_publication_identity",
+            return_value=(
+                {"runtime_info": {"version": "0.4.5"}},
+                {"checkout_head": "head"},
+            ),
+        ) as validate:
+            system_scale.run_benchmark(args)
+        self.assertEqual(validate.call_args.kwargs["required_version"], "0.4.5")
+        result = json.loads(args.output.read_text(encoding="utf-8"))
+        self.assertTrue(result["preflight"]["passed"])
+        self.assertFalse(result["publication_eligible"])
 
     def test_termination_recovery_requires_reopen_integrity_and_cleanup(
         self,

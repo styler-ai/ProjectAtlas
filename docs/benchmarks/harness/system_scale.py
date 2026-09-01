@@ -3546,6 +3546,7 @@ def forced_termination_quiescence(
 def publication_identity_errors(
     preregistration: dict[str, Any],
     *,
+    required_version: str,
     runtime_sha256: str,
     mcp_tools_sha256: str,
     skill_sha256: str,
@@ -3568,8 +3569,10 @@ def publication_identity_errors(
         errors.append("packaged skill size does not match the candidate")
     if runtime_info.get("project") != "ProjectAtlas":
         errors.append("runtime identity is not ProjectAtlas")
-    if runtime_info.get("version") != candidate.get("required_version"):
-        errors.append("runtime version does not match the preregistered candidate")
+    if runtime_info.get("version") != required_version:
+        errors.append(
+            "runtime version does not match the requested compatibility version"
+        )
     capabilities = set(runtime_info.get("capabilities", []))
     if not {"mcp", "sqlite", "toon"}.issubset(capabilities):
         errors.append("runtime omitted required MCP, SQLite, or TOON capability")
@@ -3606,6 +3609,8 @@ def validate_publication_identity(
     runtime: Path,
     preregistration: dict[str, Any],
     preregistration_path: Path,
+    *,
+    required_version: str,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     candidate = preregistration["candidate"]
     runtime_sha256 = hashlib.sha256(runtime.read_bytes()).hexdigest()
@@ -3619,7 +3624,7 @@ def validate_publication_identity(
         [
             str(runtime),
             "--require-version",
-            str(preregistration["candidate"]["required_version"]),
+            required_version,
             "--format",
             "json",
             "runtime-info",
@@ -3645,6 +3650,7 @@ def validate_publication_identity(
         request_timeout_seconds=preregistration["thresholds"]["all"][
             "mcp_request_timeout_seconds"
         ],
+        required_version=required_version,
     )
     try:
         mcp_tools, _ = mcp_client.tools()
@@ -3667,6 +3673,7 @@ def validate_publication_identity(
     ]
     errors = publication_identity_errors(
         preregistration,
+        required_version=required_version,
         runtime_sha256=runtime_sha256,
         mcp_tools_sha256=mcp_tools_sha256,
         skill_sha256=skill_sha256,
@@ -3736,6 +3743,14 @@ def main() -> None:
         default="all",
         help="Use small or medium only for harness smoke; publication requires all.",
     )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help=(
+            "Validate the complete all-route publication identity without "
+            "running corpora."
+        ),
+    )
     args = parser.parse_args()
     try:
         run_benchmark(args)
@@ -3776,6 +3791,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
         raise ValueError("--caller-files and the preregistered medium corpus must be positive")
     if not required_version:
         raise ValueError("--required-version or a preregistered candidate version is required")
+    preflight_only = bool(getattr(args, "preflight_only", False))
+    if preflight_only and args.only != "all":
+        raise ValueError("--preflight-only requires --only all")
     measurement_eligibility = final_measurement_eligibility(args.only)
     if (
         measurement_eligibility["requested"]
@@ -3784,10 +3802,34 @@ def run_benchmark(args: argparse.Namespace) -> None:
         raise RuntimeError(measurement_eligibility["ineligible_reason"])
     if args.only == "all":
         publication_identity, source_identity = validate_publication_identity(
-            runtime, preregistration, preregistration_path
+            runtime,
+            preregistration,
+            preregistration_path,
+            required_version=required_version,
         )
     else:
         publication_identity, source_identity = None, None
+    if preflight_only:
+        write_result(
+            {
+                "schema_version": 1,
+                "preregistration": str(preregistration_path),
+                "mode": args.only,
+                "required_version": required_version,
+                "final_measurement_eligibility": measurement_eligibility,
+                "publication_eligible": False,
+                "preflight_only": True,
+                "preflight": {
+                    "scope": "all-route publication identity and MCP routing",
+                    "passed": True,
+                    "publication_identity": publication_identity,
+                    "candidate_source_identity": source_identity,
+                },
+                "passed": True,
+            },
+            args.output,
+        )
+        return
     work_root = args.work_root.resolve()
     allowed = (ROOT / "target/benchmarks/system-scale").resolve()
     if work_root == allowed or allowed not in work_root.parents:
