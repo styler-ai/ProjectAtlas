@@ -234,6 +234,9 @@ const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
 const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS";
 #[cfg(windows)]
 const REAL_HOST_READER_TIMEOUT: Duration = Duration::from_millis(250);
+// Parallel workspace test binaries can delay the owned child identity write;
+// retain a bounded capture window without making cleanup depend on scheduling.
+const REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET: Duration = Duration::from_secs(15);
 // The direct host is reaped under the same bounded five-second envelope on every platform.
 const REAL_HOST_READER_REAP_BUDGET: Duration = Duration::from_secs(5);
 const REAL_HOST_SPECIAL_PATH_COMPONENT: &str = "host reader path with space-\u{00fc}";
@@ -11494,7 +11497,7 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
         ),
     )?;
     let complete_bound = REAL_HOST_READER_TIMEOUT
-        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET
         + CODEX_OWNER_CHILD_STOP_BUDGET
         + REAL_HOST_READER_REAP_BUDGET;
     require(
@@ -42225,7 +42228,7 @@ fn run_bounded_output_with_owned_mcp_descendant(
         let identity = read_codex_owner_child_identity_until_published(
             &retained_identity_file,
             stable_runtime,
-            CODEX_OWNER_CHILD_STOP_BUDGET,
+            REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET,
         )
         .map_err(|error| {
             io::Error::other(format!("owned MCP identity validation failed: {error}"))
