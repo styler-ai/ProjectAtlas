@@ -82,6 +82,15 @@ flowchart LR
     cancel[Cancellation or failure] --> cleanup[Discard staging; retain last complete generation]
 ```
 
+The runtime creates one bounded Rayon pool for each non-empty indexing
+operation. `SymbolBuildOptions` supplies the process ceiling and the shared
+`IndexWorkControl` can tighten it for a background task. Symbol parsing,
+graph-identity admission, and structural-summary derivation reuse that pool;
+they do not create nested per-stage pools. Each parallel graph admission
+returns its own report, then merges reports in source order before projection,
+so cancellation, deterministic ordering, and the single atomic publication
+transaction remain owned by the existing pipeline.
+
 ## Filtered custom-harness timeout ownership
 
 ```mermaid

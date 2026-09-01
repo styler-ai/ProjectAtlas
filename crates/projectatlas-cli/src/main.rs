@@ -1040,6 +1040,9 @@ enum Command {
         /// Repository root to scan.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Maximum parser, graph-admission, and structural-summary worker threads.
+        #[arg(long)]
+        max_workers: Option<usize>,
         /// Maximum UTF-8 file size persisted into `SQLite` text search.
         #[arg(long)]
         text_index_max_bytes: Option<u64>,
@@ -1732,10 +1735,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
         }
         Command::Scan {
             path,
+            max_workers,
             text_index_max_bytes,
         } => {
             let path = cli.project_root_for_path(path)?;
-            let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None);
+            let symbol_options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, *max_workers, None);
             let control = index_work_control(&symbol_options);
             let plan = ScanRuntimePlan::for_path_controlled(
                 cli.config.as_deref(),
@@ -4507,6 +4511,7 @@ impl RequiredCliCommand {
             },
             Self::Scan => Command::Scan {
                 path: PathBuf::from("."),
+                max_workers: None,
                 text_index_max_bytes: None,
             },
             Self::Overview => Command::Overview,

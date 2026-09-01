@@ -95,8 +95,8 @@ use projectatlas_symbols::{
     MarkdownFacts, extract_markdown_facts_controlled, extract_symbol_graph_controlled,
     semantic_resolution_contract_digest,
 };
-use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -2890,6 +2890,7 @@ fn stage_full_index_publication(
         plan.text_options,
         control,
     )?;
+    let worker_pool = build_index_worker_pool(symbol_options, control, nodes.len())?;
     let content_classifications = stage_file_content_classifications(&nodes, &text.rows);
     let retained_before_symbols =
         staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
@@ -2901,7 +2902,7 @@ fn stage_full_index_publication(
             ))
             .saturating_add(staged_purpose_bytes(purpose_import.as_ref()));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let symbols = stage_symbols_for_nodes_with_limits(
+    let symbols = stage_symbols_for_nodes_with_limits_with_pool(
         store,
         &plan.root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -2913,10 +2914,11 @@ fn stage_full_index_publication(
         &protected_purpose_paths,
         control,
         symbol_limits,
+        worker_pool.as_ref(),
     )?;
     let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
-    let graph = graph_projection::stage_full_repository_graph(
+    let graph = graph_projection::stage_full_repository_graph_with_pool(
         store,
         &plan.root,
         base_generation,
@@ -2924,15 +2926,17 @@ fn stage_full_index_publication(
         &scan_policy,
         &symbols,
         control,
+        worker_pool.as_ref(),
     )?;
-    let structural_summaries = stage_structural_summaries_for_nodes_controlled(
+    let structural_summaries = stage_structural_summaries_for_nodes_controlled_with_pool(
         store,
         &nodes,
         &text.rows,
         Some(&symbols),
         &protected_purpose_paths,
-        symbol_options.effective_workers(),
+        symbol_options.effective_workers_for(control),
         control,
+        worker_pool.as_ref(),
     )?;
     enforce_publication_staging_budget(
         retained_before_symbols
@@ -3388,12 +3392,13 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         .into_iter()
         .map(|indexed| indexed.node)
         .collect::<Vec<_>>();
+    let worker_pool = build_index_worker_pool(symbol_options, control, nodes.len())?;
     let contract_fingerprint = plan.publication_contract_fingerprint();
     let retained_before_symbols =
         staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
             .saturating_add(staged_node_bytes(&nodes));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let mut staged = stage_symbols_for_nodes_with_limits(
+    let mut staged = stage_symbols_for_nodes_with_limits_with_pool(
         store,
         &plan.root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -3405,10 +3410,11 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         &HashSet::new(),
         control,
         symbol_limits,
+        worker_pool.as_ref(),
     )?;
     let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
-    let graph = graph_projection::stage_full_repository_graph(
+    let graph = graph_projection::stage_full_repository_graph_with_pool(
         store,
         &plan.root,
         base_generation,
@@ -3416,6 +3422,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         &scan_policy,
         &staged,
         control,
+        worker_pool.as_ref(),
     )?;
     enforce_publication_staging_budget(
         retained_before_symbols
@@ -5955,8 +5962,20 @@ impl SymbolBuildOptions {
     }
 
     /// Return the worker count that will be reported.
+    #[allow(dead_code)]
     pub(crate) fn reported_workers(self) -> usize {
         self.effective_workers()
+    }
+
+    /// Return the process budget after applying the operation's downstream ceiling.
+    ///
+    /// Background MCP tasks tighten the shared [`IndexWorkControl`] ceiling before
+    /// invoking the indexing pipeline. Keeping that ceiling in the same helper makes
+    /// parser, graph-admission, and structural-summary stages consume one budget.
+    pub(crate) fn effective_workers_for(self, control: &IndexWorkControl) -> usize {
+        self.effective_workers()
+            .min(control.worker_ceiling().unwrap_or(usize::MAX))
+            .max(1)
     }
 
     /// Derive the worker count from caller policy, host availability, and the safety ceiling.
@@ -5978,6 +5997,27 @@ impl SymbolBuildOptions {
 /// Bound a worker pool by its work cardinality and runtime ceiling.
 fn worker_count_for_work(work_items: usize, max_workers: usize) -> usize {
     work_items.min(max_workers.clamp(1, INDEX_WORKER_SAFE_CEILING))
+}
+
+/// Build one bounded Rayon pool for all CPU stages in one indexing operation.
+///
+/// A pool is omitted for an empty operation so clean no-op refreshes retain their
+/// existing zero-worker behavior. The caller keeps this pool alive through parsing,
+/// graph admission, and structural summaries; publication remains synchronous.
+fn build_index_worker_pool(
+    options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+    work_items: usize,
+) -> Result<Option<ThreadPool>, CliError> {
+    if work_items == 0 {
+        return Ok(None);
+    }
+    let workers = worker_count_for_work(work_items, options.effective_workers_for(control));
+    ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .map(Some)
+        .map_err(|source| CliError::InvalidInput(format!("index worker pool failed: {source}")))
 }
 
 /// Aggregate rows and retained string bytes admitted by one symbol publication.
@@ -6170,6 +6210,8 @@ fn build_symbols_for_paths_with_limits(
 }
 
 /// Build selected symbol mutations without acquiring the `SQLite` writer.
+#[cfg(test)]
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn stage_symbols_for_nodes_with_limits(
     store: &AtlasStore,
@@ -6183,6 +6225,38 @@ fn stage_symbols_for_nodes_with_limits(
     protected_purpose_paths: &HashSet<String>,
     control: &IndexWorkControl,
     limits: SymbolPublicationLimits,
+) -> Result<SymbolBuildStage, CliError> {
+    stage_symbols_for_nodes_with_limits_with_pool(
+        store,
+        root,
+        #[cfg(feature = "optional-parser-supervisor")]
+        optional_parser_selection,
+        nodes,
+        options,
+        previous_hashes,
+        target_paths,
+        protected_purpose_paths,
+        control,
+        limits,
+        None,
+    )
+}
+
+/// Build selected symbol graphs, reusing the operation's bounded worker pool when present.
+#[allow(clippy::too_many_arguments)]
+fn stage_symbols_for_nodes_with_limits_with_pool(
+    store: &AtlasStore,
+    root: &Path,
+    #[cfg(feature = "optional-parser-supervisor")]
+    optional_parser_selection: &OptionalParserPackProjectSelection,
+    nodes: &[Node],
+    options: &SymbolBuildOptions,
+    previous_hashes: Option<&HashMap<String, String>>,
+    target_paths: Option<&HashSet<String>>,
+    protected_purpose_paths: &HashSet<String>,
+    control: &IndexWorkControl,
+    limits: SymbolPublicationLimits,
+    worker_pool: Option<&ThreadPool>,
 ) -> Result<SymbolBuildStage, CliError> {
     control.check(IndexWorkStage::SymbolParsing)?;
     #[cfg(feature = "optional-parser-supervisor")]
@@ -6227,7 +6301,7 @@ fn stage_symbols_for_nodes_with_limits(
         too_large: 0,
         binary_or_non_utf8: 0,
         timed_out: 0,
-        max_workers: options.reported_workers(),
+        max_workers: options.effective_workers_for(control),
         timeout_seconds: options.timeout_seconds,
         symbols: 0,
         relations: 0,
@@ -6329,23 +6403,45 @@ fn stage_symbols_for_nodes_with_limits(
     }
     report.max_workers = worker_count_for_work(jobs.len(), report.max_workers);
     if !jobs.is_empty() {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(report.max_workers)
-            .build()
-            .map_err(|source| {
-                CliError::InvalidInput(format!("symbol worker pool failed: {source}"))
-            })?;
-        #[cfg(feature = "optional-parser-supervisor")]
-        let outcomes = optional_parser_runtime::parse_symbol_jobs_controlled(
-            &root,
-            optional_parser_selection,
-            &pool,
-            &jobs,
-            options,
-            control,
-        )?;
-        #[cfg(not(feature = "optional-parser-supervisor"))]
-        let outcomes = parse_symbol_job_batches_controlled(&pool, &jobs, options, control)?;
+        let outcomes = if let Some(pool) = worker_pool {
+            #[cfg(feature = "optional-parser-supervisor")]
+            {
+                optional_parser_runtime::parse_symbol_jobs_controlled(
+                    &root,
+                    optional_parser_selection,
+                    pool,
+                    &jobs,
+                    options,
+                    control,
+                )?
+            }
+            #[cfg(not(feature = "optional-parser-supervisor"))]
+            {
+                parse_symbol_job_batches_controlled(pool, &jobs, options, control)?
+            }
+        } else {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(report.max_workers)
+                .build()
+                .map_err(|source| {
+                    CliError::InvalidInput(format!("symbol worker pool failed: {source}"))
+                })?;
+            #[cfg(feature = "optional-parser-supervisor")]
+            {
+                optional_parser_runtime::parse_symbol_jobs_controlled(
+                    &root,
+                    optional_parser_selection,
+                    &pool,
+                    &jobs,
+                    options,
+                    control,
+                )?
+            }
+            #[cfg(not(feature = "optional-parser-supervisor"))]
+            {
+                parse_symbol_job_batches_controlled(&pool, &jobs, options, control)?
+            }
+        };
         for outcome in outcomes {
             match outcome {
                 SymbolParseOutcome::Parsed(parsed) => {
@@ -8077,6 +8173,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
         .map(|node| node.path.clone())
         .collect::<HashSet<_>>();
     let expected_nodes = expected_nodes_after_incremental(baseline_nodes, &nodes, &absent_paths);
+    let worker_pool = build_index_worker_pool(symbol_options, control, nodes.len())?;
     let contract_fingerprint = plan.publication_contract_fingerprint();
     let retained_before_symbols = staged_publication_identity_bytes(root, &contract_fingerprint)
         .saturating_add(staged_string_bytes(&text_paths))
@@ -8088,7 +8185,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
             &content_classifications,
         ));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let symbols = stage_symbols_for_nodes_with_limits(
+    let symbols = stage_symbols_for_nodes_with_limits_with_pool(
         store,
         root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -8100,8 +8197,9 @@ pub(crate) fn refresh_index_for_changes_controlled(
         &protected_purpose_paths,
         control,
         symbol_limits,
+        worker_pool.as_ref(),
     )?;
-    let graph = graph_projection::stage_incremental_repository_graph(
+    let graph = graph_projection::stage_incremental_repository_graph_with_pool(
         store,
         root,
         base_generation,
@@ -8110,15 +8208,17 @@ pub(crate) fn refresh_index_for_changes_controlled(
         &scan_policy,
         &symbols,
         control,
+        worker_pool.as_ref(),
     )?;
-    let structural_summaries = stage_structural_summaries_for_nodes_controlled(
+    let structural_summaries = stage_structural_summaries_for_nodes_controlled_with_pool(
         store,
         &nodes,
         &text.rows,
         Some(&symbols),
         &protected_purpose_paths,
-        symbol_options.effective_workers(),
+        symbol_options.effective_workers_for(control),
         control,
+        worker_pool.as_ref(),
     )?;
     enforce_publication_staging_budget(
         retained_before_symbols
@@ -8216,6 +8316,8 @@ fn refresh_structural_summaries_for_nodes_controlled(
 }
 
 /// Derive structural summary mutations without acquiring the `SQLite` writer.
+#[cfg(test)]
+#[allow(dead_code)]
 fn stage_structural_summaries_for_nodes_controlled(
     store: &AtlasStore,
     nodes: &[Node],
@@ -8224,6 +8326,30 @@ fn stage_structural_summaries_for_nodes_controlled(
     protected_purpose_paths: &HashSet<String>,
     max_workers: usize,
     control: &IndexWorkControl,
+) -> Result<StructuralSummaryStage, CliError> {
+    stage_structural_summaries_for_nodes_controlled_with_pool(
+        store,
+        nodes,
+        text_rows,
+        symbols,
+        protected_purpose_paths,
+        max_workers,
+        control,
+        None,
+    )
+}
+
+/// Derive structural summaries, reusing the operation's bounded worker pool when present.
+#[allow(clippy::too_many_arguments)]
+fn stage_structural_summaries_for_nodes_controlled_with_pool(
+    store: &AtlasStore,
+    nodes: &[Node],
+    text_rows: &[TextIndexRow],
+    symbols: Option<&SymbolBuildStage>,
+    protected_purpose_paths: &HashSet<String>,
+    max_workers: usize,
+    control: &IndexWorkControl,
+    worker_pool: Option<&ThreadPool>,
 ) -> Result<StructuralSummaryStage, CliError> {
     control.check(IndexWorkStage::TextIndex)?;
     let candidates = nodes
@@ -8280,118 +8406,132 @@ fn stage_structural_summaries_for_nodes_controlled(
         candidates: paths.len(),
         ..StructuralSummaryReport::default()
     };
-    let worker_count = worker_count_for_work(candidates.len(), max_workers);
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(worker_count)
-        .build()
-        .map_err(|source| {
-            CliError::InvalidInput(format!("structural summary worker pool failed: {source}"))
-        })?;
-    let derivations = pool.install(|| {
-        candidates
-            .par_iter()
-            .map(|node| -> Result<StructuralSummaryDerivation, CliError> {
-                control.check(IndexWorkStage::TextIndex)?;
-                let existing = indexed_nodes.get(&node.path);
-                if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::TooLarge)
-                    || node
-                        .size_bytes
-                        .is_some_and(|size_bytes| size_bytes > MAX_SYMBOL_FILE_BYTES)
-                {
-                    return Ok(StructuralSummaryDerivation {
-                        change: Some(StructuralSummaryChange::Clear {
+    let worker_count = worker_count_for_work(
+        candidates.len(),
+        max_workers
+            .min(control.worker_ceiling().unwrap_or(usize::MAX))
+            .max(1),
+    );
+    let derive = |pool: &ThreadPool| {
+        pool.install(|| {
+            candidates
+                .par_iter()
+                .map(|node| -> Result<StructuralSummaryDerivation, CliError> {
+                    control.check(IndexWorkStage::TextIndex)?;
+                    let existing = indexed_nodes.get(&node.path);
+                    if reason_by_path.get(node.path.as_str())
+                        == Some(&TextIndexSkipReason::TooLarge)
+                        || node
+                            .size_bytes
+                            .is_some_and(|size_bytes| size_bytes > MAX_SYMBOL_FILE_BYTES)
+                    {
+                        return Ok(StructuralSummaryDerivation {
+                            change: Some(StructuralSummaryChange::Clear {
+                                path: node.path.clone(),
+                            }),
+                            cleared: 1,
+                            too_large: 1,
+                            retained_bytes: node.path.len() as u64,
+                            ..StructuralSummaryDerivation::default()
+                        });
+                    }
+                    let Some(text) = text_by_path.get(node.path.as_str()) else {
+                        return Ok(StructuralSummaryDerivation {
+                            change: Some(StructuralSummaryChange::Clear {
+                                path: node.path.clone(),
+                            }),
+                            cleared: 1,
+                            binary_or_non_utf8: usize::from(
+                                reason_by_path.get(node.path.as_str())
+                                    == Some(&TextIndexSkipReason::BinaryOrNonUtf8),
+                            ),
+                            retained_bytes: node.path.len() as u64,
+                            ..StructuralSummaryDerivation::default()
+                        });
+                    };
+                    if let Some(purpose_suggested) =
+                        staged_structural_summaries.get(node.path.as_str())
+                    {
+                        return Ok(StructuralSummaryDerivation {
+                            summarized: 1,
+                            purpose_suggestions: usize::from(*purpose_suggested),
+                            ..StructuralSummaryDerivation::default()
+                        });
+                    }
+                    let symbol_count = staged_symbol_counts
+                        .get(node.path.as_str())
+                        .copied()
+                        .or_else(|| symbol_counts.get(node.path.as_str()).copied())
+                        .unwrap_or_default();
+                    let effective_summary = staged_symbol_summaries
+                        .get(node.path.as_str())
+                        .copied()
+                        .or_else(|| existing.and_then(|indexed| indexed.summary.as_deref()));
+                    if symbol_count > 0
+                        && effective_summary.is_some_and(|summary| {
+                            !summary.trim().is_empty() && !is_scanner_fallback_summary(summary)
+                        })
+                    {
+                        return Ok(StructuralSummaryDerivation::default());
+                    }
+                    let Some(summary) = structural_summary_for_path(
+                        &node.path,
+                        node.language.as_deref(),
+                        &text.content,
+                    ) else {
+                        return Ok(StructuralSummaryDerivation {
+                            change: Some(StructuralSummaryChange::Clear {
+                                path: node.path.clone(),
+                            }),
+                            cleared: 1,
+                            retained_bytes: node.path.len() as u64,
+                            ..StructuralSummaryDerivation::default()
+                        });
+                    };
+                    let purpose_needs_suggestion = !protected_purpose_paths.contains(&node.path)
+                        && existing.is_none_or(|indexed| {
+                            matches!(
+                                indexed.purpose.status,
+                                PurposeStatus::Missing | PurposeStatus::Suggested
+                            )
+                        });
+                    let purpose_suggestion = purpose_needs_suggestion
+                        .then(|| suggest_file_purpose(&node.path, &summary));
+                    let purpose_suggestions = usize::from(purpose_suggestion.is_some());
+                    let retained_bytes = (node.path.len() as u64)
+                        .saturating_add(summary.len() as u64)
+                        .saturating_add(
+                            purpose_suggestion
+                                .as_ref()
+                                .map_or(0, |suggestion| suggestion.len() as u64),
+                        );
+                    control.check(IndexWorkStage::TextIndex)?;
+                    Ok(StructuralSummaryDerivation {
+                        change: Some(StructuralSummaryChange::Set {
                             path: node.path.clone(),
+                            summary,
+                            purpose_suggestion,
                         }),
-                        cleared: 1,
-                        too_large: 1,
-                        retained_bytes: node.path.len() as u64,
-                        ..StructuralSummaryDerivation::default()
-                    });
-                }
-                let Some(text) = text_by_path.get(node.path.as_str()) else {
-                    return Ok(StructuralSummaryDerivation {
-                        change: Some(StructuralSummaryChange::Clear {
-                            path: node.path.clone(),
-                        }),
-                        cleared: 1,
-                        binary_or_non_utf8: usize::from(
-                            reason_by_path.get(node.path.as_str())
-                                == Some(&TextIndexSkipReason::BinaryOrNonUtf8),
-                        ),
-                        retained_bytes: node.path.len() as u64,
-                        ..StructuralSummaryDerivation::default()
-                    });
-                };
-                if let Some(purpose_suggested) = staged_structural_summaries.get(node.path.as_str())
-                {
-                    return Ok(StructuralSummaryDerivation {
                         summarized: 1,
-                        purpose_suggestions: usize::from(*purpose_suggested),
+                        purpose_suggestions,
+                        retained_bytes,
                         ..StructuralSummaryDerivation::default()
-                    });
-                }
-                let symbol_count = staged_symbol_counts
-                    .get(node.path.as_str())
-                    .copied()
-                    .or_else(|| symbol_counts.get(node.path.as_str()).copied())
-                    .unwrap_or_default();
-                let effective_summary = staged_symbol_summaries
-                    .get(node.path.as_str())
-                    .copied()
-                    .or_else(|| existing.and_then(|indexed| indexed.summary.as_deref()));
-                if symbol_count > 0
-                    && effective_summary.is_some_and(|summary| {
-                        !summary.trim().is_empty() && !is_scanner_fallback_summary(summary)
                     })
-                {
-                    return Ok(StructuralSummaryDerivation::default());
-                }
-                let Some(summary) = structural_summary_for_path(
-                    &node.path,
-                    node.language.as_deref(),
-                    &text.content,
-                ) else {
-                    return Ok(StructuralSummaryDerivation {
-                        change: Some(StructuralSummaryChange::Clear {
-                            path: node.path.clone(),
-                        }),
-                        cleared: 1,
-                        retained_bytes: node.path.len() as u64,
-                        ..StructuralSummaryDerivation::default()
-                    });
-                };
-                let purpose_needs_suggestion = !protected_purpose_paths.contains(&node.path)
-                    && existing.is_none_or(|indexed| {
-                        matches!(
-                            indexed.purpose.status,
-                            PurposeStatus::Missing | PurposeStatus::Suggested
-                        )
-                    });
-                let purpose_suggestion =
-                    purpose_needs_suggestion.then(|| suggest_file_purpose(&node.path, &summary));
-                let purpose_suggestions = usize::from(purpose_suggestion.is_some());
-                let retained_bytes = (node.path.len() as u64)
-                    .saturating_add(summary.len() as u64)
-                    .saturating_add(
-                        purpose_suggestion
-                            .as_ref()
-                            .map_or(0, |suggestion| suggestion.len() as u64),
-                    );
-                control.check(IndexWorkStage::TextIndex)?;
-                Ok(StructuralSummaryDerivation {
-                    change: Some(StructuralSummaryChange::Set {
-                        path: node.path.clone(),
-                        summary,
-                        purpose_suggestion,
-                    }),
-                    summarized: 1,
-                    purpose_suggestions,
-                    retained_bytes,
-                    ..StructuralSummaryDerivation::default()
                 })
-            })
-            .collect::<Result<Vec<_>, CliError>>()
-    })?;
+                .collect::<Result<Vec<_>, CliError>>()
+        })
+    };
+    let derivations = if let Some(pool) = worker_pool {
+        derive(pool)?
+    } else {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(worker_count)
+            .build()
+            .map_err(|source| {
+                CliError::InvalidInput(format!("structural summary worker pool failed: {source}"))
+            })?;
+        derive(&pool)?
+    };
     let mut changes = Vec::new();
     let mut retained_bytes = 0_u64;
     for derivation in derivations {
@@ -9593,6 +9733,21 @@ mod tests {
                 "work_items={work_items}, max_workers={max_workers}"
             );
         }
+    }
+
+    #[test]
+    fn indexing_worker_budget_honors_the_shared_operation_ceiling() {
+        let options = SymbolBuildOptions::new(1_024, Some(8), None);
+        let control = index_work_control(&options).with_worker_ceiling(3);
+        assert_eq!(options.effective_workers_for(&control), 3);
+        assert_eq!(
+            worker_count_for_work(2, options.effective_workers_for(&control)),
+            2
+        );
+        assert_eq!(
+            worker_count_for_work(32, options.effective_workers_for(&control)),
+            3
+        );
     }
 
     #[test]
