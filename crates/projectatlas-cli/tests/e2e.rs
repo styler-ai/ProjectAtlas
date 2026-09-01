@@ -7189,7 +7189,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     )?;
     fs::write(
         &timeout_runtime,
-        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID; Start-Sleep -Seconds 8; [Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\"\r\n",
+        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID; Start-Sleep -Seconds 60; [Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\"\r\n",
     )?;
     let async_runtime = temp.path().join("async-projectatlas.cmd");
     let async_child_pid = temp.path().join("async-child.pid");
