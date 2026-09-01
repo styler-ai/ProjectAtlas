@@ -12257,10 +12257,16 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
 
     // A short test-only budget makes each lock position fail deterministically;
     // the production budget remains one monotonic 30-second lock-set deadline.
+    // Keep both sorted locks occupied so the contender spends most of its one
+    // budget waiting for lock 1, then proves that the remaining time—not a
+    // reset budget—is used for lock 2.
     let deadline_state_before_first = state_snapshot()?;
     let held_first_gate = temp.path().join("deadline-held-first.gate");
     let held_first_ready = PathBuf::from(format!("{}.ready", held_first_gate.display()));
+    let held_second_gate = temp.path().join("deadline-held-second-owner.gate");
+    let held_second_ready = PathBuf::from(format!("{}.ready", held_second_gate.display()));
     fs::write(&held_first_gate, b"hold\n")?;
+    fs::write(&held_second_gate, b"hold\n")?;
     let mut held_first = make_installer(
         &first_runtime,
         &first_only_path,
@@ -12277,32 +12283,60 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         drop(held_first.wait());
         return Err(error);
     }
+    let mut held_second = make_installer(
+        &second_runtime,
+        &second_only_path,
+        None,
+        Some(&held_second_gate),
+    )?
+    .spawn()?;
+    if let Err(error) = wait_for_ready(
+        &mut held_second,
+        &held_second_ready,
+        "deadline held-second owner",
+    ) {
+        drop(held_first.kill());
+        drop(held_first.wait());
+        return Err(error);
+    }
     let mut timed_first = make_installer(&second_runtime, &first_then_second_path, None, None)?;
     timed_first.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
-    let timed_first = timed_first.spawn()?;
-    let timed_first_output = match wait_for_plugin_installer_output(
+    let timed_first_attempt = temp.path().join("deadline-held-first-attempt.gate");
+    let timed_first_attempt_ready =
+        PathBuf::from(format!("{}.ready", timed_first_attempt.display()));
+    timed_first.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ATTEMPT_GATE",
+        &timed_first_attempt,
+    );
+    let mut timed_first = timed_first.spawn()?;
+    if let Err(error) = wait_for_ready(
+        &mut timed_first,
+        &timed_first_attempt_ready,
+        "deadline held-first contender lock attempt",
+    ) {
+        drop(held_first.kill());
+        drop(held_first.wait());
+        drop(held_second.kill());
+        drop(held_second.wait());
+        return Err(error);
+    }
+    let contender_started = Instant::now();
+    thread::sleep(Duration::from_millis(200));
+    held_first.kill()?;
+    let held_first_output = held_first.wait_with_output()?;
+    let timed_first_output = wait_for_plugin_installer_output(
         timed_first,
         "deadline held-first contender",
         Duration::from_secs(5),
-    ) {
-        Ok(output) => output,
-        Err(error) => {
-            drop(held_first.kill());
-            drop(held_first.wait());
-            return Err(error);
-        }
-    };
+    )?;
+    let contender_elapsed = contender_started.elapsed();
+    fs::remove_file(&timed_first_attempt_ready)?;
     fs::remove_file(&held_first_gate)?;
     fs::remove_file(&held_first_ready)?;
-    let held_first_output = wait_for_plugin_installer_output(
-        held_first,
-        "deadline held-first owner release",
-        Duration::from_secs(35),
-    )?;
     require(
-        held_first_output.status.success() && state_snapshot()? == deadline_state_before_first,
+        !held_first_output.status.success() && state_snapshot()? == deadline_state_before_first,
         format!(
-            "held-first deadline/release changed managed state:\n{}\n{}",
+            "held-first interrupted owner changed managed state:\n{}\n{}",
             String::from_utf8_lossy(&held_first_output.stdout),
             String::from_utf8_lossy(&held_first_output.stderr)
         ),
@@ -12314,6 +12348,39 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
             timed_first_output.status,
             String::from_utf8_lossy(&timed_first_output.stdout),
             String::from_utf8_lossy(&timed_first_output.stderr)
+        ),
+    )?;
+    require(
+        contender_elapsed >= Duration::from_millis(180)
+            && contender_elapsed < Duration::from_millis(425),
+        format!(
+            "held-first contender did not consume one shared lock deadline (elapsed={contender_elapsed:?}; expected 180..425 ms)"
+        ),
+    )?;
+    let mut probe_first = make_installer(&first_runtime, &first_only_path, None, None)?;
+    probe_first.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
+    let probe_first_output = probe_first.output()?;
+    require(
+        probe_first_output.status.success() && state_snapshot()? == deadline_state_before_first,
+        format!(
+            "held-first contender did not release its partial lock set:\n{}\n{}",
+            String::from_utf8_lossy(&probe_first_output.stdout),
+            String::from_utf8_lossy(&probe_first_output.stderr)
+        ),
+    )?;
+    fs::remove_file(&held_second_gate)?;
+    fs::remove_file(&held_second_ready)?;
+    let held_second_output = wait_for_plugin_installer_output(
+        held_second,
+        "deadline held-second owner release",
+        Duration::from_secs(35),
+    )?;
+    require(
+        held_second_output.status.success() && state_snapshot()? == deadline_state_before_first,
+        format!(
+            "held-second deadline owner release changed managed state:\n{}\n{}",
+            String::from_utf8_lossy(&held_second_output.stdout),
+            String::from_utf8_lossy(&held_second_output.stderr)
         ),
     )?;
     let recover_first = run_install(&second_runtime, &first_then_second_path)?;

@@ -761,6 +761,12 @@ pause_atlas_forwarder_after_lock_discovery() {
   done
 }
 
+signal_atlas_forwarder_lock_attempt() {
+  gate=${PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ATTEMPT_GATE:-}
+  [ -n "$gate" ] || return 0
+  printf '%s\n' ready >"$gate.ready"
+}
+
 pause_atlas_forwarder_after_lock_acquisition() {
   gate=${PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ACQUIRED_GATE:-}
   [ -n "$gate" ] || return 0
@@ -788,6 +794,7 @@ write_atlas_forwarder() {
     previous_candidate=
   fi
   pause_atlas_forwarder_after_lock_discovery
+  signal_atlas_forwarder_lock_attempt
   acquire_atlas_forwarder_lifecycle_lock_set "$forwarder" "$previous_candidate" || return 1
   pause_atlas_forwarder_after_lock_acquisition
   result=0

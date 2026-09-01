@@ -2763,6 +2763,17 @@ function Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause {
     }
 }
 
+function Invoke-ProjectAtlasAtlasForwarderLockAttemptSignal {
+    $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ATTEMPT_GATE
+    if ([string]::IsNullOrWhiteSpace($gate)) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        "$gate.ready",
+        "ready`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause {
     $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ACQUIRED_GATE
     if ([string]::IsNullOrWhiteSpace($gate)) {
@@ -2836,6 +2847,7 @@ function Write-ProjectAtlasAtlasForwarder {
         $previousCandidate = $null
     }
     Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause
+    Invoke-ProjectAtlasAtlasForwarderLockAttemptSignal
     $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLockSet $forwarder $previousCandidate
     try {
         Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause
