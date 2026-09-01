@@ -12654,7 +12654,12 @@ mod tests {
             &ParserKind::Fallback,
             "partial PHP fact parser",
         )?;
-        let coverage = coverage_for_graph(&graph, IndexGeneration::new(1))?;
+        let coverage = coverage_for_graph(
+            &graph,
+            IndexGeneration::new(1),
+            &GraphIdentityAdmission::default(),
+            &GraphIdentityAdmission::default(),
+        )?;
         require_eq(
             &coverage.state(),
             &CoverageState::Partial,
@@ -12696,7 +12701,12 @@ mod tests {
                     .any(|symbol| symbol.name == symbol_name),
                 "mixed PHP declaration is missing before coverage projection",
             )?;
-            let coverage = coverage_for_graph(&graph, IndexGeneration::new(1))?;
+            let coverage = coverage_for_graph(
+                &graph,
+                IndexGeneration::new(1),
+                &GraphIdentityAdmission::default(),
+                &GraphIdentityAdmission::default(),
+            )?;
             require_eq(
                 &coverage.state(),
                 &CoverageState::Complete,
