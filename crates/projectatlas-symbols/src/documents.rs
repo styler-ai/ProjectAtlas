@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{Cursor, Read};
 use std::path::Path;
 use thiserror::Error;
-use zip::ZipArchive;
+use zip::{CompressionMethod, ZipArchive};
 
 /// The exact audited PDF parser version used by this boundary.
 pub const PDF_EXTRACT_VERSION: &str = "0.12.0";
@@ -275,6 +275,12 @@ pub enum DocumentExtractionError {
     /// ZIP package structure is unsafe or not a supported DOCX package.
     #[error("invalid DOCX package: {message}")]
     InvalidDocxPackage {
+        /// Bounded package diagnostic.
+        message: String,
+    },
+    /// A DOCX entry requires encryption or compression outside the admitted set.
+    #[error("unsupported DOCX package input: {message}")]
+    UnsupportedDocxInput {
         /// Bounded package diagnostic.
         message: String,
     },
@@ -544,7 +550,7 @@ fn extract_docx(
     let mut names = HashSet::new();
     for index in 0..archive.len() {
         check_parser_iteration(index, &mut || control.check(stage))?;
-        let entry = archive.by_index(index).map_err(|error| {
+        let entry = archive.by_index_raw(index).map_err(|error| {
             DocumentExtractionError::InvalidDocxPackage {
                 message: error.to_string(),
             }
@@ -555,10 +561,30 @@ fn extract_docx(
             });
         }
         let name = entry.name().to_owned();
-        if entry.enclosed_name().is_none()
-            || name.contains('\\')
-            || name.starts_with('/')
-            || !names.insert(name.clone())
+        let enclosed = entry.enclosed_name().is_some();
+        let compression = entry.compression();
+        let compressed_size = entry.compressed_size();
+        let expanded_size = entry.size();
+        if !matches!(
+            compression,
+            CompressionMethod::Stored | CompressionMethod::Deflated
+        ) {
+            return Err(DocumentExtractionError::UnsupportedDocxInput {
+                message: format!("unsupported compression for package part {name}"),
+            });
+        }
+        drop(entry);
+        archive.by_index(index).map_err(|error| match error {
+            zip::result::ZipError::UnsupportedArchive(message) => {
+                DocumentExtractionError::UnsupportedDocxInput {
+                    message: message.to_owned(),
+                }
+            }
+            error => DocumentExtractionError::InvalidDocxPackage {
+                message: error.to_string(),
+            },
+        })?;
+        if !enclosed || name.contains('\\') || name.starts_with('/') || !names.insert(name.clone())
         {
             return Err(DocumentExtractionError::InvalidDocxPackage {
                 message: format!("unsafe or duplicate package part {name}"),
@@ -567,14 +593,14 @@ fn extract_docx(
         if name.ends_with('/') {
             continue;
         }
-        let compressed = usize::try_from(entry.compressed_size()).map_err(|_error| {
+        let compressed = usize::try_from(compressed_size).map_err(|_error| {
             DocumentExtractionError::ResourceLimit {
                 limit: DocumentLimit::CompressedBytes,
                 observed: usize::MAX,
                 maximum: MAX_DOCUMENT_COMPRESSED_BYTES,
             }
         })?;
-        let expanded = usize::try_from(entry.size()).map_err(|_error| {
+        let expanded = usize::try_from(expanded_size).map_err(|_error| {
             DocumentExtractionError::ResourceLimit {
                 limit: DocumentLimit::ExpandedBytes,
                 observed: usize::MAX,
@@ -946,6 +972,48 @@ mod tests {
         IndexWorkControl::new(IndexCancellation::new(), None)
     }
 
+    fn docx_archive(xml: &[u8], method: CompressionMethod) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = ZipWriter::new(Cursor::new(&mut bytes));
+            writer
+                .start_file(
+                    DOCX_DOCUMENT_PART,
+                    FileOptions::default().compression_method(method),
+                )
+                .expect("fixture entry");
+            writer.write_all(xml).expect("fixture XML");
+            writer.finish().expect("fixture archive");
+        }
+        bytes
+    }
+
+    fn rewrite_zip_method(bytes: &mut [u8], method: u16) {
+        for index in 0..bytes.len().saturating_sub(4) {
+            match &bytes[index..index + 4] {
+                b"PK\x03\x04" => {
+                    bytes[index + 8..index + 10].copy_from_slice(&method.to_le_bytes());
+                }
+                b"PK\x01\x02" => {
+                    bytes[index + 10..index + 12].copy_from_slice(&method.to_le_bytes());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn mark_zip_encrypted(bytes: &mut [u8]) {
+        for index in 0..bytes.len().saturating_sub(4) {
+            let flags = match &bytes[index..index + 4] {
+                b"PK\x03\x04" => &mut bytes[index + 6..index + 8],
+                b"PK\x01\x02" => &mut bytes[index + 8..index + 10],
+                _ => continue,
+            };
+            let value = u16::from_le_bytes([flags[0], flags[1]]) | 1;
+            flags.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
     #[test]
     fn path_admission_is_case_insensitive_but_not_speculative() {
         assert_eq!(
@@ -1180,6 +1248,47 @@ mod tests {
         assert!(matches!(
             error,
             DocumentExtractionError::InvalidDocxPackage { .. }
+        ));
+    }
+
+    #[test]
+    fn stored_and_deflated_docx_parts_are_admitted() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>bounded</w:t></w:r></w:p></w:body></w:document>"#;
+        for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            let facts = extract_document_text_controlled(
+                &docx_archive(xml, method),
+                "guide.docx",
+                None,
+                &control(),
+            )
+            .expect("admitted DOCX compression");
+            assert_eq!(facts.text, "bounded");
+        }
+    }
+
+    #[test]
+    fn unsupported_docx_compression_is_rejected_before_text_read() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#;
+        let mut bytes = docx_archive(xml, CompressionMethod::Stored);
+        rewrite_zip_method(&mut bytes, 12);
+        let error = extract_document_text_controlled(&bytes, "guide.docx", None, &control())
+            .expect_err("unsupported compression must fail closed");
+        assert!(matches!(
+            error,
+            DocumentExtractionError::UnsupportedDocxInput { .. }
+        ));
+    }
+
+    #[test]
+    fn encrypted_docx_is_rejected_before_text_publication() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#;
+        let mut bytes = docx_archive(xml, CompressionMethod::Stored);
+        mark_zip_encrypted(&mut bytes);
+        let error = extract_document_text_controlled(&bytes, "guide.docx", None, &control())
+            .expect_err("encrypted packages must fail closed");
+        assert!(matches!(
+            error,
+            DocumentExtractionError::UnsupportedDocxInput { .. }
         ));
     }
 

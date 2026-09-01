@@ -116,7 +116,7 @@ tiktoken = "4.1.2"
 tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
 toml = "0.8"
 toml_edit = "0.22"
-zip = "=0.6.6"
+zip = { version = "=0.6.6", default-features = false, features = ["deflate"] }
 toon-format = { version = "0.5.0", default-features = false, features = ["json_stream"] }
 tree-sitter = "=0.26.12"
 tree-sitter-c = "=0.24.2"

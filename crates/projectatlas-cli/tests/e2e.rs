@@ -26520,7 +26520,8 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         )
         .as_bytes(),
     );
-    fs::write(docs.join("guide.pdf"), pdf)?;
+    let pdf_path = docs.join("guide.pdf");
+    fs::write(&pdf_path, pdf)?;
 
     let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
         let docx_file = fs::File::create(path)?;
@@ -26712,7 +26713,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         .into());
     }
 
-    fs::remove_file(docs.join("guide.pdf"))?;
+    fs::remove_file(&pdf_path)?;
     run_scan(&repo, &database)?;
     let files_after_delete = run_mcp_contract_json(
         &executable,

@@ -188,9 +188,10 @@ flowchart LR
 ```
 
 The document boundary pins `pdf-extract` `0.12.0`, `quick-xml` `0.42.0`, and
-`zip` `0.6.6`.
+`zip` `0.6.6` with default features disabled and only `deflate` enabled.
 PDF admission requires a `%PDF-` header and extracts only page text; DOCX
-admission requires a ZIP header, rejects unsafe or duplicate parts, and passes
+admission requires a ZIP header, admits only stored or DEFLATE entries, rejects
+unsafe, duplicate, encrypted, or otherwise unsupported package input, and passes
 only `word/document.xml` to the parser. Each result carries a page/text-span or
 part/paragraph/run/text-span locator plus parser provenance and a complete
 coverage marker. The boundary caps input/compressed package bytes at 8 MiB,
