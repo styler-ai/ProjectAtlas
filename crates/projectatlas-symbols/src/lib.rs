@@ -974,9 +974,7 @@ impl PhpNamespaceContext {
             }
             if !child.has_error()
                 && child.child_by_field_name("body").is_none()
-                && let Some(name) = child
-                    .child_by_field_name("name")
-                    .and_then(|name| named_text(name, content))
+                && let Some(name) = php_bounded_namespace_name(child, content)
             {
                 active = Some((child.end_byte(), name));
             }
@@ -1011,6 +1009,16 @@ impl PhpNamespaceContext {
             })
             .map(|range| range.name.clone())
     }
+}
+
+/// Return a namespace name only when its compact identity can remain bounded.
+fn php_bounded_namespace_name(node: Node<'_>, content: &str) -> Option<String> {
+    let name = node.child_by_field_name("name")?;
+    let text = name.utf8_text(content.as_bytes()).ok()?;
+    if text.chars().take(MAX_SNIPPET_CHARS + 1).count() > MAX_SNIPPET_CHARS {
+        return None;
+    }
+    named_text(name, content)
 }
 
 /// Select the official PHP-only or mixed grammar from their parsed roots.
@@ -1986,6 +1994,9 @@ fn is_php_language(language: Option<&str>) -> bool {
 /// Return whether a PHP node's facts require conservative partial coverage.
 fn php_node_is_incomplete(node: Node<'_>, content: &str) -> bool {
     if is_call_node(node.kind()) {
+        if is_php_first_class_callable_acquisition(node) {
+            return false;
+        }
         return php_call_target(node, content).is_none();
     }
     is_php_include_node(node.kind()) && php_static_include_target(node, content).is_none()
@@ -2224,6 +2235,12 @@ fn php_static_call_part(node: Node<'_>, content: &str) -> Option<String> {
     .flatten()
 }
 
+/// Return whether a PHP call node acquires a callable instead of invoking it.
+fn is_php_first_class_callable_acquisition(node: Node<'_>) -> bool {
+    node.child_by_field_name("arguments")
+        .is_some_and(|arguments| has_direct_child_kind(arguments, "variadic_placeholder"))
+}
+
 /// Return whether a subtree contains any node with one of the given kinds.
 fn has_descendant_kind(node: Node<'_>, kinds: &[&str]) -> bool {
     let mut cursor = node.walk();
@@ -2304,11 +2321,7 @@ fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
     if is_php_language(graph.language.as_deref()) && is_inside_php_anonymous_class(node) {
         return;
     }
-    if is_php_language(graph.language.as_deref())
-        && node
-            .child_by_field_name("arguments")
-            .is_some_and(|arguments| has_direct_child_kind(arguments, "variadic_placeholder"))
-    {
+    if is_php_language(graph.language.as_deref()) && is_php_first_class_callable_acquisition(node) {
         return;
     }
     let target_node = node
@@ -5499,6 +5512,68 @@ function run(object $object): void {
     }
 
     #[test]
+    fn php_first_class_callable_acquisitions_are_complete_but_dynamic_calls_are_partial() {
+        let acquisition = extract_symbol_graph(
+            "src/CallableAcquisition.php",
+            Some("php"),
+            r"<?php
+function capture(callable $callable, object $object): void {
+    $callable(...);
+    $object->save(...);
+    helper();
+}
+",
+        );
+        assert_eq!(
+            acquisition.parser,
+            ParserKind::TreeSitter,
+            "graph: {acquisition:?}"
+        );
+        assert!(
+            acquisition
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "capture" && symbol.source_selector.is_some())
+        );
+        let calls = acquisition
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls.len(),
+            1,
+            "acquisitions must not emit calls: {calls:?}"
+        );
+        assert_eq!(calls[0].target_name, "helper");
+        assert_eq!(calls[0].source_name, "capture");
+
+        let dynamic = extract_symbol_graph(
+            "src/DynamicCall.php",
+            Some("php"),
+            r"<?php
+function invoke(callable $callable, object $object): void {
+    $callable();
+    $object->save();
+    helper();
+}
+",
+        );
+        assert_eq!(dynamic.parser, ParserKind::Fallback, "graph: {dynamic:?}");
+        let calls = dynamic
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+        assert!(calls.iter().any(|relation| {
+            relation.target_name == "helper" && relation.source_name == "invoke"
+        }));
+        assert!(calls.iter().all(|relation| {
+            relation.target_name != "$callable" && relation.target_name != "save"
+        }));
+    }
+
+    #[test]
     fn php_complete_static_source_stays_tree_sitter() {
         let graph = extract_symbol_graph("fixture.php", Some("php"), "<?php function run() {}");
         assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
@@ -6089,6 +6164,51 @@ class Owner {
         let bounded = extract_symbol_graph("src/large.php", Some("php"), &source);
         assert_eq!(bounded.parser, ParserKind::TreeSitter);
         assert_eq!(bounded.symbols.len(), MAX_SYMBOLS_PER_FILE);
+    }
+
+    #[test]
+    fn php_oversized_namespace_is_bounded_before_declaration_ownership() {
+        let oversized_name = "N".repeat(1_900_000);
+        let mut source = format!("<?php\nnamespace {oversized_name};\n");
+        for index in 0..(MAX_SYMBOLS_PER_FILE + 50) {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let parsed = super::parse_php_tree(&source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(parsed.is_some(), "oversized namespace source should parse");
+        let Some(parsed) = parsed else { return };
+
+        let mut cancellation_checks = 0;
+        let cancelled =
+            PhpNamespaceContext::from_program(parsed.tree.root_node(), &source, &mut || {
+                cancellation_checks += 1;
+                if cancellation_checks > 128 {
+                    Err("cancelled")
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(matches!(cancelled, Err("cancelled")));
+        assert_eq!(cancellation_checks, 129);
+
+        let mut context_check = || Ok::<(), Infallible>(());
+        let context =
+            PhpNamespaceContext::from_program(parsed.tree.root_node(), &source, &mut context_check)
+                .expect("oversized namespace context should remain bounded");
+        assert!(context.ranges.is_empty());
+
+        let graph = extract_symbol_graph("src/OversizedNamespace.php", Some("php"), &source);
+        assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+        assert_eq!(graph.symbols.len(), MAX_SYMBOLS_PER_FILE);
+        assert!(graph.symbols.iter().all(|symbol| symbol.parent.is_none()));
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .all(|symbol| symbol.name.chars().count() <= MAX_SNIPPET_CHARS)
+        );
     }
 
     #[test]
