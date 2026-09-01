@@ -2083,7 +2083,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_twenty_worktree_identity_migration_backfills_and_retries_atomically()
+    fn schema_twentytwo_worktree_identity_migration_backfills_and_retries_atomically()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let control = temp.path().join("control");
@@ -2113,7 +2113,7 @@ mod tests {
         )?;
         crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute(
-            "UPDATE metadata SET value = '20' WHERE key = 'schema_version'",
+            "UPDATE metadata SET value = '22' WHERE key = 'schema_version'",
             [],
         )?;
         drop(store);
@@ -2155,7 +2155,7 @@ mod tests {
         )?;
         crate::schema::drop_worktree_native_identity_schema(&failed.connection)?;
         failed.connection.execute_batch(
-            "UPDATE metadata SET value = '20' WHERE key = 'schema_version';
+            "UPDATE metadata SET value = '22' WHERE key = 'schema_version';
              UPDATE worktree_registrations SET last_root = 'relative';",
         )?;
         let failed_database_path = failed_database;
@@ -2174,7 +2174,7 @@ mod tests {
             [],
             |row| row.get::<_, String>(0),
         )?;
-        require_eq(&marker, &"20".to_string(), "failed migration marker")?;
+        require_eq(&marker, &"22".to_string(), "failed migration marker")?;
         require_eq(
             &inspect.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('worktree_registrations')

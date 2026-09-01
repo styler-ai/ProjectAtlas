@@ -5583,11 +5583,9 @@ mod tests {
             set_metadata(&store.connection, key, value)?;
         }
         drop_worktree_native_identity_schema(&store.connection)?;
-        store
-            .connection
-            .execute_batch(
-                "DROP TABLE project_root_identity; DROP TABLE IF EXISTS graph_identity_rejections;",
-            )?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity; DROP TABLE IF EXISTS graph_identity_rejections;",
+        )?;
         if read_schema_contract(&store.connection)?
             != *worktree_control_predecessor_schema_contract()?
         {
@@ -5808,6 +5806,7 @@ mod tests {
         ] {
             set_metadata(&store.connection, key, value)?;
         }
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE graph_identity_rejections;
              UPDATE metadata SET value = '20' WHERE key = 'schema_version';",
@@ -5825,8 +5824,8 @@ mod tests {
         connection.execute_batch(
             "CREATE TEMP TRIGGER fail_schema_twenty_rejection_table
              BEFORE UPDATE OF value ON metadata
-             WHEN OLD.key = 'schema_version' AND NEW.value = '22'
-             BEGIN SELECT RAISE(ABORT, 'injected schema-22 rejection-table failure'); END;",
+             WHEN OLD.key = 'schema_version' AND NEW.value = '23'
+             BEGIN SELECT RAISE(ABORT, 'injected schema-23 rejection-table failure'); END;",
         )?;
         let failed = initialize(&connection, Some(&expected_root));
         if !matches!(failed, Err(DbError::Sqlite(_))) {
@@ -5885,7 +5884,7 @@ mod tests {
                 ))
             },
         )?;
-        if migrated != ("22".to_string(), 4, 1, 1, 1)
+        if migrated != ("23".to_string(), 4, 1, 1, 1)
             || read_schema_contract(&connection)? != *schema_contract()?
         {
             return Err(io::Error::other(format!(
@@ -5916,7 +5915,7 @@ mod tests {
             || read_schema_contract(&reopened.connection)? != *schema_contract()?
         {
             return Err(io::Error::other(
-                "reopened schema-22 state did not retain generation or current contract",
+                "reopened schema-23 state did not retain generation or current contract",
             )
             .into());
         }
@@ -5938,6 +5937,7 @@ mod tests {
             "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
             [],
         )?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE graph_identity_rejections;
              UPDATE metadata SET value = '21' WHERE key = 'schema_version';
@@ -5969,7 +5969,7 @@ mod tests {
         connection.execute_batch(
             "CREATE TEMP TRIGGER fail_schema_twentyone_rejection_migration
              BEFORE UPDATE OF value ON metadata
-             WHEN OLD.key = 'schema_version' AND NEW.value = '22'
+             WHEN OLD.key = 'schema_version' AND NEW.value = '23'
              BEGIN SELECT RAISE(ABORT, 'injected schema-21 migration failure'); END;",
         )?;
         let failed = initialize(&connection, Some(&normalize_native_path_display(&root)));
@@ -6033,7 +6033,7 @@ mod tests {
                 ))
             },
         )?;
-        if migrated_state != ("22".to_string(), 0, 0, 1) {
+        if migrated_state != ("23".to_string(), 0, 0, 1) {
             return Err(io::Error::other(format!(
                 "schema-21 migration retained unreconstructable state: {migrated_state:?}"
             ))
@@ -6076,6 +6076,7 @@ mod tests {
         fs::create_dir(&root)?;
         let database = temp.path().join("schema-21-empty.db");
         let store = AtlasStore::open_for_project(&database, &root)?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE graph_identity_rejections;
              UPDATE metadata SET value = '21' WHERE key = 'schema_version';
@@ -6184,6 +6185,7 @@ mod tests {
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
              INSERT INTO purposes(node_id, purpose, source, status, updated_by)
@@ -6295,7 +6297,7 @@ mod tests {
                 ))
             },
         )?;
-        if migrated_state != ("22".to_string(), 7, 1, 1, 0, 1)
+        if migrated_state != ("23".to_string(), 7, 1, 1, 0, 1)
             || migrated.project_root_identity()? != Some(expected_identity.clone())
         {
             return Err(io::Error::other(format!(

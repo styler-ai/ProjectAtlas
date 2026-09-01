@@ -7966,8 +7966,6 @@ mod tests {
              ALTER TABLE worktree_registrations DROP COLUMN last_root_identity;",
         )
     }
-    }
-
     #[cfg(unix)]
     fn create_directory_link(target: &Path, link: &Path) -> io::Result<()> {
         std::os::unix::fs::symlink(target, link)

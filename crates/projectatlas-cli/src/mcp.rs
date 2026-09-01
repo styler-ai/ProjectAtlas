@@ -13423,8 +13423,13 @@ mod tests {
         // predecessor before any write. Schema 20 retains the typed singleton
         // and is the common predecessor for this alias-routed lifecycle test.
         incomplete_current.execute_batch(
-            "UPDATE metadata SET value = '20' WHERE key = 'schema_version';
-             DROP TABLE graph_identity_rejections;",
+            "DROP INDEX IF EXISTS idx_worktree_registrations_active_native_administrative_directory;
+             DROP INDEX IF EXISTS idx_worktree_registrations_active_native_root;
+             ALTER TABLE worktree_registrations DROP COLUMN git_common_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN git_administrative_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN last_root_identity;
+             DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '20' WHERE key = 'schema_version';",
         )?;
         drop(incomplete_current);
         let migratable_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
