@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use projectatlas_core::normalize_native_path_display;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 20;
+pub(crate) const SCHEMA_VERSION: i64 = 22;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
@@ -43,6 +43,10 @@ const WORKTREE_CONTROL_SCHEMA_VERSION: i64 = 18;
 pub(crate) const CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION: i64 = 19;
 /// First schema with a lossless native project-root identity.
 const CANONICAL_ROOT_SCHEMA_VERSION: i64 = 20;
+/// First schema with generation-owned graph identity rejection provenance.
+const GRAPH_IDENTITY_REJECTION_SCHEMA_VERSION: i64 = 21;
+/// First schema with deterministic same-span rejection fact identities.
+const GRAPH_IDENTITY_REJECTION_FACT_INDEX_SCHEMA_VERSION: i64 = 22;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -161,6 +165,16 @@ const MIGRATIONS: &[Migration] = &[
         from: CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION,
         to: CANONICAL_ROOT_SCHEMA_VERSION,
         apply: migrate_19_to_20,
+    },
+    Migration {
+        from: CANONICAL_ROOT_SCHEMA_VERSION,
+        to: GRAPH_IDENTITY_REJECTION_SCHEMA_VERSION,
+        apply: migrate_20_to_21,
+    },
+    Migration {
+        from: GRAPH_IDENTITY_REJECTION_SCHEMA_VERSION,
+        to: GRAPH_IDENTITY_REJECTION_FACT_INDEX_SCHEMA_VERSION,
+        apply: migrate_21_to_22,
     },
 ];
 
@@ -300,6 +314,11 @@ static CLASSIFIED_GRAPH_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = 
 static WORKTREE_CONTROL_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 /// Immutable expected schema-19 contract before native-root identity storage.
 static CANONICAL_ROOT_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Immutable expected schema-20 contract before identity rejection provenance storage.
+static GRAPH_IDENTITY_REJECTION_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> =
+    OnceLock::new();
+/// Immutable expected schema-21 contract before rejection fact identity storage.
+static GRAPH_IDENTITY_REJECTION_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -1024,6 +1043,83 @@ fn create_graph_schema(connection: &Connection, shape: GraphSchemaShape) -> DbRe
     Ok(())
 }
 
+/// Schema-21 generation-owned, bounded parser identity rejection provenance.
+const GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL: &str = "
+    CREATE TABLE graph_identity_rejections (
+        id INTEGER PRIMARY KEY,
+        project_instance_id BLOB NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        generation INTEGER NOT NULL CHECK(typeof(generation) = 'integer' AND generation > 0),
+        file_path TEXT NOT NULL
+            CHECK(typeof(file_path) = 'text' AND length(file_path) > 0),
+        start_line INTEGER NOT NULL CHECK(typeof(start_line) = 'integer' AND start_line > 0),
+        start_column INTEGER NOT NULL CHECK(typeof(start_column) = 'integer' AND start_column >= 0),
+        end_line INTEGER NOT NULL CHECK(typeof(end_line) = 'integer' AND end_line > 0),
+        end_column INTEGER NOT NULL CHECK(typeof(end_column) = 'integer' AND end_column >= 0),
+        parser TEXT NOT NULL CHECK(parser IN ('tree-sitter', 'manifest', 'structural', 'fallback')),
+        field TEXT NOT NULL CHECK(field IN (
+            'package', 'symbol', 'parent', 'signature',
+            'relation.source', 'relation.target', 'resolution-key'
+        )),
+        reason TEXT NOT NULL CHECK(reason IN (
+            'empty', 'surrounding-whitespace', 'control-characters',
+            'oversized', 'reserved-namespace', 'contract'
+        )),
+        FOREIGN KEY(project_instance_id)
+            REFERENCES project_identity(project_instance_id) ON DELETE RESTRICT,
+        FOREIGN KEY(file_path) REFERENCES nodes(path) ON DELETE CASCADE,
+        CHECK(end_line > start_line OR (end_line = start_line AND end_column >= start_column)),
+        UNIQUE(
+            project_instance_id, generation, file_path, start_line, start_column,
+            end_line, end_column, parser, field, reason
+        )
+    ) STRICT;
+    CREATE INDEX idx_graph_identity_rejections_generation_path
+        ON graph_identity_rejections(
+            project_instance_id, generation, file_path,
+            start_line, start_column, id
+        );
+";
+
+/// Current generation-owned, bounded parser identity rejection provenance.
+const GRAPH_IDENTITY_REJECTION_SCHEMA_SQL: &str = "
+    CREATE TABLE graph_identity_rejections (
+        id INTEGER PRIMARY KEY,
+        project_instance_id BLOB NOT NULL
+            CHECK(typeof(project_instance_id) = 'blob' AND length(project_instance_id) = 16),
+        generation INTEGER NOT NULL CHECK(typeof(generation) = 'integer' AND generation > 0),
+        file_path TEXT NOT NULL
+            CHECK(typeof(file_path) = 'text' AND length(file_path) > 0),
+        start_line INTEGER NOT NULL CHECK(typeof(start_line) = 'integer' AND start_line > 0),
+        start_column INTEGER NOT NULL CHECK(typeof(start_column) = 'integer' AND start_column >= 0),
+        end_line INTEGER NOT NULL CHECK(typeof(end_line) = 'integer' AND end_line > 0),
+        end_column INTEGER NOT NULL CHECK(typeof(end_column) = 'integer' AND end_column >= 0),
+        parser TEXT NOT NULL CHECK(parser IN ('tree-sitter', 'manifest', 'structural', 'fallback')),
+        field TEXT NOT NULL CHECK(field IN (
+            'package', 'symbol', 'parent', 'signature',
+            'relation.source', 'relation.target', 'resolution-key'
+        )),
+        reason TEXT NOT NULL CHECK(reason IN (
+            'empty', 'surrounding-whitespace', 'control-characters',
+            'oversized', 'reserved-namespace', 'contract'
+        )),
+        fact_index INTEGER NOT NULL CHECK(typeof(fact_index) = 'integer' AND fact_index >= 0),
+        FOREIGN KEY(project_instance_id)
+            REFERENCES project_identity(project_instance_id) ON DELETE RESTRICT,
+        FOREIGN KEY(file_path) REFERENCES nodes(path) ON DELETE CASCADE,
+        CHECK(end_line > start_line OR (end_line = start_line AND end_column >= start_column)),
+        UNIQUE(
+            project_instance_id, generation, file_path, start_line, start_column,
+            end_line, end_column, parser, field, reason, fact_index
+        )
+    ) STRICT;
+    CREATE INDEX idx_graph_identity_rejections_generation_path
+        ON graph_identity_rejections(
+            project_instance_id, generation, file_path,
+            start_line, start_column, fact_index, id
+        );
+";
+
 /// Parser lookup indexes owned by bounded project-wide coverage discovery.
 const COVERAGE_DISCOVERY_SOURCE_SCHEMA_SQL: &str = "
     CREATE INDEX idx_source_parse_metadata_source_parser_path
@@ -1433,10 +1529,10 @@ pub(crate) fn preflight(
 
 /// Inspect one database against a native project root before writable access.
 ///
-/// Current databases use the typed root identity. A missing typed identity is
-/// admitted only for the narrow recovery path that proves unambiguous legacy
-/// metadata names the same existing native root on platforms where that
-/// historical projection is injective; no binding is created by this helper.
+/// Current and post-schema-19 predecessor databases use the typed root
+/// identity when its table exists. A missing typed row is a corruption or
+/// incomplete-binding error, even when legacy metadata is present. Legacy
+/// validation is available only when the typed table is genuinely absent.
 pub(crate) fn preflight_for_project(
     path: &Path,
     expected_root: &CanonicalProjectRoot,
@@ -1446,12 +1542,11 @@ pub(crate) fn preflight_for_project(
         return Ok((preflight, location));
     }
     let connection = open_read_only_connection(path, &location)?;
-    let found_identity = if preflight.state == SchemaState::Current {
-        crate::project_identity::load_project_root_identity(&connection)?
-    } else {
-        None
-    };
-    if let Some(found) = found_identity.as_ref() {
+    let has_native_identity_table =
+        object_kind(&connection, "project_root_identity")?.as_deref() == Some("table");
+    if has_native_identity_table {
+        let found = crate::project_identity::load_project_root_identity(&connection)?
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         crate::project_identity::prove_existing_root_equivalence(
             expected_root.as_path(),
             found.as_path(),
@@ -1648,10 +1743,32 @@ pub(crate) fn initialize_with_project_root_in_transaction(
     let predecessor_native_identity = if let Some(expected_identity) = expected_identity
         && preflight.state == SchemaState::UpgradeRequired
     {
-        Some(validate_legacy_project_root_binding(
-            connection,
-            expected_identity,
-        )?)
+        if object_kind(connection, "project_root_identity")?.as_deref() == Some("table") {
+            let found = crate::project_identity::load_project_root_identity(connection)?
+                .ok_or(DbError::ProjectRootIdentityMissing)?;
+            crate::project_identity::prove_existing_root_equivalence(
+                expected_identity.as_path(),
+                found.as_path(),
+            )?;
+            Some(found)
+        } else {
+            Some(validate_legacy_project_root_binding(
+                connection,
+                expected_identity,
+            )?)
+        }
+    } else {
+        None
+    };
+    let predecessor_legacy_identity = if expected_identity.is_none()
+        && expected_root.is_some()
+        && preflight.state == SchemaState::UpgradeRequired
+        && object_kind(connection, "project_root_identity")?.as_deref() != Some("table")
+    {
+        let expected = CanonicalProjectRoot::from_path(Path::new(
+            expected_root.ok_or(DbError::ProjectRootMissing)?,
+        ))?;
+        Some(validate_legacy_project_root_binding(connection, &expected)?)
     } else {
         None
     };
@@ -1680,9 +1797,16 @@ pub(crate) fn initialize_with_project_root_in_transaction(
     } else if let Some(expected_root) = expected_root {
         let expected = CanonicalProjectRoot::from_path(Path::new(expected_root))?;
         crate::project_identity::ensure_project_identity(connection)?;
-        crate::project_identity::ensure_project_root_identity_in_transaction(
-            connection, &expected,
-        )?;
+        if let Some(predecessor_identity) = predecessor_legacy_identity {
+            // The writer-connection legacy binding recheck above proved the
+            // predecessor metadata before migration created the native table.
+            crate::project_identity::set_project_root_identity(connection, &predecessor_identity)?;
+            crate::project_identity::set_project_root_metadata(connection, &predecessor_identity)?;
+        } else {
+            crate::project_identity::ensure_project_root_identity_in_transaction(
+                connection, &expected,
+            )?;
+        }
     }
     let current = if expected_identity.is_some() {
         inspect_connection_native(connection, expected_identity, false)?
@@ -2105,6 +2229,7 @@ fn create_fresh(
     connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
     connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
     connection.execute_batch(PROJECT_ROOT_IDENTITY_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_SQL)?;
     set_metadata(connection, FILE_TEXT_FTS_SOURCE_REVISION_KEY, "0")?;
     set_metadata(connection, FILE_TEXT_FTS_PROJECTION_REVISION_KEY, "0")?;
     crate::telemetry::initialize_empty_storage(connection)?;
@@ -2239,6 +2364,32 @@ fn migrate_19_to_20(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Add generation-owned parser identity rejection provenance.
+fn migrate_20_to_21(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL)?;
+    Ok(())
+}
+
+/// Add deterministic same-span parser-fact identity to rejection provenance.
+fn migrate_21_to_22(connection: &Connection) -> DbResult<()> {
+    let had_rejections = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM graph_identity_rejections)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    connection.execute_batch(
+        "DROP INDEX idx_graph_identity_rejections_generation_path;
+         ALTER TABLE graph_identity_rejections
+             RENAME TO graph_identity_rejections_schema_21;",
+    )?;
+    connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_SQL)?;
+    connection.execute_batch("DROP TABLE graph_identity_rejections_schema_21;")?;
+    if had_rejections {
+        invalidate_derived_publication(connection)?;
+    }
+    Ok(())
+}
+
 /// Add selector columns by rebuilding the derived symbol table in the caller transaction.
 fn add_symbol_source_selector_storage(connection: &Connection) -> DbResult<()> {
     connection.execute_batch(SYMBOL_SOURCE_SELECTOR_SCHEMA_SQL)?;
@@ -2275,6 +2426,7 @@ fn recreate_disposable_graph_projection_with_shape(
         DROP TABLE graph_relation_dependencies;
         DROP TABLE graph_entity_exports;
         DROP TABLE graph_resolution_keys;
+        DROP TABLE IF EXISTS graph_identity_rejections;
         DROP TABLE graph_relation_occurrences;
         DROP TABLE graph_coverage;
         DROP TABLE graph_relations;
@@ -2358,6 +2510,12 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
                 WORKTREE_CONTROL_SCHEMA_VERSION => worktree_control_predecessor_schema_contract()?,
                 CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION => {
                     canonical_root_predecessor_schema_contract()?
+                }
+                CANONICAL_ROOT_SCHEMA_VERSION => {
+                    graph_identity_rejection_predecessor_schema_contract()?
+                }
+                GRAPH_IDENTITY_REJECTION_SCHEMA_VERSION => {
+                    graph_identity_rejection_schema_contract()?
                 }
                 found => {
                     return Err(DbError::SchemaVersion {
@@ -2674,8 +2832,56 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
     connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
     connection.execute_batch(PROJECT_ROOT_IDENTITY_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the schema-20 contract before identity rejection provenance storage.
+fn graph_identity_rejection_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = GRAPH_IDENTITY_REJECTION_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    add_symbol_source_selector_storage(&connection)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    create_graph_schema(&connection, GraphSchemaShape::Current)?;
+    create_coverage_discovery_schema(&connection)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
+    connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
+    connection.execute_batch(PROJECT_ROOT_IDENTITY_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(GRAPH_IDENTITY_REJECTION_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the schema-21 contract before same-span fact identity storage.
+fn graph_identity_rejection_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = GRAPH_IDENTITY_REJECTION_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    add_symbol_source_selector_storage(&connection)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    create_graph_schema(&connection, GraphSchemaShape::Current)?;
+    create_coverage_discovery_schema(&connection)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
+    connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
+    connection.execute_batch(PROJECT_ROOT_IDENTITY_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(GRAPH_IDENTITY_REJECTION_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-10 contract from base plus graph DDL.
@@ -3232,6 +3438,7 @@ pub(crate) fn recreate_pre_selector_symbol_storage_for_test(
 mod tests {
     use super::*;
     use crate::{AtlasStore, DbError};
+    use projectatlas_core::IndexGeneration;
     #[cfg(windows)]
     use projectatlas_core::graph::{CoverageScope, RepositoryNodePath};
     use projectatlas_core::telemetry::usage_from_estimates;
@@ -4112,7 +4319,7 @@ mod tests {
                 ))
                 .into());
             };
-            if !matches!(error, DbError::ProjectInstanceIdentityMissing) {
+            if !matches!(error, DbError::ProjectRootIdentityMissing) {
                 return Err(io::Error::other(format!(
                     "incomplete current binding returned the wrong error on attempt {attempt}: {error}"
                 ))
@@ -4213,7 +4420,7 @@ mod tests {
             )
             .into());
         };
-        if !matches!(error, DbError::ProjectRootMismatch { .. }) {
+        if !matches!(error, DbError::ProjectRootIdentityMissing) {
             return Err(io::Error::other(format!(
                 "distinct root returned the wrong error: {error}"
             ))
@@ -4664,7 +4871,8 @@ mod tests {
              DROP TABLE worktree_usage_aggregates;
              DROP TABLE worktree_registrations;
              DROP TABLE usage_aggregate_revisions;
-             DROP TABLE project_root_identity;",
+             DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;",
         )?;
         recreate_disposable_graph_projection(&store.connection, false)?;
         recreate_pre_selector_symbol_storage_for_test(&store.connection)?;
@@ -4823,9 +5031,9 @@ mod tests {
              );
              UPDATE project_identity SET active_generation = 3 WHERE singleton = 1;",
         )?;
-        store
-            .connection
-            .execute_batch("DROP TABLE project_root_identity")?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity; DROP TABLE IF EXISTS graph_identity_rejections;",
+        )?;
         set_metadata(&store.connection, INDEX_PUBLICATION_STATE_KEY, "complete")?;
         set_metadata(
             &store.connection,
@@ -5105,7 +5313,8 @@ mod tests {
              DROP TABLE worktree_usage_aggregates;
              DROP TABLE worktree_registrations;
              DROP TABLE usage_aggregate_revisions;
-             DROP TABLE project_root_identity;",
+             DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;",
         )?;
         set_metadata(
             &store.connection,
@@ -5234,9 +5443,9 @@ mod tests {
         ] {
             set_metadata(&store.connection, key, value)?;
         }
-        store
-            .connection
-            .execute_batch("DROP TABLE project_root_identity")?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity; DROP TABLE IF EXISTS graph_identity_rejections;",
+        )?;
         if read_schema_contract(&store.connection)?
             != *worktree_control_predecessor_schema_contract()?
         {
@@ -5426,6 +5635,551 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn schema_twenty_upgrade_adds_identity_rejections_atomically_and_retries()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-20-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("schema-20.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-20 fixture identity is missing"))?;
+        store.connection.execute(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'Schema 20 authored purpose', 'agent', 'approved', 'schema-test'
+               FROM nodes WHERE path = 'src/lib.rs'",
+            [],
+        )?;
+        store.connection.execute(
+            "UPDATE project_identity SET active_generation = 4 WHERE singleton = 1",
+            [],
+        )?;
+        for (key, value) in [
+            (INDEX_PUBLICATION_STATE_KEY, "complete"),
+            (INDEX_PUBLICATION_FINGERPRINT_KEY, "schema-20-fixture"),
+            (INDEX_PUBLICATION_GENERATION_KEY, "4"),
+        ] {
+            set_metadata(&store.connection, key, value)?;
+        }
+        store.connection.execute_batch(
+            "DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '20' WHERE key = 'schema_version';",
+        )?;
+        if read_schema_contract(&store.connection)?
+            != *graph_identity_rejection_predecessor_schema_contract()?
+        {
+            return Err(io::Error::other("schema-20 fixture shape drifted").into());
+        }
+        drop(store);
+
+        let expected_root = normalize_native_path_display(&root);
+        let connection = Connection::open(&database)?;
+        configure_writable(&connection)?;
+        connection.execute_batch(
+            "CREATE TEMP TRIGGER fail_schema_twenty_rejection_table
+             BEFORE UPDATE OF value ON metadata
+             WHEN OLD.key = 'schema_version' AND NEW.value = '22'
+             BEGIN SELECT RAISE(ABORT, 'injected schema-22 rejection-table failure'); END;",
+        )?;
+        let failed = initialize(&connection, Some(&expected_root));
+        if !matches!(failed, Err(DbError::Sqlite(_))) {
+            return Err(io::Error::other(format!(
+                "schema-20 injected failure returned the wrong result: {failed:?}"
+            ))
+            .into());
+        }
+        let rolled_back = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT COUNT(*) FROM purposes
+                  WHERE purpose = 'Schema 20 authored purpose' AND source = 'agent'
+                    AND status = 'approved' AND updated_by = 'schema-test'),
+                (SELECT COUNT(*) FROM sqlite_master WHERE name = 'graph_identity_rejections')",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if rolled_back != ("20".to_string(), 4, 1, 0)
+            || read_schema_contract(&connection)?
+                != *graph_identity_rejection_predecessor_schema_contract()?
+        {
+            return Err(io::Error::other(format!(
+                "schema-20 failure exposed partial rejection-table state: {rolled_back:?}"
+            ))
+            .into());
+        }
+        connection.execute_batch("DROP TRIGGER fail_schema_twenty_rejection_table")?;
+        initialize(&connection, Some(&expected_root))?;
+        let migrated = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT COUNT(*) FROM purposes
+                  WHERE purpose = 'Schema 20 authored purpose' AND source = 'agent'
+                    AND status = 'approved' AND updated_by = 'schema-test'),
+                (SELECT COUNT(*) FROM sqlite_master WHERE name = 'graph_identity_rejections'),
+                (SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'index' AND name = 'idx_graph_identity_rejections_generation_path')",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+        if migrated != ("22".to_string(), 4, 1, 1, 1)
+            || read_schema_contract(&connection)? != *schema_contract()?
+        {
+            return Err(io::Error::other(format!(
+                "schema-20 retry changed its authority boundary: {migrated:?}"
+            ))
+            .into());
+        }
+        let retained_publication_keys = connection.query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key IN (?1, ?2, ?3)",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if retained_publication_keys != 3 {
+            return Err(io::Error::other(format!(
+                "schema-20 empty migration changed publication metadata: {retained_publication_keys}"
+            ))
+            .into());
+        }
+        drop(connection);
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        if reopened.project_instance_id()? != Some(project)
+            || reopened.repository_graph_generation()? != Some(IndexGeneration::new(4))
+            || read_schema_contract(&reopened.connection)? != *schema_contract()?
+        {
+            return Err(io::Error::other(
+                "reopened schema-22 state did not retain generation or current contract",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_twentyone_upgrade_discards_unreconstructable_rejection_identity_and_reopens()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-21-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("schema-21.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-21 fixture identity is missing"))?;
+        store.connection.execute(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+            [],
+        )?;
+        store.connection.execute_batch(
+            "DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '21' WHERE key = 'schema_version';
+             UPDATE project_identity SET active_generation = 1 WHERE singleton = 1;",
+        )?;
+        for (key, value) in [
+            (INDEX_PUBLICATION_STATE_KEY, "complete"),
+            (INDEX_PUBLICATION_FINGERPRINT_KEY, "schema-21-fixture"),
+            (INDEX_PUBLICATION_GENERATION_KEY, "1"),
+        ] {
+            set_metadata(&store.connection, key, value)?;
+        }
+        store
+            .connection
+            .execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL)?;
+        store.connection.execute(
+            "INSERT INTO graph_identity_rejections(
+                 project_instance_id, generation, file_path,
+                 start_line, start_column, end_line, end_column,
+                 parser, field, reason
+             ) VALUES(?1, 1, 'src/lib.rs', 2, 0, 2, 0,
+                       'tree-sitter', 'symbol', 'empty')",
+            [&project.as_bytes()[..]],
+        )?;
+        drop(store);
+
+        let connection = Connection::open(&database)?;
+        configure_writable(&connection)?;
+        connection.execute_batch(
+            "CREATE TEMP TRIGGER fail_schema_twentyone_rejection_migration
+             BEFORE UPDATE OF value ON metadata
+             WHEN OLD.key = 'schema_version' AND NEW.value = '22'
+             BEGIN SELECT RAISE(ABORT, 'injected schema-21 migration failure'); END;",
+        )?;
+        let failed = initialize(&connection, Some(&normalize_native_path_display(&root)));
+        if !matches!(failed, Err(DbError::Sqlite(_))) {
+            return Err(io::Error::other(format!(
+                "schema-21 injected failure returned the wrong result: {failed:?}"
+            ))
+            .into());
+        }
+        let rolled_back = connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM graph_identity_rejections),
+                (SELECT COUNT(*) FROM sqlite_master
+                  WHERE name = 'graph_identity_rejections_schema_21'),
+                (SELECT COUNT(*) FROM metadata
+                  WHERE key IN (?1, ?2, ?3))",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if rolled_back != ("21".to_string(), 1, 0, 3)
+            || read_schema_contract(&connection)? != *graph_identity_rejection_schema_contract()?
+        {
+            return Err(io::Error::other(format!(
+                "schema-21 failure exposed partial rejection migration state: {rolled_back:?}"
+            ))
+            .into());
+        }
+        connection.execute_batch("DROP TRIGGER fail_schema_twentyone_rejection_migration")?;
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        let migrated_state = migrated.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT COUNT(*) FROM graph_identity_rejections),
+                (SELECT COUNT(*) FROM metadata
+                  WHERE key IN (?1, ?2, ?3)),
+                (SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'index' AND name = 'idx_graph_identity_rejections_generation_path')",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if migrated_state != ("22".to_string(), 0, 0, 1) {
+            return Err(io::Error::other(format!(
+                "schema-21 migration retained unreconstructable state: {migrated_state:?}"
+            ))
+            .into());
+        }
+        if read_metadata(&migrated.connection, SCHEMA_VERSION_KEY)?
+            != Some(SCHEMA_VERSION.to_string())
+            || read_schema_contract(&migrated.connection)? != *schema_contract()?
+        {
+            return Err(io::Error::other(
+                "schema-21 migration did not expose the current fact-identity contract",
+            )
+            .into());
+        }
+        drop(migrated);
+
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        let reopened_count = reopened.connection.query_row(
+            "SELECT COUNT(*)
+               FROM graph_identity_rejections
+              WHERE project_instance_id = ?1 AND generation = 1",
+            [&project.as_bytes()[..]],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let reopened_generation = reopened.repository_graph_generation()?;
+        if reopened_count != 0 || reopened_generation.is_some() {
+            return Err(io::Error::other(format!(
+                "schema-21 migration did not fail closed on reopen: count={reopened_count}, generation={reopened_generation:?}",
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_twentyone_empty_upgrade_preserves_publication_metadata() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-21-empty-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("schema-21-empty.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        store.connection.execute_batch(
+            "DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '21' WHERE key = 'schema_version';
+             UPDATE project_identity SET active_generation = 3 WHERE singleton = 1;",
+        )?;
+        for (key, value) in [
+            (INDEX_PUBLICATION_STATE_KEY, "complete"),
+            (INDEX_PUBLICATION_FINGERPRINT_KEY, "schema-21-empty"),
+            (INDEX_PUBLICATION_GENERATION_KEY, "3"),
+        ] {
+            set_metadata(&store.connection, key, value)?;
+        }
+        store
+            .connection
+            .execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL)?;
+        drop(store);
+
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        let metadata = migrated.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = ?1),
+                (SELECT value FROM metadata WHERE key = ?2),
+                (SELECT value FROM metadata WHERE key = ?3),
+                (SELECT COUNT(*) FROM graph_identity_rejections)",
+            params![
+                INDEX_PUBLICATION_STATE_KEY,
+                INDEX_PUBLICATION_FINGERPRINT_KEY,
+                INDEX_PUBLICATION_GENERATION_KEY,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if metadata
+            != (
+                Some("complete".to_string()),
+                Some("schema-21-empty".to_string()),
+                Some("3".to_string()),
+                0,
+            )
+        {
+            return Err(io::Error::other(format!(
+                "schema-21 empty migration changed publication metadata: {metadata:?}"
+            ))
+            .into());
+        }
+        drop(migrated);
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        if reopened.repository_graph_generation()? != Some(IndexGeneration::new(3)) {
+            return Err(io::Error::other(
+                "schema-21 empty migration did not retain the complete generation",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_twentyone_missing_native_identity_refuses_without_mutation_and_retries()
+    -> Result<(), Box<dyn Error>> {
+        fn snapshot(
+            database: &Path,
+        ) -> Result<
+            (
+                Vec<u8>,
+                [Option<Vec<u8>>; 3],
+                Vec<String>,
+                CurrentSchemaSnapshot,
+            ),
+            Box<dyn Error>,
+        > {
+            let parent = database
+                .parent()
+                .ok_or_else(|| io::Error::other("schema-21 identity fixture has no parent"))?;
+            let connection =
+                Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let schema = current_schema_snapshot(&connection)?;
+            drop(connection);
+            Ok((
+                fs::read(database)?,
+                ["-wal", "-shm", "-journal"]
+                    .map(|suffix| fs::read(sqlite_sidecar_path(database, suffix)).ok()),
+                directory_entry_names(parent)?,
+                schema,
+            ))
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("schema-21-missing-identity-root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("schema-21-missing-identity.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("schema-21 missing-identity fixture lacks project"))?;
+        let native_row = store.connection.query_row(
+            "SELECT codec_version, root
+               FROM project_root_identity
+              WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        store.connection.execute_batch(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
+             INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'Schema 21 authored purpose', 'agent', 'approved', 'schema-test'
+               FROM nodes WHERE path = 'src/lib.rs';
+             UPDATE project_identity SET active_generation = 7 WHERE singleton = 1;
+             DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '21' WHERE key = 'schema_version';",
+        )?;
+        store
+            .connection
+            .execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_V21_SQL)?;
+        store.connection.execute(
+            "INSERT INTO graph_identity_rejections(
+                 project_instance_id, generation, file_path,
+                 start_line, start_column, end_line, end_column,
+                 parser, field, reason
+             ) VALUES(?1, 7, 'src/lib.rs', 2, 0, 2, 0,
+                       'tree-sitter', 'symbol', 'empty')",
+            [&project.as_bytes()[..]],
+        )?;
+        store
+            .connection
+            .execute("DELETE FROM project_root_identity", [])?;
+        drop(store);
+
+        let before = snapshot(&database)?;
+        let preflight = preflight_for_project(&database, &expected_identity);
+        if !matches!(preflight, Err(DbError::ProjectRootIdentityMissing)) {
+            return Err(io::Error::other(format!(
+                "schema-21 missing native identity preflight returned {preflight:?}"
+            ))
+            .into());
+        }
+        if snapshot(&database)? != before {
+            return Err(io::Error::other(
+                "schema-21 missing native identity preflight mutated durable state",
+            )
+            .into());
+        }
+
+        let opened = AtlasStore::open_for_project(&database, &root);
+        let Some(open_error) = opened.err() else {
+            return Err(io::Error::other(
+                "schema-21 missing native identity open unexpectedly succeeded",
+            )
+            .into());
+        };
+        if !matches!(open_error, DbError::ProjectRootIdentityMissing) {
+            return Err(io::Error::other(format!(
+                "schema-21 missing native identity open returned {open_error:?}"
+            ))
+            .into());
+        }
+        if snapshot(&database)? != before {
+            return Err(io::Error::other(
+                "schema-21 missing native identity open mutated durable state",
+            )
+            .into());
+        }
+
+        let expected_root = expected_identity.display_string()?;
+        let writer = Connection::open(&database)?;
+        configure_writable(&writer)?;
+        let writer_result =
+            initialize_with_project_root(&writer, Some(&expected_root), Some(&expected_identity));
+        if !matches!(writer_result, Err(DbError::ProjectRootIdentityMissing)) {
+            return Err(io::Error::other(format!(
+                "schema-21 missing native identity writer returned {writer_result:?}"
+            ))
+            .into());
+        }
+        drop(writer);
+        if snapshot(&database)? != before {
+            return Err(io::Error::other(
+                "schema-21 missing native identity writer mutated durable state",
+            )
+            .into());
+        }
+
+        let repair = Connection::open(&database)?;
+        configure_writable(&repair)?;
+        repair.execute(
+            "INSERT INTO project_root_identity(singleton, codec_version, root)
+             VALUES(1, ?1, ?2)",
+            params![native_row.0, native_row.1],
+        )?;
+        drop(repair);
+        let migrated = AtlasStore::open_for_project(&database, &root)?;
+        let migrated_state = migrated.connection.query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT COUNT(*) FROM nodes WHERE path = 'src/lib.rs'),
+                (SELECT COUNT(*) FROM purposes
+                  WHERE purpose = 'Schema 21 authored purpose'),
+                (SELECT COUNT(*) FROM graph_identity_rejections
+                  WHERE generation = 7),
+                (SELECT COUNT(*) FROM project_root_identity WHERE singleton = 1)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        if migrated_state != ("22".to_string(), 7, 1, 1, 0, 1)
+            || migrated.project_root_identity()? != Some(expected_identity.clone())
+        {
+            return Err(io::Error::other(format!(
+                "schema-21 identity repair changed durable state: {migrated_state:?}"
+            ))
+            .into());
+        }
+        drop(migrated);
+        let reopened = AtlasStore::open_read_only_for_project(&database, &root)?;
+        let reopened_generation = reopened.connection.query_row(
+            "SELECT active_generation FROM project_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if reopened.project_root_identity()? != Some(expected_identity) || reopened_generation != 7
+        {
+            return Err(io::Error::other(
+                "schema-21 identity repair did not survive SQLite reopen",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn schema_nineteen_upgrade_repairs_native_root_atomically_and_retries()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -5466,6 +6220,7 @@ mod tests {
         )?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         if read_schema_contract(&store.connection)?
@@ -5687,6 +6442,7 @@ mod tests {
         )?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';
              PRAGMA wal_checkpoint(TRUNCATE);",
         )?;
@@ -5811,6 +6567,7 @@ mod tests {
         }
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(store);
@@ -5860,6 +6617,7 @@ mod tests {
         let store = AtlasStore::open_for_project(&database, &root)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(store);
@@ -5973,6 +6731,7 @@ mod tests {
                FROM nodes WHERE path = 'src/lib.rs';
              UPDATE project_identity SET active_generation = 13 WHERE singleton = 1;
              DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';
              UPDATE metadata SET value = REPLACE(value, char(92), '/')
                WHERE key = 'project_root';",
@@ -6065,7 +6824,8 @@ mod tests {
             let store = AtlasStore::open_for_project(database, root)?;
             store.connection.execute_batch(
                 "DROP TABLE project_root_identity;
-                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+             DROP TABLE IF EXISTS graph_identity_rejections;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
             Ok(())
         }
@@ -6161,7 +6921,8 @@ mod tests {
             let store = AtlasStore::open_for_project(database, root)?;
             store.connection.execute_batch(
                 "DROP TABLE project_root_identity;
-                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+             DROP TABLE IF EXISTS graph_identity_rejections;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
             Ok(())
         }
@@ -6280,6 +7041,7 @@ mod tests {
         }
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '18' WHERE key = 'schema_version';",
         )?;
         if read_schema_contract(&store.connection)?
@@ -6934,7 +7696,7 @@ mod tests {
         let Err(unbound_error) = AtlasStore::open_for_project(&unbound_path, &root) else {
             return Err(io::Error::other("unbound existing database unexpectedly opened").into());
         };
-        if !matches!(unbound_error, DbError::ProjectRootMissing) {
+        if !matches!(unbound_error, DbError::ProjectRootIdentityMissing) {
             return Err(io::Error::other("unbound database returned the wrong error").into());
         }
         require_unchanged(
@@ -6997,6 +7759,7 @@ mod tests {
         let store = AtlasStore::open_for_project(&database, &root_a)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(store);
@@ -7282,12 +8045,47 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn schema_eight_project_binding_requires_native_identity_on_unix() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("schema-eight.db");
+        write_schema_eight_fixture(&database, &root)?;
+        let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+        let before = fs::read(&database)?;
+        let parent = database
+            .parent()
+            .ok_or_else(|| io::Error::other("schema-eight fixture has no parent"))?;
+        let inventory = directory_entry_names(parent)?;
+
+        let preflight = preflight_for_project(&database, &expected_identity);
+        if !matches!(preflight, Err(DbError::ProjectRootIdentityMissing)) {
+            return Err(
+                io::Error::other(format!("legacy Unix preflight returned {preflight:?}")).into(),
+            );
+        }
+        let Err(error) = AtlasStore::open_for_project(&database, &root) else {
+            return Err(io::Error::other("legacy Unix open unexpectedly succeeded").into());
+        };
+        if !matches!(error, DbError::ProjectRootIdentityMissing) {
+            return Err(io::Error::other(format!("legacy Unix open returned {error}")).into());
+        }
+        require_unchanged(parent, &database, &before, &inventory)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
     #[test]
     fn late_migration_failure_rolls_back_graph_schema_and_authored_state()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo");
         fs::create_dir_all(&root)?;
+        let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+        let expected_root = expected_identity.display_string()?;
         let db_path = temp.path().join("projectatlas.db");
         write_schema_eight_fixture(&db_path, &root)?;
         let connection = Connection::open(&db_path)?;
@@ -7311,8 +8109,11 @@ mod tests {
             END;
             ",
         ))?;
-        let Err(error) = initialize(&connection, Some(&normalize_native_path_display(&root)))
-        else {
+        let Err(error) = initialize_with_project_root(
+            &connection,
+            Some(&expected_root),
+            Some(&expected_identity),
+        ) else {
             return Err(io::Error::other("late migration failure unexpectedly committed").into());
         };
         if !matches!(error, DbError::Sqlite(_)) {
@@ -7398,7 +8199,7 @@ mod tests {
             return Err(io::Error::other("failed migration changed project root identity").into());
         }
         connection.execute_batch("DROP TRIGGER abort_final_schema_version")?;
-        initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+        initialize_with_project_root(&connection, Some(&expected_root), Some(&expected_identity))?;
         if read_metadata(&connection, SCHEMA_VERSION_KEY)? != Some(SCHEMA_VERSION.to_string()) {
             return Err(io::Error::other("retry did not advance the final schema version").into());
         }
@@ -7433,12 +8234,15 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_ten_telemetry_migration_rolls_back_malformed_rows_and_retries()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo");
         fs::create_dir_all(&root)?;
+        let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+        let expected_root = expected_identity.display_string()?;
         let db_path = temp.path().join("projectatlas.db");
         let connection = Connection::open(&db_path)?;
         configure_writable(&connection)?;
@@ -7476,8 +8280,11 @@ mod tests {
             |row| row.get::<_, Vec<u8>>(0),
         )?;
 
-        let Err(error) = initialize(&connection, Some(&normalize_native_path_display(&root)))
-        else {
+        let Err(error) = initialize_with_project_root(
+            &connection,
+            Some(&expected_root),
+            Some(&expected_identity),
+        ) else {
             return Err(io::Error::other("malformed telemetry unexpectedly migrated").into());
         };
         if !matches!(error, DbError::InvalidEnum { .. }) {
@@ -7573,7 +8380,7 @@ mod tests {
              )",
             [],
         )?;
-        initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+        initialize_with_project_root(&connection, Some(&expected_root), Some(&expected_identity))?;
         let migrated = connection.query_row(
             "SELECT
                  (SELECT COUNT(*) FROM usage_events),
@@ -7781,6 +8588,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn schema_ten_migration_preserves_exact_totals_above_runtime_baseline_capacity() {
         let result = (|| -> Result<(), Box<dyn Error>> {
@@ -7790,6 +8598,8 @@ mod tests {
             let temp = tempfile::tempdir()?;
             let root = temp.path().join("repo");
             fs::create_dir_all(&root)?;
+            let expected_identity = CanonicalProjectRoot::from_path(&root)?;
+            let expected_root = expected_identity.display_string()?;
             let connection = Connection::open(temp.path().join("projectatlas.db"))?;
             configure_writable(&connection)?;
             create_released_schema_eight(&connection)?;
@@ -7838,7 +8648,11 @@ mod tests {
             insert.execute(params![distinct_identity, distinct_fingerprint])?;
             drop(insert);
 
-            initialize(&connection, Some(&normalize_native_path_display(&root)))?;
+            initialize_with_project_root(
+                &connection,
+                Some(&expected_root),
+                Some(&expected_identity),
+            )?;
             let migrated = connection.query_row(
                 "SELECT
                  (SELECT COUNT(*) FROM usage_events),
