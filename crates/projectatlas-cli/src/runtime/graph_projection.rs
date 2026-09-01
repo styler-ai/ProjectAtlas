@@ -2706,6 +2706,8 @@ fn finish_projection_in_database_with_documents(
     database.store_mut()?.replace_scan(nodes)?;
     let mut identity_rejections = identity_admission.rejections.clone();
     let mut identity_rejection_keys = identity_rejection_key_set(&identity_rejections);
+    let mut identity_rejection_bytes =
+        identity_rejection_keys_retained_bytes(&identity_rejection_keys)?;
     {
         let mut staging = database
             .store_mut()?
@@ -2739,11 +2741,15 @@ fn finish_projection_in_database_with_documents(
                 control,
             )?;
             staged_rows.append(rows);
-            extend_bounded_identity_rejections(
-                &mut identity_rejections,
-                &mut identity_rejection_keys,
-                staged_rows.identity_rejections.iter().cloned(),
-            )?;
+            identity_rejection_bytes = identity_rejection_bytes
+                .checked_add(extend_bounded_identity_rejections(
+                    &mut identity_rejections,
+                    &mut identity_rejection_keys,
+                    staged_rows.identity_rejections.iter().cloned(),
+                )?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
             staged_rows.identity_rejections.clear();
             if staged_rows.row_count() < GRAPH_STAGE_ROW_BATCH_SIZE {
                 continue;
@@ -2790,7 +2796,8 @@ fn finish_projection_in_database_with_documents(
         + document_target_states
             .iter()
             .map(|(path, _reason)| path.len() as u64 + STAGED_GRAPH_ROW_BYTES)
-            .sum::<u64>();
+            .sum::<u64>()
+        + identity_rejection_bytes;
     Ok(StagedRepositoryGraph {
         project,
         mutation: RepositoryGraphMutation::Full,
@@ -2870,6 +2877,8 @@ fn finish_projection_with_documents(
     let mut document_unresolved_reasons = BTreeMap::new();
     let mut identity_rejections = identity_admission.rejections.clone();
     let mut identity_rejection_keys = identity_rejection_key_set(&identity_rejections);
+    let mut identity_rejection_bytes =
+        identity_rejection_keys_retained_bytes(&identity_rejection_keys)?;
     for graph in graphs {
         let graph = graph.borrow();
         let rows = project_graph_rows(
@@ -2898,11 +2907,15 @@ fn finish_projection_with_documents(
             insert_document_unresolved_reason(&mut document_unresolved_reasons, key, reason)?;
         }
         coverage.extend(rows.coverage);
-        extend_bounded_identity_rejections(
-            &mut identity_rejections,
-            &mut identity_rejection_keys,
-            rows.identity_rejections,
-        )?;
+        identity_rejection_bytes = identity_rejection_bytes
+            .checked_add(extend_bounded_identity_rejections(
+                &mut identity_rejections,
+                &mut identity_rejection_keys,
+                rows.identity_rejections,
+            )?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
         entities.retained_bytes = rows
             .external_entities
             .iter()
@@ -2967,7 +2980,9 @@ fn finish_projection_with_documents(
         scan_policy: scan_policy.clone(),
         document_target_states,
         database: None,
-        retained_bytes: entities.retained_bytes,
+        retained_bytes: entities
+            .retained_bytes
+            .saturating_add(identity_rejection_bytes),
     })
 }
 
@@ -6332,9 +6347,10 @@ mod tests {
         enforce_incremental_projection_limits, enforce_resolution_staging_budget,
         explicit_external_selector, finish_projection, finish_projection_in_database,
         finish_projection_in_database_with_documents, finish_projection_with_documents,
-        insert_relation, is_cargo_manifest_path, normalize_document_target, project_document_rows,
-        qualified_symbol_identity, qualified_symbol_parents, registry_resolution_matches,
-        relation_resolution, remove_owned_graph_stage_payload, repository_path_belongs_to,
+        identity_rejection_keys_retained_bytes, insert_relation, is_cargo_manifest_path,
+        normalize_document_target, project_document_rows, qualified_symbol_identity,
+        qualified_symbol_parents, registry_resolution_matches, relation_resolution,
+        remove_owned_graph_stage_payload, repository_path_belongs_to,
         resolution_projection_map_retained_bytes, resolution_registry_from_exports,
         rust_toolchain_identity, source_symbol_identity, stage_full_repository_graph,
         stage_incremental_repository_graph, stage_incremental_repository_graph_with_test_limit,
@@ -9097,6 +9113,184 @@ mod tests {
         require(
             !coverage.rows.is_empty(),
             "database-staged graph rows were not published",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn staged_identity_rejections_count_toward_normal_and_database_bytes()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("identity-rejection-bytes");
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/lib.rs"), "pub fn indexed() {}\n")?;
+        let database = root.join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("identity rejection fixture project identity is missing")?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let graphs = vec![extract_symbol_graph(
+            "src/lib.rs",
+            Some("rust"),
+            "pub fn indexed() {}\n",
+        )];
+        let nodes = vec![test_file_node("src/lib.rs", "rust")];
+        let packages = PackageIndex::from_graphs(&graphs)?;
+        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let mut admission = GraphIdentityAdmission::default();
+        let rejection_path = format!("src/{}.rs", "long-rejection-path".repeat(64));
+        admission.record(
+            &rejection_path,
+            super::IdentitySpan {
+                start_line: 4,
+                start_column: 0,
+                end_line: 4,
+                end_column: 12,
+            },
+            ParserKind::TreeSitter,
+            7,
+            &[(
+                GraphIdentityField::Symbol,
+                GraphIdentityRejectionReason::Oversized,
+            )],
+            &control,
+        )?;
+        let rejection_bytes = identity_rejection_keys_retained_bytes(&admission.rejection_keys)?;
+        require(
+            rejection_bytes > 1,
+            "identity rejection fixture did not retain a bounded detail payload",
+        )?;
+        let build_projection = || {
+            let projection = build_entity_projection(
+                project, generation, &nodes, &graphs, &packages, true, &control,
+            )?;
+            let candidates = resolution_registry_from_exports(&projection, &control)?;
+            Result::<_, Box<dyn Error>>::Ok((projection, candidates))
+        };
+
+        let (projection, candidates) = build_projection()?;
+        let baseline = finish_projection_with_documents(
+            project,
+            generation,
+            RepositoryGraphMutation::Full,
+            &graphs,
+            &root,
+            &nodes,
+            &BTreeMap::new(),
+            &GraphIdentityAdmission::default(),
+            projection,
+            &candidates,
+            &scan_policy,
+            &control,
+        )?;
+        let (projection, candidates) = build_projection()?;
+        let in_memory = finish_projection_with_documents(
+            project,
+            generation,
+            RepositoryGraphMutation::Full,
+            &graphs,
+            &root,
+            &nodes,
+            &BTreeMap::new(),
+            &admission,
+            projection,
+            &candidates,
+            &scan_policy,
+            &control,
+        )?;
+        require_eq(
+            &in_memory.retained_bytes(),
+            &baseline.retained_bytes().saturating_add(rejection_bytes),
+            "in-memory identity rejection retained bytes",
+        )?;
+        require_eq(
+            &in_memory.identity_rejections.len(),
+            &1,
+            "in-memory identity rejection detail count",
+        )?;
+        let parent_prefix = super::super::MAX_PUBLICATION_STAGING_BYTES
+            .checked_sub(in_memory.retained_bytes())
+            .ok_or("identity rejection fixture exceeded the publication budget")?;
+        require(
+            super::super::enforce_publication_staging_budget(
+                parent_prefix.saturating_add(in_memory.retained_bytes()),
+            )
+            .is_ok(),
+            "parent publication budget rejected exact staged identity bytes",
+        )?;
+        require(
+            super::super::enforce_publication_staging_budget(
+                parent_prefix
+                    .saturating_add(in_memory.retained_bytes())
+                    .saturating_add(1),
+            )
+            .is_err(),
+            "parent publication budget accepted one byte over staged identity bytes",
+        )?;
+        drop(in_memory);
+        drop(baseline);
+
+        let (projection, candidates) = build_projection()?;
+        let baseline_database = finish_projection_in_database_with_documents(
+            &root,
+            &nodes,
+            project,
+            generation,
+            &graphs,
+            &BTreeMap::new(),
+            &GraphIdentityAdmission::default(),
+            projection,
+            &candidates,
+            &scan_policy,
+            &control,
+        )?;
+        let baseline_database_path_bytes = baseline_database
+            .database
+            .as_ref()
+            .ok_or("database staging baseline was not selected")?
+            .directory()?
+            .path()
+            .join(GRAPH_STAGE_DATABASE_FILE_NAME)
+            .as_os_str()
+            .as_encoded_bytes()
+            .len() as u64;
+        require_eq(
+            &baseline_database.retained_bytes(),
+            &baseline_database_path_bytes,
+            "database staging baseline retained bytes",
+        )?;
+        drop(baseline_database);
+
+        let (projection, candidates) = build_projection()?;
+        let database_staged = finish_projection_in_database_with_documents(
+            &root,
+            &nodes,
+            project,
+            generation,
+            &graphs,
+            &BTreeMap::new(),
+            &admission,
+            projection,
+            &candidates,
+            &scan_policy,
+            &control,
+        )?;
+        let database_path_bytes = database_staged
+            .database
+            .as_ref()
+            .ok_or("database staging was not selected")?
+            .directory()?
+            .path()
+            .join(GRAPH_STAGE_DATABASE_FILE_NAME)
+            .as_os_str()
+            .as_encoded_bytes()
+            .len() as u64;
+        require_eq(
+            &database_staged.retained_bytes(),
+            &database_path_bytes.saturating_add(rejection_bytes),
+            "database staging identity rejection retained bytes",
         )?;
         Ok(())
     }
