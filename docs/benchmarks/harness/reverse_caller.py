@@ -998,6 +998,199 @@ def decision(
     }
 
 
+def compact_process_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    """Keep bounded process measurements without retaining raw streams."""
+
+    fields = (
+        "returncode",
+        "wall_ms",
+        "cpu_ms",
+        "peak_rss_bytes",
+        "stdout_bytes",
+        "stdout_sha256",
+        "stderr_bytes",
+        "stderr_sha256",
+        "allocation_metrics",
+        "case",
+        "target",
+        "limit",
+    )
+    return {field: record[field] for field in fields if field in record}
+
+
+def compact_summary_evidence(summary: object) -> dict[str, Any] | None:
+    """Keep only review-relevant fields from one decoded summary."""
+
+    if not isinstance(summary, dict):
+        return None
+    result: dict[str, Any] = {
+        field: summary[field]
+        for field in (
+            "file_path",
+            "language",
+            "source_status",
+            "summary_status",
+            "parser_kind",
+            "symbol_count",
+            "limit",
+            "line_count",
+            "truncated",
+        )
+        if field in summary
+    }
+    result["functions"] = [
+        {
+            field: function[field]
+            for field in ("name", "kind", "line", "called_by")
+            if field in function
+        }
+        for function in summary.get("functions", [])
+        if isinstance(function, dict)
+    ]
+    return result
+
+
+def compact_query_plan_evidence(observations: dict[str, Any]) -> dict[str, Any]:
+    """Retain query-plan aggregates and one exact event per query family."""
+
+    representatives: list[dict[str, Any]] = []
+    seen_families: set[str] = set()
+    for event in observations.get("events", []):
+        family = event.get("family")
+        if not isinstance(family, str) or family in seen_families:
+            continue
+        seen_families.add(family)
+        representatives.append(
+            {
+                field: event[field]
+                for field in (
+                    "sequence",
+                    "family",
+                    "binding",
+                    "limit",
+                    "rows",
+                    "row_bytes",
+                    "sql",
+                    "parameters",
+                    "query_plan",
+                )
+                if field in event
+            }
+        )
+    return {
+        "by_family": observations.get("by_family", {}),
+        "representative_events": representatives,
+    }
+
+
+def compact_fixture_evidence(fixture: dict[str, Any]) -> dict[str, Any]:
+    """Project one fixture to bounded process and query-plan evidence."""
+
+    return {
+        "targets": fixture.get("targets", []),
+        "aggregate": fixture.get("aggregate", {}),
+        "runs": [compact_process_evidence(run) for run in fixture.get("runs", [])],
+        "query_plan_evidence": compact_query_plan_evidence(
+            fixture.get("query_observations", {})
+        ),
+    }
+
+
+def compact_arm_evidence(arm: dict[str, Any]) -> dict[str, Any]:
+    """Project one benchmark arm without raw setup or process streams."""
+
+    result: dict[str, Any] = {"binary_sha256": arm["binary_sha256"]}
+    if "candidate_patch" in arm:
+        result["candidate_patch"] = arm["candidate_patch"]
+    result["fixtures"] = {
+        name: compact_fixture_evidence(fixture)
+        for name, fixture in arm.get("fixtures", {}).items()
+    }
+    return result
+
+
+def compact_failure_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    """Keep bounded failure diagnostics and omit complete process streams."""
+
+    result = compact_process_evidence(record)
+    diagnostic = record.get("stderr_text")
+    if isinstance(diagnostic, str) and diagnostic:
+        result["diagnostic"] = diagnostic
+    summary = compact_summary_evidence(record.get("decoded_summary"))
+    if summary is not None:
+        result["decoded_summary"] = summary
+    return result
+
+
+def compact_cancellation_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    """Keep the authoritative cancellation and post-cancel process proof."""
+
+    result = compact_process_evidence(record)
+    for field in (
+        "terminal_observation",
+        "response_sha256",
+        "response_is_error",
+        "outcome",
+        "partial_success",
+    ):
+        if field in record:
+            result[field] = record[field]
+    return result
+
+
+def compact_review_evidence(
+    result: dict[str, Any], raw_output: Path
+) -> dict[str, Any]:
+    """Build the bounded tracked projection while retaining raw output elsewhere."""
+
+    raw_output = raw_output.resolve()
+    if not raw_output.is_file():
+        raise ValueError(f"missing raw benchmark output: {raw_output}")
+    compact: dict[str, Any] = {
+        "schema": result["schema"],
+        "artifact_kind": "compact-review-evidence",
+        "issue": result["issue"],
+        "repository_revision": result["repository_revision"],
+        "repeats": result["repeats"],
+        "harness_identity": {
+            "path": "docs/benchmarks/harness/reverse_caller.py",
+            "sha256": sha256_file(ROOT / "docs/benchmarks/harness/reverse_caller.py"),
+        },
+        "baseline": compact_arm_evidence(result["baseline"]),
+        "candidate": compact_arm_evidence(result["candidate"]),
+        "candidate_patch_preflight": result["candidate_patch_preflight"],
+        "failure_cases": {
+            name: {
+                "baseline": compact_failure_evidence(case["baseline"]),
+                "candidate": compact_failure_evidence(case["candidate"]),
+            }
+            for name, case in result.get("failure_cases", {}).items()
+        },
+        "multi_binding_alias": {
+            arm: compact_failure_evidence(result["multi_binding_alias"][arm])
+            for arm in ("baseline", "candidate")
+        },
+        "cancellation": {
+            arm: compact_cancellation_evidence(result["cancellation"][arm])
+            for arm in ("baseline", "candidate")
+        },
+        "decision": result["decision"],
+        "reproduction": {
+            "raw_trace_path": raw_output.relative_to(ROOT).as_posix(),
+            "raw_trace_schema": result["schema"],
+            "raw_trace_bytes": raw_output.stat().st_size,
+            "raw_trace_sha256": sha256_file(raw_output),
+            "raw_trace_ignored": True,
+            "note": (
+                "Full raw streams remain in ignored local output and are recoverable "
+                "by rerunning the existing harness; this tracked file contains only "
+                "bounded review evidence."
+            ),
+        },
+    }
+    return compact
+
+
 def git_revision() -> str:
     """Read the exact source revision used by the matrix."""
 
@@ -1081,6 +1274,11 @@ def main() -> None:
     parser.add_argument("--candidate-binary", type=Path, required=True)
     parser.add_argument("--candidate-patch", type=Path, default=ROOT / "docs/benchmarks/reverse-caller-candidate.patch")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--compact-output",
+        type=Path,
+        help="also write bounded review evidence beside the retained raw output",
+    )
     parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
     if args.repeats < 1:
@@ -1091,6 +1289,11 @@ def main() -> None:
     output = args.output.resolve()
     if not output.is_relative_to(ROOT):
         parser.error("--output must remain inside the repository")
+    compact_output = args.compact_output.resolve() if args.compact_output else None
+    if compact_output is not None and not compact_output.is_relative_to(ROOT):
+        parser.error("--compact-output must remain inside the repository")
+    if compact_output == output:
+        parser.error("--compact-output must differ from --output")
     if sha256_file(baseline_binary) == sha256_file(candidate_binary):
         parser.error("baseline and candidate binaries must be distinct")
     if not candidate_patch.is_relative_to(ROOT):
@@ -1178,10 +1381,20 @@ def main() -> None:
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if compact_output is not None:
+        compact_output.parent.mkdir(parents=True, exist_ok=True)
+        compact_output.write_text(
+            json.dumps(compact_review_evidence(result, output), indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+    output_paths = {"output": output.relative_to(ROOT).as_posix()}
+    if compact_output is not None:
+        output_paths["compact_output"] = compact_output.relative_to(ROOT).as_posix()
     print(
         json.dumps(
             {
-                "output": output.relative_to(ROOT).as_posix(),
+                **output_paths,
                 "outcome": result["decision"]["outcome"],
                 "semantic_findings": len(semantic_findings),
             },

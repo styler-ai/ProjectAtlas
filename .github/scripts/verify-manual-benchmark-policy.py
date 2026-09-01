@@ -16,14 +16,14 @@ MAX_TRACKED_RAW_BENCHMARK_BYTES = 4 * 1024 * 1024
 def is_oversized_tracked_raw_result(
     relative: str, size: int, *, tracked: bool = True
 ) -> bool:
-    """Identify only oversized root-level JSONL benchmark traces."""
+    """Identify oversized root-level JSON benchmark result formats."""
 
     path = PurePosixPath(relative)
     return (
         tracked
         and path.parts[:2] == ("docs", "benchmarks")
         and len(path.parts) == 3
-        and path.suffix.lower() == ".jsonl"
+        and path.suffix.lower() in {".json", ".jsonl"}
         and size > MAX_TRACKED_RAW_BENCHMARK_BYTES
     )
 
@@ -73,6 +73,10 @@ def self_test() -> None:
 
     assert not is_oversized_tracked_raw_result(
         "docs/benchmarks/v0.4-agent-navigation-results.json",
+        MAX_TRACKED_RAW_BENCHMARK_BYTES,
+    )
+    assert is_oversized_tracked_raw_result(
+        "docs/benchmarks/v0.5-reverse-caller-performance-results.json",
         MAX_TRACKED_RAW_BENCHMARK_BYTES + 1,
     )
     assert not is_oversized_tracked_raw_result(
@@ -109,9 +113,13 @@ def self_test() -> None:
         benchmark_root = root / "docs" / "benchmarks"
         benchmark_root.mkdir(parents=True)
         oversized = benchmark_root / "oversized.jsonl"
+        oversized_json = benchmark_root / "oversized.json"
         compact = benchmark_root / "compact.jsonl"
+        compact_json = benchmark_root / "compact.json"
         oversized.write_bytes(b"x" * (MAX_TRACKED_RAW_BENCHMARK_BYTES + 1))
+        oversized_json.write_bytes(b"x" * (MAX_TRACKED_RAW_BENCHMARK_BYTES + 1))
         compact.write_bytes(b"x" * (MAX_TRACKED_RAW_BENCHMARK_BYTES - 1))
+        compact_json.write_bytes(b"x" * (MAX_TRACKED_RAW_BENCHMARK_BYTES - 1))
         for command in (
             ["git", "init", "--quiet"],
             [
@@ -119,7 +127,9 @@ def self_test() -> None:
                 "add",
                 "--",
                 "docs/benchmarks/oversized.jsonl",
+                "docs/benchmarks/oversized.json",
                 "docs/benchmarks/compact.jsonl",
+                "docs/benchmarks/compact.json",
             ],
             [
                 "git",
@@ -142,7 +152,8 @@ def self_test() -> None:
             )
 
         expected = [
-            ("docs/benchmarks/oversized.jsonl", MAX_TRACKED_RAW_BENCHMARK_BYTES + 1)
+            ("docs/benchmarks/oversized.json", MAX_TRACKED_RAW_BENCHMARK_BYTES + 1),
+            ("docs/benchmarks/oversized.jsonl", MAX_TRACKED_RAW_BENCHMARK_BYTES + 1),
         ]
         assert oversized_tracked_raw_results(root) == expected
         oversized.unlink()
