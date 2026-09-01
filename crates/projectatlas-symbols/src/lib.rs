@@ -2153,10 +2153,10 @@ fn php_call_target(node: Node<'_>, content: &str) -> Option<String> {
             let name = php_static_call_part(name, content)?;
             format!("{scope}::{name}")
         }
-        "member_call_expression" | "nullsafe_member_call_expression" => {
-            let name = node.child_by_field_name("name")?;
-            php_static_call_part(name, content)?
-        }
+        // The receiver determines member dispatch, and this parser does not
+        // resolve object types. Publishing only the member name would create
+        // a false edge to an unrelated same-file function or method.
+        "member_call_expression" | "nullsafe_member_call_expression" => return None,
         _ => php_static_call_part(node.child_by_field_name("function")?, content)?,
     };
     let target = compact_text(&target);
@@ -5155,7 +5155,7 @@ function helper(string $value): void {}
         assert!(graph.symbols.iter().any(|symbol| {
             symbol.kind == SymbolKind::Import && symbol.name == "Vendor\\Thing" && !symbol.exported
         }));
-        for target in ["helper", "save", "Service::boot"] {
+        for target in ["helper", "Service::boot"] {
             assert!(
                 graph.relations.iter().any(|relation| {
                     relation.kind == RelationKind::Calls && relation.target_name == target
@@ -5164,6 +5164,9 @@ function helper(string $value): void {}
                 graph.relations
             );
         }
+        assert!(graph.relations.iter().all(|relation| {
+            relation.kind != RelationKind::Calls || relation.target_name != "save"
+        }));
         assert!(
             graph
                 .relations
@@ -5429,6 +5432,35 @@ function run(string $code): void {
     }
 
     #[test]
+    fn php_dynamic_member_calls_are_omitted_and_mark_coverage_incomplete() {
+        let source = r"<?php
+function save(): void {}
+class Service {
+    public static function boot(): void {}
+}
+function run(object $object): void {
+    $object->save();
+    $object?->save();
+    Service::boot();
+}
+";
+        let graph = extract_symbol_graph("src/DynamicMember.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::Fallback, "graph: {graph:?}");
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+
+        assert!(calls.iter().all(|relation| relation.target_name != "save"));
+        assert!(calls.iter().any(|relation| {
+            relation.target_name == "Service::boot"
+                && relation.source_name == "run"
+                && relation.context.contains("Service::boot()")
+        }));
+    }
+
+    #[test]
     fn php_complete_static_source_stays_tree_sitter() {
         let graph = extract_symbol_graph("fixture.php", Some("php"), "<?php function run() {}");
         assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
@@ -5506,11 +5538,7 @@ function run(): void {
             .iter()
             .filter(|relation| relation.kind == RelationKind::Calls)
             .collect::<Vec<_>>();
-        for (target, lines) in [
-            ("foo", vec![13, 14]),
-            ("Service::boot", vec![16]),
-            ("save", vec![18]),
-        ] {
+        for (target, lines) in [("foo", vec![13, 14]), ("Service::boot", vec![16])] {
             assert_eq!(
                 calls
                     .iter()
@@ -5536,6 +5564,7 @@ function run(): void {
             !relation.context.contains("foo(...)")
                 && !relation.context.contains("Service::boot(...)")
                 && !relation.context.contains("$object->save(...)")
+                && relation.target_name != "save"
                 && relation.target_name != "$dynamic"
                 && relation.target_name != "$name"
         }));
@@ -6357,7 +6386,7 @@ class ClassLoader {
 }
 ";
         let graph = extract_symbol_graph("vendor/composer/ClassLoader.php", Some("php"), source);
-        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        assert_eq!(graph.parser, ParserKind::Fallback);
         assert!(
             graph
                 .symbols
@@ -6373,8 +6402,8 @@ class ClassLoader {
             relation.kind == RelationKind::Imports
                 && relation.target_name == "Composer\\Autoload\\ClassLoader"
         }));
-        assert!(graph.relations.iter().any(|relation| {
-            relation.kind == RelationKind::Calls && relation.target_name == "findFile"
+        assert!(graph.relations.iter().all(|relation| {
+            relation.kind != RelationKind::Calls || relation.target_name != "findFile"
         }));
     }
 

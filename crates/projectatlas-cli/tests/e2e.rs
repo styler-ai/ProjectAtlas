@@ -41880,12 +41880,15 @@ final class Service implements ServiceContract {
         parent::boot();
         static::finish();
         RuntimeKernel::start();
+        $object->save();
+        $object?->save();
     }
 
     private static function prepare(): void {}
 }
 
 function helper(): void {}
+function save(): void {}
 "#;
     let source_path = repo
         .join(SRC_DIR_NAME)
@@ -42009,6 +42012,15 @@ function helper(): void {}
                 .into());
             }
         }
+        if calls
+            .iter()
+            .any(|call| call.get("target").and_then(Value::as_str) == Some("save"))
+        {
+            return Err(io::Error::other(format!(
+                "PHP summary published dynamic member call as save: {calls:?}"
+            ))
+            .into());
+        }
         Ok(())
     };
 
@@ -42105,6 +42117,19 @@ function helper(): void {}
                 ))
                 .into());
             }
+        }
+        if rows.iter().any(|row| {
+            row.get("kind").and_then(Value::as_str) == Some("calls")
+                && row
+                    .get("target")
+                    .or_else(|| row.get("target_name"))
+                    .and_then(Value::as_str)
+                    == Some("save")
+        }) {
+            return Err(io::Error::other(format!(
+                "PHP relations published dynamic member call as save: {rows:?}"
+            ))
+            .into());
         }
         Ok(())
     };
