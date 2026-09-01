@@ -7179,11 +7179,17 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     fs::write(&hanging_runtime, "@echo off\r\n:probe\r\ngoto probe\r\n")?;
     let flooding_runtime = temp.path().join("flooding-projectatlas.cmd");
     let flood_child_pid = temp.path().join("flood-child.pid");
+    let timeout_runtime = temp.path().join("timeout-projectatlas.cmd");
+    let timeout_child_pid = temp.path().join("timeout-child.pid");
     let probe_temp = temp.path().join("runtime-probe-temp");
     fs::create_dir_all(&probe_temp)?;
     fs::write(
         &flooding_runtime,
-        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
+        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; Start-Sleep -Milliseconds 750; $chunk = -join ('x' * 131072); for ($i = 0; $i -lt 9; $i++) { [Console]::Out.Write($chunk); [Console]::Out.Flush(); [Console]::Error.Write($chunk); [Console]::Error.Flush() }; Start-Sleep -Seconds 60\"\r\n",
+    )?;
+    fs::write(
+        &timeout_runtime,
+        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID; Start-Sleep -Seconds 60; [Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\"\r\n",
     )?;
     let async_runtime = temp.path().join("async-projectatlas.cmd");
     let async_child_pid = temp.path().join("async-child.pid");
@@ -7325,6 +7331,14 @@ $unicodePayload = Invoke-ProjectAtlasBoundedJsonCommand `
 $expectedUnicodePath = "M$([char]0x00FC)nchen\$([char]0x8DEF)$([char]0x5F84)"
 if ($unicodePayload.unicode_path -ne $expectedUnicodePath) {
     throw "Bounded JSON command did not strictly decode BOM-less UTF-8 output: expected='$expectedUnicodePath' actual='$($unicodePayload.unicode_path)'"
+}
+$validDisposition = $null
+$validPayload = Invoke-ProjectAtlasBoundedJsonCommand `
+    $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
+    ([string[]]@("runtime-info")) `
+    ([ref]$validDisposition)
+if ($null -eq $validPayload -or $null -ne $validDisposition) {
+    throw "Valid bounded JSON command changed payload or disposition: payload='$validPayload' disposition='$validDisposition'"
 }
 if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME "0.4.1")) {
     throw "Valid structured runtime probe was rejected"
@@ -7468,13 +7482,13 @@ $probe.Stop()
 if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(10)) {
     throw "Nonreturning runtime probe exceeded its bounded tolerance: $($probe.Elapsed)"
 }
-$probe = [Diagnostics.Stopwatch]::StartNew()
-if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_FLOODING_RUNTIME $null) {
-    throw "Output-flooding runtime was accepted"
-}
-$probe.Stop()
-if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(4)) {
-    throw "Output-flooding runtime reached the timeout instead of the live byte limit: $($probe.Elapsed)"
+$floodDisposition = $null
+$floodPayload = Invoke-ProjectAtlasBoundedJsonCommand `
+    $env:PROJECTATLAS_TEST_FLOODING_RUNTIME `
+    ([string[]]@("runtime-info")) `
+    ([ref]$floodDisposition)
+if ($null -ne $floodPayload -or $floodDisposition -ne "output_limit") {
+    throw "Output-flooding runtime was not causally stopped by its output limit: payload='$floodPayload' disposition='$floodDisposition'"
 }
 $floodChildPid = $null
 try {
@@ -7507,6 +7521,47 @@ try {
 finally {
     if ($floodChildPid -and (Get-Process -Id $floodChildPid -ErrorAction SilentlyContinue)) {
         & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $floodChildPid /T /F | Out-Null
+    }
+}
+$timeoutDisposition = $null
+$timeoutPayload = Invoke-ProjectAtlasBoundedJsonCommand `
+    $env:PROJECTATLAS_TEST_TIMEOUT_RUNTIME `
+    ([string[]]@("runtime-info")) `
+    ([ref]$timeoutDisposition)
+if ($null -ne $timeoutPayload -or $timeoutDisposition -ne "timeout") {
+    throw "Below-limit delayed runtime was not causally stopped by its timeout: payload='$timeoutPayload' disposition='$timeoutDisposition'"
+}
+$timeoutChildPid = $null
+try {
+    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID)) {
+        throw "Below-limit delayed runtime did not report its child process"
+    }
+    $timeoutChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID)
+    $childDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $timeoutChild = Get-Process -Id $timeoutChildPid -ErrorAction SilentlyContinue
+        if (-not $timeoutChild) {
+            break
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    while ([DateTime]::UtcNow -lt $childDeadline)
+    if ($timeoutChild) {
+        throw "Timed-out runtime probe left its owned child process alive: $timeoutChildPid"
+    }
+    $leftoverProbeFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-command-probe-*" `
+            -File |
+        Select-Object -ExpandProperty FullName
+    )
+    if ($leftoverProbeFiles.Count -ne 0) {
+        throw "Timed-out runtime probe left temporary files: $($leftoverProbeFiles -join ', ')"
+    }
+}
+finally {
+    if ($timeoutChildPid -and (Get-Process -Id $timeoutChildPid -ErrorAction SilentlyContinue)) {
+        & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $timeoutChildPid /T /F | Out-Null
     }
 }
 $canary = Start-Process `
@@ -7629,6 +7684,8 @@ finally {
         .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
         .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
         .env("PROJECTATLAS_TEST_FLOOD_CHILD_PID", &flood_child_pid)
+        .env("PROJECTATLAS_TEST_TIMEOUT_RUNTIME", &timeout_runtime)
+        .env("PROJECTATLAS_TEST_TIMEOUT_CHILD_PID", &timeout_child_pid)
         .env("PROJECTATLAS_TEST_ASYNC_RUNTIME", &async_runtime)
         .env("PROJECTATLAS_TEST_ASYNC_CHILD_PID", &async_child_pid)
         .env(
@@ -7662,7 +7719,12 @@ finally {
         .env("PROJECTATLAS_TEST_UNPINNED_RUNTIME", &unpinned_runtime)
         .env("PROJECTATLAS_TEST_STABLE_RUNTIME", &stable_runtime)
         .env("LOCALAPPDATA", &local_app_data)
-        .output()?;
+        .spawn()?;
+    let output = wait_for_plugin_installer_output(
+        output,
+        "fresh Windows PATH probe",
+        Duration::from_secs(30),
+    )?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "fresh Windows PATH probe failed\nstdout:\n{}\nstderr:\n{}",

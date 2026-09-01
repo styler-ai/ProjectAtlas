@@ -1184,7 +1184,9 @@ function Test-ProjectAtlasJsonObject {
 function Invoke-ProjectAtlasBoundedJsonCommand {
     param(
         [string]$FilePath,
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        [AllowNull()]
+        [ref]$ProbeDisposition
     )
     if (-not $FilePath -or -not (Test-Path -LiteralPath $FilePath)) {
         return $null
@@ -1218,6 +1220,9 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
                 }
             }
             if ($outputLimitExceeded -or (-not $exited -and $probeClock.ElapsedMilliseconds -ge $probeTimeoutMs)) {
+                if ($null -ne $ProbeDisposition) {
+                    $ProbeDisposition.Value = if ($outputLimitExceeded) { "output_limit" } else { "timeout" }
+                }
                 $process.Stop($probeTimeoutMs)
                 return $null
             }
