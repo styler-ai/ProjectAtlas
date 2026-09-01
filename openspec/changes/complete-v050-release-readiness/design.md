@@ -53,7 +53,7 @@ Issue-event repair derives reverse direct-blocker adjacency solely from the decl
 
 #477 pins `tree-sitter-php` 0.24.2 against Tree-sitter 0.26.9 and owns PHP 8 grammar registration plus conservative exact namespace/import/include/call relations. Dynamic PHP and mixed HTML gaps remain typed partial coverage. #339 follows #477 and publishes exactly one evidence-derived PHP guidance profile from the registry, generated support, fixtures, representative repositories, and installed skill.
 
-#465 supports only PDF and DOCX. `pdf-extract` 0.12.0 and `docx-lite` 0.2.0 are pinned and their locked transitive trees are audited before adoption. DOCX admits only `word/document.xml`; PDF runs no script/external reference. Evidence locators are page/text span or part/paragraph/run/text span. Input, expansion, entries, recursion, time, memory, output, cancellation, coverage, and sparse-link policy are explicit; any necessary SQLite delta lands before adapters.
+#465 supports only PDF and DOCX. `pdf-extract` 0.12.0, `quick-xml` 0.42.0, and `zip` 0.6.6 with default features disabled and only `deflate` enabled are pinned and their locked transitive trees are audited before adoption. DOCX admits only stored or DEFLATE `word/document.xml` and rejects encrypted or unsupported compression; PDF runs no script/external reference. Evidence locators are page/text span or part/paragraph/run/text span. Input, expansion, entries, recursion, time, memory, output, cancellation, coverage, and sparse-link policy are explicit; any necessary SQLite delta lands before adapters.
 
 ### Analysis is typed, bounded, and measurement-led
 
@@ -92,7 +92,7 @@ Parallel delivery waves derived from the exact graph:
 
 Before wave 1, the planning PR publishes the shared OpenSpec and architecture sources, the exact live default branch passes the published-readiness gate, and every accepted issue link/task mirror is read back. No Luna implementation worktree starts from candidate-only specification evidence.
 
-1. Independent foundations and disjoint lanes: #372, #390, #464, #477, #482, #487, #488, #489, #491, #495, and the #517 workflow gate.
+1. Independent foundations and disjoint lanes: #372, #390, #464, #477, #482, #487, #488, #489, #491, #495, #544, and the #517 workflow gate.
 2. After #482: #480, #481, and #483 may proceed independently.
 3. #342 follows #488; #388 follows #491; #476 follows #481; #486 follows #482/#483.
 4. #358 and #465 follow #476/#480/#488; #484 follows #476/#481.
