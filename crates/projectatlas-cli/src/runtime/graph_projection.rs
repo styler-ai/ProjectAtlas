@@ -439,6 +439,17 @@ fn identity_rejection_keys_retained_bytes(
     })
 }
 
+/// Count the path markers retained for publication-time detail evictions.
+fn identity_rejection_drop_paths_retained_bytes(paths: &BTreeSet<String>) -> Result<u64, CliError> {
+    paths.iter().try_fold(0_u64, |retained, path| {
+        retained
+            .checked_add(identity_count_path_retained_bytes(path)?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })
+    })
+}
+
 /// Return the exact incremental identity-state total owned by one report.
 fn identity_admission_retained_bytes(report: &GraphIdentityAdmission) -> u64 {
     report.observed_fact_bytes
@@ -518,6 +529,9 @@ pub(super) struct GraphIdentityAdmission {
     /// unknowable. These paths require a complete source reparse before a
     /// replacement publication can be exact.
     reused_rejection_details_incomplete: BTreeSet<String>,
+    /// Paths where a distinct typed rejection detail was evicted by the
+    /// publication-wide detail ceiling.
+    rejection_details_dropped_by_path: BTreeSet<String>,
     /// Test-only proof of one derivation per source path and generation.
     #[cfg(test)]
     resolution_derivations: BTreeMap<(String, IndexGeneration), usize>,
@@ -571,12 +585,8 @@ impl GraphIdentityAdmission {
             .get(&path_key)
             .is_none_or(|facts| !facts.contains(&fact_key));
         let mut new_rejection_keys = Vec::new();
-        let remaining_detail_capacity =
-            MAX_GRAPH_IDENTITY_REJECTIONS.saturating_sub(self.rejections.len());
+        let mut dropped_rejection_detail = false;
         for (field, reason) in fields {
-            if new_rejection_keys.len() >= remaining_detail_capacity {
-                break;
-            }
             let key = IdentityRejectionKey {
                 path: path.clone(),
                 span: fact_span,
@@ -588,12 +598,18 @@ impl GraphIdentityAdmission {
             if !self.rejection_keys.contains(&key)
                 && !new_rejection_keys.iter().any(|existing| existing == &key)
             {
-                new_rejection_keys.push(key);
-                if new_rejection_keys.len() == remaining_detail_capacity {
-                    break;
+                if self.rejections.len() + new_rejection_keys.len() >= MAX_GRAPH_IDENTITY_REJECTIONS
+                {
+                    dropped_rejection_detail = true;
+                } else {
+                    new_rejection_keys.push(key);
                 }
             }
         }
+        let dropped_path_is_new = dropped_rejection_detail
+            && !self
+                .rejection_details_dropped_by_path
+                .contains(path.as_str());
         let mut additional_bytes = if fact_is_new {
             identity_fact_retained_bytes(path.as_str(), observed_path_is_new, count_path_is_new)?
         } else {
@@ -606,7 +622,18 @@ impl GraphIdentityAdmission {
                     CliError::InvalidInput("identity rejection bytes overflowed".to_string())
                 })?;
         }
+        if dropped_path_is_new {
+            additional_bytes = additional_bytes
+                .checked_add(identity_count_path_retained_bytes(path.as_str())?)
+                .ok_or_else(|| {
+                    CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                })?;
+        }
         self.reserve_identity_bytes(additional_bytes, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
+        if dropped_rejection_detail {
+            self.rejection_details_dropped_by_path
+                .insert(path.as_str().to_owned());
+        }
         if fact_is_new {
             self.observed_facts
                 .entry(path_key.clone())
@@ -859,6 +886,7 @@ impl GraphIdentityAdmission {
         let other_observed_facts = other.observed_facts;
         let other_rejected_facts_by_path = other.rejected_facts_by_path;
         let other_reused_rejection_facts = other.reused_rejection_facts;
+        let other_rejection_details_dropped_by_path = other.rejection_details_dropped_by_path;
         for (path, incoming_total) in &other_rejected_facts_by_path {
             self.merge_observed_identity_path(
                 path,
@@ -914,10 +942,11 @@ impl GraphIdentityAdmission {
             }
         }
         control.check(IndexWorkStage::SymbolParsing)?;
-        let rejection_key_bytes = extend_bounded_identity_rejections(
+        let rejection_key_bytes = extend_bounded_identity_rejections_with_drop_paths(
             &mut self.rejections,
             &mut self.rejection_keys,
             other.rejections,
+            &mut self.rejection_details_dropped_by_path,
         )?;
         self.observed_fact_bytes = self
             .observed_fact_bytes
@@ -925,6 +954,16 @@ impl GraphIdentityAdmission {
             .ok_or_else(|| {
                 CliError::InvalidInput("identity rejection bytes overflowed".to_string())
             })?;
+        for path in other_rejection_details_dropped_by_path {
+            control.check(IndexWorkStage::SymbolParsing)?;
+            if self.rejection_details_dropped_by_path.insert(path.clone()) {
+                self.reserve_identity_bytes(
+                    identity_count_path_retained_bytes(&path)?,
+                    control,
+                    MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                )?;
+            }
+        }
         self.resolution_projections
             .extend(other.resolution_projections);
         for (path, count) in other.reused_rejection_counts {
@@ -1039,9 +1078,18 @@ impl GraphIdentityAdmission {
             .filter(|key| paths.contains(key.path.as_str()))
             .cloned()
             .collect::<BTreeSet<_>>();
+        let rejection_details_dropped_by_path = self
+            .rejection_details_dropped_by_path
+            .iter()
+            .filter(|path| paths.contains(path.as_str()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let marker_bytes =
+            identity_rejection_drop_paths_retained_bytes(&rejection_details_dropped_by_path)?;
         let observed_fact_bytes =
             identity_maps_retained_bytes(&observed_facts, &rejected_facts_by_path)?
                 .checked_add(identity_rejection_keys_retained_bytes(&rejection_keys)?)
+                .and_then(|bytes| bytes.checked_add(marker_bytes))
                 .ok_or_else(|| {
                     CliError::InvalidInput("identity rejection bytes overflowed".to_string())
                 })?;
@@ -1064,6 +1112,7 @@ impl GraphIdentityAdmission {
             reused_parser_rejection_counts: BTreeMap::new(),
             reused_rejection_detail_counts: BTreeMap::new(),
             reused_rejection_details_incomplete: BTreeSet::new(),
+            rejection_details_dropped_by_path,
             #[cfg(test)]
             resolution_derivations: BTreeMap::new(),
             #[cfg(test)]
@@ -1079,6 +1128,12 @@ impl GraphIdentityAdmission {
     /// Return reused paths that cannot be reconciled without reparsing source.
     fn incomplete_reused_rejection_paths(&self) -> &BTreeSet<String> {
         &self.reused_rejection_details_incomplete
+    }
+
+    /// Return whether a path lost a distinct typed rejection detail at the
+    /// publication-wide ceiling.
+    fn rejection_details_dropped_for(&self, path: &str) -> bool {
+        self.rejection_details_dropped_by_path.contains(path)
     }
 
     /// Reconcile a reused path's persisted total with current re-derived facts.
@@ -1201,20 +1256,45 @@ fn identity_rejection_key_set(
 }
 
 /// Merge typed details under the one-publication storage ceiling.
+#[cfg(test)]
 fn extend_bounded_identity_rejections(
     target: &mut Vec<GraphIdentityRejection>,
     target_keys: &mut BTreeSet<IdentityRejectionKey>,
     incoming: impl IntoIterator<Item = GraphIdentityRejection>,
 ) -> Result<u64, CliError> {
+    let mut dropped_paths = BTreeSet::new();
+    extend_bounded_identity_rejections_with_drop_paths(
+        target,
+        target_keys,
+        incoming,
+        &mut dropped_paths,
+    )
+}
+
+/// Merge typed details and retain the exact paths that lost a distinct row.
+fn extend_bounded_identity_rejections_with_drop_paths(
+    target: &mut Vec<GraphIdentityRejection>,
+    target_keys: &mut BTreeSet<IdentityRejectionKey>,
+    incoming: impl IntoIterator<Item = GraphIdentityRejection>,
+    dropped_paths: &mut BTreeSet<String>,
+) -> Result<u64, CliError> {
     let mut retained_bytes = 0_u64;
     for rejection in incoming {
-        if target.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
-            break;
-        }
         let key = IdentityRejectionKey::from(&rejection);
-        if !target_keys.insert(key) {
+        if target_keys.contains(&key) {
             continue;
         }
+        if target.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
+            if dropped_paths.insert(rejection.path.as_str().to_owned()) {
+                retained_bytes = retained_bytes
+                    .checked_add(identity_count_path_retained_bytes(rejection.path.as_str())?)
+                    .ok_or_else(|| {
+                        CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+                    })?;
+            }
+            continue;
+        }
+        target_keys.insert(key);
         retained_bytes = retained_bytes
             .checked_add(identity_rejection_key_retained_bytes(
                 rejection.path.as_str(),
@@ -1225,6 +1305,36 @@ fn extend_bounded_identity_rejections(
         target.push(rejection);
     }
     Ok(retained_bytes)
+}
+
+/// Mark graph-scoped coverage when publication evicted a typed identity row.
+fn mark_identity_rejection_coverage_limits(
+    coverage: &mut [CoverageRecord],
+    dropped_paths: &BTreeSet<String>,
+) -> Result<(), CliError> {
+    for row in coverage {
+        let CoverageScope::Path { path } = row.scope() else {
+            continue;
+        };
+        if row.relation().is_some()
+            || !dropped_paths.contains(path.as_str())
+            || row.reached_limit() == Some(GraphLimitKind::Rows)
+        {
+            continue;
+        }
+        *row = CoverageRecord::new(
+            row.scope().clone(),
+            row.relation(),
+            row.state(),
+            row.covered(),
+            row.omitted(),
+            row.generation(),
+            row.reason().cloned(),
+            Some(GraphLimitKind::Rows),
+        )
+        .map_err(invalid_graph_contract)?;
+    }
+    Ok(())
 }
 
 /// One graph mutation staged outside the database writer transaction.
@@ -2707,7 +2817,15 @@ fn finish_projection_in_database_with_documents(
     let mut identity_rejections = identity_admission.rejections.clone();
     let mut identity_rejection_keys = identity_rejection_key_set(&identity_rejections);
     let mut identity_rejection_bytes =
-        identity_rejection_keys_retained_bytes(&identity_rejection_keys)?;
+        identity_rejection_keys_retained_bytes(&identity_rejection_keys)?
+            .checked_add(identity_rejection_drop_paths_retained_bytes(
+                &identity_admission.rejection_details_dropped_by_path,
+            )?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
+    let mut rejection_details_dropped_by_path =
+        identity_admission.rejection_details_dropped_by_path.clone();
     {
         let mut staging = database
             .store_mut()?
@@ -2742,14 +2860,19 @@ fn finish_projection_in_database_with_documents(
             )?;
             staged_rows.append(rows);
             identity_rejection_bytes = identity_rejection_bytes
-                .checked_add(extend_bounded_identity_rejections(
+                .checked_add(extend_bounded_identity_rejections_with_drop_paths(
                     &mut identity_rejections,
                     &mut identity_rejection_keys,
                     staged_rows.identity_rejections.iter().cloned(),
+                    &mut rejection_details_dropped_by_path,
                 )?)
                 .ok_or_else(|| {
                     CliError::InvalidInput("identity rejection bytes overflowed".to_string())
                 })?;
+            mark_identity_rejection_coverage_limits(
+                &mut staged_rows.coverage,
+                &rejection_details_dropped_by_path,
+            )?;
             staged_rows.identity_rejections.clear();
             if staged_rows.row_count() < GRAPH_STAGE_ROW_BATCH_SIZE {
                 continue;
@@ -2878,7 +3001,15 @@ fn finish_projection_with_documents(
     let mut identity_rejections = identity_admission.rejections.clone();
     let mut identity_rejection_keys = identity_rejection_key_set(&identity_rejections);
     let mut identity_rejection_bytes =
-        identity_rejection_keys_retained_bytes(&identity_rejection_keys)?;
+        identity_rejection_keys_retained_bytes(&identity_rejection_keys)?
+            .checked_add(identity_rejection_drop_paths_retained_bytes(
+                &identity_admission.rejection_details_dropped_by_path,
+            )?)
+            .ok_or_else(|| {
+                CliError::InvalidInput("identity rejection bytes overflowed".to_string())
+            })?;
+    let mut rejection_details_dropped_by_path =
+        identity_admission.rejection_details_dropped_by_path.clone();
     for graph in graphs {
         let graph = graph.borrow();
         let rows = project_graph_rows(
@@ -2908,14 +3039,16 @@ fn finish_projection_with_documents(
         }
         coverage.extend(rows.coverage);
         identity_rejection_bytes = identity_rejection_bytes
-            .checked_add(extend_bounded_identity_rejections(
+            .checked_add(extend_bounded_identity_rejections_with_drop_paths(
                 &mut identity_rejections,
                 &mut identity_rejection_keys,
                 rows.identity_rejections,
+                &mut rejection_details_dropped_by_path,
             )?)
             .ok_or_else(|| {
                 CliError::InvalidInput("identity rejection bytes overflowed".to_string())
             })?;
+        mark_identity_rejection_coverage_limits(&mut coverage, &rejection_details_dropped_by_path)?;
         entities.retained_bytes = rows
             .external_entities
             .iter()
@@ -4963,6 +5096,12 @@ fn coverage_for_graph(
     let omitted = identity_omitted
         .checked_add(parser_omitted)
         .ok_or_else(|| CliError::InvalidInput("identity rejection count overflowed".to_string()))?;
+    let identity_details_dropped = identity_admission.rejection_details_dropped_for(&graph.path)
+        || derived_identity_admission.rejection_details_dropped_for(&graph.path);
+    // Graph-scoped `rows` is the existing persisted coverage slot for the
+    // publication-wide typed identity-detail ceiling. It is set only from
+    // the admission fact that a distinct detail was actually evicted.
+    let reached_limit = (omitted > 0 && identity_details_dropped).then_some(GraphLimitKind::Rows);
     let covered = if identity_omitted > 0 {
         u64::try_from(graph.symbols.len().saturating_add(graph.relations.len())).unwrap_or(u64::MAX)
     } else {
@@ -4982,7 +5121,7 @@ fn coverage_for_graph(
             omitted,
             generation,
             Some(GraphIdentityText::new(PARTIAL_COVERAGE_REASON).map_err(invalid_graph_contract)?),
-            None,
+            reached_limit,
         )
         .map_err(invalid_graph_contract);
     }
@@ -5064,6 +5203,7 @@ fn hydrate_reused_identity_admission(
         .collect::<Result<Vec<_>, _>>()?;
     let mut persisted_rejections = Vec::new();
     let mut persisted_coverage = BTreeMap::new();
+    let mut persisted_rejection_details_dropped_by_path = BTreeSet::new();
     for paths in reused_node_paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
         control.check(IndexWorkStage::SymbolParsing)?;
         let rejection_rows = match store.repository_graph_identity_rejections(
@@ -5107,11 +5247,27 @@ fn hydrate_reused_identity_admission(
                 control.check(IndexWorkStage::SymbolParsing)?;
                 persisted_coverage.insert(path.as_str().to_owned(), row.omitted());
             }
+            if row.relation().is_none() && row.reached_limit() == Some(GraphLimitKind::Rows) {
+                control.check(IndexWorkStage::SymbolParsing)?;
+                persisted_rejection_details_dropped_by_path.insert(path.as_str().to_owned());
+            }
         }
     }
     let mut persisted_fact_counts = BTreeMap::<String, BTreeSet<IdentityFactKey>>::new();
-    let persisted_detail_ceiling_reached =
-        persisted_rejections.len() >= GraphLimits::MAX_ROWS as usize;
+    for path in persisted_rejection_details_dropped_by_path {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        if report
+            .rejection_details_dropped_by_path
+            .insert(path.clone())
+        {
+            report.reserve_reused_path_bytes(
+                &path,
+                false,
+                control,
+                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+            )?;
+        }
+    }
     for rejection in persisted_rejections {
         control.check(IndexWorkStage::SymbolParsing)?;
         let namespace = rejection.fact_index & !((1_u64 << 56) - 1);
@@ -5136,10 +5292,11 @@ fn hydrate_reused_identity_admission(
             continue;
         }
         control.check(IndexWorkStage::SymbolParsing)?;
-        let rejection_key_bytes = extend_bounded_identity_rejections(
+        let rejection_key_bytes = extend_bounded_identity_rejections_with_drop_paths(
             &mut report.rejections,
             &mut report.rejection_keys,
             std::iter::once(rejection),
+            &mut report.rejection_details_dropped_by_path,
         )?;
         report.reserve_identity_bytes(
             rejection_key_bytes,
@@ -5203,7 +5360,7 @@ fn hydrate_reused_identity_admission(
         })
         .collect::<BTreeMap<_, _>>();
     for path in reused_paths {
-        let Some(omitted) = report.reused_rejection_counts.get(path).copied() else {
+        let Some(_omitted) = report.reused_rejection_counts.get(path).copied() else {
             continue;
         };
         let details = report
@@ -5240,8 +5397,7 @@ fn hydrate_reused_identity_admission(
         // be reparsed when a capped persisted row set cannot identify every
         // old fact without guessing.
         if parser != Some(ParserKind::Fallback)
-            && ((persisted_detail_ceiling_reached && details == 0 && omitted > 0)
-                || omitted > baseline.saturating_add(details))
+            && report.rejection_details_dropped_for(path)
             && !report.reused_rejection_details_incomplete.contains(path)
         {
             report.reserve_reused_path_bytes(
@@ -6863,6 +7019,123 @@ mod tests {
             &aggregated_keys.len(),
             &super::MAX_GRAPH_IDENTITY_REJECTIONS,
             "bounded aggregation membership lost a distinct detail",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn identity_rejection_limit_marker_is_causal_and_path_scoped() -> Result<(), Box<dyn Error>> {
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let failure = [(
+            GraphIdentityField::Symbol,
+            GraphIdentityRejectionReason::Empty,
+        )];
+        let span = |line| super::IdentitySpan {
+            start_line: line,
+            start_column: 0,
+            end_line: line,
+            end_column: 0,
+        };
+        let mut admission = GraphIdentityAdmission::default();
+        for fact_index in 0..super::MAX_GRAPH_IDENTITY_REJECTIONS {
+            admission.record(
+                "src/exact-cap.ts",
+                span(fact_index + 1),
+                ParserKind::TreeSitter,
+                super::parser_fact_index(super::SYMBOL_FACT_INDEX_NAMESPACE, fact_index),
+                &failure,
+                &control,
+            )?;
+        }
+        require(
+            admission.rejection_details_dropped_by_path.is_empty(),
+            "an exactly full retained detail set claimed an eviction",
+        )?;
+
+        let graph = |path: &str, parser: ParserKind| SymbolGraph {
+            path: path.to_string(),
+            language: Some("test".to_string()),
+            parser,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        let exact_cap = super::coverage_for_graph(
+            &graph("src/exact-cap.ts", ParserKind::TreeSitter),
+            IndexGeneration::new(1),
+            &admission,
+            &GraphIdentityAdmission::default(),
+        )?;
+        require_eq(
+            &exact_cap.reached_limit(),
+            &None,
+            "exactly full retained details reported an eviction",
+        )?;
+
+        admission.record(
+            "src/exact-parser.ts",
+            span(1),
+            ParserKind::TreeSitter,
+            super::parser_fact_index(super::SYMBOL_FACT_INDEX_NAMESPACE, 10_000),
+            &failure,
+            &control,
+        )?;
+        admission.record(
+            "src/markdown-structural.md",
+            span(1),
+            ParserKind::Structural,
+            super::parser_fact_index(super::MARKDOWN_FACT_INDEX_NAMESPACE, 0),
+            &failure,
+            &control,
+        )?;
+        require(
+            admission
+                .rejection_details_dropped_by_path
+                .contains("src/exact-parser.ts")
+                && admission
+                    .rejection_details_dropped_by_path
+                    .contains("src/markdown-structural.md"),
+            "distinct exact and structural evictions were not marked by path",
+        )?;
+        for (path, parser) in [
+            ("src/exact-parser.ts", ParserKind::TreeSitter),
+            ("src/markdown-structural.md", ParserKind::Structural),
+        ] {
+            let coverage = super::coverage_for_graph(
+                &graph(path, parser),
+                IndexGeneration::new(1),
+                &admission,
+                &GraphIdentityAdmission::default(),
+            )?;
+            require_eq(
+                &coverage.reached_limit(),
+                &Some(GraphLimitKind::Rows),
+                "causal identity eviction did not reach path coverage",
+            )?;
+        }
+
+        for parser in [ParserKind::Structural, ParserKind::Fallback] {
+            let coverage = super::coverage_for_graph(
+                &graph("src/baseline.rs", parser),
+                IndexGeneration::new(1),
+                &GraphIdentityAdmission::default(),
+                &GraphIdentityAdmission::default(),
+            )?;
+            require_eq(
+                &coverage.reached_limit(),
+                &None,
+                "parser baseline omission claimed identity-detail eviction",
+            )?;
+        }
+        let unrelated = super::coverage_for_graph(
+            &graph("src/unrelated.rs", ParserKind::TreeSitter),
+            IndexGeneration::new(1),
+            &admission,
+            &GraphIdentityAdmission::default(),
+        )?;
+        require_eq(
+            &unrelated.reached_limit(),
+            &None,
+            "an unrelated path inherited another path's identity eviction",
         )?;
         Ok(())
     }

@@ -23772,7 +23772,7 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         10_000,
         generation,
         Some(GraphIdentityText::new("bounded identity details")?),
-        Some(GraphLimitKind::Rows),
+        None,
     )?;
     let later_coverage = CoverageRecord::new(
         CoverageScope::Path {
@@ -23784,7 +23784,7 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         1,
         generation,
         Some(GraphIdentityText::new("bounded identity details evicted")?),
-        None,
+        Some(GraphLimitKind::Rows),
     )?;
     let rejections = (0..GraphLimits::MAX_ROWS)
         .map(|fact_index| {
@@ -23811,7 +23811,7 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         publication.replace_symbol_graph(&SymbolGraph {
             path: later_path.as_str().to_string(),
             language: Some("typescript".to_string()),
-            parser: ParserKind::TreeSitter,
+            parser: ParserKind::Structural,
             symbols: Vec::new(),
             relations: Vec::new(),
         })?;

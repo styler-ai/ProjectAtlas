@@ -640,7 +640,6 @@ pub fn load_coverage_discovery_controlled(
             CoverageScope::Project => None,
         })
         .collect::<Vec<_>>();
-    let selected_exact_identity_omission = page_rows.iter().any(coverage_row_has_identity_omission);
     let identity_rejections_query_limit = COVERAGE_IDENTITY_REJECTION_LIMIT
         .checked_add(1)
         .ok_or_else(|| {
@@ -652,10 +651,16 @@ pub fn load_coverage_discovery_controlled(
         identity_rejections_query_limit,
         Some(&control),
     )?;
+    // Graph-scoped `rows` is the publication-time, path-owned marker for a
+    // distinct identity detail evicted by the global detail ceiling. Reading
+    // it from the selected page keeps unrelated paths from tainting a report.
     let identity_rejections_truncated = rejections.len()
         > COVERAGE_IDENTITY_REJECTION_LIMIT as usize
-        || (selected_exact_identity_omission
-            && store.repository_graph_identity_rejection_cap_reached(project, Some(&control))?);
+        || page_rows.iter().any(|row| {
+            matches!(row.coverage.scope(), CoverageScope::Path { .. })
+                && row.coverage.relation().is_none()
+                && row.coverage.reached_limit() == Some(GraphLimitKind::Rows)
+        });
     let mut rejections_by_path = HashMap::<String, Vec<GraphIdentityRejection>>::new();
     for rejection in rejections
         .into_iter()
@@ -699,27 +704,6 @@ pub fn load_coverage_discovery_controlled(
         identity_rejections_limit: COVERAGE_IDENTITY_REJECTION_LIMIT,
         rows,
     })
-}
-
-/// Identify path coverage whose omission can represent an identity-detail
-/// eviction rather than a parser-baseline omission.
-///
-/// Structural and fallback graph coverage always contributes a parser
-/// baseline omission independently of identity facts. Exact source and fact
-/// parser coverage has no such baseline, so a graph-scoped omission there is
-/// the service's typed identity omission boundary.
-fn coverage_row_has_identity_omission(row: &RepositoryCoverageRow) -> bool {
-    matches!(row.coverage.scope(), CoverageScope::Path { .. })
-        && row.coverage.relation().is_none()
-        && row.coverage.omitted() > 0
-        && matches!(
-            row.parser,
-            Some(ParserKind::TreeSitter | ParserKind::Manifest)
-        )
-        && matches!(
-            row.provider,
-            Some(ParserKind::TreeSitter | ParserKind::Manifest)
-        )
 }
 
 /// Project one validated storage row into the agent-facing coverage contract.
@@ -4596,6 +4580,7 @@ mod tests {
         let long_path = format!("src/{}/entry.ts", "segment".repeat(400));
         let path = RepositoryNodePath::new(Path::new(&long_path))?;
         let later_path = RepositoryNodePath::new(Path::new("src/later.ts"))?;
+        let complete_path = RepositoryNodePath::new(Path::new("src/complete.ts"))?;
         let coverage = CoverageRecord::new(
             CoverageScope::Path { path: path.clone() },
             None,
@@ -4604,7 +4589,7 @@ mod tests {
             10_000,
             generation,
             Some(GraphIdentityText::new("identity details retained")?),
-            Some(GraphLimitKind::Rows),
+            None,
         )?;
         let later_coverage = CoverageRecord::new(
             CoverageScope::Path {
@@ -4616,6 +4601,18 @@ mod tests {
             1,
             generation,
             Some(GraphIdentityText::new("identity details evicted")?),
+            Some(GraphLimitKind::Rows),
+        )?;
+        let complete_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: complete_path.clone(),
+            },
+            None,
+            CoverageState::Complete,
+            1,
+            0,
+            generation,
+            None,
             None,
         )?;
         let rejections = (0..GraphLimits::MAX_ROWS)
@@ -4636,6 +4633,7 @@ mod tests {
             publication.upsert_scan_node_batch(&[
                 test_node(&long_path, "bounded-coverage-hash"),
                 test_node("src/later.ts", "later-coverage-hash"),
+                test_node("src/complete.ts", "complete-coverage-hash"),
             ])?;
             publication.finish_scan_replacement()?;
             publication.replace_symbol_graph(&SymbolGraph {
@@ -4650,7 +4648,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                &[coverage, later_coverage],
+                &[coverage, later_coverage, complete_coverage],
             )?;
             publication.replace_graph_identity_rejections(project, &rejections)?;
             publication.complete()?;
@@ -4712,6 +4710,24 @@ mod tests {
             &later.identity_rejections_truncated,
             &true,
             "publication-cap causal coverage truncation state",
+        )?;
+        let complete = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some(complete_path.as_str().to_string()),
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(
+            &complete.identity_rejections_truncated,
+            &false,
+            "unrelated identity-detail overflow marked a complete path",
         )?;
         Ok(())
     }
