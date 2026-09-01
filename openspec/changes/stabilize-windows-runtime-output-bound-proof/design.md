@@ -45,7 +45,7 @@ No data or schema migration. Land the private observation and causal Windows fix
 
 ## Dependencies / Cross-Issue Impact
 
-No prerequisite issue. If #487 lands first, refresh onto its accepted test-ownership move; #518 and #523 remain separate E2E boundaries.
+#523 is a genuine prerequisite because this proof uses the corrected generic installer observer's outer deadline. If #487 lands first, refresh onto its accepted test-ownership move; #518 and #523 remain separate E2E boundaries.
 
 ## Open Questions
 

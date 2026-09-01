@@ -2,7 +2,7 @@
 
 ### Requirement: Generic subprocess observers classify deadline expiry before completion
 
-Every generic E2E child-process observer covered by this change MUST classify an observation made at or after its absolute deadline as timed out before accepting child completion. The timeout path MUST terminate the exact child only when still running, reap it in all cases, preserve available output and diagnostics, and MUST NOT report successful completion.
+Every generic E2E child-process observer covered by this change MUST classify an observation made at or after its absolute deadline as timed out before accepting child completion. The timeout path MUST act only on the exact child, preserve available output and diagnostics, and MUST NOT report successful completion. After successful termination or an observed-exit race it MUST reap the child and join owned readers. If termination fails and a re-probe proves the child is still live, it MUST release owned stdin, preserve `TimedOut` with the owner-specific deadline reason and termination/re-probe cause, explicitly detach the exact child/readers without synchronously waiting or joining, and report the cleanup as incomplete and unreaped.
 
 #### Scenario: Completed child is first observed after the deadline
 
@@ -12,7 +12,7 @@ Every generic E2E child-process observer covered by this change MUST classify an
 #### Scenario: Running child reaches the deadline
 
 - **WHEN** the observer reaches its absolute deadline while the exact child remains running
-- **THEN** the observer SHALL terminate and reap that child and return the existing bounded timeout diagnostic with all safely available output
+- **THEN** the observer SHALL terminate and reap that child when termination succeeds or the re-probe observes its exit, and return the existing bounded timeout diagnostic with all safely available output; if termination fails while the re-probe proves it remains live, it SHALL return promptly with the same timeout classification/reason and truthful cause after releasing stdin and explicitly detaching the exact child/readers, reporting incomplete unreaped cleanup without retrying or waiting
 
 #### Scenario: Child completion is observed before the deadline
 

@@ -33095,11 +33095,103 @@ fn assert_cli_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// Return the exact advertised inventory from a real release-candidate stdio process.
+/// Test-only packet for exact cleanup after an injected observer failure.
+struct McpContractCleanupPacket {
+    child: Child,
+    stdout_reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+}
+
+/// Reap one test-owned MCP contract packet after the observer has returned.
+fn reap_mcp_contract_packet(mut packet: McpContractCleanupPacket) -> Result<(), Box<dyn Error>> {
+    packet.child.stdin.take();
+    if packet.child.try_wait()?.is_none() {
+        packet.child.kill()?;
+    }
+    packet.child.wait()?;
+    if let Some(reader) = packet.stdout_reader.take() {
+        reader
+            .join()
+            .map_err(|_panic| io::Error::other("MCP contract stdout cleanup reader panicked"))?;
+    }
+    if let Some(reader) = packet.stderr_reader.take() {
+        reader
+            .join()
+            .map_err(|_panic| io::Error::other("MCP contract stderr cleanup reader panicked"))??;
+    }
+    Ok(())
+}
+
 fn run_mcp_contract_inventory(
     executable: &Path,
     cwd: &Path,
     database: &Path,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_contract_inventory_with_test_delay(
+        executable,
+        cwd,
+        database,
+        Duration::from_secs(10),
+        None,
+        false,
+    )
+}
+
+fn run_mcp_contract_inventory_with_test_delay(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_contract_inventory_with_test_delay_and_kill(
+        executable,
+        cwd,
+        database,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        &mut |child| child.kill(),
+    )
+}
+
+fn run_mcp_contract_inventory_with_test_delay_and_kill(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+        executable,
+        cwd,
+        database,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        None,
+        None,
+        kill_child,
+        None,
+    )
+}
+
+/// Test-only variant that transfers a proven-live child and its readers to the
+/// caller when injected termination cannot safely reap it here.
+fn run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
 ) -> Result<String, Box<dyn Error>> {
     let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
@@ -33115,7 +33207,17 @@ fn run_mcp_contract_inventory(
             serde_json::to_string(&tools)?
         ))
     })();
-    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
+    complete_mcp_test_after_shutdown(operation_result, || {
+        session.shutdown_with_test_delay_and_kill_and_handoff(
+            timeout,
+            observer_delay,
+            hold_stdin_until_observation,
+            exit_probe_error,
+            cleanup_probe_error,
+            kill_child,
+            handoff_live_child,
+        )
+    })
 }
 
 /// Execute one advertised tool through its own real stdio process.
@@ -33438,6 +33540,80 @@ fn complete_mcp_test_after_shutdown<T>(
     Ok(value)
 }
 
+fn synchronize_prompt_exit_before_delayed_observation(
+    child: &mut Child,
+    label: &str,
+    exit_probe_error: Option<io::Error>,
+) -> io::Result<()> {
+    if let Some(error) = exit_probe_error {
+        return Err(error);
+    }
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(10))
+        .ok_or_else(|| io::Error::other("test child exit deadline overflowed"))?;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{label} did not exit before the delayed observer was released"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
+    }
+}
+
+fn require_injected_exit_probe_failure<T>(
+    result: &Result<T, Box<dyn Error>>,
+    owner: &str,
+    cause: &str,
+    disposition: &str,
+) -> Result<(), Box<dyn Error>> {
+    let error = result
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other(format!("{owner} exit probe failure was not returned")))?;
+    let io_error = error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other(format!("{owner} exit probe lost its io error")))?;
+    let diagnostic = error.to_string();
+    if io_error.kind() != io::ErrorKind::TimedOut
+        || !diagnostic.contains(cause)
+        || !diagnostic.contains(disposition)
+    {
+        return Err(io::Error::other(format!(
+            "{owner} exit probe failure lost its classification, cause, or ownership disposition: {diagnostic}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn require_reaped_probe_failure<T>(
+    result: &Result<T, Box<dyn Error>>,
+    owner: &str,
+    cause: &str,
+) -> Result<(), Box<dyn Error>> {
+    require_injected_exit_probe_failure(result, owner, cause, ") status=")?;
+    let diagnostic = result
+        .as_ref()
+        .err()
+        .ok_or_else(|| {
+            io::Error::other(format!("{owner} post-kill probe failure was not returned"))
+        })?
+        .to_string();
+    if diagnostic.contains("cleanup incomplete") {
+        return Err(io::Error::other(format!(
+            "{owner} detached ownership after successful termination: {diagnostic}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 #[test]
 fn mcp_test_shutdown_runs_after_primary_failure_without_hiding_it() -> Result<(), Box<dyn Error>> {
     let mut shutdown_attempted = false;
@@ -33460,6 +33636,854 @@ fn mcp_test_shutdown_runs_after_primary_failure_without_hiding_it() -> Result<()
         Ok(()) => Err(io::Error::other("MCP test failure was discarded").into()),
     }
 }
+
+#[test]
+fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
+-> Result<(), Box<dyn Error>> {
+    const OBSERVER_TIMEOUT: Duration = Duration::from_secs(2);
+    const FIRST_OBSERVATION_DELAY: Duration = Duration::from_secs(3);
+    const INJECTED_EXIT_PROBE_FAILURE: &str = "injected delayed-observer exit probe failure";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        None,
+        false,
+    )?;
+    let late_shutdown = run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        false,
+    );
+    let late_shutdown_text = late_shutdown
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_shutdown.is_ok()
+        || !late_shutdown_text.contains("completed after deadline")
+        || late_shutdown_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not distinguish late completion from a running timeout: {late_shutdown:?}"
+        ))
+        .into());
+    }
+    let mut session_probe_kill_attempted = false;
+    let mut session_probe_was_live = false;
+    let session_probe_failure = run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        true,
+        Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+        None,
+        &mut |child| {
+            session_probe_kill_attempted = true;
+            session_probe_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_injected_exit_probe_failure(
+        &session_probe_failure,
+        "MCP session observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup complete: child reaped and readers joined",
+    )?;
+    if !session_probe_kill_attempted || !session_probe_was_live {
+        return Err(io::Error::other(
+            "MCP session synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
+    // Keep the real MCP server's owned pipe open so its stdio future is
+    // causally pending when the zero-length deadline probe runs.
+    let still_running_shutdown = run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        Duration::ZERO,
+        None,
+        true,
+    );
+    let still_running_shutdown_text = still_running_shutdown
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_shutdown.is_ok()
+        || !still_running_shutdown_text.contains("still running at deadline")
+        || !still_running_shutdown_text.contains("status=")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not terminate and reap a child still running at its deadline: {still_running_shutdown:?}"
+        ))
+        .into());
+    }
+    let mut session_cleanup_packet = None;
+    let mut injected_session_kill =
+        |_child: &mut Child| Err(io::Error::other("injected session kill failure"));
+    let injected_session_failure = {
+        let mut session_cleanup_handoff = |packet: McpContractCleanupPacket| {
+            session_cleanup_packet = Some(packet);
+        };
+        run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &database,
+            Duration::ZERO,
+            None,
+            true,
+            None,
+            None,
+            &mut injected_session_kill,
+            Some(&mut session_cleanup_handoff),
+        )
+    };
+    let injected_session_error = injected_session_failure
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("injected session kill failure was not returned"))?;
+    let injected_session_io_error = injected_session_error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("injected session failure lost its io error"))?;
+    if injected_session_io_error.kind() != io::ErrorKind::TimedOut
+        || !injected_session_error
+            .to_string()
+            .contains("still running at deadline")
+        || !injected_session_error
+            .to_string()
+            .contains("injected session kill failure")
+        || !injected_session_error
+            .to_string()
+            .contains("cleanup incomplete: operating system refused termination")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not preserve timeout classification for an injected kill failure: {injected_session_failure:?}"
+        ))
+        .into());
+    }
+    let mut session_cleanup_packet = session_cleanup_packet
+        .take()
+        .ok_or_else(|| io::Error::other("session cleanup was not synchronously transferred"))?;
+    let (session_stdout_reader, session_stderr_reader) = match (
+        session_cleanup_packet.stdout_reader.take(),
+        session_cleanup_packet.stderr_reader.take(),
+    ) {
+        (Some(stdout_reader), Some(stderr_reader)) => (stdout_reader, stderr_reader),
+        (stdout_reader, stderr_reader) => {
+            reap_mcp_contract_packet(McpContractCleanupPacket {
+                child: session_cleanup_packet.child,
+                stdout_reader,
+                stderr_reader,
+            })?;
+            return Err(io::Error::other("session readers were not transferred").into());
+        }
+    };
+    let mut session_child = session_cleanup_packet.child;
+    drop(session_child.stdin.take());
+    if session_child.try_wait()?.is_none() {
+        session_child.kill()?;
+    }
+    session_child.wait()?;
+    session_stdout_reader
+        .join()
+        .map_err(|_panic| io::Error::other("session stdout cleanup reader panicked"))?;
+    session_stderr_reader
+        .join()
+        .map_err(|_panic| io::Error::other("session stderr cleanup reader panicked"))??;
+    let args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let messages = vec![
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-process-observer-deadlines", "version": "0.1.0"}
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+    ];
+    let in_time_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        None,
+        false,
+    )?;
+    if mcp_response(&in_time_mcp, 1)?.get("result").is_none() {
+        return Err(io::Error::other("in-time MCP observer omitted initialize result").into());
+    }
+    let late_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        false,
+    );
+    let late_mcp_text = late_mcp
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_mcp.is_ok()
+        || !late_mcp_text.contains("completed after deadline")
+        || late_mcp_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not distinguish late completion from a running timeout: {late_mcp:?}"
+        ))
+        .into());
+    }
+    let mut stdio_probe_kill_attempted = false;
+    let mut stdio_probe_was_live = false;
+    let stdio_probe_failure = run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        true,
+        Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+        None,
+        &mut |child| {
+            stdio_probe_kill_attempted = true;
+            stdio_probe_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_injected_exit_probe_failure(
+        &stdio_probe_failure,
+        "MCP stdio observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup complete: child reaped and readers joined",
+    )?;
+    if !stdio_probe_kill_attempted || !stdio_probe_was_live {
+        return Err(io::Error::other(
+            "MCP stdio synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
+    let still_running_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        Duration::ZERO,
+        None,
+        true,
+    );
+    let still_running_mcp_text = still_running_mcp
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_mcp.is_ok()
+        || !still_running_mcp_text.contains("still running at deadline")
+        || !still_running_mcp_text.contains("status=")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not terminate and reap a child still running at its deadline: {still_running_mcp:?}"
+        ))
+        .into());
+    }
+    let mut stdio_cleanup_packet = None;
+    let mut injected_stdio_kill =
+        |_child: &mut Child| Err(io::Error::other("injected stdio kill failure"));
+    let injected_stdio_failure = {
+        let mut stdio_cleanup_handoff =
+            |child: Child,
+             stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+                stdio_cleanup_packet = Some(McpStdioCleanupPacket {
+                    child,
+                    stdout_reader,
+                    stderr_reader,
+                });
+            };
+        run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &args,
+            &messages,
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+            Duration::ZERO,
+            None,
+            true,
+            None,
+            None,
+            &mut injected_stdio_kill,
+            Some(&mut stdio_cleanup_handoff),
+        )
+    };
+    let injected_stdio_error = injected_stdio_failure
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("injected stdio kill failure was not returned"))?;
+    let injected_stdio_io_error = injected_stdio_error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("injected stdio failure lost its io error"))?;
+    if injected_stdio_io_error.kind() != io::ErrorKind::TimedOut
+        || !injected_stdio_error
+            .to_string()
+            .contains("still running at deadline")
+        || !injected_stdio_error
+            .to_string()
+            .contains("injected stdio kill failure")
+        || !injected_stdio_error
+            .to_string()
+            .contains("cleanup incomplete: operating system refused termination")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not preserve timeout classification for an injected kill failure: {injected_stdio_failure:?}"
+        ))
+        .into());
+    }
+    reap_mcp_stdio_packet(
+        stdio_cleanup_packet
+            .take()
+            .ok_or_else(|| io::Error::other("stdio cleanup was not synchronously transferred"))?,
+    )?;
+
+    let in_time_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "in-time",
+        OBSERVER_TIMEOUT,
+        None,
+    )?;
+    if !in_time_installer.status.success() {
+        return Err(io::Error::other("in-time installer observer rejected --version").into());
+    }
+    let late_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "late",
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+    );
+    let late_installer_text = late_installer
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_installer.is_ok()
+        || !late_installer_text.contains("completed after deadline")
+        || late_installer_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "installer observer did not distinguish late completion from a running timeout: {late_installer:?}"
+        ))
+        .into());
+    }
+    let mut installer_probe_kill_attempted = false;
+    let mut installer_probe_was_live = false;
+    let installer_probe_failure =
+        wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+            "probe-failure",
+            OBSERVER_TIMEOUT,
+            Some(FIRST_OBSERVATION_DELAY),
+            Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+            None,
+            &mut |child| {
+                installer_probe_kill_attempted = true;
+                installer_probe_was_live = child.try_wait()?.is_none();
+                child.kill()
+            },
+            None,
+        );
+    require_injected_exit_probe_failure(
+        &installer_probe_failure,
+        "installer observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup complete: child reaped and output drained",
+    )?;
+    if !installer_probe_kill_attempted || !installer_probe_was_live {
+        return Err(io::Error::other(
+            "installer synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
+    // The held stdio pipe keeps this real MCP child running until the observer
+    // kills this exact process and wait_with_output drains both streams.
+    let still_running_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "still-running",
+        Duration::ZERO,
+        None,
+    );
+    let still_running_installer_text = still_running_installer
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_installer.is_ok()
+        || !still_running_installer_text.contains("still running at deadline")
+        || !still_running_installer_text.contains("status=")
+        || !still_running_installer_text.contains("stdout:")
+        || !still_running_installer_text.contains("stderr:")
+    {
+        return Err(io::Error::other(format!(
+            "installer observer did not terminate and drain a child still running at its deadline: {still_running_installer:?}"
+        ))
+        .into());
+    }
+    let mut installer_cleanup_child = None;
+    let mut injected_installer_kill =
+        |_child: &mut Child| Err(io::Error::other("injected installer kill failure"));
+    let injected_installer_failure = {
+        let mut installer_cleanup_handoff = |child: Child| {
+            installer_cleanup_child = Some(child);
+        };
+        wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+            "injected-installer",
+            Duration::ZERO,
+            None,
+            None,
+            None,
+            &mut injected_installer_kill,
+            Some(&mut installer_cleanup_handoff),
+        )
+    };
+    let injected_installer_error = injected_installer_failure
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("injected installer kill failure was not returned"))?;
+    let injected_installer_io_error = injected_installer_error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("injected installer failure lost its io error"))?;
+    if injected_installer_io_error.kind() != io::ErrorKind::TimedOut
+        || !injected_installer_error
+            .to_string()
+            .contains("still running at deadline")
+        || !injected_installer_error
+            .to_string()
+            .contains("injected installer kill failure")
+        || !injected_installer_error
+            .to_string()
+            .contains("cleanup incomplete: operating system refused termination")
+    {
+        return Err(io::Error::other(format!(
+            "installer observer did not preserve timeout classification for an injected kill failure: {injected_installer_failure:?}"
+        ))
+        .into());
+    }
+    let mut installer_child = installer_cleanup_child
+        .take()
+        .ok_or_else(|| io::Error::other("installer cleanup was not synchronously transferred"))?;
+    drop(installer_child.stdin.take());
+    if installer_child.try_wait()?.is_none() {
+        installer_child.kill()?;
+    }
+    // The real child may have consumed EOF and exited gracefully before this
+    // test-owned cleanup probe runs. Reaping and draining it is the proof; its
+    // final status is not part of the injected kill-failure contract.
+    reap_plugin_installer_child(installer_child)?;
+    Ok(())
+}
+
+#[test]
+fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
+-> Result<(), Box<dyn Error>> {
+    const INJECTED_REPROBE_FAILURE: &str = "injected post-kill exit probe failure";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+
+    let mut session_handoff_packet = None;
+    let session_result = {
+        let mut handoff = |packet: McpContractCleanupPacket| {
+            session_handoff_packet = Some(packet);
+        };
+        run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &database,
+            Duration::ZERO,
+            None,
+            true,
+            Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
+            &mut |child| child.kill(),
+            Some(&mut handoff),
+        )
+    };
+    require_reaped_probe_failure(
+        &session_result,
+        "MCP session observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if let Some(packet) = session_handoff_packet {
+        reap_mcp_contract_packet(packet)?;
+        return Err(io::Error::other(
+            "MCP session detached after a successful injected termination",
+        )
+        .into());
+    }
+
+    let args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let mut stdio_handoff_packet = None;
+    let stdio_result = {
+        let mut handoff =
+            |child: Child,
+             stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+                stdio_handoff_packet = Some(McpStdioCleanupPacket {
+                    child,
+                    stdout_reader,
+                    stderr_reader,
+                });
+            };
+        run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &args,
+            &[] as &[String],
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+            Duration::ZERO,
+            None,
+            true,
+            Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
+            &mut |child| child.kill(),
+            Some(&mut handoff),
+        )
+    };
+    require_reaped_probe_failure(
+        &stdio_result,
+        "MCP stdio observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if let Some(packet) = stdio_handoff_packet {
+        reap_mcp_stdio_packet(packet)?;
+        return Err(
+            io::Error::other("MCP stdio detached after a successful injected termination").into(),
+        );
+    }
+
+    let mut installer_handoff_child = None;
+    let installer_result = {
+        let mut handoff = |child: Child| {
+            installer_handoff_child = Some(child);
+        };
+        wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+            "installer post-kill probe",
+            Duration::ZERO,
+            None,
+            Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
+            &mut |child| child.kill(),
+            Some(&mut handoff),
+        )
+    };
+    require_reaped_probe_failure(
+        &installer_result,
+        "installer observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if let Some(child) = installer_handoff_child {
+        reap_plugin_installer_child(child)?;
+        return Err(
+            io::Error::other("installer detached after a successful injected termination").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn e2e_process_observers_attempt_termination_when_cleanup_reprobe_fails()
+-> Result<(), Box<dyn Error>> {
+    const INJECTED_REPROBE_FAILURE: &str = "injected pre-termination exit probe failure";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+
+    let mut session_kill_attempted = false;
+    let mut session_was_live = false;
+    let session_result = run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &database,
+        Duration::ZERO,
+        None,
+        true,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            session_kill_attempted = true;
+            session_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &session_result,
+        "MCP session observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !session_kill_attempted || !session_was_live {
+        return Err(io::Error::other(
+            "MCP session cleanup probe failure skipped termination of a live child",
+        )
+        .into());
+    }
+
+    let args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let mut stdio_kill_attempted = false;
+    let mut stdio_was_live = false;
+    let stdio_result = run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &args,
+        &[] as &[String],
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        Duration::ZERO,
+        None,
+        true,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            stdio_kill_attempted = true;
+            stdio_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &stdio_result,
+        "MCP stdio observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !stdio_kill_attempted || !stdio_was_live {
+        return Err(io::Error::other(
+            "MCP stdio cleanup probe failure skipped termination of a live child",
+        )
+        .into());
+    }
+
+    let mut installer_kill_attempted = false;
+    let mut installer_was_live = false;
+    let installer_result = wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "installer pre-termination probe",
+        Duration::ZERO,
+        None,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            installer_kill_attempted = true;
+            installer_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &installer_result,
+        "installer observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !installer_kill_attempted || !installer_was_live {
+        return Err(io::Error::other(
+            "installer cleanup probe failure skipped termination of a live child",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_contract_shutdown_disconnects_saturated_responses_before_reader_join()
+-> Result<(), Box<dyn Error>> {
+    let executable = mcp_contract_executable();
+    let mut child = StdCommand::new(&executable)
+        .arg("--version")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("saturated-response fixture stdin was not piped"))?;
+    let (sender, responses) =
+        mpsc::sync_channel::<io::Result<String>>(MCP_CONTRACT_RESPONSE_CAPACITY);
+    let (state_sender, state_receiver) = mpsc::channel();
+    let stdout_reader = thread::spawn(move || {
+        for id in 0..MCP_CONTRACT_RESPONSE_CAPACITY {
+            if sender
+                .send(Ok(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {}
+                })
+                .to_string()))
+                .is_err()
+            {
+                return;
+            }
+        }
+        if state_sender.send("saturated").is_err() {
+            return;
+        }
+        let disconnected = sender
+            .send(Ok(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": MCP_CONTRACT_RESPONSE_CAPACITY,
+                "result": {}
+            })
+            .to_string()))
+            .is_err();
+        let _terminal_state = state_sender.send(if disconnected {
+            "disconnected"
+        } else {
+            "accepted"
+        });
+    });
+    let stderr_reader = thread::spawn(|| Ok(Vec::new()));
+    let session = McpContractSession {
+        child: Some(child),
+        stdin: Some(stdin),
+        responses,
+        stdout_reader: Some(stdout_reader),
+        stderr_reader: Some(stderr_reader),
+        next_request_id: 1,
+    };
+    let state = state_receiver.recv_timeout(Duration::from_secs(10))?;
+    if state != "saturated" {
+        return Err(io::Error::other(format!(
+            "response reader did not fill the bounded channel: {state}"
+        ))
+        .into());
+    }
+
+    let shutdown = session.shutdown_with_test_delay(Duration::ZERO, None, false);
+    let error = shutdown
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("saturated response shutdown was not timed out"))?;
+    let io_error = error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("saturated response shutdown lost its io error"))?;
+    if io_error.kind() != io::ErrorKind::TimedOut {
+        return Err(io::Error::other(format!(
+            "saturated response shutdown was not TimedOut: {error}"
+        ))
+        .into());
+    }
+    let terminal_state = state_receiver.try_recv()?;
+    if terminal_state != "disconnected" {
+        return Err(io::Error::other(format!(
+            "stdout reader did not observe response disconnection: {terminal_state}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+const MCP_CONTRACT_RESPONSE_CAPACITY: usize = 64;
 
 /// Persistent real MCP session used by E2E contract clients.
 struct McpContractSession {
@@ -33519,7 +34543,7 @@ impl McpContractSession {
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr was not piped"))?;
-        let (sender, responses) = mpsc::sync_channel(64);
+        let (sender, responses) = mpsc::sync_channel(MCP_CONTRACT_RESPONSE_CAPACITY);
         let stdout_reader = thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             loop {
@@ -33782,47 +34806,303 @@ impl McpContractSession {
         Ok(())
     }
 
+    /// Disconnect the bounded stdout sender before joining its reader.
+    fn disconnect_responses(&mut self) {
+        let (_sender, disconnected) = mpsc::channel();
+        self.responses = disconnected;
+    }
+
     /// Close stdin and require a clean bounded process exit.
-    fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
-        self.stdin.take();
+    fn shutdown(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown_with_test_delay(Duration::from_secs(10), None, false)
+    }
+
+    fn shutdown_with_test_delay(
+        self,
+        timeout: Duration,
+        observer_delay: Option<Duration>,
+        hold_stdin_until_observation: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        self.shutdown_with_test_delay_and_kill(
+            timeout,
+            observer_delay,
+            hold_stdin_until_observation,
+            &mut |child| child.kill(),
+        )
+    }
+
+    fn shutdown_with_test_delay_and_kill(
+        self,
+        timeout: Duration,
+        observer_delay: Option<Duration>,
+        hold_stdin_until_observation: bool,
+        kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.shutdown_with_test_delay_and_kill_and_handoff(
+            timeout,
+            observer_delay,
+            hold_stdin_until_observation,
+            None,
+            None,
+            kill_child,
+            None,
+        )
+    }
+
+    /// Test-only seam for transferring a proven-live child and its readers.
+    fn shutdown_with_test_delay_and_kill_and_handoff(
+        mut self,
+        timeout: Duration,
+        observer_delay: Option<Duration>,
+        hold_stdin_until_observation: bool,
+        exit_probe_error: Option<io::Error>,
+        cleanup_probe_error: Option<io::Error>,
+        kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+        handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut exit_probe_error = exit_probe_error;
+        let mut cleanup_probe_error = cleanup_probe_error;
+        if !hold_stdin_until_observation {
+            self.stdin.take();
+        }
+        if observer_delay.is_some() && (!hold_stdin_until_observation || exit_probe_error.is_some())
+        {
+            let synchronization = self.child.as_mut().map_or_else(
+                || Err(io::Error::other("MCP contract child was consumed")),
+                |child| {
+                    synchronize_prompt_exit_before_delayed_observation(
+                        child,
+                        "MCP contract server",
+                        exit_probe_error.take(),
+                    )
+                },
+            );
+            if let Err(error) = synchronization {
+                self.stdin.take();
+                let stdout_reader = self.stdout_reader.take();
+                let stderr_reader = self.stderr_reader.take();
+                let mut child = self
+                    .child
+                    .take()
+                    .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+                let kill_result = kill_child(&mut child);
+                let status_after_kill = child.try_wait();
+                if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+                    let packet = McpContractCleanupPacket {
+                        child,
+                        stdout_reader,
+                        stderr_reader,
+                    };
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(packet);
+                    } else {
+                        drop(packet);
+                    }
+                    let mut diagnostic = format!(
+                        "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+                    );
+                    if let Some(kill_error) = kill_result.as_ref().err() {
+                        diagnostic.push_str("; termination failed: ");
+                        diagnostic.push_str(&kill_error.to_string());
+                    }
+                    if let Err(probe_error) = status_after_kill {
+                        diagnostic.push_str("; re-probe failed after termination attempt: ");
+                        diagnostic.push_str(&probe_error.to_string());
+                    }
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+                let status = child.wait()?;
+                self.disconnect_responses();
+                if let Some(reader) = stdout_reader {
+                    reader.join().map_err(|_panic| {
+                        io::Error::other("MCP contract stdout reader panicked")
+                    })?;
+                }
+                if let Some(reader) = stderr_reader {
+                    reader.join().map_err(|_panic| {
+                        io::Error::other("MCP contract stderr reader panicked")
+                    })??;
+                }
+                let diagnostic = format!(
+                    "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
+                );
+                return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+            }
+        }
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(10))
+            .checked_add(timeout)
             .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
-        let status = loop {
-            let child = self
-                .child
-                .as_mut()
-                .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
+        if let Some(delay) = observer_delay {
+            thread::sleep(delay);
+        }
+        let mut timeout_reason = None;
+        let mut accepted_completion = false;
+        loop {
             if Instant::now() >= deadline {
-                child.kill()?;
-                let _status = child.wait()?;
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "MCP contract server did not exit after stdin closed",
-                )
-                .into());
+                timeout_reason = Some("still running at deadline".to_string());
+                break;
             }
-            thread::sleep(Duration::from_millis(25));
-        };
-        self.child.take();
-        if let Some(reader) = self.stdout_reader.take() {
+            let (status, observed_at) = {
+                let child = self
+                    .child
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+                let status = child.try_wait()?;
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            match status {
+                Some(_) if observed_at < deadline => {
+                    accepted_completion = true;
+                    break;
+                }
+                Some(_) => {
+                    timeout_reason = Some(format!(
+                        "completed after deadline (observed_at={observed_at:?})"
+                    ));
+                    break;
+                }
+                None => {
+                    let remaining = deadline.saturating_duration_since(observed_at);
+                    if remaining.is_zero() {
+                        timeout_reason = Some("still running at deadline".to_string());
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(25).min(remaining));
+                }
+            }
+        }
+
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+        let mut pre_termination_probe_error = None;
+        let mut post_termination_probe_error = None;
+        if timeout_reason.is_some() {
+            let (status, observed_at) = {
+                let status = match cleanup_probe_error.take() {
+                    Some(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
+                    }
+                    None => match child.try_wait() {
+                        Ok(status) => status,
+                        Err(error) => {
+                            pre_termination_probe_error = Some(error);
+                            None
+                        }
+                    },
+                };
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            if status.is_none() {
+                let kill_result = kill_child(&mut child);
+                let status_after_kill = match exit_probe_error.take() {
+                    Some(error) => Err(error),
+                    None => child.try_wait(),
+                };
+                let status_after_kill = match status_after_kill {
+                    Ok(status) => status,
+                    Err(error) if kill_result.is_ok() => {
+                        post_termination_probe_error = Some(error);
+                        None
+                    }
+                    Err(error) => {
+                        self.stdin.take();
+                        let packet = McpContractCleanupPacket {
+                            child,
+                            stdout_reader: self.stdout_reader.take(),
+                            stderr_reader: self.stderr_reader.take(),
+                        };
+                        if let Some(handoff) = handoff_live_child {
+                            handoff(packet);
+                        } else {
+                            drop(packet);
+                        }
+                        let mut diagnostic = format!(
+                            "MCP contract server did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child/readers detached)",
+                            timeout_reason.as_deref().unwrap_or("timeout")
+                        );
+                        if let Some(kill_error) = kill_result.as_ref().err() {
+                            diagnostic.push_str("; termination failed: ");
+                            diagnostic.push_str(&kill_error.to_string());
+                        }
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                    }
+                };
+                if let Err(error) = kill_result
+                    && status_after_kill.is_none()
+                {
+                    self.stdin.take();
+                    let packet = McpContractCleanupPacket {
+                        child,
+                        stdout_reader: self.stdout_reader.take(),
+                        stderr_reader: self.stderr_reader.take(),
+                    };
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(packet);
+                    } else {
+                        drop(packet);
+                    }
+                    let diagnostic = format!(
+                        "MCP contract server did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; cleanup incomplete: operating system refused termination; child was not reaped; child/readers detached)",
+                        timeout_reason.as_deref().unwrap_or("timeout")
+                    );
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+            } else if timeout_reason.as_deref() == Some("still running at deadline") {
+                timeout_reason = Some(format!(
+                    "completed after deadline (observed_at={observed_at:?})"
+                ));
+            }
+        }
+        self.stdin.take();
+        let wait_result = child.wait();
+        self.disconnect_responses();
+        let stdout_result = self.stdout_reader.take().map(|reader| {
             reader
                 .join()
-                .map_err(|_panic| io::Error::other("MCP contract stdout reader panicked"))?;
-        }
-        let stderr = self
+                .map_err(|_panic| io::Error::other("MCP contract stdout reader panicked"))
+        });
+        let stderr_result = self
             .stderr_reader
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr reader was consumed"))?
             .join()
             .map_err(|_panic| io::Error::other("MCP contract stderr reader panicked"))??;
-        if !status.success() {
+        if let Some(reason) = timeout_reason {
+            let mut diagnostic =
+                format!("MCP contract server did not exit after stdin closed: {reason}");
+            if let Some(error) = pre_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed before termination attempt: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Some(error) = post_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed after successful termination: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Ok(status) = &wait_result {
+                diagnostic.push_str(" status=");
+                diagnostic.push_str(&status.to_string());
+            }
+            if !stderr_result.is_empty() {
+                diagnostic.push_str(" stderr=");
+                diagnostic.push_str(&String::from_utf8_lossy(&stderr_result));
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+        }
+        let status = wait_result?;
+        stdout_result.transpose()?;
+        if !accepted_completion || !status.success() {
             return Err(io::Error::other(format!(
                 "MCP contract server failed: {}",
-                String::from_utf8_lossy(&stderr)
+                String::from_utf8_lossy(&stderr_result)
             ))
             .into());
         }
@@ -33838,6 +35118,7 @@ impl Drop for McpContractSession {
             drop(child.wait());
         }
         self.child.take();
+        self.disconnect_responses();
         if let Some(reader) = self.stdout_reader.take() {
             drop(reader.join());
         }
@@ -33971,6 +35252,117 @@ fn run_mcp_stdio_with_env(
     messages: &[impl AsRef<str>],
     environment: &[(&str, Option<&str>)],
 ) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env_and_test_delay_and_kill(
+        executable,
+        cwd,
+        args,
+        messages,
+        environment,
+        Duration::from_secs(10),
+        None,
+        false,
+        &mut |child| child.kill(),
+    )
+}
+
+struct McpStdioCleanupPacket {
+    child: Child,
+    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+}
+
+/// Reap one test-owned MCP stdio packet after the observer has returned.
+fn reap_mcp_stdio_packet(mut packet: McpStdioCleanupPacket) -> Result<(), Box<dyn Error>> {
+    packet.child.stdin.take();
+    if packet.child.try_wait()?.is_none() {
+        packet.child.kill()?;
+    }
+    packet.child.wait()?;
+    packet
+        .stdout_reader
+        .join()
+        .map_err(|_panic| io::Error::other("mcp stdout cleanup reader panicked"))??;
+    packet
+        .stderr_reader
+        .join()
+        .map_err(|_panic| io::Error::other("mcp stderr cleanup reader panicked"))??;
+    Ok(())
+}
+
+fn run_mcp_stdio_with_env_and_test_delay(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env_and_test_delay_and_kill(
+        executable,
+        cwd,
+        args,
+        messages,
+        environment,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        &mut |child| child.kill(),
+    )
+}
+
+fn run_mcp_stdio_with_env_and_test_delay_and_kill(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+        executable,
+        cwd,
+        args,
+        messages,
+        environment,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        None,
+        None,
+        kill_child,
+        None,
+    )
+}
+
+/// Test-only variant that transfers a proven-live child and its readers to the
+/// caller when injected termination cannot safely reap it here.
+fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    handoff_live_child: Option<
+        &mut dyn FnMut(
+            Child,
+            thread::JoinHandle<io::Result<Vec<u8>>>,
+            thread::JoinHandle<io::Result<Vec<u8>>>,
+        ),
+    >,
+) -> Result<String, Box<dyn Error>> {
+    let mut exit_probe_error = exit_probe_error;
+    let mut cleanup_probe_error = cleanup_probe_error;
     let mut expected_responses = BTreeSet::new();
     for message in messages {
         let request: Value = serde_json::from_str(message.as_ref())?;
@@ -34001,10 +35393,12 @@ fn run_mcp_stdio_with_env(
         }
     }
     let mut child = command.spawn()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?;
+    let mut stdin = Some(
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?,
+    );
     let mut stdout_pipe = child
         .stdout
         .take()
@@ -34034,6 +35428,9 @@ fn run_mcp_stdio_with_env(
     });
 
     let response_result = (|| -> Result<(), Box<dyn Error>> {
+        let stdin = stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("mcp stdin was closed before requests were sent"))?;
         stdin.write_all(input.as_bytes())?;
         stdin.flush()?;
         let mut response_deadline = Instant::now()
@@ -34076,36 +35473,205 @@ fn run_mcp_stdio_with_env(
         }
         Ok(())
     })();
-    drop(stdin);
+    if !hold_stdin_until_observation {
+        stdin.take();
+    }
     drop(response_receiver);
 
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(10) {
-            if child.try_wait()?.is_none() {
-                child.kill()?;
+    if observer_delay.is_some()
+        && (!hold_stdin_until_observation || exit_probe_error.is_some())
+        && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
+            &mut child,
+            "projectatlas mcp",
+            exit_probe_error.take(),
+        )
+    {
+        stdin.take();
+        let kill_result = kill_child(&mut child);
+        let status_after_kill = child.try_wait();
+        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+            if let Some(handoff) = handoff_live_child {
+                handoff(child, stdout_reader, stderr_reader);
+            } else {
+                drop(child);
+                drop(stdout_reader);
+                drop(stderr_reader);
             }
-            let _status = child.wait()?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "projectatlas mcp did not exit after stdin closed",
-            )
-            .into());
+            let mut diagnostic = format!(
+                "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+            );
+            if let Some(kill_error) = kill_result.as_ref().err() {
+                diagnostic.push_str("; termination failed: ");
+                diagnostic.push_str(&kill_error.to_string());
+            }
+            if let Err(probe_error) = status_after_kill {
+                diagnostic.push_str("; re-probe failed after termination attempt: ");
+                diagnostic.push_str(&probe_error.to_string());
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
-        thread::sleep(Duration::from_millis(100));
-    };
+        let status = child.wait()?;
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+        let diagnostic = format!(
+            "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
+        );
+        let _ = (stdout, stderr);
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+    }
 
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("MCP process deadline overflowed"))?;
+    if let Some(delay) = observer_delay {
+        thread::sleep(delay);
+    }
+    let mut timeout_reason = None;
+    let mut accepted_completion = false;
+    let mut pre_termination_probe_error = None;
+    let mut post_termination_probe_error = None;
+    loop {
+        if Instant::now() >= deadline {
+            timeout_reason = Some("still running at deadline".to_string());
+            break;
+        }
+        let (status, observed_at) = {
+            let status = child.try_wait()?;
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        match status {
+            Some(_) if observed_at < deadline => {
+                accepted_completion = true;
+                break;
+            }
+            Some(_) => {
+                timeout_reason = Some(format!(
+                    "completed after deadline (observed_at={observed_at:?})"
+                ));
+                break;
+            }
+            None => {
+                let remaining = deadline.saturating_duration_since(observed_at);
+                if remaining.is_zero() {
+                    timeout_reason = Some("still running at deadline".to_string());
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100).min(remaining));
+            }
+        }
+    }
+
+    if timeout_reason.is_some() {
+        let (status, observed_at) = {
+            let status = match cleanup_probe_error.take() {
+                Some(error) => {
+                    pre_termination_probe_error = Some(error);
+                    None
+                }
+                None => match child.try_wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
+                    }
+                },
+            };
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        if status.is_none() {
+            let kill_result = kill_child(&mut child);
+            let status_after_kill = match exit_probe_error.take() {
+                Some(error) => Err(error),
+                None => child.try_wait(),
+            };
+            let status_after_kill = match status_after_kill {
+                Ok(status) => status,
+                Err(error) if kill_result.is_ok() => {
+                    post_termination_probe_error = Some(error);
+                    None
+                }
+                Err(error) => {
+                    stdin.take();
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(child, stdout_reader, stderr_reader);
+                    } else {
+                        drop(child);
+                        drop(stdout_reader);
+                        drop(stderr_reader);
+                    }
+                    let mut diagnostic = format!(
+                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child/readers detached)",
+                        timeout_reason.as_deref().unwrap_or("timeout")
+                    );
+                    if let Some(kill_error) = kill_result.as_ref().err() {
+                        diagnostic.push_str("; termination failed: ");
+                        diagnostic.push_str(&kill_error.to_string());
+                    }
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+            };
+            if let Err(error) = kill_result
+                && status_after_kill.is_none()
+            {
+                stdin.take();
+                if let Some(handoff) = handoff_live_child {
+                    handoff(child, stdout_reader, stderr_reader);
+                } else {
+                    drop(child);
+                    drop(stdout_reader);
+                    drop(stderr_reader);
+                }
+                let diagnostic = format!(
+                    "projectatlas mcp did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; cleanup incomplete: operating system refused termination; child was not reaped; child/readers detached)",
+                    timeout_reason.as_deref().unwrap_or("timeout")
+                );
+                return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+            }
+        } else if timeout_reason.as_deref() == Some("still running at deadline") {
+            timeout_reason = Some(format!(
+                "completed after deadline (observed_at={observed_at:?})"
+            ));
+        }
+    }
+    stdin.take();
+    let wait_result = child.wait();
     let stdout = stdout_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
     let stderr = stderr_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+    if let Some(reason) = timeout_reason {
+        let mut diagnostic = format!("projectatlas mcp did not exit after stdin closed: {reason}");
+        if let Some(error) = pre_termination_probe_error {
+            diagnostic.push_str(" status=unknown (re-probe failed before termination attempt: ");
+            diagnostic.push_str(&error.to_string());
+            diagnostic.push(')');
+        }
+        if let Some(error) = post_termination_probe_error {
+            diagnostic.push_str(" status=unknown (re-probe failed after successful termination: ");
+            diagnostic.push_str(&error.to_string());
+            diagnostic.push(')');
+        }
+        if let Ok(status) = &wait_result {
+            diagnostic.push_str(" status=");
+            diagnostic.push_str(&status.to_string());
+        }
+        if !stderr.is_empty() {
+            diagnostic.push_str(" stderr=");
+            diagnostic.push_str(&String::from_utf8_lossy(&stderr));
+        }
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+    }
     response_result?;
-    if !status.success() {
+    let status = wait_result?;
+    if !accepted_completion || !status.success() {
         return Err(io::Error::other(format!(
             "projectatlas mcp failed: {}",
             String::from_utf8_lossy(&stderr)
@@ -37874,28 +39440,219 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     Ok(command)
 }
 
+/// Reap one test-owned installer child after the observer has returned.
+fn reap_plugin_installer_child(mut child: Child) -> Result<std::process::Output, Box<dyn Error>> {
+    child.stdin.take();
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+    }
+    Ok(child.wait_with_output()?)
+}
+
 /// Collect one coordinated installer process under an explicit deadline.
 fn wait_for_plugin_installer_output(
-    mut child: Child,
+    child: Child,
     label: &str,
     timeout: Duration,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if child.try_wait()?.is_some() {
-            return Ok(child.wait_with_output()?);
+    wait_for_plugin_installer_output_with_test_delay(child, label, timeout, None)
+}
+
+fn wait_for_plugin_installer_output_with_test_delay(
+    child: Child,
+    label: &str,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+        child,
+        label,
+        timeout,
+        observer_delay,
+        None,
+        None,
+        &mut |child| child.kill(),
+        None,
+    )
+}
+
+/// Test-only variant that transfers a proven-live child to the caller when
+/// injected termination cannot safely reap it here.
+fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+    mut child: Child,
+    label: &str,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    handoff_live_child: Option<&mut dyn FnMut(Child)>,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let mut exit_probe_error = exit_probe_error;
+    let mut cleanup_probe_error = cleanup_probe_error;
+    if observer_delay.is_some()
+        && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
+            &mut child,
+            label,
+            exit_probe_error.take(),
+        )
+    {
+        child.stdin.take();
+        let kill_result = kill_child(&mut child);
+        let status_after_kill = child.try_wait();
+        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+            if let Some(handoff) = handoff_live_child {
+                handoff(child);
+            } else {
+                drop(child);
+            }
+            let mut diagnostic = format!(
+                "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup incomplete: child detached"
+            );
+            if let Some(kill_error) = kill_result.as_ref().err() {
+                diagnostic.push_str("; termination failed: ");
+                diagnostic.push_str(&kill_error.to_string());
+            }
+            if let Err(probe_error) = status_after_kill {
+                diagnostic.push_str("; re-probe failed after termination attempt: ");
+                diagnostic.push_str(&probe_error.to_string());
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
+        let output = child.wait_with_output()?;
+        let diagnostic = format!(
+            "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and output drained status={}",
+            output.status
+        );
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+    }
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("plugin installer deadline overflowed"))?;
+    if let Some(delay) = observer_delay {
+        thread::sleep(delay);
+    }
+    loop {
         if Instant::now() >= deadline {
-            drop(child.kill());
+            let mut pre_termination_probe_error = None;
+            let (status, _observed_at) = {
+                let status = match cleanup_probe_error.take() {
+                    Some(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
+                    }
+                    None => match child.try_wait() {
+                        Ok(status) => status,
+                        Err(error) => {
+                            pre_termination_probe_error = Some(error);
+                            None
+                        }
+                    },
+                };
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            let still_running = status.is_none();
+            let mut post_termination_probe_error = None;
+            if still_running {
+                let kill_result = kill_child(&mut child);
+                let status_after_kill = match exit_probe_error.take() {
+                    Some(error) => Err(error),
+                    None => child.try_wait(),
+                };
+                let status_after_kill = match status_after_kill {
+                    Ok(status) => status,
+                    Err(error) if kill_result.is_ok() => {
+                        post_termination_probe_error = Some(error);
+                        None
+                    }
+                    Err(error) => {
+                        child.stdin.take();
+                        if let Some(handoff) = handoff_live_child {
+                            handoff(child);
+                        } else {
+                            drop(child);
+                        }
+                        let mut diagnostic = format!(
+                            "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child detached)"
+                        );
+                        if let Some(kill_error) = kill_result.as_ref().err() {
+                            diagnostic.push_str("; termination failed: ");
+                            diagnostic.push_str(&kill_error.to_string());
+                        }
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                    }
+                };
+                if let Err(kill_error) = kill_result
+                    && status_after_kill.is_none()
+                {
+                    child.stdin.take();
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(child);
+                    } else {
+                        drop(child);
+                    }
+                    let diagnostic = format!(
+                        "{label} plugin installer exceeded {timeout:?}: still running at deadline status=still-running at deadline (termination failed: {kill_error}; cleanup incomplete: operating system refused termination; child was not reaped; child detached)"
+                    );
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+            }
             let output = child.wait_with_output()?;
-            return Err(io::Error::other(format!(
-                "{label} plugin installer exceeded {timeout:?}\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ))
+            let mut diagnostic = format!(
+                "{label} plugin installer exceeded {timeout:?}: {}",
+                if still_running {
+                    "still running at deadline"
+                } else {
+                    "completed after deadline"
+                }
+            );
+            if let Some(error) = post_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed after successful termination: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Some(error) = pre_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed before termination attempt: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            diagnostic.push_str(" status=");
+            diagnostic.push_str(&output.status.to_string());
+            diagnostic.push_str("\nstdout:\n");
+            diagnostic.push_str(&String::from_utf8_lossy(&output.stdout));
+            diagnostic.push_str("\nstderr:\n");
+            diagnostic.push_str(&String::from_utf8_lossy(&output.stderr));
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+        }
+        let (status, observed_at) = {
+            let status = child.try_wait()?;
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        if let Some(_status) = status {
+            if observed_at < deadline {
+                return Ok(child.wait_with_output()?);
+            }
+            let output = child.wait_with_output()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{label} plugin installer exceeded {timeout:?}: completed after deadline (observed_at={observed_at:?}) status={}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
             .into());
         }
-        thread::sleep(Duration::from_millis(25));
+        let remaining = deadline.saturating_duration_since(observed_at);
+        if remaining.is_zero() {
+            continue;
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
     }
 }
 
