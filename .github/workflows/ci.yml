@@ -187,6 +187,7 @@ jobs:
         run: |
           cargo test --locked -p projectatlas-cli --test e2e csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture
           cargo test --locked -p projectatlas-cli --test e2e deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e partial_markdown_limit_persists_without_losing_complete_publication -- --exact --include-ignored --nocapture
           cargo test --locked -p projectatlas-cli --test e2e lint_formats_share_typed_cli_and_mcp_report -- --exact --include-ignored --nocapture
           cargo test --locked -p projectatlas-cli --test e2e classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture

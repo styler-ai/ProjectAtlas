@@ -7655,6 +7655,32 @@ mod tests {
             );
         }
 
+        let mut coverage_health_args = Map::new();
+        coverage_health_args.insert("coverage".to_string(), json!(true));
+        coverage_health_args.insert("path_prefix".to_string(), json!("src"));
+        coverage_health_args.insert("limit".to_string(), json!(1));
+        let coverage_health = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("atlas_health").with_arguments(coverage_health_args),
+            )
+            .await?;
+        let coverage_health_text = coverage_health
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str())
+            .ok_or_else(|| io::Error::other("coverage health result did not contain text"))?;
+        if !coverage_health_text.contains("coverage:")
+            || !coverage_health_text.contains("limit: 1")
+            || !coverage_health_text.contains("path: src/detail.rs")
+        {
+            return Err(format!(
+                "atlas_health coverage result lost structured filtered output: {coverage_health_text}"
+            )
+            .into());
+        }
+
         let mut summary_health_args = Map::new();
         summary_health_args.insert("category".to_string(), json!("missing-purpose"));
         summary_health_args.insert("path_prefix".to_string(), json!(".\\src\\"));

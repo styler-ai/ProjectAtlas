@@ -13473,7 +13473,15 @@ mod tests {
             "UPDATE metadata SET value = ?1 WHERE key = 'project_root'",
             [worktree_b.join(".").to_string_lossy().into_owned()],
         )?;
-        incomplete_current.execute_batch("DELETE FROM project_root_identity;")?;
+        // Exercise the cross-platform typed predecessor migration path. The
+        // schema-19 table-absent route is supported only where its legacy
+        // display is lossless (Windows); Unix must reject that non-injective
+        // predecessor before any write. Schema 20 retains the typed singleton
+        // and is the common predecessor for this alias-routed lifecycle test.
+        incomplete_current.execute_batch(
+            "UPDATE metadata SET value = '20' WHERE key = 'schema_version';
+             DROP TABLE graph_identity_rejections;",
+        )?;
         drop(incomplete_current);
         let migratable_added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
             worktree: selector_b,
@@ -16678,6 +16686,7 @@ mod tests {
         let predecessor = rusqlite::Connection::open(&database)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(predecessor);
@@ -16817,6 +16826,7 @@ mod tests {
         let predecessor = rusqlite::Connection::open(&database)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         predecessor.execute(
@@ -16978,6 +16988,7 @@ mod tests {
             let connection = rusqlite::Connection::open(&database)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
+                 DROP TABLE IF EXISTS graph_identity_rejections;
                  UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
             )?;
         }
@@ -17085,6 +17096,7 @@ mod tests {
         let predecessor = rusqlite::Connection::open(&raw_database)?;
         predecessor.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(predecessor);
@@ -17145,6 +17157,7 @@ mod tests {
         )?;
         collision_predecessor.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(collision_predecessor);

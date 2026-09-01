@@ -5,7 +5,7 @@ use crate::configured_modules::ConfiguredModuleSource;
 use crate::semantic;
 use blake3::Hasher;
 use projectatlas_core::graph::{
-    CanonicalResolutionKey, GraphContractError, GraphIdentityText, GraphRelationKind,
+    CanonicalResolutionKey, GraphContractError, GraphIdentityText, GraphLimits, GraphRelationKind,
     ProjectInstanceId, ResolutionKeyDomain,
 };
 use projectatlas_core::language::{LANGUAGE_CAPABILITIES, SemanticProviderOwner};
@@ -149,6 +149,66 @@ pub struct ResolutionProjectionContext<'a> {
 /// Provider scopes expanded once per unique import in one source graph.
 type ImportScopeCache = BTreeMap<String, BTreeMap<String, Vec<String>>>;
 
+/// Bounded contract failures retained while a graph keeps valid siblings.
+struct ContractFailures {
+    /// Rejected derived-key facts retained for typed adapter detail.
+    failures: Vec<ResolutionProjectionFactFailure>,
+    /// Number of distinct rejected derived-key facts observed.
+    rejected_count: usize,
+    /// Whether the source fact has already been rejected.
+    source_seen: bool,
+    /// Rejected symbol ordinals, bit-packed by `Vec<bool>`.
+    symbol_seen: Vec<bool>,
+    /// Rejected relation ordinals, bit-packed by `Vec<bool>`.
+    relation_seen: Vec<bool>,
+}
+
+impl ContractFailures {
+    /// Allocate closed ordinal tracking for one parser graph.
+    fn new(symbol_count: usize, relation_count: usize) -> Self {
+        Self {
+            failures: Vec::new(),
+            rejected_count: 0,
+            source_seen: false,
+            symbol_seen: vec![false; symbol_count],
+            relation_seen: vec![false; relation_count],
+        }
+    }
+
+    /// Record the first failure for one dense parser fact.
+    fn remember(&mut self, fact: ResolutionProjectionFact, error: GraphContractError) {
+        let seen = match fact {
+            ResolutionProjectionFact::Source => {
+                let seen = self.source_seen;
+                self.source_seen = true;
+                !seen
+            }
+            ResolutionProjectionFact::Symbol(index) => {
+                self.symbol_seen.get_mut(index).is_some_and(|seen| {
+                    let was_seen = *seen;
+                    *seen = true;
+                    !was_seen
+                })
+            }
+            ResolutionProjectionFact::Relation(index) => {
+                self.relation_seen.get_mut(index).is_some_and(|seen| {
+                    let was_seen = *seen;
+                    *seen = true;
+                    !was_seen
+                })
+            }
+        };
+        if !seen {
+            return;
+        }
+        self.rejected_count = self.rejected_count.saturating_add(1);
+        if self.failures.len() < MAX_RESOLUTION_PROJECTION_FAILURES {
+            self.failures
+                .push(ResolutionProjectionFactFailure { error, fact });
+        }
+    }
+}
+
 impl<'a> ResolutionProjectionContext<'a> {
     /// Construct a projection context with one validated configured-module snapshot.
     #[must_use]
@@ -162,6 +222,18 @@ impl<'a> ResolutionProjectionContext<'a> {
 }
 
 impl ResolutionKeyProjection {
+    /// Construct an empty projection when one parser graph has no admissible
+    /// canonical identity keys. Entity and relation rows can still be staged;
+    /// the graph publication layer records the rejected key provenance.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            source: Vec::new(),
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+
     /// Borrow module keys exported by the source file itself.
     #[must_use]
     pub fn source_keys(&self) -> &[CanonicalResolutionKey] {
@@ -181,11 +253,97 @@ impl ResolutionKeyProjection {
     }
 }
 
+/// Parser fact whose derived canonical key was rejected by graph admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolutionProjectionFact {
+    /// A source-file export scope.
+    Source,
+    /// A symbol-index-associated export.
+    Symbol(usize),
+    /// A relation-index-associated dependency.
+    Relation(usize),
+}
+
+/// Maximum rejected derived-key facts retained from one parser graph.
+pub const MAX_RESOLUTION_PROJECTION_FAILURES: usize = GraphLimits::MAX_ROWS as usize;
+
+/// One parser fact whose derived canonical key violated the graph contract.
+#[derive(Debug)]
+pub struct ResolutionProjectionFactFailure {
+    /// Stable contract error category for the rejected derived key.
+    error: GraphContractError,
+    /// Exact parser fact that produced the rejected derived key.
+    fact: ResolutionProjectionFact,
+}
+
+impl ResolutionProjectionFactFailure {
+    /// Return the graph-contract error without exposing rejected identity text.
+    #[must_use]
+    pub fn error(&self) -> &GraphContractError {
+        &self.error
+    }
+
+    /// Return the parser fact that produced the rejected derived key.
+    #[must_use]
+    pub const fn fact(&self) -> ResolutionProjectionFact {
+        self.fact
+    }
+
+    /// Consume one failure at an adapter boundary that needs its typed error.
+    #[must_use]
+    pub fn into_parts(self) -> (ResolutionProjectionFact, GraphContractError) {
+        (self.fact, self.error)
+    }
+}
+
+/// Bounded rejected derived-key facts and the partial valid projection.
+#[derive(Debug)]
+pub struct ResolutionProjectionFailure {
+    /// Every retained rejected derived-key fact in deterministic traversal order.
+    failures: Vec<ResolutionProjectionFactFailure>,
+    /// Number of rejected derived-key facts, including rows beyond the detail bound.
+    rejected_count: usize,
+    /// All valid canonical keys retained from the graph.
+    projection: ResolutionKeyProjection,
+}
+
+impl ResolutionProjectionFailure {
+    /// Borrow every retained rejected derived-key fact.
+    #[must_use]
+    pub fn failures(&self) -> &[ResolutionProjectionFactFailure] {
+        &self.failures
+    }
+
+    /// Return the total rejected derived-key count before bounded detail retention.
+    #[must_use]
+    pub const fn rejected_count(&self) -> usize {
+        self.rejected_count
+    }
+
+    /// Borrow the projection containing all valid keys derived before and after the failure.
+    #[must_use]
+    pub fn projection(&self) -> &ResolutionKeyProjection {
+        &self.projection
+    }
+
+    /// Consume the failure at an adapter boundary that needs all retained state.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<ResolutionProjectionFactFailure>,
+        usize,
+        ResolutionKeyProjection,
+    ) {
+        (self.failures, self.rejected_count, self.projection)
+    }
+}
+
 /// Failure while deriving bounded canonical keys from parser facts.
 #[derive(Debug)]
 pub enum ResolutionProjectionError {
     /// An extracted or caller-supplied identity violated the graph contract.
-    Contract(GraphContractError),
+    Contract(Box<ResolutionProjectionFailure>),
     /// One source fact would exceed the bounded key fan-out.
     KeyLimit {
         /// Kind of parser fact being projected.
@@ -200,7 +358,12 @@ pub enum ResolutionProjectionError {
 impl fmt::Display for ResolutionProjectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Contract(error) => write!(formatter, "invalid resolution identity: {error}"),
+            Self::Contract(failure) => match failure.failures.first() {
+                Some(failure) => {
+                    write!(formatter, "invalid resolution identity: {}", failure.error)
+                }
+                None => formatter.write_str("invalid resolution identity"),
+            },
             Self::KeyLimit {
                 fact,
                 index,
@@ -216,7 +379,10 @@ impl fmt::Display for ResolutionProjectionError {
 impl Error for ResolutionProjectionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Contract(error) => Some(error),
+            Self::Contract(failure) => failure
+                .failures
+                .first()
+                .map(|failure| &failure.error as &(dyn Error + 'static)),
             Self::KeyLimit { .. } => None,
         }
     }
@@ -224,7 +390,14 @@ impl Error for ResolutionProjectionError {
 
 impl From<GraphContractError> for ResolutionProjectionError {
     fn from(value: GraphContractError) -> Self {
-        Self::Contract(value)
+        Self::Contract(Box::new(ResolutionProjectionFailure {
+            failures: vec![ResolutionProjectionFactFailure {
+                error: value,
+                fact: ResolutionProjectionFact::Source,
+            }],
+            rejected_count: 1,
+            projection: ResolutionKeyProjection::empty(),
+        }))
     }
 }
 
@@ -415,6 +588,7 @@ pub fn derive_resolution_keys_with_context(
             relations: Vec::new(),
         });
     };
+    let mut contract_failures = ContractFailures::new(graph.symbols.len(), graph.relations.len());
     let language = GraphIdentityText::new(resolution_family)?;
     let package = package.map(GraphIdentityText::new).transpose()?;
 
@@ -430,28 +604,40 @@ pub fn derive_resolution_keys_with_context(
     if emits_source_module_keys {
         source_keys.reserve(source_scopes.len() + configured_source_scopes.len());
         for scope in &source_scopes {
-            source_keys.push(canonical_key(
-                project,
-                ResolutionKeyDomain::Module,
-                &provider,
-                &language,
-                package.as_ref(),
-                None,
-                RelationKind::Imports,
-                scope,
-            )?);
+            if let Some(key) = retain_derived_key(
+                canonical_key(
+                    project,
+                    ResolutionKeyDomain::Module,
+                    &provider,
+                    &language,
+                    package.as_ref(),
+                    None,
+                    RelationKind::Imports,
+                    scope,
+                ),
+                ResolutionProjectionFact::Source,
+                &mut contract_failures,
+            ) {
+                source_keys.push(key);
+            }
         }
         for scope in &configured_source_scopes {
-            source_keys.push(canonical_key(
-                project,
-                ResolutionKeyDomain::Module,
-                &provider,
-                &language,
-                None,
-                None,
-                RelationKind::Imports,
-                scope,
-            )?);
+            if let Some(key) = retain_derived_key(
+                canonical_key(
+                    project,
+                    ResolutionKeyDomain::Module,
+                    &provider,
+                    &language,
+                    None,
+                    None,
+                    RelationKind::Imports,
+                    scope,
+                ),
+                ResolutionProjectionFact::Source,
+                &mut contract_failures,
+            ) {
+                source_keys.push(key);
+            }
         }
     }
     let source_keys = bounded_keys(source_keys, "source", 0)?;
@@ -461,22 +647,38 @@ pub fn derive_resolution_keys_with_context(
         let mut keys = Vec::new();
         match symbol.kind {
             SymbolKind::Package if provider_owner == SemanticProviderOwner::Cargo => {
-                keys.push(canonical_key(
-                    project,
-                    ResolutionKeyDomain::Package,
-                    &provider,
-                    &language,
-                    None,
-                    None,
-                    RelationKind::DependsOn,
-                    &symbol.name,
-                )?);
+                if let Some(key) = retain_derived_key(
+                    canonical_key(
+                        project,
+                        ResolutionKeyDomain::Package,
+                        &provider,
+                        &language,
+                        None,
+                        None,
+                        RelationKind::DependsOn,
+                        &symbol.name,
+                    ),
+                    ResolutionProjectionFact::Symbol(symbol_index),
+                    &mut contract_failures,
+                ) {
+                    keys.push(key);
+                }
             }
             SymbolKind::Dependency | SymbolKind::Import | SymbolKind::Workspace => {}
             _ if emits_source_module_keys
                 && semantic::is_export_candidate(provider_owner, graph, symbol_index) =>
             {
-                let identity = GraphIdentityText::new(symbol.name.clone())?;
+                let identity = match GraphIdentityText::new(symbol.name.clone()) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        remember_contract_failure(
+                            &mut contract_failures,
+                            ResolutionProjectionFact::Symbol(symbol_index),
+                            error,
+                        );
+                        continue;
+                    }
+                };
                 let mut scopes = source_scopes.clone();
                 if let Some(parent) = symbol.parent.as_deref() {
                     scopes.extend(
@@ -490,9 +692,21 @@ pub fn derive_resolution_keys_with_context(
                 scopes.sort();
                 scopes.dedup();
                 for scope in &scopes {
-                    let scope = (!scope.is_empty())
-                        .then(|| GraphIdentityText::new(scope.clone()))
-                        .transpose()?;
+                    let scope = if scope.is_empty() {
+                        None
+                    } else {
+                        match GraphIdentityText::new(scope.clone()) {
+                            Ok(scope) => Some(scope),
+                            Err(error) => {
+                                remember_contract_failure(
+                                    &mut contract_failures,
+                                    ResolutionProjectionFact::Symbol(symbol_index),
+                                    error,
+                                );
+                                continue;
+                            }
+                        }
+                    };
                     keys.push(CanonicalResolutionKey::new(
                         project,
                         ResolutionKeyDomain::Declaration,
@@ -515,7 +729,17 @@ pub fn derive_resolution_keys_with_context(
                     configured_scopes.dedup();
                 }
                 for scope in configured_scopes {
-                    let scope = GraphIdentityText::new(scope)?;
+                    let scope = match GraphIdentityText::new(scope) {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            remember_contract_failure(
+                                &mut contract_failures,
+                                ResolutionProjectionFact::Symbol(symbol_index),
+                                error,
+                            );
+                            continue;
+                        }
+                    };
                     keys.push(CanonicalResolutionKey::new(
                         project,
                         ResolutionKeyDomain::Declaration,
@@ -579,7 +803,9 @@ pub fn derive_resolution_keys_with_context(
                     &relation.path,
                     &parsed_imports[relation_index],
                     &import_scopes,
-                )?
+                    relation_index,
+                    &mut contract_failures,
+                )
             }
             RelationKind::Calls if semantic::supports_source_dependencies(provider_owner) => {
                 call_dependency_keys(
@@ -592,19 +818,27 @@ pub fn derive_resolution_keys_with_context(
                     &relation.target_name,
                     &aliases,
                     &import_scopes,
-                )?
+                    relation_index,
+                    &mut contract_failures,
+                )
             }
             RelationKind::DependsOn if semantic::supports_package_dependencies(provider_owner) => {
-                vec![canonical_key(
-                    project,
-                    ResolutionKeyDomain::Package,
-                    &provider,
-                    &language,
-                    None,
-                    None,
-                    RelationKind::DependsOn,
-                    &relation.target_name,
-                )?]
+                retain_derived_key(
+                    canonical_key(
+                        project,
+                        ResolutionKeyDomain::Package,
+                        &provider,
+                        &language,
+                        None,
+                        None,
+                        RelationKind::DependsOn,
+                        &relation.target_name,
+                    ),
+                    ResolutionProjectionFact::Relation(relation_index),
+                    &mut contract_failures,
+                )
+                .into_iter()
+                .collect()
             }
             RelationKind::Contains => continue,
             RelationKind::Imports | RelationKind::Calls | RelationKind::DependsOn => Vec::new(),
@@ -616,11 +850,22 @@ pub fn derive_resolution_keys_with_context(
         });
     }
 
-    Ok(ResolutionKeyProjection {
+    let projection = ResolutionKeyProjection {
         source: source_keys,
         symbols: symbol_keys,
         relations: relation_keys,
-    })
+    };
+    if contract_failures.failures.is_empty() {
+        Ok(projection)
+    } else {
+        Err(ResolutionProjectionError::Contract(Box::new(
+            ResolutionProjectionFailure {
+                failures: contract_failures.failures,
+                rejected_count: contract_failures.rejected_count,
+                projection,
+            },
+        )))
+    }
 }
 
 /// Expand each unique import scope once for the complete source graph.
@@ -672,25 +917,33 @@ fn import_dependency_keys(
     caller_path: &str,
     references: &[ImportReference],
     import_scopes: &ImportScopeCache,
-) -> Result<Vec<CanonicalResolutionKey>, ResolutionProjectionError> {
+    relation_index: usize,
+    contract_failures: &mut ContractFailures,
+) -> Vec<CanonicalResolutionKey> {
     let mut keys = Vec::new();
     for reference in references {
         let scopes = cached_import_scopes(import_scopes, caller_path, reference);
         let package = dependency_package(provider_owner, reference, package);
         for scope in scopes {
-            keys.push(canonical_key(
-                project,
-                ResolutionKeyDomain::Module,
-                provider,
-                language,
-                package,
-                None,
-                RelationKind::Imports,
-                scope,
-            )?);
+            if let Some(key) = retain_derived_key(
+                canonical_key(
+                    project,
+                    ResolutionKeyDomain::Module,
+                    provider,
+                    language,
+                    package,
+                    None,
+                    RelationKind::Imports,
+                    scope,
+                ),
+                ResolutionProjectionFact::Relation(relation_index),
+                contract_failures,
+            ) {
+                keys.push(key);
+            }
         }
     }
-    Ok(keys)
+    keys
 }
 
 /// Derive canonical declaration keys for one call, including local aliases.
@@ -704,7 +957,9 @@ fn call_dependency_keys(
     target: &str,
     aliases: &BTreeMap<&str, Vec<&ImportReference>>,
     import_scopes: &ImportScopeCache,
-) -> Result<Vec<CanonicalResolutionKey>, ResolutionProjectionError> {
+    relation_index: usize,
+    contract_failures: &mut ContractFailures,
+) -> Vec<CanonicalResolutionKey> {
     let (prefix, remainder) = split_qualified_target(target);
     let alias = prefix.unwrap_or(target).trim();
     if let Some(references) = aliases.get(alias) {
@@ -726,39 +981,51 @@ fn call_dependency_keys(
                 } else {
                     scope.as_str()
                 };
-                keys.push(canonical_key(
-                    project,
-                    ResolutionKeyDomain::Declaration,
-                    provider,
-                    language,
-                    package,
-                    Some(scope),
-                    RelationKind::Calls,
-                    identity,
-                )?);
+                if let Some(key) = retain_derived_key(
+                    canonical_key(
+                        project,
+                        ResolutionKeyDomain::Declaration,
+                        provider,
+                        language,
+                        package,
+                        Some(scope),
+                        RelationKind::Calls,
+                        identity,
+                    ),
+                    ResolutionProjectionFact::Relation(relation_index),
+                    contract_failures,
+                ) {
+                    keys.push(key);
+                }
             }
         }
-        return Ok(keys);
+        return keys;
     }
 
     let (scope, identity) = split_qualified_target(target);
     if scope.is_some() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let Some(identity) = identity.or_else(|| (!target.trim().is_empty()).then_some(target.trim()))
     else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
-    Ok(vec![canonical_key(
-        project,
-        ResolutionKeyDomain::Declaration,
-        provider,
-        language,
-        package,
-        None,
-        RelationKind::Calls,
-        identity,
-    )?])
+    retain_derived_key(
+        canonical_key(
+            project,
+            ResolutionKeyDomain::Declaration,
+            provider,
+            language,
+            package,
+            None,
+            RelationKind::Calls,
+            identity,
+        ),
+        ResolutionProjectionFact::Relation(relation_index),
+        contract_failures,
+    )
+    .into_iter()
+    .collect()
 }
 
 /// Configured ECMAScript targets are repository paths, so caller Cargo
@@ -801,6 +1068,30 @@ fn canonical_key(
         Some(GraphRelationKind::from_legacy(relation)),
         &identity,
     ))
+}
+
+/// Retain one valid derived key while remembering the first rejected fact.
+fn retain_derived_key(
+    result: Result<CanonicalResolutionKey, GraphContractError>,
+    fact: ResolutionProjectionFact,
+    contract_failures: &mut ContractFailures,
+) -> Option<CanonicalResolutionKey> {
+    match result {
+        Ok(key) => Some(key),
+        Err(error) => {
+            remember_contract_failure(contract_failures, fact, error);
+            None
+        }
+    }
+}
+
+/// Keep one deterministic contract failure without retaining rejected identity text.
+fn remember_contract_failure(
+    contract_failures: &mut ContractFailures,
+    fact: ResolutionProjectionFact,
+    error: GraphContractError,
+) {
+    contract_failures.remember(fact, error);
 }
 
 /// Sort, deduplicate, and enforce the per-fact canonical-key limit.
@@ -915,10 +1206,10 @@ pub(super) fn strip_known_source_extension(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportReference, ImportSyntax, RelationKind, ResolutionProjectionContext,
-        ResolutionProjectionError, SEMANTIC_RESOLUTION_CONTRACT_VERSION, build_import_scope_cache,
-        derive_resolution_keys, derive_resolution_keys_with_context, parse_import_references,
-        resolve_relative_import_path, semantic_resolution_contract_digest,
+        ImportReference, ImportSyntax, ResolutionProjectionContext, ResolutionProjectionError,
+        SEMANTIC_RESOLUTION_CONTRACT_VERSION, build_import_scope_cache, derive_resolution_keys,
+        derive_resolution_keys_with_context, parse_import_references, resolve_relative_import_path,
+        semantic_resolution_contract_digest,
     };
     use crate::{
         ConfiguredModuleResolution, EcmaScriptConfigKind, EcmaScriptModuleConfig,
@@ -926,7 +1217,9 @@ mod tests {
     };
     use projectatlas_core::graph::{CanonicalResolutionKey, ProjectInstanceId};
     use projectatlas_core::language::SemanticProviderOwner;
-    use projectatlas_core::symbols::SymbolGraph;
+    use projectatlas_core::symbols::{
+        CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    };
     use std::error::Error;
     use std::io;
 
@@ -2009,6 +2302,153 @@ mod tests {
                 })
             ),
             "excessive relation-key fan-out was not rejected",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn contract_failure_retains_valid_resolution_projection_siblings() -> Result<(), Box<dyn Error>>
+    {
+        let path = format!("pkg/{0}/{0}/{0}/{0}/page.rs", "d".repeat(100));
+        let imported = "i".repeat(3_800);
+        let mut graph = extract_symbol_graph(
+            &path,
+            Some("rust"),
+            "pub fn caller() { helper(); }\npub fn helper() {}\n",
+        );
+        graph
+            .relations
+            .retain(|relation| relation.kind == RelationKind::Calls);
+        graph.relations.push(SymbolRelation {
+            path,
+            source_name: "<module>".to_string(),
+            target_name: format!("use self::{{{imported}}};"),
+            kind: RelationKind::Imports,
+            line: 1,
+            context: "partial projection fixture".to_string(),
+            parser: ParserKind::TreeSitter,
+        });
+        graph.relations.push(SymbolRelation {
+            path: graph.path.clone(),
+            source_name: "caller".to_string(),
+            target_name: format!("{imported}.member"),
+            kind: RelationKind::Calls,
+            line: 3,
+            context: "partial projection fixture".to_string(),
+            parser: ParserKind::TreeSitter,
+        });
+
+        let result = derive_resolution_keys(project_id(23)?, None, &graph);
+        let Err(ResolutionProjectionError::Contract(failure)) = result else {
+            return Err(io::Error::other(
+                "invalid derived resolution key did not retain a typed contract failure",
+            )
+            .into());
+        };
+        require(
+            !failure.projection().source_keys().is_empty(),
+            "contract failure discarded valid source resolution keys",
+        )?;
+        require(
+            !failure.projection().symbol_keys().is_empty(),
+            "contract failure discarded valid symbol resolution keys",
+        )?;
+        require(
+            failure
+                .projection()
+                .relation_keys()
+                .iter()
+                .any(|relation| relation.relation_index() == 0 && !relation.keys().is_empty()),
+            "contract failure discarded a valid sibling relation key",
+        )?;
+        require(
+            failure
+                .failures()
+                .iter()
+                .all(|failure| !format!("{:?}", failure.error()).contains(&imported)),
+            "contract failure retained rejected raw identity text",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn contract_failure_deduplicates_repeated_facts_after_detail_ceiling()
+    -> Result<(), Box<dyn Error>> {
+        let mut graph = SymbolGraph {
+            path: "src/main.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::with_capacity(super::MAX_RESOLUTION_PROJECTION_FAILURES + 1),
+            relations: Vec::new(),
+        };
+        for index in 0..super::MAX_RESOLUTION_PROJECTION_FAILURES {
+            graph.symbols.push(CodeSymbol {
+                path: graph.path.clone(),
+                language: graph.language.clone(),
+                name: format!("invalid\0{index}"),
+                kind: SymbolKind::Function,
+                signature: "fn invalid()".to_string(),
+                exported: true,
+                documentation: None,
+                line_start: index + 1,
+                line_end: index + 1,
+                source_selector: None,
+                parent: None,
+                parser: ParserKind::TreeSitter,
+                detail: None,
+            });
+        }
+        graph.symbols.push(CodeSymbol {
+            path: graph.path.clone(),
+            language: graph.language.clone(),
+            name: "valid_tail".to_string(),
+            kind: SymbolKind::Function,
+            signature: "fn valid_tail()".to_string(),
+            exported: true,
+            documentation: None,
+            line_start: graph.symbols.len() + 1,
+            line_end: graph.symbols.len() + 1,
+            source_selector: None,
+            parent: Some("\0invalid-parent".to_string()),
+            parser: ParserKind::TreeSitter,
+            detail: None,
+        });
+
+        let Err(ResolutionProjectionError::Contract(failure)) =
+            derive_resolution_keys(project_id(24)?, None, &graph)
+        else {
+            return Err(
+                io::Error::other("repeated post-ceiling failures were not reported").into(),
+            );
+        };
+        require(
+            failure.failures().len() == super::MAX_RESOLUTION_PROJECTION_FAILURES,
+            "detail ceiling retained repeated fact attempts",
+        )?;
+        require(
+            failure.rejected_count() == super::MAX_RESOLUTION_PROJECTION_FAILURES + 1,
+            "repeated post-ceiling fact inflated rejected count",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn supported_typescript_parser_retains_control_bearing_import_identities()
+    -> Result<(), Box<dyn Error>> {
+        let graph = extract_symbol_graph(
+            "src/page.ts",
+            Some("typescript"),
+            "import * as first from './bad\0one';\nimport * as second from './bad\0two';\nexport function caller() { first(); second(); }\n",
+        );
+        require(
+            graph.parser == ParserKind::TreeSitter,
+            "supported TypeScript fixture did not use the semantic parser",
+        )?;
+        require(
+            graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Imports && relation.target_name.contains('\0')
+            }),
+            "supported TypeScript parser did not retain the control-bearing import",
         )?;
         Ok(())
     }

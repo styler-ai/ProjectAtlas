@@ -47,6 +47,91 @@ pub struct ProjectRootTransitionResult {
 }
 
 impl AtlasStore {
+    /// Repair a missing native root identity through an explicit initializer.
+    ///
+    /// Ordinary project opens remain fail-closed when a current database has
+    /// the native identity table but no singleton row. Initialization has the
+    /// caller's selected root as explicit authority, so it may restore that
+    /// row only after proving the selected root is equivalent to the existing
+    /// legacy metadata. The proof is repeated under the write transaction to
+    /// keep a concurrent metadata change from authorizing a different root.
+    ///
+    /// Predecessor and fresh databases are left to their normal initializer;
+    /// this narrow repair handles only an otherwise-current database whose
+    /// native row is incomplete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected root cannot be proven equivalent to
+    /// the existing binding, the current schema or project identity is
+    /// incomplete, or SQLite cannot complete the atomic repair.
+    pub fn repair_missing_project_root_identity(
+        database_path: &Path,
+        destination: &Path,
+    ) -> DbResult<()> {
+        let destination_identity = validate_project_root_destination(destination)?;
+        let (preflight, _) = schema::preflight(database_path, None)?;
+        if preflight.state != SchemaState::Current {
+            return Ok(());
+        }
+        if let Some(found) = read_current_project_root_identity(database_path)? {
+            prove_existing_root_equivalence(destination_identity.as_path(), found.as_path())?;
+            return Ok(());
+        }
+        let legacy = preflight
+            .project_root
+            .as_deref()
+            .ok_or(DbError::ProjectRootMissing)?;
+        prove_existing_root_equivalence(destination_identity.as_path(), Path::new(legacy))?;
+
+        let store = Self::open_with_binding_requirement(
+            database_path,
+            None,
+            None,
+            super::ProjectIdentityRequirement::TransitionOwned,
+        )?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let result = (|| {
+            schema::validate_current_schema_version(&transaction)?;
+            if load_project_identity(&transaction)?.is_none() {
+                return Err(DbError::ProjectInstanceIdentityMissing);
+            }
+            let found_identity = load_project_root_identity(&transaction)?;
+            let selected = if let Some(found) = found_identity.as_ref() {
+                prove_existing_root_equivalence(destination_identity.as_path(), found.as_path())?
+            } else {
+                let legacy = transaction
+                    .query_row(
+                        "SELECT value FROM metadata WHERE key = ?1",
+                        [PROJECT_ROOT_KEY],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .ok_or(DbError::ProjectRootMissing)?;
+                prove_existing_root_equivalence(destination_identity.as_path(), Path::new(&legacy))?
+            };
+            set_project_root_identity(&transaction, &selected)?;
+            set_project_root_metadata(&transaction, &selected)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                transaction.commit()?;
+                Ok(())
+            }
+            Err(operation) => match transaction.rollback() {
+                Ok(()) => Err(operation),
+                Err(rollback) => Err(DbError::TransactionRollback {
+                    operation: Box::new(operation),
+                    rollback,
+                }),
+            },
+        }
+    }
+
     /// Apply an explicit root-binding transition to one database path.
     ///
     /// `destination` must be an absolute existing project directory and is
@@ -302,6 +387,9 @@ fn apply_root_transition_in_transaction(
             store.connection.execute("DELETE FROM graph_coverage", [])?;
             store
                 .connection
+                .execute("DELETE FROM graph_identity_rejections", [])?;
+            store
+                .connection
                 .execute("DELETE FROM graph_relations", [])?;
             store.connection.execute("DELETE FROM graph_entities", [])?;
             let identity = generate_project_identity(&store.connection, found_identity)?;
@@ -496,6 +584,18 @@ pub(crate) fn ensure_project_root_identity_in_transaction(
     let selected = if let Some(found) = found_identity.as_ref() {
         prove_existing_root_equivalence(expected.as_path(), found.as_path())?
     } else {
+        let native_identity_table_exists = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'project_root_identity'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if native_identity_table_exists {
+            return Err(DbError::ProjectRootIdentityMissing);
+        }
         let Some(legacy) = found_metadata.as_deref() else {
             return Err(DbError::ProjectRootMissing);
         };
@@ -686,7 +786,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[allow(clippy::panic_in_result_fn)]
-    fn canonical_root_repairs_equivalent_alias_without_changing_project_identity()
+    fn canonical_root_missing_identity_refuses_even_for_equivalent_alias()
     -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::symlink;
 
@@ -696,11 +796,7 @@ mod tests {
         fs::create_dir(&target)?;
         symlink(&target, &alias)?;
         let database = temp.path().join("projectatlas.db");
-        let initial = AtlasStore::open_for_project(&database, &target)?;
-        let project = initial
-            .project_instance_id()?
-            .ok_or_else(|| io::Error::other("fresh identity is missing"))?;
-        drop(initial);
+        drop(AtlasStore::open_for_project(&database, &target)?);
 
         let connection = Connection::open(&database)?;
         connection.execute(
@@ -710,32 +806,38 @@ mod tests {
         connection.execute("DELETE FROM project_root_identity", [])?;
         drop(connection);
 
-        let repaired = AtlasStore::open_for_project(&database, &alias)?;
-        require_eq(
-            &repaired.project_instance_id()?,
-            &Some(project),
-            "alias repair project identity",
+        let database_before = fs::read(&database)?;
+        let error = AtlasStore::open_for_project(&database, &alias)
+            .err()
+            .ok_or_else(|| io::Error::other("missing native identity unexpectedly repaired"))?;
+        require(
+            matches!(error, DbError::ProjectRootIdentityMissing),
+            "missing native identity returned the wrong error",
         )?;
         require_eq(
-            &repaired.project_root()?,
-            &Some(normalize_metadata_path(&target)),
-            "alias repair display metadata",
+            &fs::read(&database)?,
+            &database_before,
+            "missing native identity database bytes",
+        )?;
+        let connection = Connection::open(&database)?;
+        require_eq(
+            &connection.query_row(
+                "SELECT COUNT(*) FROM project_root_identity WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &0,
+            "missing native identity row",
         )?;
         require_eq(
-            &repaired.project_root_identity()?,
-            &Some(CanonicalProjectRoot::from_path(&target)?),
-            "alias repair native identity",
+            &connection.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [PROJECT_ROOT_KEY],
+                |row| row.get::<_, String>(0),
+            )?,
+            &normalize_metadata_path(&alias),
+            "missing native identity legacy metadata",
         )?;
-        let plan = repaired.connection.query_row(
-            "EXPLAIN QUERY PLAN
-             SELECT root FROM project_root_identity WHERE singleton = 1",
-            [],
-            |row| row.get::<_, String>(3),
-        )?;
-        assert!(
-            plan.contains("INTEGER PRIMARY KEY"),
-            "unexpected root identity plan: {plan}"
-        );
         Ok(())
     }
 
@@ -757,10 +859,9 @@ mod tests {
             "UPDATE metadata SET value = ?1 WHERE key = ?2",
             rusqlite::params![normalize_metadata_path(&alias), PROJECT_ROOT_KEY],
         )?;
-        connection.execute("DELETE FROM project_root_identity", [])?;
         connection.execute_batch(
-            "CREATE TEMP TRIGGER fail_project_root_identity_insert
-             BEFORE INSERT ON project_root_identity
+            "CREATE TEMP TRIGGER fail_project_root_identity_update
+             BEFORE UPDATE OF root ON project_root_identity
              BEGIN SELECT RAISE(ABORT, 'injected root identity failure'); END;",
         )?;
         let expected = CanonicalProjectRoot::from_path(&alias)?;
@@ -773,12 +874,13 @@ mod tests {
             [PROJECT_ROOT_KEY],
             |row| row.get::<_, String>(0),
         )?;
-        let identity_rows =
-            connection.query_row("SELECT COUNT(*) FROM project_root_identity", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+        let identity_rows = connection.query_row(
+            "SELECT COUNT(*) FROM project_root_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
         assert_eq!(metadata, normalize_metadata_path(&alias));
-        assert_eq!(identity_rows, 0);
+        assert_eq!(identity_rows, 1);
         drop(connection);
 
         let connection = Connection::open(&database)?;
@@ -787,12 +889,13 @@ mod tests {
             [PROJECT_ROOT_KEY],
             |row| row.get::<_, String>(0),
         )?;
-        let reopened_identity_rows =
-            connection.query_row("SELECT COUNT(*) FROM project_root_identity", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+        let reopened_identity_rows = connection.query_row(
+            "SELECT COUNT(*) FROM project_root_identity WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
         assert_eq!(reopened_metadata, normalize_metadata_path(&alias));
-        assert_eq!(reopened_identity_rows, 0);
+        assert_eq!(reopened_identity_rows, 1);
         Ok(())
     }
 
@@ -1646,6 +1749,7 @@ mod tests {
         seed_authored_and_graph_state(&mut store, previous_project)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(store);
@@ -1673,7 +1777,7 @@ mod tests {
         )?;
         require_eq(
             &schema_version,
-            &"20".to_string(),
+            &schema::SCHEMA_VERSION.to_string(),
             "schema-19 detach schema",
         )?;
         require_eq(
@@ -1700,7 +1804,7 @@ mod tests {
         let missing_store = AtlasStore::open_for_project(&missing_database, &source_root)?;
         missing_store
             .connection
-            .execute_batch("DROP TABLE project_root_identity; UPDATE metadata SET value = '19' WHERE key = 'schema_version';")?;
+            .execute_batch("DROP TABLE project_root_identity; DROP TABLE IF EXISTS graph_identity_rejections; UPDATE metadata SET value = '19' WHERE key = 'schema_version';")?;
         drop(missing_store);
         let missing_before = fs::read(&missing_database)?;
         fs::remove_dir(&source_root)?;
@@ -1745,6 +1849,7 @@ mod tests {
         let overview_before = store.token_overview(Some("identity-test"))?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';
              PRAGMA wal_checkpoint(TRUNCATE);",
         )?;
@@ -1911,6 +2016,7 @@ mod tests {
         assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
         )?;
         drop(store);
@@ -2221,6 +2327,7 @@ mod tests {
 
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;
              UPDATE metadata SET value = '19' WHERE key = 'schema_version';
              PRAGMA wal_checkpoint(TRUNCATE);",
         )?;

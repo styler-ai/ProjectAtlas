@@ -10477,8 +10477,16 @@ mod tests {
             20,
         );
         let rooted_instance = UsageInstanceId::from_bytes([7; 16])?;
+        let native_root_row;
         {
             let store = AtlasStore::open_for_project(&database, &root)?;
+            native_root_row = store.connection.query_row(
+                "SELECT codec_version, root
+                   FROM project_root_identity
+                  WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
             store.record_usage(&event)?;
             store.record_usage_for_instance(
                 rooted_instance,
@@ -10596,6 +10604,14 @@ mod tests {
         )?;
         drop(reader);
 
+        let repair = Connection::open(&database)?;
+        schema::configure_writable(&repair)?;
+        repair.execute(
+            "INSERT INTO project_root_identity(singleton, codec_version, root)
+             VALUES(1, ?1, ?2)",
+            params![native_root_row.0, native_root_row.1],
+        )?;
+        drop(repair);
         let repaired = AtlasStore::open_for_project(&database, &root)?;
         repaired.record_usage(&usage_from_estimates(
             "repaired-telemetry",
@@ -12533,7 +12549,8 @@ mod tests {
              DROP TABLE worktree_usage_aggregates;
              DROP TABLE worktree_registrations;
              DROP TABLE usage_aggregate_revisions;
-             DROP TABLE project_root_identity;",
+             DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;",
         )?;
         crate::schema::recreate_disposable_graph_projection(&store.connection, false)?;
         crate::schema::recreate_pre_selector_symbol_storage_for_test(&store.connection)?;
