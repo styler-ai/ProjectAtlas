@@ -10363,6 +10363,37 @@ fn prepare_real_host_fixture(
     })
 }
 
+fn run_real_host_installer_repair(
+    repo: &Path,
+    runtime: &Path,
+    host_root: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let mut installer = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        repo,
+        runtime,
+        None,
+        Some(host_root),
+    )?;
+    configure_real_host_environment(&mut installer, host_root, None)?;
+    installer
+        .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PROJECTATLAS_RUNTIME_PATH", runtime)
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1");
+    let output = run_bounded_output(installer, "real-host installer repair")?;
+    require(
+        output.status.success(),
+        format!(
+            "real-host installer repair failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
 fn snapshot_real_host_tree(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Box<dyn Error>> {
     let mut pending = vec![root.to_path_buf()];
     let mut snapshot = BTreeMap::new();
@@ -11419,91 +11450,52 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
     compile_obsolete_projectatlas_fixture(&runtime)?;
     // This controlled native-host fixture intentionally uses the existing #523 owner fixture
     // contract: it publishes one exact descendant identity, then waits while that MCP child is
-    // live. The timeout path therefore exercises the accepted identity-safe ownership helpers.
+    // live. The timeout path therefore exercises the same real-host runner used by Claude Code
+    // and OpenCode, including its identity-safe descendant cleanup seam.
     let native_host_fixture = temp.path().join("native-host-owner.exe");
     compile_codex_mcp_owner_fixture(&native_host_fixture)?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let database = temp.path().join("projectatlas.db");
+    let host_root = temp.path().join("host-root");
     fs::create_dir_all(&repo)?;
+    fs::create_dir_all(&host_root)?;
 
     for attempt in 0..2 {
         let identity_file = temp.path().join(format!("native-host-owned-{attempt}.pid"));
-        let (parent, child_identity) = spawn_codex_owned_obsolete_mcp(
+        let arguments = vec![
+            identity_file.to_string_lossy().into_owned(),
+            runtime.to_string_lossy().into_owned(),
+            database.to_string_lossy().into_owned(),
+        ];
+        let timeout_result = run_real_host_command_with_owned_mcp_descendant(
             &native_host_fixture,
-            &runtime,
-            &database,
+            &repo,
+            &host_root,
             None,
+            &arguments,
+            &[],
             &identity_file,
-            None,
-            None,
-        )?;
-        let parent_identity = capture_windows_process_identity(parent.id())?;
-        require(
-            windows_process_is_alive(&parent_identity)?
-                && windows_process_is_alive(&child_identity)?,
-            format!(
-                "native host timeout fixture did not establish a live owned tree before attempt {attempt}"
-            ),
-        )?;
-
-        let mut descendant_cleanup = None;
-        let mut parent_kill_attempted = false;
-        let mut owned_parent = Some(parent);
-        let timeout_result = {
-            let parent = owned_parent.take().ok_or_else(|| {
-                io::Error::other("native host timeout parent was already consumed")
-            })?;
-            wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
-                parent,
-                "real host reader",
-                REAL_HOST_READER_TIMEOUT,
-                None,
-                None,
-                None,
-                &mut |parent| {
-                    let descendant_result =
-                        stop_windows_fixture_process(&child_identity).map_err(|error| {
-                            io::Error::other(format!(
-                                "native host timeout descendant cleanup failed: {error}"
-                            ))
-                        });
-                    descendant_cleanup = Some(descendant_result);
-                    parent_kill_attempted = true;
-                    parent.kill()
-                },
-                None,
-            )
-        };
+            &runtime,
+        );
         let timeout_text = timeout_result
             .as_ref()
             .err()
             .map(ToString::to_string)
             .unwrap_or_default();
-        let cleanup_result = descendant_cleanup
-            .take()
-            .ok_or_else(|| io::Error::other("native host timeout skipped descendant cleanup"))?;
-        if let Some(parent) = owned_parent {
-            let fallback = cleanup_codex_owner_processes(parent, &child_identity);
-            return Err(io::Error::other(format!(
-                "native host timeout did not consume and reap its owned parent: result={timeout_result:?} fallback_cleanup={fallback:?}"
-            ))
-            .into());
-        }
-        cleanup_result?;
         require(
-            parent_kill_attempted
-                && timeout_result.is_err()
+            timeout_result.is_err()
                 && timeout_text.contains("real host reader plugin installer exceeded")
                 && timeout_text.contains("status "),
             format!(
-                "native host timeout did not preserve bounded timeout classification: {timeout_result:?}"
+                "native host runner timeout did not preserve bounded timeout classification: {timeout_result:?}"
             ),
         )?;
+        let child_identity =
+            read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
         require(
-            !windows_process_is_alive(&child_identity)?
-                && !windows_process_is_alive(&parent_identity)?,
+            !windows_process_is_alive(&child_identity)?,
             format!(
-                "native host timeout left a matching owned descendant or parent alive on attempt {attempt}: child={child_identity:?} parent={parent_identity:?}"
+                "native host runner timeout left its matching owned descendant alive on attempt {attempt}: child={child_identity:?}"
             ),
         )?;
     }
@@ -11726,6 +11718,48 @@ fn run_real_host_command_with_environment(
     arguments: &[String],
     environment: &[(&str, &str)],
 ) -> Result<std::process::Output, Box<dyn Error>> {
+    run_real_host_command_inner(
+        executable,
+        repo,
+        host_root,
+        opencode_config,
+        arguments,
+        environment,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn run_real_host_command_with_owned_mcp_descendant(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    opencode_config: Option<&Path>,
+    arguments: &[String],
+    environment: &[(&str, &str)],
+    descendant_identity_file: &Path,
+    stable_runtime: &Path,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    run_real_host_command_inner(
+        executable,
+        repo,
+        host_root,
+        opencode_config,
+        arguments,
+        environment,
+        Some((descendant_identity_file, stable_runtime)),
+    )
+}
+
+fn run_real_host_command_inner(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    opencode_config: Option<&Path>,
+    arguments: &[String],
+    environment: &[(&str, &str)],
+    owned_descendant: Option<(&Path, &Path)>,
+) -> Result<std::process::Output, Box<dyn Error>> {
     let mut command = host_command(executable);
     command
         .current_dir(repo)
@@ -11735,6 +11769,17 @@ fn run_real_host_command_with_environment(
     for (key, value) in environment {
         command.env(key, value);
     }
+    #[cfg(windows)]
+    if let Some((descendant_identity_file, stable_runtime)) = owned_descendant {
+        return run_bounded_output_with_owned_mcp_descendant(
+            command,
+            "real host reader",
+            descendant_identity_file,
+            stable_runtime,
+        );
+    }
+    #[cfg(not(windows))]
+    let _ = owned_descendant;
     run_bounded_output(command, "real host reader")
 }
 
@@ -11894,6 +11939,95 @@ fn verify_claude_native_reader(
         debug_lower.contains("hastools\":true")
             && debug_lower.contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))),
         format!("Claude Code native MCP health check omitted tools/runtime identity: {debug}"),
+    )?;
+
+    // Keep the unrelated native project entry as the host-state witness while
+    // corrupting only the installer-owned generated ProjectAtlas entry. Rerun
+    // the real installer, then make Claude consume the repaired generated file
+    // through its strict native reader.
+    let unrelated_native_state = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        unrelated_native_state.contains("unrelated"),
+        format!(
+            "Claude native host reader did not expose the unrelated entry before installer repair: {unrelated_native_state}"
+        ),
+    )?;
+    let unrelated_native_line = unrelated_native_state
+        .lines()
+        .find(|line| line.contains("unrelated"))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            io::Error::other("Claude native host reader omitted unrelated entry line")
+        })?;
+    let mut corrupted_generated = read_json_file(generated_config)?;
+    corrupted_generated["mcpServers"]["projectatlas"]["command"] = Value::String(
+        host_root
+            .join(MISSING_PROJECTATLAS_RUNTIME_NAME)
+            .display()
+            .to_string(),
+    );
+    let corrupted_arguments = corrupted_generated["mcpServers"]["projectatlas"]["args"]
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("Claude generated args were not mutable"))?;
+    let version_index = corrupted_arguments
+        .iter()
+        .position(|argument| argument.as_str() == Some("--require-version"))
+        .and_then(|index| index.checked_add(1))
+        .ok_or_else(|| io::Error::other("Claude generated args omitted version guard"))?;
+    corrupted_arguments[version_index] = Value::String("0.0.0".to_owned());
+    fs::write(
+        generated_config,
+        serde_json::to_vec_pretty(&corrupted_generated)?,
+    )?;
+    run_real_host_installer_repair(repo, runtime, host_root)?;
+    let repaired_generated = read_json_file(generated_config)?;
+    let (repaired_runtime, repaired_arguments) =
+        generated_host_launch(&repaired_generated, "claude")?;
+    require(
+        repaired_runtime == runtime.to_path_buf()
+            && repaired_arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--require-version" && pair[1] == env!("CARGO_PKG_VERSION")),
+        format!(
+            "Claude installer repair did not restore its owned generated entry: {repaired_generated}"
+        ),
+    )?;
+    let repaired_reader_arguments = vec![
+        "--bare".to_owned(),
+        "--strict-mcp-config".to_owned(),
+        "--mcp-config".to_owned(),
+        generated_config.to_string_lossy().into_owned(),
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "Return exactly OK.".to_owned(),
+    ];
+    let repaired_reader = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        None,
+        &repaired_reader_arguments,
+    )?;
+    let repaired_reader_text = host_output_text(&repaired_reader);
+    require(
+        !repaired_reader.status.success()
+            && repaired_reader_text
+                .to_ascii_lowercase()
+                .contains("not logged in"),
+        format!(
+            "Claude native reader did not consume the installer-repaired generated config before its expected unauthenticated refusal: {repaired_reader_text}"
+        ),
+    )?;
+    let repaired_native_state = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        repaired_native_state
+            .lines()
+            .find(|line| line.contains("unrelated"))
+            .is_some_and(|line| line == unrelated_native_line),
+        format!(
+            "Claude installer repair changed the unrelated native project entry: {repaired_native_state}"
+        ),
     )?;
     let get_output = run_real_host_command(
         executable,
@@ -12258,67 +12392,10 @@ fn verify_opencode_native_reader(
         format!("OpenCode did not fail closed for wrong-version config: {text}"),
     )?;
 
-    // A repaired config may change only the owned MCP command while retaining
-    // unrelated host settings. The native reader must reject the stale route,
-    // then connect the repaired route without losing that setting.
-    let repaired_config = host_root.join("opencode-repaired.json");
-    let mut repaired = read_json_file(generated_config)?;
-    repaired["mcp"]["unrelated"] = repaired["mcp"]["projectatlas"].clone();
-    repaired["mcp"]["projectatlas"]["command"][0] = Value::String(
-        host_root
-            .join(MISSING_PROJECTATLAS_RUNTIME_NAME)
-            .display()
-            .to_string(),
-    );
-    fs::write(&repaired_config, serde_json::to_vec_pretty(&repaired)?)?;
-    let output = run_real_host_command(
-        executable,
-        repo,
-        host_root,
-        Some(&repaired_config),
-        &["mcp", "list"].map(str::to_owned),
-    )?;
-    let text = host_output_text(&output);
-    require(
-        output.status.success()
-            && text.contains("projectatlas")
-            && text.to_ascii_lowercase().contains("failed")
-            && text.contains("unrelated"),
-        format!("OpenCode did not fail closed for repaired stale config: {text}"),
-    )?;
-    let generated_command =
-        read_json_file(generated_config)?["mcp"]["projectatlas"]["command"].clone();
-    repaired["mcp"]["projectatlas"]["command"] = generated_command;
-    fs::write(&repaired_config, serde_json::to_vec_pretty(&repaired)?)?;
-    let output = run_real_host_command(
-        executable,
-        repo,
-        host_root,
-        Some(&repaired_config),
-        &["mcp", "list"].map(str::to_owned),
-    )?;
-    let text = host_output_text(&output);
-    require(
-        output.status.success()
-            && text.contains("projectatlas")
-            && text.to_ascii_lowercase().contains("connected"),
-        format!("OpenCode native repair did not reconnect generated command: {text}"),
-    )?;
-    let repaired_resolved = run_real_host_command(
-        executable,
-        repo,
-        host_root,
-        Some(&repaired_config),
-        &["debug", "config"].map(str::to_owned),
-    )?;
-    let resolved_text = host_output_text(&repaired_resolved);
-    require(
-        repaired_resolved.status.success() && resolved_text.contains("unrelated"),
-        format!("OpenCode native repair changed unrelated settings: {resolved_text}"),
-    )?;
-
-    // The shared default registry and the explicit generated path must both
-    // consume the same project-scoped entry without ambient user state.
+    // Keep an unrelated native registry entry as the host-state witness while
+    // corrupting only the installer-owned generated ProjectAtlas entry. Rerun
+    // the real installer, then make OpenCode consume the repaired generated
+    // file through its native reader.
     let shared_config = host_root
         .join(ISOLATED_XDG_CONFIG_DIR_NAME)
         .join(OPENCODE_CONFIG_DIR_NAME)
@@ -12327,7 +12404,66 @@ fn verify_opencode_native_reader(
         .parent()
         .ok_or_else(|| io::Error::other("shared OpenCode config has no parent"))?;
     fs::create_dir_all(shared_parent)?;
-    fs::copy(generated_config, &shared_config)?;
+    let mut unrelated_registry = generated;
+    unrelated_registry["mcp"]["unrelated"] = unrelated_registry["mcp"]["projectatlas"].clone();
+    fs::write(
+        &shared_config,
+        serde_json::to_vec_pretty(&unrelated_registry)?,
+    )?;
+    let unrelated_host_state = fs::read(&shared_config)?;
+
+    let mut corrupted_generated = read_json_file(generated_config)?;
+    corrupted_generated["mcp"]["projectatlas"]["command"][0] = Value::String(
+        host_root
+            .join(MISSING_PROJECTATLAS_RUNTIME_NAME)
+            .display()
+            .to_string(),
+    );
+    let corrupted_command = corrupted_generated["mcp"]["projectatlas"]["command"]
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("OpenCode generated command was not mutable"))?;
+    let corrupted_version_index = corrupted_command
+        .iter()
+        .position(|argument| argument.as_str() == Some("--require-version"))
+        .and_then(|index| index.checked_add(1))
+        .ok_or_else(|| io::Error::other("OpenCode generated command omitted version guard"))?;
+    corrupted_command[corrupted_version_index] = Value::String("0.0.0".to_owned());
+    fs::write(
+        generated_config,
+        serde_json::to_vec_pretty(&corrupted_generated)?,
+    )?;
+    run_real_host_installer_repair(repo, &generated_runtime, host_root)?;
+    let repaired_generated = read_json_file(generated_config)?;
+    let (repaired_runtime, repaired_arguments) =
+        generated_host_launch(&repaired_generated, "opencode")?;
+    require(
+        repaired_runtime == generated_runtime
+            && repaired_arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--require-version" && pair[1] == env!("CARGO_PKG_VERSION")),
+        format!(
+            "OpenCode installer repair did not restore its owned generated entry: {repaired_generated}"
+        ),
+    )?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(generated_config),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success()
+            && text.contains("projectatlas")
+            && text.to_ascii_lowercase().contains("connected"),
+        format!(
+            "OpenCode native reader did not consume the installer-repaired generated config: {text}"
+        ),
+    )?;
+
+    // The shared default registry and the explicit generated path must both
+    // consume the same project-scoped entry without ambient user state.
     let output = run_real_host_command(
         executable,
         repo,
@@ -12339,8 +12475,10 @@ fn verify_opencode_native_reader(
     require(
         output.status.success()
             && text.contains("projectatlas")
-            && text.to_ascii_lowercase().contains("connected"),
-        format!("OpenCode shared default registry did not connect generated MCP entry: {text}"),
+            && text.contains("unrelated")
+            && text.to_ascii_lowercase().contains("connected")
+            && fs::read(&shared_config)? == unrelated_host_state,
+        format!("OpenCode installer repair changed unrelated native registry state: {text}"),
     )?;
 
     fs::remove_file(&shared_config)?;
@@ -41976,6 +42114,67 @@ fn run_bounded_output(
 ) -> Result<std::process::Output, Box<dyn Error>> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     wait_for_plugin_installer_output(command.spawn()?, label, Duration::from_secs(30))
+}
+
+#[cfg(windows)]
+fn run_bounded_output_with_owned_mcp_descendant(
+    mut command: StdCommand,
+    label: &str,
+    descendant_identity_file: &Path,
+    stable_runtime: &Path,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut stop_owned_descendant = |host: &mut Child| -> io::Result<()> {
+        let retained_identity_file = codex_owner_retained_identity_path(descendant_identity_file);
+        let identity = read_codex_owner_child_identity_until_published(
+            &retained_identity_file,
+            stable_runtime,
+            CODEX_OWNER_CHILD_STOP_BUDGET,
+        )
+        .map_err(|error| {
+            io::Error::other(format!("owned MCP identity validation failed: {error}"))
+        })?;
+        stop_windows_fixture_process(&identity).map_err(|error| {
+            io::Error::other(format!("owned MCP descendant cleanup failed: {error}"))
+        })?;
+        host.kill()
+    };
+    wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+        command.spawn()?,
+        label,
+        REAL_HOST_READER_TIMEOUT,
+        None,
+        None,
+        None,
+        &mut stop_owned_descendant,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn read_codex_owner_child_identity_until_published(
+    identity_file: &Path,
+    stable_runtime: &Path,
+    timeout: Duration,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("owned MCP identity deadline overflowed"))?;
+    loop {
+        match read_codex_owner_child_identity_with_test_delay(
+            identity_file,
+            stable_runtime,
+            deadline,
+            None,
+        ) {
+            Ok(identity) => return Ok(identity),
+            Err(_error) if !identity_file.is_file() && Instant::now() < deadline => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(Duration::from_millis(25).min(remaining));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Convert one host-reader invariant into a bounded integration-test error.
