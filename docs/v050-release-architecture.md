@@ -428,7 +428,8 @@ flowchart LR
 ```mermaid
 flowchart TB
   installer[Installer] --> identity[Canonical verified runtime identity]
-  identity --> collision{Existing atlas command?}
+  identity --> locks[Discover destination plus owned source; acquire canonical locks ascending; hold lifecycle; release reverse]
+  locks --> collision{Existing atlas command?}
   collision -->|unmanaged| reject[Typed collision; no overwrite]
   collision -->|owned current| stage[Stage shim and provenance]
   collision -->|owned prior target| stage

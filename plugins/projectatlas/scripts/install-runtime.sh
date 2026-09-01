@@ -155,9 +155,24 @@ atlas_forwarder_state_path() {
 atlas_forwarder_lifecycle_lock_path=
 atlas_forwarder_lifecycle_lock_root=
 atlas_forwarder_lifecycle_lock_identity=
+atlas_forwarder_lifecycle_lock_count=0
+atlas_forwarder_lifecycle_lock_path_1=
+atlas_forwarder_lifecycle_lock_root_1=
+atlas_forwarder_lifecycle_lock_identity_1=
+atlas_forwarder_lifecycle_lock_path_2=
+atlas_forwarder_lifecycle_lock_root_2=
+atlas_forwarder_lifecycle_lock_identity_2=
 
-acquire_atlas_forwarder_lifecycle_lock() {
+acquire_atlas_forwarder_lifecycle_lock_fd() {
   forwarder=$1
+  lock_fd=$2
+  case "$lock_fd" in
+    7|8) ;;
+    *)
+      printf '%s\n' "ProjectAtlas received an unsupported atlas forwarder lifecycle lock descriptor: $lock_fd" >&2
+      return 1
+      ;;
+  esac
   state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
   lock_root=$(dirname -- "$state_path")
   mkdir -p -- "$lock_root" || {
@@ -179,7 +194,11 @@ acquire_atlas_forwarder_lifecycle_lock() {
     return 1
   fi
 
-  exec 8<> "$lock_path" || return 1
+  if [ "$lock_fd" = 8 ]; then
+    exec 8<> "$lock_path" || return 1
+  else
+    exec 7<> "$lock_path" || return 1
+  fi
   lock_acquired=false
   lock_platform=$(uname -s 2>/dev/null || true)
   lock_device=${lock_identity%%:*}
@@ -189,18 +208,40 @@ acquire_atlas_forwarder_lifecycle_lock() {
     lock_runtime=$(find_projectatlas || true)
   fi
   if [ "$lock_platform" = Darwin ]; then
-    [ -n "$lock_runtime" ] &&
-      "$lock_runtime" acquire-installer-lock "$lock_device" "$lock_inode" <&8 && lock_acquired=true
-  elif command -v flock >/dev/null 2>&1; then
     if [ -n "$lock_runtime" ]; then
-      "$lock_runtime" acquire-installer-lock "$lock_device" "$lock_inode" <&8 &&
-        flock -w 30 8 && lock_acquired=true
+      if [ "$lock_fd" = 8 ]; then
+        "$lock_runtime" acquire-installer-lock "$lock_device" "$lock_inode" <&8 && lock_acquired=true
+      else
+        "$lock_runtime" acquire-installer-lock "$lock_device" "$lock_inode" <&7 && lock_acquired=true
+      fi
+    fi
+  elif command -v flock >/dev/null 2>&1; then
+    if [ "$lock_fd" = 8 ]; then
+      if [ -n "$lock_runtime" ]; then
+        if "$lock_runtime" acquire-installer-lock "$lock_device" "$lock_inode" <&8 &&
+          flock -w 30 8; then
+          lock_acquired=true
+        fi
+      elif flock -w 30 8; then
+        lock_acquired=true
+      fi
     else
-      flock -w 30 8 && lock_acquired=true
+      if [ -n "$lock_runtime" ]; then
+        if "$lock_runtime" acquire-installer-lock "$lock_device" "$lock_inode" <&7 &&
+          flock -w 30 7; then
+          lock_acquired=true
+        fi
+      elif flock -w 30 7; then
+        lock_acquired=true
+      fi
     fi
   fi
   if [ "$lock_acquired" != true ]; then
-    exec 8>&-
+    if [ "$lock_fd" = 8 ]; then
+      exec 8>&-
+    else
+      exec 7>&-
+    fi
     printf '%s\n' "ProjectAtlas atlas forwarder lifecycle is busy or no supported lock utility is available: $forwarder" >&2
     return 1
   fi
@@ -209,40 +250,139 @@ acquire_atlas_forwarder_lifecycle_lock() {
   current_lock_links=$(stat -c %h -- "$lock_path" 2>/dev/null || stat -f %l "$lock_path" 2>/dev/null || true)
   if [ -L "$lock_path" ] || [ ! -f "$lock_path" ] || [ "$current_lock_links" != 1 ] ||
     [ "$current_lock_identity" != "$lock_identity" ]; then
-    exec 8>&-
+    if [ "$lock_fd" = 8 ]; then
+      exec 8>&-
+    else
+      exec 7>&-
+    fi
     printf '%s\n' "ProjectAtlas atlas forwarder lifecycle lock changed while acquiring: $lock_path" >&2
     return 1
   fi
-  atlas_forwarder_lifecycle_lock_path=$lock_path
-  atlas_forwarder_lifecycle_lock_root=$lock_root
-  atlas_forwarder_lifecycle_lock_identity=$lock_identity
+  atlas_forwarder_lifecycle_lock_acquired_path=$lock_path
+  atlas_forwarder_lifecycle_lock_acquired_root=$lock_root
+  atlas_forwarder_lifecycle_lock_acquired_identity=$lock_identity
+}
+
+acquire_atlas_forwarder_lifecycle_lock() {
+  acquire_atlas_forwarder_lifecycle_lock_fd "$1" 8 || return 1
+  atlas_forwarder_lifecycle_lock_path=$atlas_forwarder_lifecycle_lock_acquired_path
+  atlas_forwarder_lifecycle_lock_root=$atlas_forwarder_lifecycle_lock_acquired_root
+  atlas_forwarder_lifecycle_lock_identity=$atlas_forwarder_lifecycle_lock_acquired_identity
+}
+
+release_atlas_forwarder_lifecycle_lock_fd() {
+  lock_fd=$1
+  lock_path=$2
+  lock_root=$3
+  expected_lock_identity=$4
+  if [ -z "$lock_path" ]; then
+    return 0
+  fi
+  lock_parent=$(dirname -- "$lock_path")
+  lock_parent_resolved=$(CDPATH= cd -P -- "$lock_parent" 2>/dev/null && pwd -P) || lock_parent_resolved=
+  lock_identity=
+  if [ -f "$lock_path" ] && [ ! -L "$lock_path" ]; then
+    lock_identity=$(stat -c '%d:%i' -- "$lock_path" 2>/dev/null || stat -f '%d:%i' "$lock_path" 2>/dev/null || true)
+  fi
+  lock_links=$(stat -c %h -- "$lock_path" 2>/dev/null || stat -f %l "$lock_path" 2>/dev/null || true)
+  lock_release_valid=true
+  if [ "$lock_parent_resolved" != "$lock_root" ] ||
+    [ -L "$lock_path" ] || [ ! -f "$lock_path" ] ||
+    [ "$lock_identity" != "$expected_lock_identity" ] || [ "$lock_links" != 1 ]; then
+    lock_release_valid=false
+  fi
+  if [ "$lock_fd" = 8 ]; then
+    exec 8>&-
+  else
+    exec 7>&-
+  fi
+  if [ "$lock_release_valid" != true ]; then
+    printf '%s\n' "ProjectAtlas atlas forwarder lifecycle lock cleanup refused/path changed: $lock_path" >&2
+    return 1
+  fi
 }
 
 release_atlas_forwarder_lifecycle_lock() {
   if [ -z "$atlas_forwarder_lifecycle_lock_path" ]; then
     return 0
   fi
-  lock_parent=$(dirname -- "$atlas_forwarder_lifecycle_lock_path")
-  lock_parent_resolved=$(CDPATH= cd -P -- "$lock_parent" 2>/dev/null && pwd -P) || lock_parent_resolved=
-  lock_identity=
-  if [ -f "$atlas_forwarder_lifecycle_lock_path" ] && [ ! -L "$atlas_forwarder_lifecycle_lock_path" ]; then
-    lock_identity=$(stat -c '%d:%i' -- "$atlas_forwarder_lifecycle_lock_path" 2>/dev/null || stat -f '%d:%i' "$atlas_forwarder_lifecycle_lock_path" 2>/dev/null || true)
-  fi
-  lock_links=$(stat -c %h -- "$atlas_forwarder_lifecycle_lock_path" 2>/dev/null || stat -f %l "$atlas_forwarder_lifecycle_lock_path" 2>/dev/null || true)
-  lock_release_valid=true
-  if [ "$lock_parent_resolved" != "$atlas_forwarder_lifecycle_lock_root" ] ||
-    [ -L "$atlas_forwarder_lifecycle_lock_path" ] || [ ! -f "$atlas_forwarder_lifecycle_lock_path" ] ||
-    [ "$lock_identity" != "$atlas_forwarder_lifecycle_lock_identity" ] || [ "$lock_links" != 1 ]; then
-    lock_release_valid=false
-  fi
-  exec 8>&-
+  result=0
+  release_atlas_forwarder_lifecycle_lock_fd 8 \
+    "$atlas_forwarder_lifecycle_lock_path" \
+    "$atlas_forwarder_lifecycle_lock_root" \
+    "$atlas_forwarder_lifecycle_lock_identity" || result=$?
   atlas_forwarder_lifecycle_lock_path=
   atlas_forwarder_lifecycle_lock_root=
   atlas_forwarder_lifecycle_lock_identity=
-  if [ "$lock_release_valid" != true ]; then
-    printf '%s\n' "ProjectAtlas atlas forwarder lifecycle lock cleanup refused/path changed: $lock_parent/.atlas-forwarder-*.lock" >&2
-    return 1
+  return "$result"
+}
+
+acquire_atlas_forwarder_lifecycle_lock_set() {
+  # A write can retire one prior owned source, so acquire both identities in a
+  # stable order before either forwarder lifecycle is allowed to mutate.
+  destination=$1
+  source=${2:-}
+  destination_key=$(canonical_file "$destination") || return 1
+  source_key=
+  if [ -n "$source" ]; then
+    source_key=$(canonical_file "$source") || return 1
   fi
+  first_forwarder=$destination
+  second_forwarder=
+  if [ -n "$source" ] && [ "$source_key" != "$destination_key" ]; then
+    if [ "$source_key" \< "$destination_key" ]; then
+      first_forwarder=$source
+      second_forwarder=$destination
+    else
+      second_forwarder=$source
+    fi
+  fi
+  acquire_atlas_forwarder_lifecycle_lock_fd "$first_forwarder" 8 || return 1
+  first_lock_path=$atlas_forwarder_lifecycle_lock_acquired_path
+  first_lock_root=$atlas_forwarder_lifecycle_lock_acquired_root
+  first_lock_identity=$atlas_forwarder_lifecycle_lock_acquired_identity
+  if [ -n "$second_forwarder" ]; then
+    if ! acquire_atlas_forwarder_lifecycle_lock_fd "$second_forwarder" 7; then
+      release_atlas_forwarder_lifecycle_lock_fd 8 "$first_lock_path" "$first_lock_root" "$first_lock_identity" || true
+      return 1
+    fi
+    atlas_forwarder_lifecycle_lock_count=2
+    atlas_forwarder_lifecycle_lock_path_1=$first_lock_path
+    atlas_forwarder_lifecycle_lock_root_1=$first_lock_root
+    atlas_forwarder_lifecycle_lock_identity_1=$first_lock_identity
+    atlas_forwarder_lifecycle_lock_path_2=$atlas_forwarder_lifecycle_lock_acquired_path
+    atlas_forwarder_lifecycle_lock_root_2=$atlas_forwarder_lifecycle_lock_acquired_root
+    atlas_forwarder_lifecycle_lock_identity_2=$atlas_forwarder_lifecycle_lock_acquired_identity
+  else
+    atlas_forwarder_lifecycle_lock_count=1
+    atlas_forwarder_lifecycle_lock_path_1=$first_lock_path
+    atlas_forwarder_lifecycle_lock_root_1=$first_lock_root
+    atlas_forwarder_lifecycle_lock_identity_1=$first_lock_identity
+  fi
+}
+
+release_atlas_forwarder_lifecycle_lock_set() {
+  result=0
+  if [ "$atlas_forwarder_lifecycle_lock_count" -eq 2 ]; then
+    release_atlas_forwarder_lifecycle_lock_fd 7 \
+      "$atlas_forwarder_lifecycle_lock_path_2" \
+      "$atlas_forwarder_lifecycle_lock_root_2" \
+      "$atlas_forwarder_lifecycle_lock_identity_2" || result=$?
+  fi
+  if [ "$atlas_forwarder_lifecycle_lock_count" -ge 1 ]; then
+    release_atlas_forwarder_lifecycle_lock_fd 8 \
+      "$atlas_forwarder_lifecycle_lock_path_1" \
+      "$atlas_forwarder_lifecycle_lock_root_1" \
+      "$atlas_forwarder_lifecycle_lock_identity_1" || result=$?
+  fi
+  atlas_forwarder_lifecycle_lock_count=0
+  atlas_forwarder_lifecycle_lock_path_1=
+  atlas_forwarder_lifecycle_lock_root_1=
+  atlas_forwarder_lifecycle_lock_identity_1=
+  atlas_forwarder_lifecycle_lock_path_2=
+  atlas_forwarder_lifecycle_lock_root_2=
+  atlas_forwarder_lifecycle_lock_identity_2=
+  return "$result"
 }
 
 new_atlas_forwarder_capability() {
@@ -470,27 +610,6 @@ is_managed_atlas_forwarder() {
   [ "$managed_target" = "$(canonical_file "$verified")" ]
 }
 
-migrate_managed_atlas_forwarder() {
-  candidate=$1
-  candidate_lock=$(atlas_forwarder_state_path "$candidate") || return 1
-  candidate_lock=${candidate_lock%.state}.lock
-  if [ "${atlas_forwarder_lifecycle_lock_path:-}" = "$candidate_lock" ]; then
-    migrate_managed_atlas_forwarder_locked "$@"
-    return $?
-  fi
-  (
-    acquire_atlas_forwarder_lifecycle_lock "$candidate" || exit 1
-    result=0
-    migrate_managed_atlas_forwarder_locked "$@" || result=$?
-    release_result=0
-    release_atlas_forwarder_lifecycle_lock || release_result=$?
-    if [ "$release_result" -ne 0 ] && [ "$result" -eq 0 ]; then
-      result=$release_result
-    fi
-    exit "$result"
-  )
-}
-
 migrate_managed_atlas_forwarder_locked() {
   candidate=$1
   verified=$2
@@ -596,14 +715,43 @@ pause_atlas_forwarder_after_state_publication() {
   done
 }
 
+pause_atlas_forwarder_after_lock_discovery() {
+  gate=${PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_DISCOVERY_GATE:-}
+  [ -n "$gate" ] || return 0
+  printf '%s\n' ready >"$gate.ready"
+  while [ -e "$gate" ] || [ -L "$gate" ]; do
+    sleep 1
+  done
+}
+
+pause_atlas_forwarder_after_lock_acquisition() {
+  gate=${PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ACQUIRED_GATE:-}
+  [ -n "$gate" ] || return 0
+  printf '%s\n' ready >"$gate.ready"
+  while [ -e "$gate" ] || [ -L "$gate" ]; do
+    sleep 1
+  done
+}
+
 write_atlas_forwarder() {
   verified=$(canonical_file "$1") || return 1
   forwarder=$(atlas_forwarder_path "$verified")
-  acquire_atlas_forwarder_lifecycle_lock "$forwarder" || return 1
+  previous_atlas=$(command -v atlas 2>/dev/null || true)
+  previous_atlas_identity=
+  if [ -n "$previous_atlas" ] &&
+    [ "$(canonical_file "$previous_atlas")" != "$(canonical_file "$forwarder")" ] &&
+    is_owned_atlas_forwarder "$previous_atlas"; then
+    previous_atlas_identity=$(canonical_file "$previous_atlas") || return 1
+  else
+    previous_atlas=
+  fi
+  pause_atlas_forwarder_after_lock_discovery
+  acquire_atlas_forwarder_lifecycle_lock_set "$forwarder" "$previous_atlas" || return 1
+  pause_atlas_forwarder_after_lock_acquisition
   result=0
-  write_atlas_forwarder_locked "$verified" || result=$?
+  write_atlas_forwarder_locked "$verified" "$previous_atlas" "$previous_atlas_identity" || result=$?
   release_result=0
-  release_atlas_forwarder_lifecycle_lock || release_result=$?
+  release_atlas_forwarder_lifecycle_lock_set || release_result=$?
   if [ "$release_result" -ne 0 ] && [ "$result" -eq 0 ]; then
     result=$release_result
   fi
@@ -612,10 +760,17 @@ write_atlas_forwarder() {
 
 write_atlas_forwarder_locked() {
   verified=$1
+  previous_atlas=${2:-}
+  previous_atlas_identity=${3:-}
   forwarder=$(atlas_forwarder_path "$verified")
   provenance=$(atlas_forwarder_provenance_path "$forwarder")
   state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
-  previous_atlas=$(command -v atlas 2>/dev/null || true)
+  if [ -n "$previous_atlas" ] &&
+    { [ "$(canonical_file "$previous_atlas")" != "$previous_atlas_identity" ] ||
+      ! is_owned_atlas_forwarder "$previous_atlas"; }; then
+    printf '%s\n' "ProjectAtlas atlas forwarder migration source changed or is no longer managed: $previous_atlas" >&2
+    return 1
+  fi
   ensure_atlas_forwarder_collision_free "$forwarder" "$verified" || return 1
   runtime_dir=$(dirname -- "$verified")
   temporary=$(mktemp "$runtime_dir/.atlas-forwarder.XXXXXX") || {
@@ -733,8 +888,8 @@ write_atlas_forwarder_locked() {
     printf '%s\n' "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder" >&2
     return 1
   fi
-  if [ -n "$previous_atlas" ] && [ "$(canonical_file "$previous_atlas")" != "$(canonical_file "$forwarder")" ] && is_owned_atlas_forwarder "$previous_atlas"; then
-    migrate_managed_atlas_forwarder "$previous_atlas" "$verified" || return 1
+  if [ -n "$previous_atlas" ]; then
+    migrate_managed_atlas_forwarder_locked "$previous_atlas" "$verified" || return 1
     hash -r 2>/dev/null || true
   fi
   printf 'ProjectAtlas atlas forwarder installed and verified: %s -> %s\n' "$forwarder" "$verified"
@@ -767,7 +922,7 @@ remove_atlas_forwarder_locked() {
     printf '%s\n' "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $forwarder" >&2
     return 1
   fi
-  migrate_managed_atlas_forwarder "$forwarder" "$verified" 1 || {
+  migrate_managed_atlas_forwarder_locked "$forwarder" "$verified" 1 || {
     printf '%s\n' "ProjectAtlas atlas uninstall could not retire the owned forwarder safely: $forwarder" >&2
     return 1
   }

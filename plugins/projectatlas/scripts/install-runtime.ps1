@@ -2086,18 +2086,29 @@ function Get-ProjectAtlasAtlasForwarderStatePath {
     return Join-Path (Get-ProjectAtlasAtlasForwarderStateRoot) ("atlas-forwarder-$digest.state")
 }
 
-function Enter-ProjectAtlasAtlasForwarderLifecycleLock {
+function Get-ProjectAtlasAtlasForwarderLifecycleLockKey {
     param(
         [string]$ForwarderPath
     )
+    $canonicalForwarderPath = Get-NormalizedPathEntry $ForwarderPath
+    $lockIdentity = $canonicalForwarderPath.ToLowerInvariant()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($lockIdentity)
+    return [pscustomobject]@{
+        ForwarderPath = $canonicalForwarderPath
+        SortKey = $lockIdentity
+        Digest = Get-ProjectAtlasSha256FromBytes $bytes
+    }
+}
+
+function Enter-ProjectAtlasAtlasForwarderLifecycleLockKey {
+    param(
+        [object]$LockKey
+    )
     $mutex = $null
     try {
-        $canonicalForwarderPath = Get-NormalizedPathEntry $ForwarderPath
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($canonicalForwarderPath.ToLowerInvariant())
-        $digest = Get-ProjectAtlasSha256FromBytes $bytes
         $mutex = [System.Threading.Mutex]::new(
             $false,
-            "Global\ProjectAtlas-AtlasForwarderLifecycle-$digest"
+            "Global\ProjectAtlas-AtlasForwarderLifecycle-$($LockKey.Digest)"
         )
         $acquired = $false
         try {
@@ -2107,11 +2118,12 @@ function Enter-ProjectAtlasAtlasForwarderLifecycleLock {
             $acquired = $true
         }
         if (-not $acquired) {
-            throw "ProjectAtlas atlas forwarder lifecycle is busy; another installer owns the bounded lock for $canonicalForwarderPath."
+            throw "ProjectAtlas atlas forwarder lifecycle is busy; another installer owns the bounded lock for $($LockKey.ForwarderPath)."
         }
         return [pscustomobject]@{
             Mutex = $mutex
-            ForwarderPath = $canonicalForwarderPath
+            ForwarderPath = $LockKey.ForwarderPath
+            SortKey = $LockKey.SortKey
         }
     }
     catch {
@@ -2119,6 +2131,61 @@ function Enter-ProjectAtlasAtlasForwarderLifecycleLock {
             $mutex.Dispose()
         }
         throw
+    }
+}
+
+function Enter-ProjectAtlasAtlasForwarderLifecycleLock {
+    param(
+        [string]$ForwarderPath
+    )
+    Enter-ProjectAtlasAtlasForwarderLifecycleLockKey (
+        Get-ProjectAtlasAtlasForwarderLifecycleLockKey $ForwarderPath)
+}
+
+function Enter-ProjectAtlasAtlasForwarderLifecycleLockSet {
+    param(
+        [string]$DestinationPath,
+        [string]$SourcePath
+    )
+    $keys = @(
+        Get-ProjectAtlasAtlasForwarderLifecycleLockKey $DestinationPath
+    )
+    if (-not [string]::IsNullOrWhiteSpace($SourcePath)) {
+        $sourceKey = Get-ProjectAtlasAtlasForwarderLifecycleLockKey $SourcePath
+        if ($sourceKey.SortKey -cne $keys[0].SortKey) {
+            $keys += $sourceKey
+        }
+    }
+    if ($keys.Count -eq 2 -and [string]::CompareOrdinal($keys[0].SortKey, $keys[1].SortKey) -gt 0) {
+        $temporaryKey = $keys[0]
+        $keys[0] = $keys[1]
+        $keys[1] = $temporaryKey
+    }
+    $locks = [System.Collections.Generic.List[object]]::new()
+    try {
+        foreach ($key in $keys) {
+            $lock = Enter-ProjectAtlasAtlasForwarderLifecycleLockKey $key
+            $locks.Add($lock) | Out-Null
+        }
+        return [pscustomobject]@{
+            Locks = $locks
+        }
+    }
+    catch {
+        $originalError = $_
+        $cleanupErrors = @()
+        for ($index = $locks.Count - 1; $index -ge 0; $index--) {
+            try {
+                Exit-ProjectAtlasAtlasForwarderLifecycleLock $locks[$index]
+            }
+            catch {
+                $cleanupErrors += $_.Exception.Message
+            }
+        }
+        if ($cleanupErrors.Count -gt 0) {
+            throw "$($originalError.Exception.Message) ProjectAtlas atlas forwarder lifecycle lock cleanup failed: $($cleanupErrors -join '; ')"
+        }
+        throw $originalError
     }
 }
 
@@ -2134,6 +2201,27 @@ function Exit-ProjectAtlasAtlasForwarderLifecycleLock {
     }
     finally {
         $Lock.Mutex.Dispose()
+    }
+}
+
+function Exit-ProjectAtlasAtlasForwarderLifecycleLockSet {
+    param(
+        [object]$LockSet
+    )
+    if (-not $LockSet -or -not $LockSet.Locks) {
+        return
+    }
+    $cleanupErrors = @()
+    for ($index = $LockSet.Locks.Count - 1; $index -ge 0; $index--) {
+        try {
+            Exit-ProjectAtlasAtlasForwarderLifecycleLock $LockSet.Locks[$index]
+        }
+        catch {
+            $cleanupErrors += $_.Exception.Message
+        }
+    }
+    if ($cleanupErrors.Count -gt 0) {
+        throw "ProjectAtlas atlas forwarder lifecycle lock cleanup failed: $($cleanupErrors -join '; ')"
     }
 }
 
@@ -2471,21 +2559,6 @@ function Remove-ProjectAtlasAtlasForwarderState {
     }
 }
 
-function Move-ProjectAtlasManagedAtlasForwarder {
-    param(
-        [string]$FilePath,
-        [string]$VerifiedPath,
-        [switch]$AllowSameTarget
-    )
-    $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLock $FilePath
-    try {
-        Move-ProjectAtlasManagedAtlasForwarderLocked $FilePath $VerifiedPath -AllowSameTarget:$AllowSameTarget
-    }
-    finally {
-        Exit-ProjectAtlasAtlasForwarderLifecycleLock $lifecycleLock
-    }
-}
-
 function Move-ProjectAtlasManagedAtlasForwarderLocked {
     param(
         [string]$FilePath,
@@ -2655,6 +2728,34 @@ function Invoke-ProjectAtlasAtlasForwarderStatePublicationPause {
     }
 }
 
+function Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause {
+    $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_DISCOVERY_GATE
+    if ([string]::IsNullOrWhiteSpace($gate)) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        "$gate.ready",
+        "ready`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    while (Test-Path -LiteralPath $gate) {
+        Start-Sleep -Milliseconds 50
+    }
+}
+
+function Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause {
+    $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ACQUIRED_GATE
+    if ([string]::IsNullOrWhiteSpace($gate)) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        "$gate.ready",
+        "ready`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    while (Test-Path -LiteralPath $gate) {
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Assert-ProjectAtlasAtlasForwarderCollisionFree {
     param(
         [string]$VerifiedPath
@@ -2695,22 +2796,42 @@ function Write-ProjectAtlasAtlasForwarder {
         [string]$VerifiedPath
     )
     $forwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
-    $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLock $forwarder
+    $previousCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+    $previousPath = if ($previousCommand) {
+        if ($previousCommand.Path) { $previousCommand.Path } else { $previousCommand.Source }
+    }
+    $previousIdentity = $null
+    if ($previousPath `
+        -and (Get-NormalizedPathEntry $previousPath) -ine (Get-NormalizedPathEntry $forwarder) `
+        -and (Test-ProjectAtlasOwnedAtlasForwarder $previousPath)) {
+        $previousIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $previousPath).SortKey
+    }
+    else {
+        $previousPath = $null
+    }
+    Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause
+    $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLockSet $forwarder $previousPath
     try {
-        Write-ProjectAtlasAtlasForwarderLocked $VerifiedPath
+        Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause
+        Write-ProjectAtlasAtlasForwarderLocked $VerifiedPath $previousPath $previousIdentity
     }
     finally {
-        Exit-ProjectAtlasAtlasForwarderLifecycleLock $lifecycleLock
+        Exit-ProjectAtlasAtlasForwarderLifecycleLockSet $lifecycleLock
     }
 }
 
 function Write-ProjectAtlasAtlasForwarderLocked {
     param(
-        [string]$VerifiedPath
+        [string]$VerifiedPath,
+        [string]$PreviousPath,
+        [string]$PreviousIdentity
     )
-    $previousCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
-    $previousPath = if ($previousCommand) {
-        if ($previousCommand.Path) { $previousCommand.Path } else { $previousCommand.Source }
+    if ($PreviousPath) {
+        $currentPreviousIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $PreviousPath).SortKey
+        if ($currentPreviousIdentity -cne $PreviousIdentity `
+            -or -not (Test-ProjectAtlasOwnedAtlasForwarder $PreviousPath)) {
+            throw "ProjectAtlas atlas forwarder migration source changed or is no longer managed: $PreviousPath"
+        }
     }
     $forwarder = Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath
     $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $forwarder
@@ -2765,11 +2886,9 @@ function Write-ProjectAtlasAtlasForwarderLocked {
         if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath)) {
             throw "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder"
         }
-        if ($previousPath `
-            -and (Get-NormalizedPathEntry $previousPath) -ine (Get-NormalizedPathEntry $forwarder) `
-            -and (Test-ProjectAtlasOwnedAtlasForwarder $previousPath)) {
-            if (-not (Move-ProjectAtlasManagedAtlasForwarder $previousPath $VerifiedPath)) {
-                throw "ProjectAtlas atlas forwarder migration failed after publishing the replacement: $previousPath"
+        if ($PreviousPath) {
+            if (-not (Move-ProjectAtlasManagedAtlasForwarderLocked $PreviousPath $VerifiedPath)) {
+                throw "ProjectAtlas atlas forwarder migration failed after publishing the replacement: $PreviousPath"
             }
         }
     }

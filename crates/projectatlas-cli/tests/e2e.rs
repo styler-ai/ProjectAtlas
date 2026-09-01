@@ -58,7 +58,6 @@ use std::env;
 use std::error::Error;
 #[cfg(any(windows, feature = "optional-parser-supervisor"))]
 use std::ffi::OsStr;
-#[cfg(all(target_os = "macos", feature = "optional-parser-supervisor"))]
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -6951,6 +6950,14 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         )
         .into());
     }
+    if !forwarder_lifecycle_step["run"].as_str().is_some_and(|run| {
+        run.contains("plugin_installer_serializes_opposite_atlas_forwarder_migrations")
+    }) {
+        return Err(io::Error::other(
+            "atlas forwarder lifecycle E2E must run the opposite migration lock-order regression",
+        )
+        .into());
+    }
     if !e2e_smoke.contains("plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp") {
         return Err(io::Error::other(
             "multi-OS CI smoke must run the plugin update stale-shim regression",
@@ -11689,6 +11696,393 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
             alias_output.status,
             String::from_utf8_lossy(&alias_output.stderr)
         ),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+
+    let runtime_name = if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    };
+    let first_runtime_dir = temp.path().join("opposite first runtime");
+    let second_runtime_dir = temp.path().join("opposite second runtime");
+    fs::create_dir_all(&first_runtime_dir)?;
+    fs::create_dir_all(&second_runtime_dir)?;
+    let first_runtime = first_runtime_dir.join(runtime_name);
+    let second_runtime = second_runtime_dir.join(runtime_name);
+    fs::copy(mcp_contract_executable(), &first_runtime)?;
+    fs::copy(mcp_contract_executable(), &second_runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for runtime in [&first_runtime, &second_runtime] {
+            let mut permissions = fs::metadata(runtime)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(runtime, permissions)?;
+        }
+    }
+
+    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
+    fs::create_dir_all(&home)?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let inherited_entries = env::split_paths(&inherited_path)
+        .filter(|entry| !is_shared_test_runtime_directory(entry))
+        .collect::<Vec<_>>();
+    let path_for = |first: &Path, second: Option<&Path>| -> Result<OsString, Box<dyn Error>> {
+        let mut entries = vec![first.to_path_buf()];
+        if let Some(second) = second {
+            entries.push(second.to_path_buf());
+        }
+        entries.extend(inherited_entries.iter().cloned());
+        Ok(env::join_paths(entries)?)
+    };
+    let first_only_path = path_for(&first_runtime_dir, None)?;
+    let second_only_path = path_for(&second_runtime_dir, None)?;
+    let first_then_second_path = path_for(&first_runtime_dir, Some(&second_runtime_dir))?;
+    let second_then_first_path = path_for(&second_runtime_dir, Some(&first_runtime_dir))?;
+    let workspace_root = workspace_root()?;
+    let make_installer = |runtime: &Path,
+                          path: &OsString,
+                          discovery_gate: Option<&Path>,
+                          acquired_gate: Option<&Path>|
+     -> Result<StdCommand, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", path);
+        if let Some(discovery_gate) = discovery_gate {
+            command.env(
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_DISCOVERY_GATE",
+                discovery_gate,
+            );
+        }
+        if let Some(acquired_gate) = acquired_gate {
+            command.env(
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ACQUIRED_GATE",
+                acquired_gate,
+            );
+        }
+        Ok(command)
+    };
+    let run_install =
+        |runtime: &Path, path: &OsString| -> Result<std::process::Output, Box<dyn Error>> {
+            Ok(make_installer(runtime, path, None, None)?.output()?)
+        };
+    let wait_for_ready = |child: &mut Child,
+                          ready: &Path,
+                          label: &str|
+     -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if ready.is_file() {
+                return Ok(());
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "{label} exited before reaching its lock coordination gate: {status}"
+                ))
+                .into());
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                let _ = child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{label} did not reach its lock coordination gate within 30 seconds"),
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let forwarder_for =
+        |directory: &Path| directory.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let provenance_for = |directory: &Path| directory.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+    let pair_is_complete = |directory: &Path, runtime: &Path| -> Result<bool, Box<dyn Error>> {
+        let forwarder = forwarder_for(directory);
+        let provenance = provenance_for(directory);
+        if !forwarder.is_file() || !provenance.is_file() {
+            return Ok(false);
+        }
+        let canonical_runtime = runtime.to_string_lossy();
+        let expected_forwarder = if cfg!(windows) {
+            format!(
+                "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{canonical_runtime}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n"
+            )
+        } else {
+            format!(
+                "# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
+            )
+        };
+        let expected_provenance = if cfg!(windows) {
+            format!(
+                "# ProjectAtlas atlas forwarder provenance v1\r\nforwarder: {}\r\nruntime: {}\r\n",
+                forwarder.display(),
+                runtime.display()
+            )
+        } else {
+            format!(
+                "# ProjectAtlas atlas forwarder provenance v1\nforwarder: {}\nruntime: {}\n",
+                forwarder.display(),
+                runtime.display()
+            )
+        };
+        Ok(fs::read_to_string(&forwarder)? == expected_forwarder
+            && fs::read_to_string(&provenance)? == expected_provenance)
+    };
+    let first_forwarder = forwarder_for(&first_runtime_dir);
+    let first_provenance = provenance_for(&first_runtime_dir);
+
+    let first_output = run_install(&first_runtime, &first_only_path)?;
+    require(
+        first_output.status.success(),
+        format!(
+            "opposite migration fixture could not install first runtime:\n{}\n{}",
+            String::from_utf8_lossy(&first_output.stdout),
+            String::from_utf8_lossy(&first_output.stderr)
+        ),
+    )?;
+    let second_output = run_install(&second_runtime, &second_only_path)?;
+    require(
+        second_output.status.success(),
+        format!(
+            "opposite migration fixture could not install second runtime:\n{}\n{}",
+            String::from_utf8_lossy(&second_output.stdout),
+            String::from_utf8_lossy(&second_output.stderr)
+        ),
+    )?;
+
+    let installer_state_dir = if cfg!(windows) {
+        home.join(TEST_WINDOWS_INSTALLER_STATE_DIR)
+    } else {
+        home.join(TEST_POSIX_INSTALLER_STATE_DIR)
+    };
+    let state_files = || -> Result<Vec<PathBuf>, Box<dyn Error>> {
+        Ok(fs::read_dir(&installer_state_dir)?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .into_iter()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("state"))
+            .collect())
+    };
+    require(
+        pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 2,
+        "opposite migration fixture did not establish two complete managed forwarder pairs",
+    )?;
+    let unrelated_state = installer_state_dir.join("opposite-migration-unrelated-state");
+    let unrelated_state_content = if cfg!(windows) {
+        b"opposite migration unrelated state\r\n".as_slice()
+    } else {
+        b"opposite migration unrelated state\n".as_slice()
+    };
+    fs::write(&unrelated_state, unrelated_state_content)?;
+
+    let discovery_a = temp.path().join("opposite-a-discovery.gate");
+    let discovery_b = temp.path().join("opposite-b-discovery.gate");
+    fs::write(&discovery_a, b"hold\n")?;
+    fs::write(&discovery_b, b"hold\n")?;
+    let discovery_a_ready = PathBuf::from(format!("{}.ready", discovery_a.display()));
+    let discovery_b_ready = PathBuf::from(format!("{}.ready", discovery_b.display()));
+    let mut install_a = make_installer(
+        &first_runtime,
+        &second_then_first_path,
+        Some(&discovery_a),
+        None,
+    )?
+    .spawn()?;
+    let mut install_b = make_installer(
+        &second_runtime,
+        &first_then_second_path,
+        Some(&discovery_b),
+        None,
+    )?
+    .spawn()?;
+    if let Err(error) = wait_for_ready(&mut install_a, &discovery_a_ready, "opposite installer A") {
+        drop(install_b.kill());
+        drop(install_b.wait());
+        return Err(error);
+    }
+    if let Err(error) = wait_for_ready(&mut install_b, &discovery_b_ready, "opposite installer B") {
+        drop(install_a.kill());
+        drop(install_a.wait());
+        return Err(error);
+    }
+    fs::remove_file(&discovery_a)?;
+    fs::remove_file(&discovery_b)?;
+    fs::remove_file(&discovery_a_ready)?;
+    fs::remove_file(&discovery_b_ready)?;
+    let migration_started = Instant::now();
+    let output_a = match wait_for_plugin_installer_output(
+        install_a,
+        "opposite installer A",
+        Duration::from_secs(35),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            drop(install_b.kill());
+            drop(install_b.wait());
+            return Err(error);
+        }
+    };
+    let output_b = wait_for_plugin_installer_output(
+        install_b,
+        "opposite installer B",
+        Duration::from_secs(35),
+    )?;
+    require(
+        migration_started.elapsed() < Duration::from_secs(30),
+        "opposite forwarder migrations incurred the full bounded lock timeout",
+    )?;
+    require(
+        output_a.status.success() && output_b.status.success(),
+        format!(
+            "opposite forwarder migrations did not both complete under total lock order:\nA stdout:\n{}\nA stderr:\n{}\nB stdout:\n{}\nB stderr:\n{}",
+            String::from_utf8_lossy(&output_a.stdout),
+            String::from_utf8_lossy(&output_a.stderr),
+            String::from_utf8_lossy(&output_b.stdout),
+            String::from_utf8_lossy(&output_b.stderr)
+        ),
+    )?;
+    let first_pair = pair_is_complete(&first_runtime_dir, &first_runtime)?;
+    let second_pair = pair_is_complete(&second_runtime_dir, &second_runtime)?;
+    require(
+        first_pair ^ second_pair,
+        "opposite forwarder migrations left zero or two managed pairs",
+    )?;
+    require(
+        state_files()?.len() == 1 && fs::read(&unrelated_state)? == unrelated_state_content,
+        "opposite forwarder migrations changed unrelated state or left stale capability state",
+    )?;
+
+    let missing_runtime = if first_pair {
+        &second_runtime
+    } else {
+        &first_runtime
+    };
+    let missing_runtime_path = if first_pair {
+        &second_only_path
+    } else {
+        &first_only_path
+    };
+    let recovery_install = run_install(missing_runtime, missing_runtime_path)?;
+    require(
+        recovery_install.status.success()
+            && pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 2,
+        format!(
+            "opposite migration fixture could not restore two managed pairs for interruption proof:\n{}\n{}",
+            String::from_utf8_lossy(&recovery_install.stdout),
+            String::from_utf8_lossy(&recovery_install.stderr)
+        ),
+    )?;
+
+    let recovery_discovery_a = temp.path().join("opposite-recovery-a-discovery.gate");
+    let recovery_discovery_b = temp.path().join("opposite-recovery-b-discovery.gate");
+    let recovery_acquired_a = temp.path().join("opposite-recovery-a-acquired.gate");
+    fs::write(&recovery_discovery_a, b"hold\n")?;
+    fs::write(&recovery_discovery_b, b"hold\n")?;
+    fs::write(&recovery_acquired_a, b"hold\n")?;
+    let recovery_discovery_a_ready =
+        PathBuf::from(format!("{}.ready", recovery_discovery_a.display()));
+    let recovery_discovery_b_ready =
+        PathBuf::from(format!("{}.ready", recovery_discovery_b.display()));
+    let recovery_acquired_a_ready =
+        PathBuf::from(format!("{}.ready", recovery_acquired_a.display()));
+    let mut interrupted_a = make_installer(
+        &first_runtime,
+        &second_then_first_path,
+        Some(&recovery_discovery_a),
+        Some(&recovery_acquired_a),
+    )?
+    .spawn()?;
+    let mut recovering_b = make_installer(
+        &second_runtime,
+        &first_then_second_path,
+        Some(&recovery_discovery_b),
+        None,
+    )?
+    .spawn()?;
+    if let Err(error) = wait_for_ready(
+        &mut interrupted_a,
+        &recovery_discovery_a_ready,
+        "interrupted opposite installer A",
+    ) {
+        drop(recovering_b.kill());
+        drop(recovering_b.wait());
+        return Err(error);
+    }
+    if let Err(error) = wait_for_ready(
+        &mut recovering_b,
+        &recovery_discovery_b_ready,
+        "recovering opposite installer B",
+    ) {
+        drop(interrupted_a.kill());
+        drop(interrupted_a.wait());
+        return Err(error);
+    }
+    fs::remove_file(&recovery_discovery_a)?;
+    fs::remove_file(&recovery_discovery_a_ready)?;
+    if let Err(error) = wait_for_ready(
+        &mut interrupted_a,
+        &recovery_acquired_a_ready,
+        "interrupted opposite installer A lock owner",
+    ) {
+        drop(interrupted_a.kill());
+        drop(interrupted_a.wait());
+        drop(recovering_b.kill());
+        drop(recovering_b.wait());
+        return Err(error);
+    }
+    interrupted_a.kill()?;
+    let interrupted_output = interrupted_a.wait_with_output()?;
+    fs::remove_file(&recovery_acquired_a)?;
+    fs::remove_file(&recovery_acquired_a_ready)?;
+    fs::remove_file(&recovery_discovery_b)?;
+    fs::remove_file(&recovery_discovery_b_ready)?;
+    let recovering_output = wait_for_plugin_installer_output(
+        recovering_b,
+        "recovering opposite installer B",
+        Duration::from_secs(35),
+    )?;
+    require(
+        !interrupted_output.status.success() && recovering_output.status.success(),
+        format!(
+            "interrupted opposite migration did not fail/recover truthfully:\nA stdout:\n{}\nA stderr:\n{}\nB stdout:\n{}\nB stderr:\n{}",
+            String::from_utf8_lossy(&interrupted_output.stdout),
+            String::from_utf8_lossy(&interrupted_output.stderr),
+            String::from_utf8_lossy(&recovering_output.stdout),
+            String::from_utf8_lossy(&recovering_output.stderr)
+        ),
+    )?;
+    require(
+        !first_forwarder.exists()
+            && !first_provenance.exists()
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 1
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        "interrupted opposite migration did not leave one complete recoverable pair",
     )?;
     Ok(())
 }
