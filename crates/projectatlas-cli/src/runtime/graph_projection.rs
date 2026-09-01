@@ -35,8 +35,6 @@ use projectatlas_symbols::{
     ResolutionProjectionError, ResolutionProjectionFact, derive_resolution_keys_with_context,
     extract_markdown_facts_controlled, parse_import_references,
 };
-use rayon::ThreadPool;
-use rayon::prelude::*;
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -1537,7 +1535,6 @@ impl StagedRepositoryGraph {
 }
 
 /// Stage a complete repository graph from current parser output plus safe reused graphs.
-#[cfg(test)]
 pub(super) fn stage_full_repository_graph(
     store: &AtlasStore,
     root: &Path,
@@ -1546,30 +1543,6 @@ pub(super) fn stage_full_repository_graph(
     scan_policy: &RootScanPolicy,
     symbols: &SymbolBuildStage,
     control: &IndexWorkControl,
-) -> Result<StagedRepositoryGraph, CliError> {
-    stage_full_repository_graph_with_pool(
-        store,
-        root,
-        base_generation,
-        nodes,
-        scan_policy,
-        symbols,
-        control,
-        None,
-    )
-}
-
-/// Stage a complete graph while reusing the operation's bounded worker pool.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn stage_full_repository_graph_with_pool(
-    store: &AtlasStore,
-    root: &Path,
-    base_generation: IndexGeneration,
-    nodes: &[Node],
-    scan_policy: &RootScanPolicy,
-    symbols: &SymbolBuildStage,
-    control: &IndexWorkControl,
-    worker_pool: Option<&ThreadPool>,
 ) -> Result<StagedRepositoryGraph, CliError> {
     cleanup_abandoned_repository_graph_staging(store, root, control)?;
     let project = selected_project(store)?;
@@ -1580,8 +1553,7 @@ pub(super) fn stage_full_repository_graph_with_pool(
         .map(|node| node.path.clone())
         .collect::<BTreeSet<_>>();
     let loaded_graphs = complete_symbol_graphs(store, &paths, symbols, control)?;
-    let (graphs, mut identity_admission) =
-        admit_symbol_graphs_with_pool(loaded_graphs, control, worker_pool)?;
+    let (graphs, mut identity_admission) = admit_symbol_graphs(loaded_graphs, control)?;
     let changed_paths = symbols
         .changes
         .iter()
@@ -1693,7 +1665,6 @@ pub(super) fn stage_full_repository_graph_with_pool(
 }
 
 /// Stage one bounded dependency-aware graph closure for an incremental publication.
-#[cfg(test)]
 pub(super) fn stage_incremental_repository_graph(
     store: &AtlasStore,
     root: &Path,
@@ -1713,34 +1684,6 @@ pub(super) fn stage_incremental_repository_graph(
         scan_policy,
         symbols,
         control,
-        None,
-        super::MAX_PUBLICATION_STAGING_BYTES,
-    )
-}
-
-/// Stage one incremental graph while reusing the operation's bounded worker pool.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn stage_incremental_repository_graph_with_pool(
-    store: &AtlasStore,
-    root: &Path,
-    base_generation: IndexGeneration,
-    expected_nodes: &[Node],
-    direct_paths: &[String],
-    scan_policy: &RootScanPolicy,
-    symbols: &SymbolBuildStage,
-    control: &IndexWorkControl,
-    worker_pool: Option<&ThreadPool>,
-) -> Result<StagedRepositoryGraph, CliError> {
-    stage_incremental_repository_graph_with_limit(
-        store,
-        root,
-        base_generation,
-        expected_nodes,
-        direct_paths,
-        scan_policy,
-        symbols,
-        control,
-        worker_pool,
         super::MAX_PUBLICATION_STAGING_BYTES,
     )
 }
@@ -1766,7 +1709,6 @@ fn stage_incremental_repository_graph_with_test_limit(
         scan_policy,
         symbols,
         control,
-        None,
         staging_limit,
     )
 }
@@ -1782,7 +1724,6 @@ fn stage_incremental_repository_graph_with_limit(
     scan_policy: &RootScanPolicy,
     symbols: &SymbolBuildStage,
     control: &IndexWorkControl,
-    worker_pool: Option<&ThreadPool>,
     staging_limit: u64,
 ) -> Result<StagedRepositoryGraph, CliError> {
     let project = selected_project(store)?;
@@ -1820,14 +1761,14 @@ fn stage_incremental_repository_graph_with_limit(
     let loaded_direct_graphs =
         complete_symbol_graphs(store, &direct_graph_paths, symbols, control)?;
     let (direct_graphs, mut direct_identity_admission) =
-        admit_symbol_graphs_with_pool(loaded_direct_graphs, control, worker_pool)?;
+        admit_symbol_graphs(loaded_direct_graphs, control)?;
     direct_identity_admission.merge(
         symbols.identity_admission.for_paths(&direct_graph_paths)?,
         control,
     )?;
     let package_graphs = complete_symbol_graphs(store, &package_only_paths, symbols, control)?;
     let (package_graphs, _package_context_admission) =
-        admit_symbol_graphs_with_pool(package_graphs, control, worker_pool)?;
+        admit_symbol_graphs(package_graphs, control)?;
     let package_index_graphs = direct_graphs
         .iter()
         .map(Cow::as_ref)
@@ -1928,7 +1869,7 @@ fn stage_incremental_repository_graph_with_limit(
     let loaded_affected_graphs =
         complete_symbol_graphs(store, &newly_affected_graph_paths, symbols, control)?;
     let (newly_affected_graphs, mut affected_identity_admission) =
-        admit_symbol_graphs_with_pool(loaded_affected_graphs, control, worker_pool)?;
+        admit_symbol_graphs(loaded_affected_graphs, control)?;
     hydrate_reused_identity_admission(
         store,
         project,
@@ -5508,43 +5449,15 @@ fn complete_symbol_graphs<'a>(
 }
 
 /// Admit parser graphs at one shared boundary before any strict graph object is built.
-#[cfg(test)]
 fn admit_symbol_graphs<'a>(
     graphs: Vec<Cow<'a, SymbolGraph>>,
     control: &IndexWorkControl,
 ) -> Result<(Vec<Cow<'a, SymbolGraph>>, GraphIdentityAdmission), CliError> {
-    admit_symbol_graphs_with_pool(graphs, control, None)
-}
-
-/// Admit parser graphs in parallel when the caller owns the operation pool.
-///
-/// Each graph produces an independent report. Reports are merged in their input
-/// order after the parallel pass, preserving deterministic rejection ordering and
-/// first-error behavior while sharing the caller's process-level worker budget.
-fn admit_symbol_graphs_with_pool<'a>(
-    graphs: Vec<Cow<'a, SymbolGraph>>,
-    control: &IndexWorkControl,
-    worker_pool: Option<&ThreadPool>,
-) -> Result<(Vec<Cow<'a, SymbolGraph>>, GraphIdentityAdmission), CliError> {
-    let graph_count = graphs.len();
-    let admitted_graphs = if let Some(pool) = worker_pool {
-        pool.install(|| {
-            graphs
-                .into_par_iter()
-                .map(|graph| admit_symbol_graph(graph, control))
-                .collect::<Vec<_>>()
-        })
-    } else {
-        graphs
-            .into_iter()
-            .map(|graph| admit_symbol_graph(graph, control))
-            .collect::<Vec<_>>()
-    };
-    let mut admitted = Vec::with_capacity(graph_count);
+    let mut admitted = Vec::with_capacity(graphs.len());
     let mut report = GraphIdentityAdmission::default();
-    for (index, result) in admitted_graphs.into_iter().enumerate() {
+    for (index, graph) in graphs.into_iter().enumerate() {
         check_graph_work(control, index)?;
-        let (graph, graph_report) = result?;
+        let (graph, graph_report) = admit_symbol_graph(graph, control)?;
         report.merge(graph_report, control)?;
         admitted.push(graph);
     }
@@ -6633,7 +6546,6 @@ mod tests {
         EcmaScriptPathMapping, MAX_DOCUMENT_LINK_CANDIDATES, MAX_DOCUMENT_SELECTOR_BYTES,
         MAX_MARKDOWN_EVIDENCE_BYTES, MAX_MARKDOWN_LABEL_BYTES, MarkdownFactLimit,
     };
-    use rayon::ThreadPoolBuilder;
     use rusqlite::Connection;
     use std::borrow::Cow;
     use std::collections::{BTreeMap, BTreeSet};
@@ -6689,60 +6601,6 @@ mod tests {
         require(
             admitted.symbols.is_empty() && admitted.relations.is_empty(),
             "paired multiline import retained an invalid parser fact",
-        )?;
-        Ok(())
-    }
-
-    #[test]
-    fn parallel_graph_admission_preserves_input_order_and_rejections() -> Result<(), Box<dyn Error>>
-    {
-        let graphs = || {
-            vec![
-                Cow::Owned(extract_symbol_graph(
-                    "src/z-last.ts",
-                    Some("typescript"),
-                    "export const invalid\u{0}last = 1;\n",
-                )),
-                Cow::Owned(extract_symbol_graph(
-                    "src/a-first.ts",
-                    Some("typescript"),
-                    "export const invalid\u{0}first = 1;\n",
-                )),
-            ]
-        };
-        let control = IndexWorkControl::new(IndexCancellation::new(), None);
-        let sequential = super::admit_symbol_graphs(graphs(), &control)?;
-        let pool = ThreadPoolBuilder::new().num_threads(2).build()?;
-        let parallel = super::admit_symbol_graphs_with_pool(graphs(), &control, Some(&pool))?;
-        let paths = |graphs: &(Vec<Cow<'_, SymbolGraph>>, GraphIdentityAdmission)| {
-            graphs
-                .0
-                .iter()
-                .map(|graph| graph.path.clone())
-                .collect::<Vec<_>>()
-        };
-        require_eq(
-            &paths(&parallel),
-            &paths(&sequential),
-            "parallel graph order",
-        )?;
-        let rejection_keys = |report: &GraphIdentityAdmission| {
-            report
-                .rejections
-                .iter()
-                .map(|rejection| {
-                    (
-                        rejection.path.as_str().to_string(),
-                        rejection.fact_index,
-                        rejection.field,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        require_eq(
-            &rejection_keys(&parallel.1),
-            &rejection_keys(&sequential.1),
-            "parallel graph rejection order",
         )?;
         Ok(())
     }

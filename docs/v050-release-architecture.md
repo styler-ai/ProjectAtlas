@@ -73,23 +73,21 @@ flowchart LR
 flowchart LR
     budget[One process indexing budget] --> parse[Symbol parsing]
     budget --> summaries[Structural summaries]
-    budget --> relations[Graph derivation]
+    budget --> admission[Graph-identity admission]
     parse --> staged[Prepared generation]
     summaries --> staged
-    relations --> staged
+    admission --> staged
     staged --> tx[(Short SQLite publication transaction)]
     tx --> current[One current generation]
     cancel[Cancellation or failure] --> cleanup[Discard staging; retain last complete generation]
 ```
 
-The runtime creates one bounded Rayon pool for each non-empty indexing
-operation. `SymbolBuildOptions` supplies the process ceiling and the shared
-`IndexWorkControl` can tighten it for a background task. Symbol parsing,
-graph-identity admission, and structural-summary derivation reuse that pool;
-they do not create nested per-stage pools. Each parallel graph admission
-returns its own report, then merges reports in source order before projection,
-so cancellation, deterministic ordering, and the single atomic publication
-transaction remain owned by the existing pipeline.
+For #358, the budget is the existing process-level worker ceiling; the measured
+shared-pool candidate was not retained because it did not produce a material
+full-envelope improvement. Graph-identity admission remains the existing
+sequential owning stage, and publication keeps its current atomic transaction.
+The reproducible baseline/candidate evidence is recorded in
+[`docs/benchmarks/v050-358-resource-measurement.md`](benchmarks/v050-358-resource-measurement.md).
 
 ## Filtered custom-harness timeout ownership
 

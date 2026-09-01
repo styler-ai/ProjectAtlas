@@ -28399,6 +28399,158 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
     Ok(())
 }
 
+#[test]
+fn resource_measurement_baseline_pipeline_preserves_atomic_graph_publication()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let executable = mcp_contract_executable();
+    let write_fixture = |root: &Path, marker: &str| -> Result<(), Box<dyn Error>> {
+        fs::create_dir_all(root.join(SRC_DIR_NAME))?;
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"resource-measurement\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )?;
+        fs::write(
+            root.join(SRC_DIR_NAME).join("lib.rs"),
+            format!("pub fn {marker}() -> u32 {{ 1 }}\n"),
+        )?;
+        Ok(())
+    };
+    let generation = |database: &Path| -> Result<u64, Box<dyn Error>> {
+        Ok(AtlasStore::open_read_only(database)?
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("resource measurement publication missing"))?
+            .generation
+            .get())
+    };
+
+    let repo = temp.path().join(TEST_REPO_DIR);
+    write_fixture(&repo, "baseline")?;
+    let database = temp.path().join("resource-measurement.db");
+    run_scan(&repo, &database)?;
+    let before = derived_result_snapshot(&database)?;
+    let initial_generation = generation(&database)?;
+
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn changed() -> u32 { 2 }\n",
+    )?;
+    run_watch_once(&repo, &database)?;
+    let after_watch = derived_result_snapshot(&database)?;
+    if generation(&database)? != initial_generation + 1 || after_watch == before {
+        return Err(io::Error::other("watch did not publish one new generation").into());
+    }
+    assert_clean_scan_convergence(&repo, &database, temp.path(), "resource-watch")?;
+
+    let before_failed = derived_result_snapshot(&database)?;
+    let failed_generation = generation(&database)?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn late_failure() -> u32 { 3 }\n",
+    )?;
+    let failed = Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["watch", ".", "--once", "--timeout-seconds", "0"])
+        .output()?;
+    if failed.status.success()
+        || !String::from_utf8_lossy(&failed.stderr).contains("index work deadline was reached")
+        || generation(&database)? != failed_generation
+        || derived_result_snapshot(&database)? != before_failed
+    {
+        return Err(io::Error::other(
+            "late watch failure changed the last complete graph publication",
+        )
+        .into());
+    }
+    run_watch_once(&repo, &database)?;
+    assert_clean_scan_convergence(&repo, &database, temp.path(), "resource-retry")?;
+
+    let before_mcp_generation = generation(&database)?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn mcp_watch() -> u32 { 4 }\n",
+    )?;
+    let mut mcp = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_watch = mcp.call_tool("atlas_watch_once", &serde_json::json!({"path": "."}))?;
+    mcp.shutdown()?;
+    let mcp_watch: Value = toon_format::decode_default(&mcp_watch)?;
+    if mcp_watch.get("watch").is_none() || generation(&database)? != before_mcp_generation + 1 {
+        return Err(io::Error::other("MCP watch did not publish one new generation").into());
+    }
+
+    let roots = [
+        (temp.path().join("root-a"), "root_a"),
+        (temp.path().join("root-b"), "root_b"),
+    ];
+    let databases = roots.clone().map(|(ref root, marker)| {
+        let database = temp.path().join(format!("{marker}.db"));
+        (root.clone(), database)
+    });
+    for ((root, database), (_, marker)) in databases.iter().zip(roots.iter()) {
+        write_fixture(root, marker)?;
+        run_scan(root, database)?;
+        fs::write(
+            root.join(SRC_DIR_NAME).join("lib.rs"),
+            format!("pub fn {marker}_changed() -> u32 {{ 5 }}\n"),
+        )?;
+    }
+    thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+        let workers = databases.iter().map(|(root, database)| {
+            scope.spawn(move || run_watch_once(root, database).map_err(|error| error.to_string()))
+        });
+        for worker in workers {
+            let result = worker.join().map_err(|error| {
+                io::Error::other(format!("cross-root watch panicked: {error:?}"))
+            })?;
+            result.map_err(io::Error::other)?;
+        }
+        Ok(())
+    })?;
+    for ((root, database), (_, marker)) in databases.iter().zip(roots.iter()) {
+        if generation(database)? != 2
+            || !fs::read_to_string(root.join(SRC_DIR_NAME).join("lib.rs"))?
+                .contains(&format!("{marker}_changed"))
+        {
+            return Err(io::Error::other("cross-root watch lost its own publication").into());
+        }
+    }
+
+    let contention_root = temp.path().join("same-root-contention");
+    let contention_database = temp.path().join("same-root-contention.db");
+    write_fixture(&contention_root, "contention")?;
+    run_scan(&contention_root, &contention_database)?;
+    let contention_before = derived_result_snapshot(&contention_database)?;
+    fs::write(
+        contention_root.join(SRC_DIR_NAME).join("lib.rs"),
+        "pub fn contention_changed() -> u32 { 6 }\n",
+    )?;
+    let blocker = Connection::open(&contention_database)?;
+    blocker.execute_batch("BEGIN IMMEDIATE")?;
+    let blocked = Command::new(&executable)
+        .current_dir(&contention_root)
+        .arg("--db")
+        .arg(&contention_database)
+        .args(["watch", ".", "--once", "--timeout-seconds", "1"])
+        .output()?;
+    if blocked.status.success()
+        || !String::from_utf8_lossy(&blocked.stderr).contains("database is locked")
+        || derived_result_snapshot(&contention_database)? != contention_before
+    {
+        return Err(io::Error::other("same-root writer contention was not atomic").into());
+    }
+    blocker.execute_batch("ROLLBACK")?;
+    drop(blocker);
+    run_watch_once(&contention_root, &contention_database)?;
+    if generation(&contention_database)? != 2 {
+        return Err(io::Error::other("same-root contention retry did not publish").into());
+    }
+
+    assert_mcp_active_cancellation_preserves_generation(&executable)?;
+    Ok(())
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct DerivedResultSnapshot {
     nodes: Vec<String>,
