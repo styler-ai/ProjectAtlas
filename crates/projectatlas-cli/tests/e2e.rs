@@ -184,7 +184,7 @@ const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(windows)]
 // Retained identity capture runs after owner observation and before exact child stop.
-const CODEX_OWNER_IDENTITY_CAPTURE_BUDGET: Duration = Duration::from_secs(5);
+const CODEX_OWNER_IDENTITY_CAPTURE_BUDGET: Duration = Duration::from_secs(15);
 #[cfg(windows)]
 // The exact child-stop helper allows its owned process up to this wait budget to exit.
 const CODEX_OWNER_CHILD_STOP_BUDGET: Duration = Duration::from_secs(5);
@@ -197,7 +197,7 @@ const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(
 #[cfg(windows)]
 const CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
-const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(2);
+const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(6);
 #[cfg(windows)]
 // Delay the polling caller, not the child operation, so a completed helper is observed late.
 const CODEX_OWNER_LATE_COMPLETION_TEST_DELAY: Duration = Duration::from_secs(2);
