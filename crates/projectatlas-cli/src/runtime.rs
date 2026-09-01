@@ -2539,6 +2539,10 @@ pub(crate) fn run_init_bootstrap(
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
     let root = canonical_source_project_root(root)?;
+    if db_path.is_file() {
+        AtlasStore::repair_missing_project_root_identity(db_path, &root)
+            .map_err(project_store_error)?;
+    }
     preflight_existing_project_binding(db_path, &root)?;
     let project_dir = root.join(".projectatlas");
     let config_file = init_config_path(&root, config_path);
@@ -8955,6 +8959,94 @@ mod tests {
             &reopened.project_root_identity()?,
             &persisted_identity,
             "current binding after wrong-root init",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn init_repairs_current_missing_root_identity_from_bound_metadata() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("incomplete-binding-root");
+        let database = temp.path().join("incomplete-binding.db");
+        fs::create_dir(&root)?;
+        let project_instance_id = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store
+                .project_instance_id()?
+                .ok_or_else(|| io::Error::other("incomplete binding project identity is missing"))?
+        };
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.execute("DELETE FROM project_root_identity", [])?;
+        drop(connection);
+
+        let ordinary_error = AtlasStore::open_for_project(&database, &root)
+            .err()
+            .ok_or_else(|| io::Error::other("ordinary open repaired incomplete binding"))?;
+        require_eq(
+            &matches!(ordinary_error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "ordinary open returned the wrong incomplete-binding error",
+        )?;
+
+        let wrong_root = temp.path().join("incomplete-binding-wrong-root");
+        fs::create_dir(&wrong_root)?;
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let wrong_result = run_init_bootstrap(
+            &wrong_root,
+            &database,
+            None,
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        );
+        require_eq(
+            &matches!(wrong_result, Err(CliError::ProjectMismatch(_))),
+            &true,
+            "incomplete-binding init accepted a different root",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &database_before,
+            "wrong-root incomplete-binding init changed database bytes",
+        )?;
+        require_eq(
+            &["wal", "shm", "journal"]
+                .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok()),
+            &sidecars_before,
+            "wrong-root incomplete-binding init changed SQLite sidecars",
+        )?;
+
+        let report = run_init_bootstrap(
+            &root,
+            &database,
+            None,
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        )?;
+        require_eq(
+            &report.ok,
+            &true,
+            "explicit init did not repair the incomplete binding",
+        )?;
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &Some(project_instance_id),
+            "explicit init changed the project identity while repairing the root",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?,
+            &Some(projectatlas_core::CanonicalProjectRoot::from_path(&root)?),
+            "explicit init did not restore the native root identity",
         )?;
         Ok(())
     }

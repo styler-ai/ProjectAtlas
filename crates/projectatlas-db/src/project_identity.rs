@@ -47,6 +47,91 @@ pub struct ProjectRootTransitionResult {
 }
 
 impl AtlasStore {
+    /// Repair a missing native root identity through an explicit initializer.
+    ///
+    /// Ordinary project opens remain fail-closed when a current database has
+    /// the native identity table but no singleton row. Initialization has the
+    /// caller's selected root as explicit authority, so it may restore that
+    /// row only after proving the selected root is equivalent to the existing
+    /// legacy metadata. The proof is repeated under the write transaction to
+    /// keep a concurrent metadata change from authorizing a different root.
+    ///
+    /// Predecessor and fresh databases are left to their normal initializer;
+    /// this narrow repair handles only an otherwise-current database whose
+    /// native row is incomplete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected root cannot be proven equivalent to
+    /// the existing binding, the current schema or project identity is
+    /// incomplete, or SQLite cannot complete the atomic repair.
+    pub fn repair_missing_project_root_identity(
+        database_path: &Path,
+        destination: &Path,
+    ) -> DbResult<()> {
+        let destination_identity = validate_project_root_destination(destination)?;
+        let (preflight, _) = schema::preflight(database_path, None)?;
+        if preflight.state != SchemaState::Current {
+            return Ok(());
+        }
+        if let Some(found) = read_current_project_root_identity(database_path)? {
+            prove_existing_root_equivalence(destination_identity.as_path(), found.as_path())?;
+            return Ok(());
+        }
+        let legacy = preflight
+            .project_root
+            .as_deref()
+            .ok_or(DbError::ProjectRootMissing)?;
+        prove_existing_root_equivalence(destination_identity.as_path(), Path::new(legacy))?;
+
+        let store = Self::open_with_binding_requirement(
+            database_path,
+            None,
+            None,
+            super::ProjectIdentityRequirement::TransitionOwned,
+        )?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let result = (|| {
+            schema::validate_current_schema_version(&transaction)?;
+            if load_project_identity(&transaction)?.is_none() {
+                return Err(DbError::ProjectInstanceIdentityMissing);
+            }
+            let found_identity = load_project_root_identity(&transaction)?;
+            let selected = if let Some(found) = found_identity.as_ref() {
+                prove_existing_root_equivalence(destination_identity.as_path(), found.as_path())?
+            } else {
+                let legacy = transaction
+                    .query_row(
+                        "SELECT value FROM metadata WHERE key = ?1",
+                        [PROJECT_ROOT_KEY],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .ok_or(DbError::ProjectRootMissing)?;
+                prove_existing_root_equivalence(destination_identity.as_path(), Path::new(&legacy))?
+            };
+            set_project_root_identity(&transaction, &selected)?;
+            set_project_root_metadata(&transaction, &selected)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                transaction.commit()?;
+                Ok(())
+            }
+            Err(operation) => match transaction.rollback() {
+                Ok(()) => Err(operation),
+                Err(rollback) => Err(DbError::TransactionRollback {
+                    operation: Box::new(operation),
+                    rollback,
+                }),
+            },
+        }
+    }
+
     /// Apply an explicit root-binding transition to one database path.
     ///
     /// `destination` must be an absolute existing project directory and is
