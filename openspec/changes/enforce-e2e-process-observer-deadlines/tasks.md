@@ -11,4 +11,4 @@
 ## 3. Verification And Delivery
 
 - [x] 3.1 Run the owning causal regressions, affected MCP/installer E2E, formatting and diff checks, and the normal parallel locked workspace suite with explicit timeouts; retain failure/status/output compatibility and bounded CPU, memory, process, and wall-time behavior.
-- [x] 3.2 Rebase onto the accepted shared `e2e.rs` baseline after #518, pass strict OpenSpec and live IssueOps, resolve every exact-head review finding, pass hosted checks, and reconcile the final implementation, specification, architecture link, issue tasks, and release graph without weakening #492's holistic release proof.
+- [ ] 3.2 Rebase onto the accepted shared `e2e.rs` baseline after #518, pass strict OpenSpec and live IssueOps, resolve every exact-head review finding, pass hosted checks, and reconcile the final implementation, specification, architecture link, issue tasks, and release graph without weakening #492's holistic release proof.
