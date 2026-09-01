@@ -84,10 +84,10 @@
 
 ## 13. Invalid graph identity admission (#476)
 
-- [x] 13.1 Inventory every parser-derived package, symbol, parent/scope, relation, and resolution-key producer; keep strict graph constructors unchanged and route all producers through one concrete admission/classification result at the smallest shared source-graph boundary.
-- [x] 13.2 Land any proven SQLite coverage/unresolved representation gap first, then publish every valid row plus bounded typed rejection reason, file/span/parser/field provenance, and generation identity without lossy rewriting or partial-current advertisement.
-- [x] 13.3 Cover valid, empty, surrounding-whitespace, control-character, oversized, reserved-namespace, malformed-parser, duplicate, mixed-validity, multi-sibling-folder, incremental-watch, cancellation, fault, rollback, retry, CLI, and MCP behavior.
-- [x] 13.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [ ] 13.1 Inventory every parser-derived package, symbol, parent/scope, relation, and resolution-key producer; keep strict graph constructors unchanged and route all producers through one concrete admission/classification result at the smallest shared source-graph boundary.
+- [ ] 13.2 Land any proven SQLite coverage/unresolved representation gap first, then publish every valid row plus bounded typed rejection reason, file/span/parser/field provenance, and generation identity without lossy rewriting or partial-current advertisement.
+- [ ] 13.3 Cover valid, empty, surrounding-whitespace, control-character, oversized, reserved-namespace, malformed-parser, duplicate, mixed-validity, multi-sibling-folder, incremental-watch, cancellation, fault, rollback, retry, CLI, and MCP behavior.
+- [ ] 13.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 14. Built-in PHP support (#477)
 
