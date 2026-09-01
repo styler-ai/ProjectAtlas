@@ -371,6 +371,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     root / "work",
                     {},
                     5,
+                    required_version="0.4.0",
                 )
 
             self.assertEqual(popen.call_args.args[0][-2:], ["scan", str(source_root)])
@@ -863,6 +864,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     edit=lambda: None,
                     readiness_file=root / "ready.rs",
                     writer_probe_database=root / "projectatlas.db",
+                    required_version="0.4.0",
                 )
         cleanup.assert_called_once_with(process, job)
 
@@ -996,7 +998,9 @@ class SystemScaleHarnessTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "sampler failed"),
         ):
-            system_scale.mcp_queries(Path("runtime"), Path("."), {}, {}, 1)
+            system_scale.mcp_queries(
+                Path("runtime"), Path("."), {}, {}, 1, required_version="0.4.0"
+            )
         self.assertTrue(client.closed)
         sampler.stop.assert_not_called()
 
@@ -1046,6 +1050,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     {},
                     threshold_seconds=1,
                     request_timeout_seconds=1,
+                    required_version="0.4.0",
                 )
         self.assertTrue(client.closed)
 
@@ -1238,11 +1243,28 @@ time.sleep(60)
                 {},
                 30,
                 max_workers=8,
+                required_version="0.4.0",
             )
         self.assertEqual(result, {"passed": True})
         self.assertEqual(
             measured.call_args.args[0][-5:],
             ["watch", "--once", "--max-workers", "8", "."],
+        )
+
+    def test_watch_once_uses_the_requested_runtime_version(self) -> None:
+        with mock.patch.object(
+            system_scale, "run_measured", return_value={"passed": True}
+        ) as measured:
+            system_scale.run_watch_once(
+                Path("projectatlas.exe"),
+                Path("fixture"),
+                {},
+                30,
+                required_version="0.4.5",
+            )
+        self.assertEqual(
+            measured.call_args.args[0][1:4],
+            ["--require-version", "0.4.5", "--format"],
         )
 
     def test_concurrent_worker_allocation_fails_closed_on_small_hosts(self) -> None:

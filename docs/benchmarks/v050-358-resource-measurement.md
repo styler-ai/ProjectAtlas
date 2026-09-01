@@ -16,23 +16,43 @@ rebuild was not sufficient to offset a cold-scan regression.
 
 ## Measurement boundary
 
-The existing `docs/benchmarks/harness/system_scale.py` was used with its
-Windows Job accounting and `psutil` sampler. The checked-out runtime reports
-v0.4.5 while this historical harness asks the process for v0.4.0; the runs used
-a non-persistent command-line argument shim that substituted the runtime's
-actual compatible version, without changing the harness or its measurement
-inputs. The deterministic existing corpus generator supplied the 1,024-file
-high-degree and 4,096-file large/high-edge shapes; the committed small clean
-fixture supplied the small shape.
+The existing `docs/benchmarks/harness/system_scale.py` is the measurement
+owner. It now accepts `--required-version` and `--caller-files`, so the reviewed
+v0.4.5 runtime and both generated corpus sizes are selected by the harness
+itself; no command-line shim is required. The exact six invocations, runtime
+identities, source revisions, corpus inputs, environment lock, threshold, and
+path placeholders are recorded in
+[`v050-358-resource-measurement-input.json`](v050-358-resource-measurement-input.json).
+The bounded machine-readable operands are retained in
+[`v050-358-resource-measurement-results.json`](v050-358-resource-measurement-results.json);
+the `shapes`, `concurrency`, `contention`, and `cancellation` objects are enough
+to recompute the table, digest equality, threshold, and failed cells without
+local paths or process IDs. The deterministic existing corpus generator
+supplied the 1,024-file high-degree and 4,096-file large/high-edge shapes; the
+committed small clean fixture supplied the small shape.
+
+The historical candidate executable is not retained in the worktree after the
+replay; its recorded SHA-256/size identify the measured artifact, and the
+candidate source revision plus the bounded build command are retained for
+reconstruction. This is a performance comparison record, not a release binary
+claim.
 
 The sampler records terminal process-tree CPU and I/O bytes, sampled peak RSS
 and threads, SQLite rows/profile/storage, and persistent database/WAL/SHM/stage
-bytes. Allocator events are not exposed by the existing harness on this host,
-so `allocations` is explicitly **unavailable** in this record; no allocator
-claim is used to justify adoption. All runs used the same host and telemetry
-disabled measurement environment. Both compared binaries were local debug
-builds; the measurements are a comparative no-change decision, not a release
-performance claim.
+bytes. Allocator events, transaction duration, checkpoint timing, planner text,
+an external huge repository, and Linux/macOS measurements are explicitly typed
+**unavailable** in the results artifact; no unavailable field is used to
+justify adoption. All runs used the same host and telemetry-disabled
+measurement environment. Both compared binaries were local debug builds; the
+measurements are a comparative no-change decision, not a release performance
+claim.
+
+The graph digest is emitted by the existing harness as a canonical JSON digest
+of logical graph entities, relations, occurrences, coverage, resolution keys,
+exports, dependencies, and identity rejections. Project-instance witnesses,
+storage-generated row/key identifiers, and rejection generation numbers are
+excluded or joined to canonical identities, allowing independent fixture
+databases to compare graph content rather than allocation order.
 
 ## Cold and incremental comparison
 
@@ -85,26 +105,20 @@ bounded fixture.
 
 ## Graph equivalence and SQLite profile
 
-The graph digest is a deterministic digest of normalized graph entities,
-relations, occurrences, coverage, resolution canonical identities, exports,
-dependencies, and identity rejections. Project-instance witnesses and
-storage-generated row/key identifiers are normalized or joined to their
-canonical identities, so separate fixture databases can be compared without
-mistaking fresh project identity for graph drift.
-
-| Shape | Baseline digest | Candidate digest | Semantic rows | Equal |
+| Shape | Baseline digest | Candidate digest | Digest records | Equal |
 | --- | --- | --- | ---: | --- |
-| Small clean | `ffa8955ceb9ac202fd04a0a3767cc1dd389b8070d5ce932d53da4c50a5363b45` | `ffa8955ceb9ac202fd04a0a3767cc1dd389b8070d5ce932d53da4c50a5363b45` | 188 | yes |
-| Medium high-degree | `ce979939f0b0a165ac8088a5ff5aa5694bea07fdf34292acdb6fada8457f883f` | `ce979939f0b0a165ac8088a5ff5aa5694bea07fdf34292acdb6fada8457f883f` | 23,592 | yes |
-| Large/high-edge | `2cee13440e489f59b4cdd6450b15290039c02be82cb1e6a821cacf7db7fc70b0` | `2cee13440e489f59b4cdd6450b15290039c02be82cb1e6a821cacf7db7fc70b0` | 93,763 | yes |
+| Small clean | `bec258fbb18c32d8868d3fe78ae4aff84f5bbc066be4ef149563d2662731cda3` | `bec258fbb18c32d8868d3fe78ae4aff84f5bbc066be4ef149563d2662731cda3` | 245 | yes |
+| Medium high-degree | `42eb33c7ae271906c3203f834c15c8077ab8cec296d0999ed78c3677dc515719` | `42eb33c7ae271906c3203f834c15c8077ab8cec296d0999ed78c3677dc515719` | 30,772 | yes |
+| Large/high-edge | `c72f6d5f82a6a84cc81fde3032df312ec5a7534b7b497bfa00d631d2072f5880` | `c72f6d5f82a6a84cc81fde3032df312ec5a7534b7b497bfa00d631d2072f5880` | 122,253 | yes |
 
 Both sides retained the existing SQLite profile: WAL journal mode, full
-synchronous mode, existing schema and indexes, clean quick-check, zero final
-WAL, zero graph stages, and no persistent-size amplification beyond normal
-database page-layout variance. The owning database query-plan assertions,
-including `detailed_relation_storage_statements_are_indexed_and_batch_bounded`,
-remain the proof for indexed, bounded graph reads; this issue adds no schema or
-query.
+synchronous mode, 4,096-byte pages, clean quick-check, zero final WAL/SHM,
+zero graph stages, and no persistent-size amplification beyond normal database
+page-layout variance. Transaction duration, checkpoint timing, and planner
+text are explicitly unavailable from this harness; the owning query-plan
+assertion `detailed_relation_storage_statements_are_indexed_and_batch_bounded`
+remains the available proof for indexed, bounded graph reads. This issue adds
+no schema or query.
 
 ## Disposition
 

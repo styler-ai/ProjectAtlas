@@ -71,19 +71,21 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    budget[One process indexing budget] --> parse[Symbol parsing]
-    budget --> summaries[Structural summaries]
+    budget[Existing bounded stage worker ceilings] --> parse[Symbol parsing]
     budget --> admission[Graph-identity admission]
-    parse --> staged[Prepared generation]
-    summaries --> staged
-    admission --> staged
+    budget --> summaries[Structural summaries]
+    parse --> admission
+    admission --> summaries
+    summaries --> staged[Prepared generation]
     staged --> tx[(Short SQLite publication transaction)]
     tx --> current[One current generation]
     cancel[Cancellation or failure] --> cleanup[Discard staging; retain last complete generation]
 ```
 
-For #358, the budget is the existing process-level worker ceiling; the measured
-shared-pool candidate was not retained because it did not produce a material
+The arrows show owning stage order in the publication pipeline, not a claim that
+structural summaries consume graph rows; summaries reuse parser inputs after
+graph projection. For #358, the existing bounded stage worker ceilings remain in
+place because the measured shared-pool candidate did not produce a material
 full-envelope improvement. Graph-identity admission remains the existing
 sequential owning stage, and publication keeps its current atomic transaction.
 The reproducible baseline/candidate evidence is recorded in

@@ -844,9 +844,17 @@ def measured_json(
     cwd: Path,
     env: dict[str, str],
     timeout_seconds: float,
+    required_version: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     run = run_measured(
-        [str(runtime), "--require-version", "0.4.0", "--format", "json", *arguments],
+        [
+            str(runtime),
+            "--require-version",
+            required_version,
+            "--format",
+            "json",
+            *arguments,
+        ],
         cwd=cwd,
         env=env,
         timeout_seconds=timeout_seconds,
@@ -869,6 +877,7 @@ def measured_watch_edit(
     readiness_file: Path,
     writer_probe_database: Path,
     expected_refresh_reason: str | None = None,
+    required_version: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     readiness_path = readiness_file.relative_to(cwd).as_posix()
     readiness_marker = f"projectatlas-watch-ready-{time.time_ns()}"
@@ -877,7 +886,7 @@ def measured_watch_edit(
     arguments = [
         str(runtime),
         "--require-version",
-        "0.4.0",
+        required_version,
         "--format",
         "json",
         "watch",
@@ -1211,12 +1220,14 @@ def mcp_queries(
     env: dict[str, str],
     query: dict[str, Any],
     request_timeout_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     client = McpClient(
         runtime,
         root,
         env,
         request_timeout_seconds=request_timeout_seconds,
+        required_version=required_version,
     )
     sampler = ProcessTreeSampler(client.process.pid, root)
     sampler_started = False
@@ -1441,6 +1452,13 @@ def database_profile(database: Path) -> dict[str, Any]:
         page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
         page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
         freelist_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+        journal_mode = str(
+            connection.execute("PRAGMA journal_mode").fetchone()[0]
+        ).lower()
+        synchronous = int(connection.execute("PRAGMA synchronous").fetchone()[0])
+        wal_autocheckpoint = int(
+            connection.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+        )
         quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0])
         stat1_present = (
             connection.execute(
@@ -1461,8 +1479,150 @@ def database_profile(database: Path) -> dict[str, Any]:
                 round(freelist_pages / page_count, 6) if page_count else 0.0
             ),
             "quick_check": quick_check,
+            "journal_mode": journal_mode,
+            "synchronous": synchronous,
+            "wal_autocheckpoint": wal_autocheckpoint,
             "sqlite_stat1_present": stat1_present,
             "project_root": project_root[0] if project_root else None,
+        }
+    finally:
+        connection.close()
+
+
+def database_graph_digest(database: Path) -> dict[str, Any]:
+    """Digest logical graph rows without project-instance or row identifiers."""
+
+    def normalized_identity(value: str) -> str:
+        return re.sub(r"32:[0-9a-f]{32}", "32:PROJECT_INSTANCE", value)
+
+    connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        entities = {
+            bytes(row[0]).hex(): (
+                normalized_identity(str(row[1])),
+                *row[2:],
+            )
+            for row in connection.execute(
+                "SELECT entity_key, canonical_identity, entity_kind, "
+                "repository_path, package_manager, package_name, manifest_path, "
+                "symbol_name, symbol_kind, symbol_parent, symbol_signature, "
+                "external_system, external_identity FROM graph_entities"
+            )
+        }
+        relations = {
+            bytes(row[0]).hex(): row
+            for row in connection.execute(
+                "SELECT relation_key, canonical_identity, source_entity_key, "
+                "relation_scope, relation_kind, resolution_status, "
+                "target_entity_key, reference_text, candidate_count, "
+                "document_unresolved_reason, confidence, completeness "
+                "FROM graph_relations"
+            )
+        }
+        records: list[list[Any]] = [
+            ["entity", *value] for value in entities.values()
+        ]
+        for row in relations.values():
+            source = entities[bytes(row[2]).hex()][0]
+            target = (
+                entities[bytes(row[6]).hex()][0]
+                if row[6] is not None
+                else None
+            )
+            records.append(
+                [
+                    "relation",
+                    normalized_identity(str(row[1])),
+                    source,
+                    row[3],
+                    row[4],
+                    row[5],
+                    target,
+                    *row[7:12],
+                ]
+            )
+        records.extend(
+            [
+                "occurrence",
+                normalized_identity(str(relations[bytes(row[0]).hex()][1])),
+                *row[1:],
+            ]
+            for row in connection.execute(
+                "SELECT relation_key, file_path, start_line, start_column, "
+                "end_line, end_column FROM graph_relation_occurrences"
+            )
+        )
+        records.extend(
+            ["resolution", row[0], normalized_identity(str(row[1]))]
+            for row in connection.execute(
+                "SELECT resolution_domain, canonical_identity "
+                "FROM graph_resolution_keys"
+            )
+        )
+        records.extend(
+            ["export", entities[bytes(row[0]).hex()][0], *row[1:]]
+            for row in connection.execute(
+                "SELECT entity_key, owner_path, resolution_domain "
+                "FROM graph_entity_exports"
+            )
+        )
+        records.extend(
+            [
+                "dependency",
+                normalized_identity(str(relations[bytes(row[0]).hex()][1])),
+                *row[1:],
+            ]
+            for row in connection.execute(
+                "SELECT relation_key, owner_path, resolution_domain "
+                "FROM graph_relation_dependencies"
+            )
+        )
+        records.extend(
+            ["coverage", *row]
+            for row in connection.execute(
+                "SELECT scope_kind, scope_path, relation_scope, relation_kind, "
+                "state, total, covered, omitted, reason, reached_limit "
+                "FROM graph_coverage"
+            )
+        )
+        records.extend(
+            ["rejection", *row]
+            for row in connection.execute(
+                "SELECT file_path, start_line, start_column, end_line, "
+                "end_column, parser, field, reason, fact_index "
+                "FROM graph_identity_rejections"
+            )
+        )
+        records.sort(key=lambda record: json.dumps(record, ensure_ascii=False))
+        payload = json.dumps(
+            records, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        return {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "record_count": len(records),
+            "table_rows": {
+                "entities": len(entities),
+                "relations": len(relations),
+                "occurrences": connection.execute(
+                    "SELECT COUNT(*) FROM graph_relation_occurrences"
+                ).fetchone()[0],
+                "resolution_keys": connection.execute(
+                    "SELECT COUNT(*) FROM graph_resolution_keys"
+                ).fetchone()[0],
+                "exports": connection.execute(
+                    "SELECT COUNT(*) FROM graph_entity_exports"
+                ).fetchone()[0],
+                "dependencies": connection.execute(
+                    "SELECT COUNT(*) FROM graph_relation_dependencies"
+                ).fetchone()[0],
+                "coverage": connection.execute(
+                    "SELECT COUNT(*) FROM graph_coverage"
+                ).fetchone()[0],
+                "identity_rejections": connection.execute(
+                    "SELECT COUNT(*) FROM graph_identity_rejections"
+                ).fetchone()[0],
+            },
         }
     finally:
         connection.close()
@@ -1473,6 +1633,7 @@ def run_incremental(
     root: Path,
     env: dict[str, str],
     timeout_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     database = root / ".projectatlas/projectatlas.db"
     before = database_counts(database)
@@ -1490,6 +1651,7 @@ def run_incremental(
         edit=narrow_edit,
         readiness_file=root / "src/caller_0001.rs",
         writer_probe_database=database,
+        required_version=required_version,
     )
     after_narrow = database_counts(database)
     hub = root / "src/hub.rs"
@@ -1509,6 +1671,7 @@ def run_incremental(
         edit=expanded_edit,
         readiness_file=root / "src/caller_0002.rs",
         writer_probe_database=database,
+        required_version=required_version,
         expected_refresh_reason="dependency_closure_limit",
     )
     after_guidance = database_counts(database)
@@ -1519,6 +1682,7 @@ def run_incremental(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+        required_version=required_version,
     )
     after_rebuild = database_counts(database)
     return {
@@ -1553,13 +1717,17 @@ def run_case(
     variant: str,
     preregistration: dict[str, Any],
     query: dict[str, Any],
+    required_version: str,
     incremental: bool = False,
+    caller_files: int | None = None,
 ) -> dict[str, Any]:
     timeout_seconds = preregistration["thresholds"]["all"]["command_timeout_seconds"]
     mcp_request_timeout_seconds = preregistration["thresholds"]["all"][
         "mcp_request_timeout_seconds"
     ]
     facts = corpus_facts(root)
+    if caller_files is not None:
+        facts["caller_files"] = caller_files
     pre_scan_database_bytes = storage_state(root)["database_bytes"]
     scan_run, scan = measured_json(
         runtime,
@@ -1567,6 +1735,7 @@ def run_case(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+        required_version=required_version,
     )
     post_scan_database_bytes = storage_state(root)["database_bytes"]
     settings_run, settings = measured_json(
@@ -1575,6 +1744,7 @@ def run_case(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+        required_version=required_version,
     )
     unchanged_run, unchanged = measured_json(
         runtime,
@@ -1582,6 +1752,7 @@ def run_case(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+        required_version=required_version,
     )
     incremental_result = (
         run_incremental(
@@ -1589,6 +1760,7 @@ def run_case(
             root,
             env,
             timeout_seconds,
+            required_version=required_version,
         )
         if incremental
         else None
@@ -1610,12 +1782,14 @@ def run_case(
         "incremental": incremental_result,
         "persistent": persistent_sizes(root),
         "database_profile": database_profile(database),
+        "graph_digest": database_graph_digest(database),
         "queries": mcp_queries(
             runtime,
             root,
             env,
             query,
             request_timeout_seconds=mcp_request_timeout_seconds,
+            required_version=required_version,
         ),
     }
     result["checks"] = evaluate_case(result, preregistration)
@@ -2308,7 +2482,9 @@ def evaluate_case(
         expanded = incremental["expanded"]
         guidance = expanded["guidance"]
         rebuild = incremental["expanded"]["rebuild"]
-        caller_files = preregistration["corpora"]["medium"]["caller_files"]
+        caller_files = result["corpus"].get(
+            "caller_files", preregistration["corpora"]["medium"]["caller_files"]
+        )
         guidance_report = guidance["report"]
         guidance_changed = guidance_report.get("changed")
         guidance_sample_paths = guidance_report.get("sample_paths")
@@ -2664,6 +2840,8 @@ def run_watch_once(
     env: dict[str, str],
     timeout_seconds: float,
     max_workers: int | None = None,
+    *,
+    required_version: str,
 ) -> dict[str, Any]:
     worker_arguments = (
         ["--max-workers", str(max_workers)] if max_workers is not None else []
@@ -2672,7 +2850,7 @@ def run_watch_once(
         [
             str(runtime),
             "--require-version",
-            "0.4.0",
+            required_version,
             "--format",
             "json",
             "watch",
@@ -2754,6 +2932,7 @@ def concurrent_isolation(
     timeout_seconds: float,
     caller_files: int,
     thresholds: dict[str, Any],
+    required_version: str,
 ) -> dict[str, Any]:
     roots = [work_root / "concurrent-a", work_root / "concurrent-b"]
     logical_cpus = os.cpu_count() or 1
@@ -2770,6 +2949,7 @@ def concurrent_isolation(
             cwd=root,
             env=env,
             timeout_seconds=timeout_seconds,
+            required_version=required_version,
         )
     databases = [root / ".projectatlas/projectatlas.db" for root in roots]
     before = [database_counts(database) for database in databases]
@@ -2790,6 +2970,7 @@ def concurrent_isolation(
                     env,
                     timeout_seconds,
                     max_workers=workers_per_process,
+                    required_version=required_version,
                 ),
                 roots,
             )
@@ -2843,6 +3024,7 @@ def concurrent_isolation(
                     env,
                     timeout_seconds,
                     max_workers=workers_per_process,
+                    required_version=required_version,
                 ),
                 range(2),
             )
@@ -2944,6 +3126,7 @@ def publication_contention(
     env: dict[str, str],
     timeout_seconds: float,
     maximum_failure_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     database = root / ".projectatlas/projectatlas.db"
     before = database_counts(database)
@@ -2954,12 +3137,24 @@ def publication_contention(
     blocker = sqlite3.connect(database)
     try:
         blocker.execute("BEGIN IMMEDIATE")
-        failed = run_watch_once(runtime, root, env, maximum_failure_seconds)
+        failed = run_watch_once(
+            runtime,
+            root,
+            env,
+            maximum_failure_seconds,
+            required_version=required_version,
+        )
         after_failure = database_counts(database)
     finally:
         blocker.rollback()
         blocker.close()
-    retry = run_watch_once(runtime, root, env, timeout_seconds)
+    retry = run_watch_once(
+        runtime,
+        root,
+        env,
+        timeout_seconds,
+        required_version=required_version,
+    )
     after_retry = database_counts(database)
     diagnostic = (failed["stdout"] + failed["stderr"]).lower()
     typed_busy = any(
@@ -2994,6 +3189,7 @@ def cooperative_cancellation_reopen(
     env: dict[str, str],
     threshold_seconds: float,
     request_timeout_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     database = root / ".projectatlas/projectatlas.db"
     before = database_counts(database)
@@ -3013,6 +3209,7 @@ def cooperative_cancellation_reopen(
         root,
         env,
         request_timeout_seconds=rpc_timeout_seconds,
+        required_version=required_version,
     )
     known = {client.process.pid}
     started_text = ""
@@ -3126,12 +3323,14 @@ def cooperative_cancellation_reopen(
         cwd=root,
         env=env,
         timeout_seconds=threshold_seconds,
+        required_version=required_version,
     )
     reopened = McpClient(
         runtime,
         root,
         env,
         request_timeout_seconds=request_timeout_seconds,
+        required_version=required_version,
     )
     try:
         reopened_settings, _ = reopened.call("atlas_settings", {})
@@ -3212,6 +3411,7 @@ def forced_termination_quiescence(
     work_root: Path,
     env: dict[str, str],
     threshold_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     recovery_root = work_root / "default-core-parent-termination"
     database = recovery_root / ".projectatlas/projectatlas.db"
@@ -3220,7 +3420,7 @@ def forced_termination_quiescence(
         [
             str(runtime),
             "--require-version",
-            "0.4.0",
+            required_version,
             "--format",
             "json",
             "--db",
@@ -3270,6 +3470,7 @@ def forced_termination_quiescence(
                     cwd=source_root,
                     env=env,
                     timeout_seconds=threshold_seconds,
+                    required_version=required_version,
                 )
                 connection = sqlite3.connect(
                     database, timeout=threshold_seconds
@@ -3516,6 +3717,20 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--corpus-cache", type=Path, default=DEFAULT_CORPUS_CACHE)
     parser.add_argument(
+        "--required-version",
+        help="Runtime compatibility version; defaults to the preregistration candidate version.",
+    )
+    parser.add_argument(
+        "--caller-files",
+        type=int,
+        help="Override the generated medium corpus size for a bounded scale run.",
+    )
+    parser.add_argument(
+        "--small-variant",
+        choices=("clean", "dirty", "non-git"),
+        help="Select one existing small fixture instead of running all variants.",
+    )
+    parser.add_argument(
         "--only",
         choices=("small", "medium", "huge", "all"),
         default="all",
@@ -3549,6 +3764,18 @@ def run_benchmark(args: argparse.Namespace) -> None:
     runtime = args.runtime.resolve(strict=True)
     preregistration_path = args.preregistration.resolve(strict=True)
     preregistration = json.loads(preregistration_path.read_text(encoding="utf-8"))
+    required_version = args.required_version or str(
+        preregistration.get("candidate", {}).get(
+            "required_version", ""
+        )
+    )
+    caller_files = args.caller_files or int(
+        preregistration.get("corpora", {}).get("medium", {}).get("caller_files", 0)
+    )
+    if caller_files <= 0:
+        raise ValueError("--caller-files and the preregistered medium corpus must be positive")
+    if not required_version:
+        raise ValueError("--required-version or a preregistered candidate version is required")
     measurement_eligibility = final_measurement_eligibility(args.only)
     if (
         measurement_eligibility["requested"]
@@ -3601,7 +3828,12 @@ def run_benchmark(args: argparse.Namespace) -> None:
                 "file_pattern": "src/**/*.rs",
             },
         }
-        for variant, root in small.items():
+        variants = (
+            [(args.small_variant, small[args.small_variant])]
+            if args.small_variant is not None
+            else small.items()
+        )
+        for variant, root in variants:
             cases.append(
                 run_case(
                     runtime,
@@ -3611,11 +3843,12 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     variant=variant,
                     preregistration=preregistration,
                     query=small_queries[variant],
+                    required_version=required_version,
                 )
             )
 
     medium = work_root / "medium"
-    prepare_medium(medium, preregistration["corpora"]["medium"]["caller_files"])
+    prepare_medium(medium, caller_files)
     if args.only in {"medium", "all"}:
         cases.append(
             run_case(
@@ -3632,6 +3865,8 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     "file_pattern": "src/**/*.rs",
                 },
                 incremental=True,
+                required_version=required_version,
+                caller_files=caller_files,
             )
         )
 
@@ -3652,6 +3887,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     "regex": r"class\s+[A-Za-z_]+",
                     "file_pattern": "src/**/*.ts",
                 },
+                required_version=required_version,
             )
         )
 
@@ -3662,8 +3898,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
             work_root,
             env,
             timeout,
-            preregistration["corpora"]["medium"]["caller_files"],
+            caller_files,
             preregistration["thresholds"]["all"],
+            required_version=required_version,
         )
         if args.only == "all"
         else None
@@ -3677,6 +3914,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             preregistration["thresholds"]["all"][
                 "maximum_contention_failure_seconds"
             ],
+            required_version=required_version,
         )
         if args.only == "all"
         else None
@@ -3692,6 +3930,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             preregistration["thresholds"]["all"][
                 "mcp_request_timeout_seconds"
             ],
+            required_version=required_version,
         )
         if args.only == "all"
         else None
@@ -3705,6 +3944,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             preregistration["thresholds"]["all"][
                 "maximum_cancellation_quiescence_seconds"
             ],
+            required_version=required_version,
         )
         if args.only == "all"
         else None
@@ -3714,6 +3954,11 @@ def run_benchmark(args: argparse.Namespace) -> None:
         "preregistration": str(preregistration_path),
         "effective_preregistration": preregistration,
         "mode": args.only,
+        "required_version": required_version,
+        "corpus_overrides": {
+            "medium.caller_files": caller_files,
+            "small.variant": args.small_variant or "all",
+        },
         "final_measurement_eligibility": measurement_eligibility,
         "publication_eligible": False,
         "candidate": {

@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "issue": 358,
+  "profile": "graph-construction-resource-measurement",
+  "decision_rule": {
+    "cold_wall_reduction_fraction": 0.1,
+    "cold_cpu_reduction_fraction": 0.1,
+    "maximum_resource_regression_fraction": 0.05,
+    "requires_exact_graph_digest": true,
+    "requires_atomic_generation_and_cleanup": true,
+    "decision": "retain-current-separate-stage-pools-unless-all-shapes-win"
+  },
+  "harness": {
+    "path": "docs/benchmarks/harness/system_scale.py",
+    "preregistration": "docs/benchmarks/v0.4-system-scale-preregistration.json",
+    "compatibility_argument": "--required-version",
+    "required_version": "0.4.5",
+    "corpus_argument": "--caller-files",
+    "small_fixture_argument": "--small-variant clean",
+    "expected_exit": "1 when an existing preregistered check fails; the JSON output is still written and failed cells are retained",
+    "input_digests": {
+      "docs/benchmarks/harness/system_scale.py": "742de5f2f0f054049a05b3e52ac86c5bcd797ae4902afddd98a30bd326714b58",
+      "docs/benchmarks/harness/mcp_composition.py": "bed91c3f3d45e20c0d3c9eda0a3ae0629a7e7f572de435ae3686066fb9aa9766",
+      "docs/benchmarks/harness/requirements.txt": "76b9a57ebe7f684bf0985c5b2f1f19aa5963852b099eb0cc934bbe6088cb85c6",
+      "docs/benchmarks/fixtures/mcp-composition (git-tree-sha1)": "65be63cbe8d54e96bc5ccabeee9dc50f7066fa22",
+      "revision_at_lock": "ff972422b318c71b818e0a202a1e053a27465e99"
+    },
+    "measurement_environment": {
+      "platform": "Windows-10-10.0.26200-SP0",
+      "python": "3.11.3",
+      "psutil": "7.0.0",
+      "logical_cpus": 16,
+      "telemetry": "disabled",
+      "sampler": "Windows Job basic and I/O accounting plus psutil peaks",
+      "sampling_interval_seconds": 0.02
+    },
+    "commands": [
+      "python docs/benchmarks/harness/system_scale.py --runtime {BASELINE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only small --small-variant clean --work-root target/benchmarks/system-scale/issue-358-baseline-small --output target/benchmarks/system-scale/issue-358-baseline-small.json",
+      "python docs/benchmarks/harness/system_scale.py --runtime {CANDIDATE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only small --small-variant clean --work-root target/benchmarks/system-scale/issue-358-candidate-small --output target/benchmarks/system-scale/issue-358-candidate-small.json",
+      "python docs/benchmarks/harness/system_scale.py --runtime {BASELINE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only medium --caller-files 1024 --work-root target/benchmarks/system-scale/issue-358-baseline-medium --output target/benchmarks/system-scale/issue-358-baseline-medium.json",
+      "python docs/benchmarks/harness/system_scale.py --runtime {CANDIDATE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only medium --caller-files 1024 --work-root target/benchmarks/system-scale/issue-358-candidate-medium --output target/benchmarks/system-scale/issue-358-candidate-medium.json",
+      "python docs/benchmarks/harness/system_scale.py --runtime {BASELINE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only medium --caller-files 4096 --work-root target/benchmarks/system-scale/issue-358-baseline-large --output target/benchmarks/system-scale/issue-358-baseline-large.json",
+      "python docs/benchmarks/harness/system_scale.py --runtime {CANDIDATE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only medium --caller-files 4096 --work-root target/benchmarks/system-scale/issue-358-candidate-large --output target/benchmarks/system-scale/issue-358-candidate-large.json"
+    ],
+    "path_placeholders": {
+      "{BASELINE_RUNTIME}": "baseline runtime executable",
+      "{CANDIDATE_RUNTIME}": "candidate runtime executable",
+      "{BASELINE_ROOT}": "baseline checkout root",
+      "{REPO_ROOT}": "candidate checkout root"
+    }
+  },
+  "source_revisions": {
+    "baseline": "57c51563576413f10c8d7530960c39880446463b",
+    "candidate": "5e475e6a6ad6ec5acfda6cef5656fe7cb1948475"
+  },
+  "runtimes": {
+    "baseline": {
+      "path": "{BASELINE_ROOT}/target/benchmarks/issue-358-baseline/debug/projectatlas.exe",
+      "version": "projectatlas 0.4.5",
+      "sha256": "6311a7deeee64b5d9e072eff34aa0d2792913e730e76a6e99a4cd238be15750e",
+      "bytes": 76348416
+    },
+    "candidate": {
+      "path": "{REPO_ROOT}/target/debug/projectatlas.exe",
+      "version": "projectatlas 0.4.5",
+      "sha256": "a55701ee39c48df23e14531d9217b823be69478fc31b096517b8512282f97d0f",
+      "bytes": 77011456
+    }
+  },
+  "runtime_artifact_notes": {
+    "candidate_binary_retained": false,
+    "candidate_identity": "The SHA-256 and byte size identify the historical measured executable; its source revision remains reproducible from Git.",
+    "rebuild_command": "cargo build --locked -p projectatlas-cli"
+  },
+  "corpora": {
+    "small-clean": {
+      "source": "docs/benchmarks/fixtures/mcp-composition/clean",
+      "generator": "existing prepare_small clean fixture",
+      "files": 7,
+      "bytes": 1503,
+      "tree_sha256": "ab5fc4021855ad75667519cb905d7542536cf7bc4104a33a8e2d8994ca60d050"
+    },
+    "medium-high-degree": {
+      "generator": "existing prepare_medium",
+      "caller_files": 1024,
+      "files": 1028,
+      "initial_text_index_bytes": 101548,
+      "source_shape": "one hub plus one direct caller module per generated caller"
+    },
+    "large-high-edge": {
+      "generator": "existing prepare_medium via --caller-files",
+      "caller_files": 4096,
+      "files": 4100,
+      "source_shape": "one hub plus one direct caller module per generated caller"
+    }
+  },
+  "unavailable": {
+    "allocator_events": "existing harness exposes no allocator-event sampler on this host",
+    "external_huge_repository": "no public/project-owned external huge corpus was available in this bounded run",
+    "platforms": "only Windows was exercised; Linux and macOS measurements remain unproven",
+    "transaction_trace": "transaction duration and checkpoint frame trace are not emitted by the existing harness"
+  }
+}

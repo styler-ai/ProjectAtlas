@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "issue": 358,
+  "input": "docs/benchmarks/v050-358-resource-measurement-input.json",
+  "harness": "docs/benchmarks/harness/system_scale.py",
+  "required_version": "0.4.5",
+  "source_revisions": {
+    "baseline": "57c51563576413f10c8d7530960c39880446463b",
+    "candidate": "5e475e6a6ad6ec5acfda6cef5656fe7cb1948475"
+  },
+  "environment": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.3",
+    "psutil": "7.0.0",
+    "logical_cpus": 16,
+    "telemetry": "disabled",
+    "sampler": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+    "sampling_interval_seconds": 0.02
+  },
+  "runtimes": {
+    "baseline": {
+      "version": "projectatlas 0.4.5",
+      "path": "{BASELINE_ROOT}/target/benchmarks/issue-358-baseline/debug/projectatlas.exe",
+      "sha256": "6311a7deeee64b5d9e072eff34aa0d2792913e730e76a6e99a4cd238be15750e",
+      "bytes": 76348416
+    },
+    "candidate": {
+      "version": "projectatlas 0.4.5",
+      "path": "{REPO_ROOT}/target/debug/projectatlas.exe",
+      "sha256": "a55701ee39c48df23e14531d9217b823be69478fc31b096517b8512282f97d0f",
+      "bytes": 77011456
+    }
+  },
+  "threshold": {
+    "cold_wall_reduction_fraction": 0.1,
+    "cold_cpu_reduction_fraction": 0.1,
+    "maximum_resource_regression_fraction": 0.05,
+    "decision": "retain-current-separate-stage-pools"
+  },
+  "shapes": {
+    "small-clean": {
+      "corpus": {
+        "files": 7,
+        "bytes": 1503,
+        "source": "docs/benchmarks/fixtures/mcp-composition/clean",
+        "tree_sha256": "ab5fc4021855ad75667519cb905d7542536cf7bc4104a33a8e2d8994ca60d050"
+      },
+      "baseline": {
+        "cold": {"wall_seconds": 0.592225, "cpu_seconds": 0.15625, "rss_bytes": 26996736, "read_bytes": 734311, "write_bytes": 3628936},
+        "unchanged_watch": {"wall_seconds": 0.312957, "cpu_seconds": 0.171875},
+        "persistent": {"database_bytes": 651264, "wal_bytes": 0, "shm_bytes": 0, "staging_bytes": 0, "stage_directories": 0},
+        "graph": {"sha256": "bec258fbb18c32d8868d3fe78ae4aff84f5bbc066be4ef149563d2662731cda3", "record_count": 245, "table_rows": {"entities": 29, "relations": 19, "occurrences": 19, "resolution_keys": 80, "exports": 79, "dependencies": 13, "coverage": 6, "identity_rejections": 0}}
+      },
+      "candidate": {
+        "cold": {"wall_seconds": 0.536433, "cpu_seconds": 0.15625, "rss_bytes": 27648000, "read_bytes": 737090, "write_bytes": 3628936},
+        "unchanged_watch": {"wall_seconds": 0.397349, "cpu_seconds": 0.203125},
+        "persistent": {"database_bytes": 651264, "wal_bytes": 0, "shm_bytes": 0, "staging_bytes": 0, "stage_directories": 0},
+        "graph": {"sha256": "bec258fbb18c32d8868d3fe78ae4aff84f5bbc066be4ef149563d2662731cda3", "record_count": 245, "table_rows": {"entities": 29, "relations": 19, "occurrences": 19, "resolution_keys": 80, "exports": 79, "dependencies": 13, "coverage": 6, "identity_rejections": 0}}
+      },
+      "threshold_evaluation": {"cold_wall_reduction_fraction": 0.094207, "cold_cpu_reduction_fraction": 0.0, "passed": false, "failed_cells": ["cold_cpu_reduction_below_10_percent"]}
+    },
+    "medium-high-degree": {
+      "corpus": {"caller_files": 1024, "files": 1028, "initial_text_index_bytes": 101548, "generator": "prepare_medium"},
+      "baseline": {
+        "cold": {"wall_seconds": 3.637465, "cpu_seconds": 4.03125, "rss_bytes": 58327040, "read_bytes": 100928028, "write_bytes": 451222284},
+        "unchanged_watch": {"wall_seconds": 0.37624, "cpu_seconds": 0.359375},
+        "narrow_watch": {"wall_seconds": 1.249288, "cpu_seconds": 0.28125},
+        "explicit_rebuild": {"wall_seconds": 9.055662, "cpu_seconds": 6.921875, "read_bytes": 145837576, "write_bytes": 532126852},
+        "persistent": {"database_bytes": 19124224, "wal_bytes": 0, "shm_bytes": 0, "staging_bytes": 0, "stage_directories": 0},
+        "sqlite": {"journal_mode": "wal", "synchronous": "full", "wal_autocheckpoint": 1000, "quick_check": "ok", "page_size": 4096, "page_count": 4669, "freelist_pages": 99},
+        "graph": {"sha256": "42eb33c7ae271906c3203f834c15c8077ab8cec296d0999ed78c3677dc515719", "record_count": 30772, "table_rows": {"entities": 3082, "relations": 2048, "occurrences": 2048, "resolution_keys": 10260, "exports": 10259, "dependencies": 2048, "coverage": 1027, "identity_rejections": 0}}
+      },
+      "candidate": {
+        "cold": {"wall_seconds": 4.638718, "cpu_seconds": 4.71875, "rss_bytes": 59867136, "read_bytes": 102858911, "write_bytes": 449906744},
+        "unchanged_watch": {"wall_seconds": 0.873522, "cpu_seconds": 0.46875},
+        "narrow_watch": {"wall_seconds": 1.250055, "cpu_seconds": 0.28125},
+        "explicit_rebuild": {"wall_seconds": 4.331094, "cpu_seconds": 4.59375, "read_bytes": 149158913, "write_bytes": 530434420},
+        "persistent": {"database_bytes": 19156992, "wal_bytes": 0, "shm_bytes": 0, "staging_bytes": 0, "stage_directories": 0},
+        "sqlite": {"journal_mode": "wal", "synchronous": "full", "wal_autocheckpoint": 1000, "quick_check": "ok", "page_size": 4096, "page_count": 4677, "freelist_pages": 107},
+        "graph": {"sha256": "42eb33c7ae271906c3203f834c15c8077ab8cec296d0999ed78c3677dc515719", "record_count": 30772, "table_rows": {"entities": 3082, "relations": 2048, "occurrences": 2048, "resolution_keys": 10260, "exports": 10259, "dependencies": 2048, "coverage": 1027, "identity_rejections": 0}}
+      },
+      "threshold_evaluation": {"cold_wall_reduction_fraction": -0.275261, "cold_cpu_reduction_fraction": -0.170543, "passed": false, "failed_cells": ["cold_wall_regression", "cold_cpu_regression", "explicit_rebuild_read_bytes_above_134217728", "baseline_mcp_startup_above_250"]}
+    },
+    "large-high-edge": {
+      "corpus": {"caller_files": 4096, "files": 4100, "generator": "prepare_medium via --caller-files", "source_shape": "one hub plus one direct caller module per generated caller"},
+      "baseline": {
+        "cold": {"wall_seconds": 18.34545, "cpu_seconds": 20.1875, "rss_bytes": 143839232, "read_bytes": 901575354, "write_bytes": 2184124648},
+        "unchanged_watch": {"wall_seconds": 0.6145, "cpu_seconds": 1.0},
+        "narrow_watch": {"wall_seconds": 1.7498, "cpu_seconds": 1.484375},
+        "explicit_rebuild": {"wall_seconds": 19.491716, "cpu_seconds": 22.53125},
+        "persistent": {"database_bytes": 72511488, "wal_bytes": 0, "shm_bytes": 0, "staging_bytes": 0, "stage_directories": 0},
+        "graph": {"sha256": "c72f6d5f82a6a84cc81fde3032df312ec5a7534b7b497bfa00d631d2072f5880", "record_count": 122253, "table_rows": {"entities": 12201, "relations": 8192, "occurrences": 8192, "resolution_keys": 40689, "exports": 40688, "dependencies": 8192, "coverage": 4099, "identity_rejections": 0}}
+      },
+      "candidate": {
+        "cold": {"wall_seconds": 20.815886, "cpu_seconds": 21.953125, "rss_bytes": 145047552, "read_bytes": 901737343, "write_bytes": 2185144596},
+        "unchanged_watch": {"wall_seconds": 0.610234, "cpu_seconds": 1.390625},
+        "narrow_watch": {"wall_seconds": 1.693783, "cpu_seconds": 1.390625},
+        "explicit_rebuild": {"wall_seconds": 20.096981, "cpu_seconds": 22.96875},
+        "persistent": {"database_bytes": 72392704, "wal_bytes": 0, "shm_bytes": 0, "staging_bytes": 0, "stage_directories": 0},
+        "graph": {"sha256": "c72f6d5f82a6a84cc81fde3032df312ec5a7534b7b497bfa00d631d2072f5880", "record_count": 122253, "table_rows": {"entities": 12201, "relations": 8192, "occurrences": 8192, "resolution_keys": 40689, "exports": 40688, "dependencies": 8192, "coverage": 4099, "identity_rejections": 0}}
+      },
+      "threshold_evaluation": {"cold_wall_reduction_fraction": -0.134662, "cold_cpu_reduction_fraction": -0.087461, "passed": false, "failed_cells": ["cold_wall_regression", "cold_cpu_regression"]}
+    }
+  },
+  "concurrency": {
+    "logical_cpus": 16,
+    "worker_budget": 16,
+    "workers_per_process": 8,
+    "two_root": {"baseline": {"peak_rss_bytes": 116973568, "cpu_seconds": 7.953125, "read_bytes": 291939388, "write_bytes": 849669592, "passed": true}, "candidate": {"peak_rss_bytes": 118800384, "cpu_seconds": 7.40625, "read_bytes": 292262660, "write_bytes": 846775016, "passed": true}},
+    "same_root": {"baseline": {"peak_rss_bytes": 116224000, "cpu_seconds": 5.109375, "read_bytes": 147743126, "write_bytes": 425288960, "passed": true}, "candidate": {"peak_rss_bytes": 118333440, "cpu_seconds": 5.421875, "read_bytes": 146772422, "write_bytes": 424215272, "passed": true}}
+  },
+  "contention": {
+    "baseline": {"blocked_wall_seconds": 1.460155, "blocked_error": "database is locked", "generation_unchanged": true, "retry_generation_increment": 1, "passed": true},
+    "candidate": {"blocked_wall_seconds": 1.525907, "blocked_error": "database is locked", "generation_unchanged": true, "retry_generation_increment": 1, "passed": true}
+  },
+  "cancellation": {
+    "baseline": {"seconds": 0.088352, "active_work_observed": true, "terminal_state": "canceled", "generation_unchanged": true, "passed": true},
+    "candidate": {"seconds": 0.092811, "active_work_observed": true, "terminal_state": "canceled", "generation_unchanged": true, "passed": true}
+  },
+  "unavailable": {
+    "allocations": {"status": "unavailable", "reason": "existing harness exposes no allocator-event sampler on this host"},
+    "external_huge_corpus": {"status": "unavailable", "reason": "no public/project-owned external huge corpus was available in this bounded run"},
+    "linux_macos": {"status": "unavailable", "reason": "only Windows was exercised"},
+    "transaction_duration": {"status": "unavailable", "reason": "existing harness does not emit transaction duration"},
+    "checkpoint_trace": {"status": "unavailable", "reason": "existing harness records final WAL/SHM state but not checkpoint frame timing"},
+    "query_plan_capture": {"status": "unavailable", "reason": "existing owning query-plan test is the available proof; benchmark output does not capture planner text"}
+  }
+}
