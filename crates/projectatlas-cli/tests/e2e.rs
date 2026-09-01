@@ -39159,11 +39159,16 @@ fn windows_fixture_identity_observed_after_readiness_is_rejected() -> Result<(),
                 "late-observed identity timeout omitted its readiness elapsed diagnostic: {text}"
             ))
         })?;
+    // The helper starts its absolute deadline before spawning the fixture. Keep the wall-clock
+    // assertion's process-start allowance bounded while preserving the 30-second readiness
+    // contract and the explicit observer delay.
+    let readiness_observation_upper_bound = CODEX_OWNER_OBSERVATION_TEST_DELAY
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     if elapsed < CODEX_OWNER_READINESS_TIMEOUT
         || elapsed > total_upper_bound
         || readiness_elapsed <= CODEX_OWNER_READINESS_TIMEOUT
-        || readiness_elapsed
-            > CODEX_OWNER_OBSERVATION_TEST_DELAY + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+        || readiness_elapsed > readiness_observation_upper_bound
         || !text.contains("published its child PID after the readiness deadline")
         || !text.contains(&format!("owner={}", codex_fixture.display()))
         || !text.contains(&format!("identity_file={}", identity_file.display()))
@@ -39171,7 +39176,7 @@ fn windows_fixture_identity_observed_after_readiness_is_rejected() -> Result<(),
         || windows_process_is_alive(&retained_identity)?
     {
         return Err(io::Error::other(format!(
-            "late-observed identity was accepted or not bounded: elapsed={elapsed:?} readiness_elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} readiness_scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_deadline={total_upper_bound:?}\n{text}"
+            "late-observed identity was accepted or not bounded: elapsed={elapsed:?} readiness_elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} readiness_observation_upper_bound={readiness_observation_upper_bound:?} readiness_scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_deadline={total_upper_bound:?}\n{text}"
         ))
         .into());
     }
