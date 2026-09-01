@@ -296,10 +296,8 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e
 
-      - name: POSIX atlas forwarder lifecycle E2E
-        if: matrix.label != 'windows'
+      - name: Atlas forwarder lifecycle E2E
         timeout-minutes: 10
-        shell: bash
         run: cargo test --locked -p projectatlas-cli plugin_installer_manages_atlas_forwarder_lifecycle_and_argv --test e2e -- --exact --nocapture
 
       - name: Installer RC pin E2E

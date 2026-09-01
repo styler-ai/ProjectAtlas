@@ -6943,6 +6943,14 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         }
     }
     let e2e_smoke = workflow_job_block(&ci_workflow, "e2e-smoke")?;
+    let forwarder_lifecycle_step =
+        workflow_job_step(&ci_workflow, "e2e-smoke", "Atlas forwarder lifecycle E2E")?;
+    if forwarder_lifecycle_step["if"].as_str().is_some() {
+        return Err(io::Error::other(
+            "atlas forwarder lifecycle E2E must run on every e2e-smoke matrix row",
+        )
+        .into());
+    }
     if !e2e_smoke.contains("plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp") {
         return Err(io::Error::other(
             "multi-OS CI smoke must run the plugin update stale-shim regression",
@@ -10372,6 +10380,49 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 .env(key, value);
             Ok(command.output()?)
         };
+    #[cfg(windows)]
+    let run_install_with_provenance_and_state_failure =
+        |provenance_path: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                &runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &run_path)
+                .env(
+                    "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
+                    provenance_path,
+                )
+                .env(
+                    "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+                    "1",
+                );
+            Ok(command.output()?)
+        };
+    #[cfg(windows)]
+    let run_install_with_state_failure = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &run_path)
+            .env(
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+                "1",
+            );
+        Ok(command.output()?)
+    };
     #[cfg(unix)]
     let run_install_with_provenance_and_state_failure =
         |provenance_path: &Path| -> Result<std::process::Output, Box<dyn Error>> {
@@ -10768,6 +10819,68 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
             format!(
                 "Windows installer could not recover after provenance publication collision:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let cleanup_failure = run_install_with_provenance_and_state_failure(&provenance)?;
+        let cleanup_failure_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&cleanup_failure.stdout),
+            String::from_utf8_lossy(&cleanup_failure.stderr)
+        );
+        let remaining_states = installer_state_dir
+            .read_dir()?
+            .collect::<Result<Vec<_>, io::Error>>()?;
+        require(
+            !cleanup_failure.status.success()
+                && cleanup_failure_text.contains("provenance publication collided")
+                && cleanup_failure_text.contains("forwarder cleanup failed")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance publication race collision\r\n"
+                && installer_state.is_file()
+                && remaining_states.len() == 2
+                && remaining_states
+                    .iter()
+                    .any(|entry| entry.path() == installer_state)
+                && remaining_states
+                    .iter()
+                    .any(|entry| entry.path() == unrelated_state)
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "Windows state cleanup failure did not retain only exact owned state and foreign bytes:\n{cleanup_failure_text}"
+            ),
+        )?;
+        let retained_state_content = fs::read(&installer_state)?;
+        fs::remove_file(&provenance)?;
+        let retained_state = run_install_with_state_failure()?;
+        let retained_state_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&retained_state.stdout),
+            String::from_utf8_lossy(&retained_state.stderr)
+        );
+        require(
+            !retained_state.status.success()
+                && retained_state_text.contains("retained without a managed forwarder")
+                && !forwarder.exists()
+                && !provenance.exists()
+                && installer_state.is_file()
+                && fs::read(&installer_state)? == retained_state_content
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "Windows retained state was reused after cleanup failure:\n{retained_state_text}"
+            ),
+        )?;
+        fs::remove_file(&installer_state)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "Windows installer could not recover after retained-state cleanup failure:\n{}\n{}",
                 String::from_utf8_lossy(&repaired_output.stdout),
                 String::from_utf8_lossy(&repaired_output.stderr)
             ),

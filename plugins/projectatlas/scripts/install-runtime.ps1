@@ -2152,7 +2152,15 @@ function Ensure-ProjectAtlasAtlasForwarderState {
         if ([string]::IsNullOrWhiteSpace($capability)) {
             throw "ProjectAtlas atlas forwarder installer state is missing, mismatched, or linked: $statePath"
         }
-        return $false
+        if (Test-ProjectAtlasManagedAtlasForwarder $ForwarderPath $VerifiedPath) {
+            return $false
+        }
+        try {
+            Remove-ProjectAtlasAtlasForwarderState $ForwarderPath $VerifiedPath
+        }
+        catch {
+            throw "ProjectAtlas atlas forwarder installer state is retained without a managed forwarder; refusing to reuse: $statePath. $($_.Exception.Message)"
+        }
     }
     $stateRoot = Get-ProjectAtlasAtlasForwarderStateRoot
     Assert-ProjectAtlasDirectPath $stateRoot "ProjectAtlas atlas forwarder installer state root"
@@ -2264,8 +2272,11 @@ function Remove-ProjectAtlasPublishedAtlasForwarderProvenance {
     }
     catch {
         if ($moved -and (Test-Path -LiteralPath $quarantinePath)) {
-            Restore-ProjectAtlasAtlasForwarderQuarantine $quarantinePath $ProvenancePath | Out-Null
+            if (-not (Restore-ProjectAtlasAtlasForwarderQuarantine $quarantinePath $ProvenancePath)) {
+                throw "ProjectAtlas atlas forwarder provenance cleanup failed and could not be restored: $ProvenancePath"
+            }
         }
+        throw
     }
 }
 
@@ -2396,11 +2407,14 @@ function Remove-ProjectAtlasAtlasForwarderState {
             }
             throw "ProjectAtlas atlas forwarder installer state changed during retirement: $statePath"
         }
+        Invoke-ProjectAtlasAtlasForwarderStateRetirementFailure
         Remove-Item -LiteralPath $quarantinePath -Force
     }
     catch {
         if (Test-Path -LiteralPath $quarantinePath) {
-            Restore-ProjectAtlasAtlasForwarderQuarantine $quarantinePath $statePath | Out-Null
+            if (-not (Restore-ProjectAtlasAtlasForwarderQuarantine $quarantinePath $statePath)) {
+                throw "ProjectAtlas atlas forwarder installer state cleanup failed and could not be restored: $statePath"
+            }
         }
         throw
     }
@@ -2554,6 +2568,13 @@ function Invoke-ProjectAtlasAtlasForwarderProvenancePublicationRace {
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Invoke-ProjectAtlasAtlasForwarderStateRetirementFailure {
+    if ([string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE)) {
+        return
+    }
+    throw "ProjectAtlas atlas forwarder installer state retirement was intentionally failed for lifecycle proof."
+}
+
 function Assert-ProjectAtlasAtlasForwarderCollisionFree {
     param(
         [string]$VerifiedPath
@@ -2656,9 +2677,16 @@ function Write-ProjectAtlasAtlasForwarder {
         }
     }
     catch {
+        $originalError = $_
+        $cleanupErrors = @()
         if ($provenancePublished -and -not $forwarderPublished `
             -and (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath)) {
-            Remove-ProjectAtlasPublishedAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath
+            try {
+                Remove-ProjectAtlasPublishedAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath
+            }
+            catch {
+                $cleanupErrors += $_.Exception.Message
+            }
         }
         if ($statePublished -and -not $forwarderPublished `
             -and (Test-Path -LiteralPath $statePath)) {
@@ -2666,10 +2694,13 @@ function Write-ProjectAtlasAtlasForwarder {
                 Remove-ProjectAtlasAtlasForwarderState $forwarder $VerifiedPath
             }
             catch {
-                # Preserve a concurrent replacement rather than deleting it by path.
+                $cleanupErrors += $_.Exception.Message
             }
         }
-        throw
+        if ($cleanupErrors.Count -gt 0) {
+            throw "$($originalError.Exception.Message) ProjectAtlas atlas forwarder cleanup failed: $($cleanupErrors -join '; ')"
+        }
+        throw $originalError
     }
     finally {
         if ([System.IO.File]::Exists($temporary)) {

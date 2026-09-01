@@ -430,11 +430,20 @@ flowchart TB
   installer[Installer] --> identity[Canonical verified runtime identity]
   identity --> collision{Existing atlas command?}
   collision -->|unmanaged| reject[Typed collision; no overwrite]
-  collision -->|owned current| stage[Stage shim plus private capability and provenance]
+  collision -->|owned current| stage[Stage shim and provenance]
   collision -->|owned prior target| stage
-  stage --> publish{No-clobber publish succeeds?}
-  publish -->|no| preserve[Preserve old owned shim and provenance]
-  publish -->|yes| shim[Publish verified managed shim]
+  stage --> state[Publish private capability state]
+  state --> provenance{Publish provenance no-clobber succeeds?}
+  provenance -->|no| state_cleanup[Quarantine and verify newly owned state]
+  state_cleanup -->|retired| reject_publication[Fail; preserve foreign provenance and unrelated bytes]
+  state_cleanup -->|retirement fails| retained[Retain exact state; report cleanup failure]
+  retained --> refuse[Later install refuses state without a managed pair]
+  refuse --> recover[Explicit safe retirement/removal enables recovery]
+  provenance -->|yes| forwarder{Publish shim no-clobber succeeds?}
+  forwarder -->|no| pair_cleanup[Retire only newly owned provenance and state]
+  pair_cleanup -->|retired| reject_publication
+  pair_cleanup -->|state retirement fails| retained
+  forwarder -->|yes| shim[Publish verified managed shim]
   shim --> migrate[Quarantine and verify prior owned pair before identity-safe retirement]
   migrate --> discover[PATH discovery; preserve concurrent foreign replacements]
   discover --> aliases[atlas top-level command aliases]
