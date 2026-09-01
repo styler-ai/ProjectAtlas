@@ -242,6 +242,12 @@ const REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET: Duration = Duration::from_secs(1
 const REAL_HOST_READER_PROCESS_TREE_MAX_DEPTH: usize = 8;
 #[cfg(windows)]
 const REAL_HOST_READER_PROCESS_TREE_MAX_PROCESSES: usize = 32;
+#[cfg(windows)]
+const REAL_HOST_READER_CIM_FAILURE_ENV: &str = "PROJECTATLAS_TEST_REAL_HOST_TREE_CIM_FAILURE";
+#[cfg(windows)]
+const REAL_HOST_READER_CIM_DISCOVERY_FAILURE: &str = "discovery";
+#[cfg(windows)]
+const REAL_HOST_READER_CIM_REVALIDATION_FAILURE: &str = "revalidation";
 // The direct host is reaped under the same bounded five-second envelope on every platform.
 const REAL_HOST_READER_REAP_BUDGET: Duration = Duration::from_secs(5);
 const REAL_HOST_SPECIAL_PATH_COMPONENT: &str = "host reader path with space-\u{00fc}";
@@ -11533,6 +11539,53 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
             ),
         )?;
     }
+    for cim_failure in [
+        REAL_HOST_READER_CIM_DISCOVERY_FAILURE,
+        REAL_HOST_READER_CIM_REVALIDATION_FAILURE,
+    ] {
+        let identity_file = temp
+            .path()
+            .join(format!("native-host-owned-{cim_failure}-failure.pid"));
+        let arguments = vec![
+            identity_file.to_string_lossy().into_owned(),
+            runtime.to_string_lossy().into_owned(),
+            database.to_string_lossy().into_owned(),
+        ];
+        let mut command = host_command(&native_host_fixture);
+        command
+            .current_dir(&repo)
+            .args(&arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_real_host_environment(&mut command, &host_root, None)?;
+        let mut host = command.spawn()?;
+        let host_identity = capture_windows_process_identity(host.id())?;
+        let child_identity = read_codex_owner_child_identity_until_published(
+            &codex_owner_retained_identity_path(&identity_file),
+            &runtime,
+            REAL_HOST_READER_IDENTITY_CAPTURE_BUDGET,
+        )?;
+        let cleanup_result = stop_windows_real_host_process_tree_until(
+            &host_identity,
+            Instant::now() + CODEX_OWNER_CHILD_STOP_BUDGET,
+            Some(cim_failure),
+        );
+        let host_alive = windows_process_is_alive(&host_identity)?;
+        let child_alive = windows_process_is_alive(&child_identity)?;
+        let child_cleanup = stop_windows_fixture_process(&child_identity);
+        let host_cleanup = stop_windows_fixture_process(&host_identity);
+        let host_wait = host.wait();
+        require(
+            cleanup_result.is_err() && host_alive && child_alive,
+            format!(
+                "injected {cim_failure} topology failure did not fail closed: result={cleanup_result:?} host_alive={host_alive} child_alive={child_alive}"
+            ),
+        )?;
+        child_cleanup?;
+        host_cleanup?;
+        host_wait?;
+    }
     Ok(())
 }
 
@@ -11818,7 +11871,7 @@ fn run_real_host_command_inner(
     }
     #[cfg(not(windows))]
     {
-        let _ = owned_descendant;
+        let _ = (owned_descendant, timeout);
         return run_bounded_output(command, "real host reader");
     }
     #[cfg(windows)]
@@ -41436,6 +41489,7 @@ fn stop_windows_fixture_process_until(
 fn stop_windows_real_host_process_tree_until(
     identity: &WindowsProcessIdentity,
     deadline: Instant,
+    cim_failure: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     let process_tree_script = r#"
 $root = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue
@@ -41445,6 +41499,10 @@ $seen = @{}
 $seen[[uint32]$root.Id] = $true
 $frontier = @([uint32]$root.Id)
 $processes = @()
+$discoveryClass = 'Win32_Process'
+if ($env:PROJECTATLAS_TEST_REAL_HOST_TREE_CIM_FAILURE -eq 'discovery') {
+    $discoveryClass = 'ProjectAtlasMissingProcessClass'
+}
 try {
     $rootCreation = $root.StartTime.ToUniversalTime().ToFileTimeUtc()
     $rootPath = [System.IO.Path]::GetFullPath($root.Path)
@@ -41462,9 +41520,10 @@ try {
         foreach ($parentId in $frontier) {
             $children = @(
                 CimCmdlets\Get-CimInstance `
-                    -ClassName Win32_Process `
+                    -ClassName $discoveryClass `
                     -Filter ("ParentProcessId = {0}" -f $parentId) `
-                    -OperationTimeoutSec 1
+                    -OperationTimeoutSec 1 `
+                    -ErrorAction Stop
             )
             foreach ($candidate in $children) {
                 $processId = [uint32]$candidate.ProcessId
@@ -41505,16 +41564,21 @@ try {
     }
     if ($result -eq 0 -and $frontier.Count -gt 0) { $result = 6 }
     if ($result -eq 0) {
+        $revalidationClass = 'Win32_Process'
+        if ($env:PROJECTATLAS_TEST_REAL_HOST_TREE_CIM_FAILURE -eq 'revalidation') {
+            $revalidationClass = 'ProjectAtlasMissingProcessClass'
+        }
         for ($index = $processes.Count - 1; $index -ge 0; $index--) {
             $entry = $processes[$index]
             $process = Get-Process -Id $entry.process_id -ErrorAction SilentlyContinue
             if ($null -eq $process) { continue }
             try {
                 $current = @(
-                CimCmdlets\Get-CimInstance `
-                        -ClassName Win32_Process `
+                    CimCmdlets\Get-CimInstance `
+                        -ClassName $revalidationClass `
                         -Filter ("ProcessId = {0}" -f $entry.process_id) `
-                        -OperationTimeoutSec 1
+                        -OperationTimeoutSec 1 `
+                        -ErrorAction Stop
                 )
                 if ($current.Count -eq 0 -or $process.HasExited) { continue }
                 $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc()
@@ -41593,8 +41657,12 @@ exit $result
             "PROJECTATLAS_REAL_HOST_TREE_MAX_PROCESSES",
             REAL_HOST_READER_PROCESS_TREE_MAX_PROCESSES.to_string(),
         )
+        .env_remove(REAL_HOST_READER_CIM_FAILURE_ENV)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(cim_failure) = cim_failure {
+        command.env(REAL_HOST_READER_CIM_FAILURE_ENV, cim_failure);
+    }
     let mut cleanup = command.spawn()?;
     let status = match wait_for_child_exit_until(&mut cleanup, deadline) {
         Ok(status) => status,
@@ -42466,7 +42534,7 @@ fn run_bounded_output_with_real_host_process_tree(
             .ok_or_else(|| {
                 io::Error::other("real host process-tree cleanup deadline overflowed")
             })?;
-        stop_windows_real_host_process_tree_until(&identity, cleanup_deadline).map_err(
+        stop_windows_real_host_process_tree_until(&identity, cleanup_deadline, None).map_err(
             |error| io::Error::other(format!("real host process-tree cleanup failed: {error}")),
         )?;
         match host.kill() {
