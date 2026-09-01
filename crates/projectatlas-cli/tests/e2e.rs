@@ -165,6 +165,7 @@ const FAKE_CODEX_SKILL_CONTENT: &str =
 const FAKE_PATH_DIR: &str = "fake-path";
 const IGNORED_FIXTURE_DIR: &str = "ignored-dir";
 const ISOLATED_HOME_DIR: &str = "isolated-home";
+const ISOLATED_CLAUDE_CONFIG_DIR_NAME: &str = "claude-config";
 const NPM_SHIM_DIR: &str = "npm";
 #[cfg(windows)]
 const WINDOWS_SYSTEM32_DIR: &str = "System32";
@@ -233,6 +234,8 @@ const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
 const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS";
 #[cfg(windows)]
 const REAL_HOST_READER_TIMEOUT: Duration = Duration::from_millis(250);
+// The direct host is reaped under the same bounded five-second envelope on every platform.
+const REAL_HOST_READER_REAP_BUDGET: Duration = Duration::from_secs(5);
 const REAL_HOST_SPECIAL_PATH_COMPONENT: &str = "host reader path with space-\u{00fc}";
 #[cfg(windows)]
 const OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME: &str = "obsolete-projectatlas.cs";
@@ -11460,45 +11463,54 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
     fs::create_dir_all(&repo)?;
     fs::create_dir_all(&host_root)?;
 
-    for attempt in 0..2 {
-        let identity_file = temp.path().join(format!("native-host-owned-{attempt}.pid"));
-        let arguments = vec![
-            identity_file.to_string_lossy().into_owned(),
-            runtime.to_string_lossy().into_owned(),
-            database.to_string_lossy().into_owned(),
-        ];
-        let timeout_result = run_real_host_command_with_owned_mcp_descendant(
-            &native_host_fixture,
-            &repo,
-            &host_root,
-            None,
-            &arguments,
-            &[],
-            &identity_file,
-            &runtime,
-        );
-        let timeout_text = timeout_result
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        require(
-            timeout_result.is_err()
-                && timeout_text.contains("real host reader plugin installer exceeded")
-                && timeout_text.contains("status "),
-            format!(
-                "native host runner timeout did not preserve bounded timeout classification: {timeout_result:?}"
-            ),
-        )?;
-        let child_identity =
-            read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
-        require(
-            !windows_process_is_alive(&child_identity)?,
-            format!(
-                "native host runner timeout left its matching owned descendant alive on attempt {attempt}: child={child_identity:?}"
-            ),
-        )?;
-    }
+    let identity_file = temp.path().join("native-host-owned.pid");
+    let arguments = vec![
+        identity_file.to_string_lossy().into_owned(),
+        runtime.to_string_lossy().into_owned(),
+        database.to_string_lossy().into_owned(),
+    ];
+    let started = Instant::now();
+    let timeout_result = run_real_host_command_with_environment(
+        &native_host_fixture,
+        &repo,
+        &host_root,
+        None,
+        &arguments,
+        &[],
+        Some((&identity_file, &runtime)),
+    );
+    let elapsed = started.elapsed();
+    let timeout_text = timeout_result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    require(
+        timeout_result.is_err()
+            && timeout_text.contains("real host reader plugin installer exceeded")
+            && timeout_text.contains("status "),
+        format!(
+            "native host runner timeout did not preserve bounded timeout classification: {timeout_result:?}"
+        ),
+    )?;
+    let complete_bound = REAL_HOST_READER_TIMEOUT
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + REAL_HOST_READER_REAP_BUDGET;
+    require(
+        elapsed <= complete_bound,
+        format!(
+            "native host runner timeout exceeded its complete cleanup bound: elapsed={elapsed:?} bound={complete_bound:?}"
+        ),
+    )?;
+    let child_identity =
+        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
+    require(
+        !windows_process_is_alive(&child_identity)?,
+        format!(
+            "native host runner timeout left its matching owned descendant alive: child={child_identity:?}"
+        ),
+    )?;
     Ok(())
 }
 
@@ -11653,7 +11665,7 @@ fn configure_real_host_environment(
     let app_data = host_root.join("app-data");
     let local_app_data = host_root.join(ISOLATED_LOCAL_APP_DATA_DIR_NAME);
     let temp_dir = host_root.join(E2E_TEMP_DIR_NAME);
-    let claude_config = host_root.join("claude-config");
+    let claude_config = host_root.join(ISOLATED_CLAUDE_CONFIG_DIR_NAME);
     let xdg_config = host_root.join(ISOLATED_XDG_CONFIG_DIR_NAME);
     let xdg_data = host_root.join("xdg-data");
     let xdg_state = host_root.join("xdg-state");
@@ -11707,6 +11719,7 @@ fn run_real_host_command(
         opencode_config,
         arguments,
         &[],
+        None,
     )
 }
 
@@ -11717,6 +11730,7 @@ fn run_real_host_command_with_environment(
     opencode_config: Option<&Path>,
     arguments: &[String],
     environment: &[(&str, &str)],
+    owned_descendant: Option<(&Path, &Path)>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     run_real_host_command_inner(
         executable,
@@ -11725,29 +11739,7 @@ fn run_real_host_command_with_environment(
         opencode_config,
         arguments,
         environment,
-        None,
-    )
-}
-
-#[cfg(windows)]
-fn run_real_host_command_with_owned_mcp_descendant(
-    executable: &Path,
-    repo: &Path,
-    host_root: &Path,
-    opencode_config: Option<&Path>,
-    arguments: &[String],
-    environment: &[(&str, &str)],
-    descendant_identity_file: &Path,
-    stable_runtime: &Path,
-) -> Result<std::process::Output, Box<dyn Error>> {
-    run_real_host_command_inner(
-        executable,
-        repo,
-        host_root,
-        opencode_config,
-        arguments,
-        environment,
-        Some((descendant_identity_file, stable_runtime)),
+        owned_descendant,
     )
 }
 
@@ -11952,12 +11944,25 @@ fn verify_claude_native_reader(
             "Claude native host reader did not expose the unrelated entry before installer repair: {unrelated_native_state}"
         ),
     )?;
-    let unrelated_native_line = unrelated_native_state
-        .lines()
-        .find(|line| line.contains("unrelated"))
-        .map(str::to_owned)
+    let native_state_file = host_root
+        .join(ISOLATED_CLAUDE_CONFIG_DIR_NAME)
+        .join(".claude.json");
+    let native_state_before = read_json_file(&native_state_file)?;
+    let canonical_project = repo.canonicalize()?.to_string_lossy().replace('\\', "/");
+    let project_key = canonical_project
+        .strip_prefix("//?/")
+        .unwrap_or(&canonical_project);
+    let unrelated_native_entry = native_state_before
+        .get("projects")
+        .and_then(|projects| projects.get(project_key))
+        .and_then(|project| project.get("mcpServers"))
+        .and_then(|servers| servers.get("unrelated"))
+        .cloned()
         .ok_or_else(|| {
-            io::Error::other("Claude native host reader omitted unrelated entry line")
+            io::Error::other(format!(
+                "Claude native state omitted the complete unrelated entry subtree: file={} project_key={project_key} state={native_state_before}",
+                native_state_file.display()
+            ))
         })?;
     let mut corrupted_generated = read_json_file(generated_config)?;
     corrupted_generated["mcpServers"]["projectatlas"]["command"] = Value::String(
@@ -11979,6 +11984,36 @@ fn verify_claude_native_reader(
         generated_config,
         serde_json::to_vec_pretty(&corrupted_generated)?,
     )?;
+    let stale_reader_arguments = vec![
+        "--bare".to_owned(),
+        "--debug-file".to_owned(),
+        host_root
+            .join("claude-stale-reader.debug.log")
+            .to_string_lossy()
+            .into_owned(),
+        "--strict-mcp-config".to_owned(),
+        "--mcp-config".to_owned(),
+        generated_config.to_string_lossy().into_owned(),
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "Return exactly OK.".to_owned(),
+    ];
+    let stale_reader =
+        run_real_host_command(executable, repo, host_root, None, &stale_reader_arguments)?;
+    let stale_reader_text = host_output_text(&stale_reader);
+    let stale_reader_debug = fs::read_to_string(host_root.join("claude-stale-reader.debug.log"))?;
+    require(
+        !stale_reader.status.success()
+            && stale_reader_debug
+                .to_ascii_lowercase()
+                .contains("connection failed")
+            && stale_reader_debug.contains(MISSING_PROJECTATLAS_RUNTIME_NAME)
+            && !stale_reader_text.contains(source_marker),
+        format!(
+            "Claude native reader unexpectedly accepted the unrepaired generated config: output={stale_reader_text} debug={stale_reader_debug}"
+        ),
+    )?;
     run_real_host_installer_repair(repo, runtime, host_root)?;
     let repaired_generated = read_json_file(generated_config)?;
     let (repaired_runtime, repaired_arguments) =
@@ -11994,6 +12029,11 @@ fn verify_claude_native_reader(
     )?;
     let repaired_reader_arguments = vec![
         "--bare".to_owned(),
+        "--debug-file".to_owned(),
+        host_root
+            .join("claude-repaired-reader.debug.log")
+            .to_string_lossy()
+            .into_owned(),
         "--strict-mcp-config".to_owned(),
         "--mcp-config".to_owned(),
         generated_config.to_string_lossy().into_owned(),
@@ -12010,6 +12050,8 @@ fn verify_claude_native_reader(
         &repaired_reader_arguments,
     )?;
     let repaired_reader_text = host_output_text(&repaired_reader);
+    let repaired_reader_debug =
+        fs::read_to_string(host_root.join("claude-repaired-reader.debug.log"))?;
     require(
         !repaired_reader.status.success()
             && repaired_reader_text
@@ -12019,12 +12061,31 @@ fn verify_claude_native_reader(
             "Claude native reader did not consume the installer-repaired generated config before its expected unauthenticated refusal: {repaired_reader_text}"
         ),
     )?;
+    let repaired_reader_debug_lower = repaired_reader_debug.to_ascii_lowercase();
+    require(
+        repaired_reader_debug_lower.contains("hastools\":true")
+            && repaired_reader_debug_lower
+                .contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION")))
+            && !repaired_reader_debug_lower.contains("connection failed"),
+        format!(
+            "Claude native reader did not initialize the installer-repaired generated artifact: {repaired_reader_debug}"
+        ),
+    )?;
+    let native_state_after = read_json_file(&native_state_file)?;
+    require(
+        native_state_after
+            .get("projects")
+            .and_then(|projects| projects.get(project_key))
+            .and_then(|project| project.get("mcpServers"))
+            .and_then(|servers| servers.get("unrelated"))
+            == Some(&unrelated_native_entry),
+        format!(
+            "Claude installer repair changed the complete unrelated native entry subtree: {native_state_after}"
+        ),
+    )?;
     let repaired_native_state = claude_mcp_list(executable, repo, host_root, None)?;
     require(
-        repaired_native_state
-            .lines()
-            .find(|line| line.contains("unrelated"))
-            .is_some_and(|line| line == unrelated_native_line),
+        repaired_native_state.contains("unrelated"),
         format!(
             "Claude installer repair changed the unrelated native project entry: {repaired_native_state}"
         ),
@@ -12156,7 +12217,7 @@ fn verify_claude_native_reader(
         format!("Claude Code native repair did not restore generated config: {text}"),
     )?;
     claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
-    fs::remove_file(project_config)?;
+    fs::remove_file(&project_config)?;
     // Claude's user scope is its shared registry. With the project-local
     // entry removed, the same generated command must still connect through
     // the shared route and retain the exact project database/config paths.
@@ -12193,6 +12254,10 @@ fn verify_claude_native_reader(
         format!("Claude Code uninstall removed unrelated native config: {text}"),
     )?;
     claude_mcp_remove(executable, repo, host_root, "local", "unrelated")?;
+    require(
+        !project_config.exists(),
+        "Claude source-evidence loopback must consume the repaired generated artifact, not the project .mcp.json copy",
+    )?;
     let loopback =
         LoopbackModelServer::start(LoopbackModelProtocol::AnthropicMessages, source_marker)?;
     let base_url = loopback.base_url();
@@ -12232,6 +12297,7 @@ fn verify_claude_native_reader(
         None,
         &model_arguments,
         &model_environment,
+        None,
     );
     let observation_result = loopback.finish();
     let model_output = model_output_result.map_err(|error| {
@@ -12551,6 +12617,7 @@ fn verify_opencode_native_reader(
         Some(generated_config),
         &model_arguments,
         &model_environment,
+        None,
     );
     let observation_result = loopback.finish();
     let model_output = model_output_result.map_err(|error| {
@@ -42042,10 +42109,19 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                 child.stdin.take();
                 drop(child.stdout.take());
                 drop(child.stderr.take());
-                let status = child.wait()?;
+                let reap_deadline = Instant::now()
+                    .checked_add(REAL_HOST_READER_REAP_BUDGET)
+                    .ok_or_else(|| io::Error::other("real host reader reap deadline overflowed"))?;
+                let status = wait_for_child_exit_until(&mut child, reap_deadline);
+                let status_text = match status {
+                    Ok(status) => format!("status {status}"),
+                    Err(error) => {
+                        format!("status unknown; bounded direct-host reap failed: {error}")
+                    }
+                };
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("{label} plugin installer exceeded {timeout:?} (status {status})"),
+                    format!("{label} plugin installer exceeded {timeout:?} ({status_text})"),
                 )
                 .into());
             }
@@ -42102,6 +42178,26 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
         let remaining = deadline.saturating_duration_since(observed_at);
         if remaining.is_zero() {
             continue;
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
+    }
+}
+
+/// Reap a direct host only within the caller's explicit cleanup deadline.
+fn wait_for_child_exit_until(
+    child: &mut Child,
+    deadline: Instant,
+) -> io::Result<std::process::ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "direct host remained running at its bounded reap deadline",
+            ));
         }
         thread::sleep(Duration::from_millis(25).min(remaining));
     }
