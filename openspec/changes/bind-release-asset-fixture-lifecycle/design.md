@@ -12,7 +12,7 @@
 
 **Non-Goals:**
 
-- New process infrastructure, dependencies, retries, suite serialization, an independent pre-request timeout, or an unbounded local fallback to the five-minute CI step.
+- New process infrastructure, dependencies, retries, a new fixture/global lock, broader suite serialization, an independent pre-request timeout, or an unbounded local fallback to the five-minute CI step.
 - Product installer, runtime, PATH, MCP, database, CLI, or payload changes.
 - A generic local HTTP server abstraction.
 

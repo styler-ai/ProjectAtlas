@@ -31,7 +31,7 @@ The fixture SHALL preserve its current suffix-based archive and `SHA256SUMS` rou
 - **THEN** the existing checksum-mismatch refusal and bounded helper cleanup remain unchanged
 
 ### Requirement: The release gate is reliable under ordinary parallel load
-The focused lifecycle fixture, affected Windows installer fixtures, POSIX checksum-mismatch fixture, and ordinary parallel locked workspace gate SHALL pass without retry-only acceptance, suite serialization, an independent pre-request timeout, global locks, or a new process/server framework.
+The focused lifecycle fixture, affected Windows installer fixtures, POSIX checksum-mismatch fixture, and ordinary parallel locked workspace gate SHALL pass without retry-only acceptance, a new fixture/global lock, broader suite serialization, an independent pre-request timeout, or a new process/server framework. The existing Windows release-asset fixture lock SHALL remain unchanged.
 
 #### Scenario: Parallel workspace execution
 - **WHEN** the fixture runs with the repository's ordinary parallel test workload
