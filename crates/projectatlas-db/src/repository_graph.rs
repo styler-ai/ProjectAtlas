@@ -3097,6 +3097,52 @@ impl AtlasStore {
         )
     }
 
+    /// Return whether the current graph generation retained the global
+    /// identity-rejection detail ceiling.
+    ///
+    /// The persisted count is authoritative for publication-level omission:
+    /// details can be evicted from a later path while its coverage omission
+    /// remains part of the same complete generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when publication metadata, project identity, count
+    /// conversion, cancellation, or SQLite state is invalid.
+    pub fn repository_graph_identity_rejection_cap_reached(
+        &self,
+        project: ProjectInstanceId,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<bool> {
+        let Some(generation) = self.repository_graph_generation()? else {
+            return Ok(false);
+        };
+        if !verify_project_identity(&self.connection, project)? {
+            return Ok(false);
+        }
+        let generation = i64::try_from(generation.get()).map_err(|_error| {
+            GraphContractError::InvalidLimits {
+                reason: "identity rejection generation exceeded SQLite integer range",
+            }
+        })?;
+        let persisted_count = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                self.connection
+                    .query_row(
+                        "SELECT COUNT(*)
+                       FROM graph_identity_rejections
+                      WHERE project_instance_id = ?1 AND generation = ?2",
+                        params![&project.as_bytes()[..], generation],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(Into::into)
+            },
+        )?;
+        Ok(persisted_count >= i64::from(GraphLimits::MAX_ROWS))
+    }
+
     /// Return the complete generation used to reconstruct normalized graph rows.
     ///
     /// # Errors
@@ -15665,6 +15711,71 @@ mod tests {
             &retained_raw_identity_count,
             &0,
             "typed rejection table retained no invalid raw identity material",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn identity_rejection_cap_reports_the_current_generation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("identity-rejection-cap");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        let fixture = publish_fixture(&mut store, "identity-rejection-cap")?;
+        require_eq(
+            &store.repository_graph_identity_rejection_cap_reached(fixture.project, None)?,
+            &false,
+            "empty generation rejection cap",
+        )?;
+
+        let source_path = RepositoryNodePath::new(Path::new("src/Äuth.rs"))?;
+        let graph = graph_fixture(fixture.project, IndexGeneration::new(2))?;
+        let rejections = (0..GraphLimits::MAX_ROWS)
+            .map(|fact_index| {
+                Ok(GraphIdentityRejection {
+                    path: source_path.clone(),
+                    span: SourceSpan::new(fact_index + 1, 0, fact_index + 1, 0)?,
+                    parser: ParserKind::TreeSitter,
+                    field: GraphIdentityField::Symbol,
+                    reason: GraphIdentityRejectionReason::Empty,
+                    fact_index: u64::from(fact_index),
+                })
+            })
+            .collect::<Result<Vec<_>, projectatlas_core::graph::GraphContractError>>()?;
+        {
+            let mut publication = store.begin_index_publication("identity-rejection-cap")?;
+            publication.replace_repository_graph(
+                fixture.project,
+                &graph.entities,
+                &graph.relations,
+                &graph.occurrences,
+                &graph.coverage,
+            )?;
+            publication.replace_graph_identity_rejections(fixture.project, &rejections)?;
+            publication.complete()?;
+        }
+        require_eq(
+            &store.repository_graph_identity_rejection_cap_reached(fixture.project, None)?,
+            &true,
+            "full generation rejection cap",
+        )?;
+        let query_plan = store
+            .connection
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                   SELECT COUNT(*)
+                     FROM graph_identity_rejections
+                    WHERE project_instance_id = ?1 AND generation = ?2",
+            )?
+            .query_map(params![&fixture.project.as_bytes()[..], 2_i64], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" ");
+        require(
+            query_plan.contains("idx_graph_identity_rejections_generation_path"),
+            "identity rejection cap query did not use its generation index",
         )?;
         Ok(())
     }

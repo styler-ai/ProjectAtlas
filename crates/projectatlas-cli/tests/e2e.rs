@@ -23715,6 +23715,7 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         .collect::<Vec<_>>()
         .join("/");
     let relative_path = format!("src/{long_path}/bounded_identity_coverage.ts");
+    let later_relative_path = "src/later_identity_coverage.ts".to_string();
     fs::create_dir_all(
         repo.join(
             Path::new(&relative_path)
@@ -23725,6 +23726,10 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
     fs::write(
         repo.join(&relative_path),
         "export function bounded_identity_coverage() {}\n",
+    )?;
+    fs::write(
+        repo.join(&later_relative_path),
+        "export function later_identity_coverage() {}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
     Command::cargo_bin("projectatlas")?
@@ -23758,6 +23763,7 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         .checked_next()
         .ok_or_else(|| io::Error::other("bounded coverage generation overflow"))?;
     let path = RepositoryNodePath::new(Path::new(&relative_path))?;
+    let later_path = RepositoryNodePath::new(Path::new(&later_relative_path))?;
     let coverage = CoverageRecord::new(
         CoverageScope::Path { path: path.clone() },
         None,
@@ -23767,6 +23773,18 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         generation,
         Some(GraphIdentityText::new("bounded identity details")?),
         Some(GraphLimitKind::Rows),
+    )?;
+    let later_coverage = CoverageRecord::new(
+        CoverageScope::Path {
+            path: later_path.clone(),
+        },
+        None,
+        CoverageState::Partial,
+        1,
+        1,
+        generation,
+        Some(GraphIdentityText::new("bounded identity details evicted")?),
+        None,
     )?;
     let rejections = (0..GraphLimits::MAX_ROWS)
         .map(|fact_index| {
@@ -23790,7 +23808,20 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&nodes)?;
         publication.finish_scan_replacement()?;
-        publication.replace_repository_graph(project, &[], &[], &[], &[coverage])?;
+        publication.replace_symbol_graph(&SymbolGraph {
+            path: later_path.as_str().to_string(),
+            language: Some("typescript".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        })?;
+        publication.replace_repository_graph(
+            project,
+            &[],
+            &[],
+            &[],
+            &[coverage, later_coverage],
+        )?;
         publication.replace_graph_identity_rejections(project, &rejections)?;
         publication.complete()?;
     }
@@ -23830,6 +23861,44 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
     {
         return Err(io::Error::other(format!(
             "bounded JSON coverage was not truthful or exceeded its output bound: {json_report}"
+        ))
+        .into());
+    }
+
+    let later_json_output = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            &later_relative_path,
+            "--limit",
+            "1",
+        ])
+        .output()?;
+    if !later_json_output.status.success() {
+        return Err(io::Error::other(format!(
+            "publication-cap JSON coverage failed: {}",
+            String::from_utf8_lossy(&later_json_output.stderr)
+        ))
+        .into());
+    }
+    let later_json_report: Value = serde_json::from_slice(&later_json_output.stdout)?;
+    let later_json_has_rejections = later_json_report["rows"][0]["identity_rejections"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty());
+    if later_json_has_rejections
+        || later_json_report["identity_rejections_truncated"] != true
+        || later_json_report["identity_rejections_limit"] != 200
+        || later_json_report["output_bytes"] != later_json_output.stdout.len()
+        || later_json_output.stdout.len() > GraphLimits::MAX_OUTPUT_BYTES as usize
+    {
+        return Err(io::Error::other(format!(
+            "publication-cap JSON coverage was not truthful: {later_json_report}"
         ))
         .into());
     }
@@ -23915,6 +23984,51 @@ fn bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp()
     {
         return Err(io::Error::other(format!(
             "bounded MCP coverage was not truthful or exceeded its output bound: {mcp_report}"
+        ))
+        .into());
+    }
+
+    let later_messages = vec![
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"publication-cap-coverage-e2e","version":"0.1.0"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "atlas_health",
+                "arguments": {
+                    "coverage": true,
+                    "path_prefix": later_relative_path,
+                    "limit": 1
+                }
+            }
+        })
+        .to_string(),
+    ];
+    let later_mcp_stdout = run_mcp_stdio(
+        &executable,
+        &repo,
+        &[
+            "--db".to_string(),
+            db.display().to_string(),
+            "mcp".to_string(),
+        ],
+        &later_messages,
+    )?;
+    let later_mcp_text = mcp_tool_text(&later_mcp_stdout, 2)?;
+    let later_mcp_report: Value = toon_format::decode_default(&later_mcp_text)?;
+    let later_mcp_has_rejections = later_mcp_report["coverage"]["rows"][0]["identity_rejections"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty());
+    if later_mcp_has_rejections
+        || later_mcp_report["coverage"]["identity_rejections_truncated"] != true
+        || later_mcp_report["coverage"]["identity_rejections_limit"] != 200
+        || later_mcp_report["coverage"]["output_bytes"] != later_mcp_text.len()
+        || later_mcp_text.len() > GraphLimits::MAX_OUTPUT_BYTES as usize
+    {
+        return Err(io::Error::other(format!(
+            "publication-cap MCP coverage was not truthful: {later_mcp_report}"
         ))
         .into());
     }
