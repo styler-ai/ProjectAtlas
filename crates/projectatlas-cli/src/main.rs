@@ -1351,6 +1351,11 @@ enum Command {
         expected_device: u64,
         /// Inode identity captured from the trusted lock path before it was opened.
         expected_inode: u64,
+        /// Optional bounded wait supplied by the installer lock-set deadline.
+        timeout_milliseconds: Option<u64>,
+        /// Print the monotonic elapsed wait after successful acquisition.
+        #[arg(long)]
+        report_elapsed: bool,
     },
     /// Manage purpose metadata stored in the durable index.
     Purpose {
@@ -2972,8 +2977,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
         Command::AcquireInstallerLock {
             expected_device,
             expected_inode,
+            timeout_milliseconds,
+            report_elapsed,
         } => {
-            io::stdin()
+            let started = Instant::now();
+            let result = io::stdin()
                 .as_fd()
                 .try_clone_to_owned()
                 .map(fs::File::from)
@@ -2982,13 +2990,18 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         &lock_file,
                         *expected_device,
                         *expected_inode,
-                        INSTALLER_LOCK_TIMEOUT,
+                        timeout_milliseconds.map_or(INSTALLER_LOCK_TIMEOUT, |milliseconds| {
+                            Duration::from_millis(milliseconds)
+                        }),
                     )
-                })
-                .map_err(|source| CliError::Io {
-                    path: PathBuf::from("inherited installer lock standard input"),
-                    source,
-                })?;
+                });
+            if result.is_ok() && *report_elapsed {
+                write_stdout(&format!("{}\n", started.elapsed().as_millis()))?;
+            }
+            result.map_err(|source| CliError::Io {
+                path: PathBuf::from("inherited installer lock standard input"),
+                source,
+            })?;
         }
         Command::Purpose { command } => match command {
             PurposeCommand::Set { path, purpose } => {

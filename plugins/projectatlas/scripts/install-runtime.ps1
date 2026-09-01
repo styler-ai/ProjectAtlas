@@ -2102,7 +2102,8 @@ function Get-ProjectAtlasAtlasForwarderLifecycleLockKey {
 
 function Enter-ProjectAtlasAtlasForwarderLifecycleLockKey {
     param(
-        [object]$LockKey
+        [object]$LockKey,
+        [long]$TimeoutMilliseconds = 30000
     )
     $mutex = $null
     try {
@@ -2112,7 +2113,7 @@ function Enter-ProjectAtlasAtlasForwarderLifecycleLockKey {
         )
         $acquired = $false
         try {
-            $acquired = $mutex.WaitOne([System.TimeSpan]::FromSeconds(30))
+            $acquired = $mutex.WaitOne([System.TimeSpan]::FromMilliseconds($TimeoutMilliseconds))
         }
         catch [System.Threading.AbandonedMutexException] {
             $acquired = $true
@@ -2139,7 +2140,7 @@ function Enter-ProjectAtlasAtlasForwarderLifecycleLock {
         [string]$ForwarderPath
     )
     Enter-ProjectAtlasAtlasForwarderLifecycleLockKey (
-        Get-ProjectAtlasAtlasForwarderLifecycleLockKey $ForwarderPath)
+        Get-ProjectAtlasAtlasForwarderLifecycleLockKey $ForwarderPath) 30000
 }
 
 function Enter-ProjectAtlasAtlasForwarderLifecycleLockSet {
@@ -2147,6 +2148,20 @@ function Enter-ProjectAtlasAtlasForwarderLifecycleLockSet {
         [string]$DestinationPath,
         [string]$SourcePath
     )
+    $timeoutMilliseconds = 30000L
+    if ($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS -match '^\d+$') {
+        try {
+            $timeoutMilliseconds = [long]$env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS
+        }
+        catch {
+            $timeoutMilliseconds = 30000L
+        }
+        if ($timeoutMilliseconds -gt 30000L) {
+            $timeoutMilliseconds = 30000L
+        }
+    }
+    $deadline = [System.Diagnostics.Stopwatch]::GetTimestamp() `
+        + [long](([double][System.Diagnostics.Stopwatch]::Frequency * $timeoutMilliseconds) / 1000.0)
     $keys = @(
         Get-ProjectAtlasAtlasForwarderLifecycleLockKey $DestinationPath
     )
@@ -2164,7 +2179,13 @@ function Enter-ProjectAtlasAtlasForwarderLifecycleLockSet {
     $locks = [System.Collections.Generic.List[object]]::new()
     try {
         foreach ($key in $keys) {
-            $lock = Enter-ProjectAtlasAtlasForwarderLifecycleLockKey $key
+            $remainingTicks = $deadline - [System.Diagnostics.Stopwatch]::GetTimestamp()
+            $remainingMilliseconds = [long][Math]::Ceiling(
+                ($remainingTicks * 1000.0) / [System.Diagnostics.Stopwatch]::Frequency)
+            if ($remainingMilliseconds -le 0) {
+                throw "ProjectAtlas atlas forwarder lifecycle lock deadline expired before acquiring $($key.ForwarderPath)."
+            }
+            $lock = Enter-ProjectAtlasAtlasForwarderLifecycleLockKey $key $remainingMilliseconds
             $locks.Add($lock) | Out-Null
         }
         return [pscustomobject]@{
@@ -2797,22 +2818,55 @@ function Write-ProjectAtlasAtlasForwarder {
     )
     $forwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
     $previousCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
-    $previousPath = if ($previousCommand) {
+    $previousCandidate = if ($previousCommand) {
         if ($previousCommand.Path) { $previousCommand.Path } else { $previousCommand.Source }
     }
+    $previousCandidateIdentity = $null
+    $previousOwnedAtDiscovery = $false
     $previousIdentity = $null
-    if ($previousPath `
-        -and (Get-NormalizedPathEntry $previousPath) -ine (Get-NormalizedPathEntry $forwarder) `
-        -and (Test-ProjectAtlasOwnedAtlasForwarder $previousPath)) {
-        $previousIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $previousPath).SortKey
+    if ($previousCandidate `
+        -and (Get-NormalizedPathEntry $previousCandidate) -ine (Get-NormalizedPathEntry $forwarder)) {
+        $previousCandidateIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $previousCandidate).SortKey
+        if (Test-ProjectAtlasOwnedAtlasForwarder $previousCandidate) {
+            $previousOwnedAtDiscovery = $true
+            $previousIdentity = $previousCandidateIdentity
+        }
     }
     else {
-        $previousPath = $null
+        $previousCandidate = $null
     }
     Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause
-    $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLockSet $forwarder $previousPath
+    $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLockSet $forwarder $previousCandidate
     try {
         Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause
+        $previousPath = $null
+        $currentCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        $currentPath = if ($currentCommand) {
+            if ($currentCommand.Path) { $currentCommand.Path } else { $currentCommand.Source }
+        }
+        if ($previousCandidate) {
+            if ($currentPath `
+                -and (Get-NormalizedPathEntry $currentPath) -ine $previousCandidateIdentity) {
+                throw "ProjectAtlas effective atlas command changed while acquiring its lifecycle locks; refusing to publish: $currentPath"
+            }
+            if ($currentPath) {
+                $currentIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $currentPath).SortKey
+                if (Test-ProjectAtlasOwnedAtlasForwarder $currentPath) {
+                    $previousPath = $currentPath
+                    $previousIdentity = $currentIdentity
+                }
+                elseif ($previousOwnedAtDiscovery) {
+                    $previousPath = $previousCandidate
+                }
+            }
+            elseif ($previousOwnedAtDiscovery) {
+                $previousPath = $previousCandidate
+            }
+        }
+        elseif ($currentPath `
+            -and (Get-NormalizedPathEntry $currentPath) -ine (Get-NormalizedPathEntry $forwarder)) {
+            throw "ProjectAtlas effective atlas command appeared while acquiring its lifecycle locks; refusing to publish: $currentPath"
+        }
         Write-ProjectAtlasAtlasForwarderLocked $VerifiedPath $previousPath $previousIdentity
     }
     finally {
@@ -4752,9 +4806,8 @@ if ($RuntimePath) {
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
-    Assert-ProjectAtlasAtlasForwarderCollisionFree $projectAtlas | Out-Null
-    $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
     Write-ProjectAtlasAtlasForwarder $projectAtlas | Out-Null
+    $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
 else {
@@ -4789,9 +4842,8 @@ else {
     if (-not $projectAtlas) {
         throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
     }
-    Assert-ProjectAtlasAtlasForwarderCollisionFree $projectAtlas | Out-Null
-    $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
     Write-ProjectAtlasAtlasForwarder $projectAtlas | Out-Null
+    $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
 
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }

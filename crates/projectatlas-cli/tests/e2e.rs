@@ -6845,6 +6845,39 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .into());
         }
     }
+    for (installer_name, installer, required) in [
+        (
+            "POSIX",
+            &posix_installer,
+            [
+                "atlas_forwarder_lifecycle_lock_remaining_ms=30000",
+                "acquire_atlas_forwarder_flock_with_deadline",
+                "previous_candidate",
+                "effective atlas command changed while acquiring its lifecycle locks",
+                "--report-elapsed",
+            ],
+        ),
+        (
+            "PowerShell",
+            &powershell_installer,
+            [
+                "[System.Diagnostics.Stopwatch]::GetTimestamp()",
+                "remainingTicks",
+                "previousCandidate",
+                "effective atlas command changed while acquiring its lifecycle locks",
+                "FromMilliseconds($TimeoutMilliseconds)",
+            ],
+        ),
+    ] {
+        for required_text in required {
+            if !installer.contains(required_text) {
+                return Err(io::Error::other(format!(
+                    "{installer_name} installer is missing lifecycle race/deadline guard {required_text:?}"
+                ))
+                .into());
+            }
+        }
+    }
     let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     if env!("CARGO_PKG_VERSION").contains("-rc") {
         for required in [
@@ -12083,6 +12116,303 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
             && state_files()?.len() == 1
             && fs::read(&unrelated_state)? == unrelated_state_content,
         "interrupted opposite migration did not leave one complete recoverable pair",
+    )?;
+
+    // A candidate without private state is still part of the lifecycle decision. Hold
+    // installer A after discovery while installer B repairs that candidate, then prove
+    // A serializes the repaired pair instead of creating a second managed destination.
+    let second_forwarder = forwarder_for(&second_runtime_dir);
+    let second_provenance = provenance_for(&second_runtime_dir);
+    let second_state = state_files()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::Error::other("repair-race fixture missing the second runtime state"))?;
+    require(
+        pair_is_complete(&second_runtime_dir, &second_runtime)? && second_state.is_file(),
+        "repair-race fixture did not begin with one complete managed candidate",
+    )?;
+    fs::remove_file(&second_forwarder)?;
+    fs::remove_file(&second_provenance)?;
+    fs::remove_file(&second_state)?;
+    let foreign_candidate = if cfg!(windows) {
+        b"repair-race foreign candidate\r\n".as_slice()
+    } else {
+        b"repair-race foreign candidate\n".as_slice()
+    };
+    fs::write(&second_forwarder, foreign_candidate)?;
+    let repair_discovery = temp.path().join("repair-race-discovery.gate");
+    let repair_state = temp.path().join("repair-race-state.gate");
+    let repair_discovery_ready = PathBuf::from(format!("{}.ready", repair_discovery.display()));
+    let repair_state_ready = PathBuf::from(format!("{}.ready", repair_state.display()));
+    fs::write(&repair_discovery, b"hold\n")?;
+    fs::write(&repair_state, b"hold\n")?;
+    let mut repair_a = make_installer(
+        &first_runtime,
+        &second_then_first_path,
+        Some(&repair_discovery),
+        None,
+    )?
+    .spawn()?;
+    if let Err(error) = wait_for_ready(
+        &mut repair_a,
+        &repair_discovery_ready,
+        "repair-race installer A",
+    ) {
+        drop(repair_a.kill());
+        drop(repair_a.wait());
+        return Err(error);
+    }
+    require(
+        fs::read(&second_forwarder)? == foreign_candidate,
+        "repair-race installer A changed the incomplete candidate before lifecycle ownership",
+    )?;
+    fs::remove_file(&second_forwarder)?;
+    let mut repair_b = make_installer(&second_runtime, &second_only_path, None, None)?;
+    repair_b.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_PUBLISHED_GATE",
+        &repair_state,
+    );
+    let mut repair_b = repair_b.spawn()?;
+    if let Err(error) = wait_for_ready(
+        &mut repair_b,
+        &repair_state_ready,
+        "repair-race installer B",
+    ) {
+        drop(repair_a.kill());
+        drop(repair_a.wait());
+        return Err(error);
+    }
+    require(
+        second_state.is_file()
+            && !first_forwarder.exists()
+            && !first_provenance.exists()
+            && !second_forwarder.exists()
+            && !second_provenance.exists(),
+        "repair-race repair owner did not publish the candidate capability state",
+    )?;
+    fs::remove_file(&repair_state)?;
+    fs::remove_file(&repair_state_ready)?;
+    let repair_b_output = wait_for_plugin_installer_output(
+        repair_b,
+        "repair-race installer B",
+        Duration::from_secs(35),
+    )?;
+    fs::remove_file(&repair_discovery)?;
+    fs::remove_file(&repair_discovery_ready)?;
+    let repair_a_output = wait_for_plugin_installer_output(
+        repair_a,
+        "repair-race installer A",
+        Duration::from_secs(35),
+    )?;
+    let repair_first_pair = pair_is_complete(&first_runtime_dir, &first_runtime)?;
+    let repair_second_pair = pair_is_complete(&second_runtime_dir, &second_runtime)?;
+    let repair_states = state_files()?;
+    require(
+        repair_b_output.status.success()
+            && repair_a_output.status.success()
+            && repair_first_pair
+            && !repair_second_pair
+            && repair_states.len() == 1
+            && repair_states[0] != second_state
+            && fs::read(&unrelated_state)? == unrelated_state_content
+            && pair_is_complete(&first_runtime_dir, &first_runtime)?,
+        format!(
+            "repair-race installers left more than one effective managed pair or lost ownership:\nA stdout:\n{}\nA stderr:\n{}\nB stdout:\n{}\nB stderr:\n{}",
+            String::from_utf8_lossy(&repair_a_output.stdout),
+            String::from_utf8_lossy(&repair_a_output.stderr),
+            String::from_utf8_lossy(&repair_b_output.stdout),
+            String::from_utf8_lossy(&repair_b_output.stderr)
+        ),
+    )?;
+    require(
+        !second_state.exists()
+            && !second_provenance.exists()
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        "repair-race migration changed unrelated or stale source state",
+    )?;
+
+    let restore_second = run_install(&second_runtime, &second_only_path)?;
+    require(
+        restore_second.status.success()
+            && pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 2,
+        format!(
+            "deadline fixture could not restore two managed pairs:\n{}\n{}",
+            String::from_utf8_lossy(&restore_second.stdout),
+            String::from_utf8_lossy(&restore_second.stderr)
+        ),
+    )?;
+    let state_snapshot = || -> Result<Vec<(PathBuf, Vec<u8>)>, Box<dyn Error>> {
+        let mut snapshot = state_files()?
+            .into_iter()
+            .map(|path| -> Result<(PathBuf, Vec<u8>), Box<dyn Error>> {
+                let content = fs::read(&path)?;
+                Ok((path, content))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(snapshot)
+    };
+
+    // A short test-only budget makes each lock position fail deterministically;
+    // the production budget remains one monotonic 30-second lock-set deadline.
+    let deadline_state_before_first = state_snapshot()?;
+    let held_first_gate = temp.path().join("deadline-held-first.gate");
+    let held_first_ready = PathBuf::from(format!("{}.ready", held_first_gate.display()));
+    fs::write(&held_first_gate, b"hold\n")?;
+    let mut held_first = make_installer(
+        &first_runtime,
+        &first_only_path,
+        None,
+        Some(&held_first_gate),
+    )?
+    .spawn()?;
+    if let Err(error) = wait_for_ready(
+        &mut held_first,
+        &held_first_ready,
+        "deadline held-first owner",
+    ) {
+        drop(held_first.kill());
+        drop(held_first.wait());
+        return Err(error);
+    }
+    let mut timed_first = make_installer(&second_runtime, &first_then_second_path, None, None)?;
+    timed_first.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
+    let timed_first = timed_first.spawn()?;
+    let timed_first_output = match wait_for_plugin_installer_output(
+        timed_first,
+        "deadline held-first contender",
+        Duration::from_secs(5),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            drop(held_first.kill());
+            drop(held_first.wait());
+            return Err(error);
+        }
+    };
+    fs::remove_file(&held_first_gate)?;
+    fs::remove_file(&held_first_ready)?;
+    let held_first_output = wait_for_plugin_installer_output(
+        held_first,
+        "deadline held-first owner release",
+        Duration::from_secs(35),
+    )?;
+    require(
+        held_first_output.status.success() && state_snapshot()? == deadline_state_before_first,
+        format!(
+            "held-first deadline/release changed managed state:\n{}\n{}",
+            String::from_utf8_lossy(&held_first_output.stdout),
+            String::from_utf8_lossy(&held_first_output.stderr)
+        ),
+    )?;
+    require(
+        !timed_first_output.status.success(),
+        format!(
+            "held-first contender did not fail closed at the bounded lock deadline (status={}):\n{}\n{}",
+            timed_first_output.status,
+            String::from_utf8_lossy(&timed_first_output.stdout),
+            String::from_utf8_lossy(&timed_first_output.stderr)
+        ),
+    )?;
+    let recover_first = run_install(&second_runtime, &first_then_second_path)?;
+    require(
+        recover_first.status.success()
+            && !pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 1
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        format!(
+            "held-first lock release did not permit safe recovery:\n{}\n{}",
+            String::from_utf8_lossy(&recover_first.stdout),
+            String::from_utf8_lossy(&recover_first.stderr)
+        ),
+    )?;
+
+    let restore_first = run_install(&first_runtime, &first_only_path)?;
+    require(
+        restore_first.status.success()
+            && pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 2,
+        format!(
+            "deadline fixture could not restore the source pair:\n{}\n{}",
+            String::from_utf8_lossy(&restore_first.stdout),
+            String::from_utf8_lossy(&restore_first.stderr)
+        ),
+    )?;
+    let deadline_state_before_second = state_snapshot()?;
+    let held_second_gate = temp.path().join("deadline-held-second.gate");
+    let held_second_ready = PathBuf::from(format!("{}.ready", held_second_gate.display()));
+    fs::write(&held_second_gate, b"hold\n")?;
+    let mut held_second = make_installer(
+        &second_runtime,
+        &second_only_path,
+        None,
+        Some(&held_second_gate),
+    )?
+    .spawn()?;
+    if let Err(error) = wait_for_ready(
+        &mut held_second,
+        &held_second_ready,
+        "deadline held-second owner",
+    ) {
+        drop(held_second.kill());
+        drop(held_second.wait());
+        return Err(error);
+    }
+    let mut timed_second = make_installer(&second_runtime, &first_then_second_path, None, None)?;
+    timed_second.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
+    let timed_second = timed_second.spawn()?;
+    let timed_second_output = match wait_for_plugin_installer_output(
+        timed_second,
+        "deadline held-second contender",
+        Duration::from_secs(5),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            drop(held_second.kill());
+            drop(held_second.wait());
+            return Err(error);
+        }
+    };
+    fs::remove_file(&held_second_gate)?;
+    fs::remove_file(&held_second_ready)?;
+    let held_second_output = wait_for_plugin_installer_output(
+        held_second,
+        "deadline held-second owner release",
+        Duration::from_secs(35),
+    )?;
+    require(
+        held_second_output.status.success() && state_snapshot()? == deadline_state_before_second,
+        format!(
+            "held-second deadline/release changed managed state:\n{}\n{}",
+            String::from_utf8_lossy(&held_second_output.stdout),
+            String::from_utf8_lossy(&held_second_output.stderr)
+        ),
+    )?;
+    require(
+        !timed_second_output.status.success(),
+        format!(
+            "held-second contender did not fail closed at the bounded lock deadline (status={}):\n{}\n{}",
+            timed_second_output.status,
+            String::from_utf8_lossy(&timed_second_output.stdout),
+            String::from_utf8_lossy(&timed_second_output.stderr)
+        ),
+    )?;
+    let recover_second = run_install(&second_runtime, &first_then_second_path)?;
+    require(
+        recover_second.status.success()
+            && !pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 1
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        format!(
+            "held-second lock release did not permit safe recovery:\n{}\n{}",
+            String::from_utf8_lossy(&recover_second.stdout),
+            String::from_utf8_lossy(&recover_second.stderr)
+        ),
     )?;
     Ok(())
 }
