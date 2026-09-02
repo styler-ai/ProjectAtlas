@@ -92,7 +92,7 @@ Parallel delivery waves derived from the exact graph:
 
 Before wave 1, the planning PR publishes the shared OpenSpec and architecture sources, the exact live default branch passes the published-readiness gate, and every accepted issue link/task mirror is read back. No Luna implementation worktree starts from candidate-only specification evidence.
 
-1. Independent foundations and disjoint lanes: #372, #390, #464, #477, #482, #487, #488, #489, #491, #495, and the #517 workflow gate.
+1. Independent foundations and disjoint lanes: #372, #390, #464, #477, #482, #487, #488, #489, #491, #495, #544, and the #517 workflow gate.
 2. After #482: #480, #481, and #483 may proceed independently.
 3. #342 follows #488; #388 follows #491; #476 follows #481; #486 follows #482/#483.
 4. #358 and #465 follow #476/#480/#488; #484 follows #476/#481.

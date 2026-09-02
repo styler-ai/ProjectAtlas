@@ -28,13 +28,14 @@
         "489": { "blocked_by": [] },
         "490": { "blocked_by": [339, 342, 358, 384, 464, 465, 489] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533] },
+        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544] },
         "495": { "blocked_by": [] },
         "517": { "blocked_by": [] },
         "518": { "blocked_by": [] },
         "523": { "blocked_by": [] },
         "525": { "blocked_by": [523] },
-        "533": { "blocked_by": [] }
+        "533": { "blocked_by": [] },
+        "544": { "blocked_by": [] }
       }
     },
     "v0.6.0-00": {
@@ -191,6 +192,7 @@
     "serialize-lint-reports": 472,
     "simplify-token-tui-dashboard": 296,
     "stabilize-hostile-parser-fixture-admission": 397,
+    "stabilize-mermaid-validation": 544,
     "stabilize-windows-mcp-owner-fixture-readiness": 518,
     "stabilize-windows-runtime-output-bound-proof": 525,
     "stabilize-parser-recovery-harness": 391
