@@ -113,7 +113,8 @@
         { "issue": 489, "first_task": "23.1", "last_task": "23.4" },
         { "issue": 490, "first_task": "24.1", "last_task": "24.4" },
         { "issue": 491, "first_task": "25.1", "last_task": "25.4" },
-        { "issue": 492, "first_task": "26.1", "last_task": "26.7" }
+        { "issue": 492, "first_task": "26.1", "last_task": "26.7" },
+        { "issue": 544, "first_task": "27.1", "last_task": "27.4" }
       ]
     },
     "complete-v060-release-acceptance": {
