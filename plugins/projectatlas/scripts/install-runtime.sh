@@ -99,8 +99,8 @@ is_projectatlas_runtime() {
 }
 
 is_projectatlas_runtime_contract() {
-  candidate=$1
-  runtime_info=$("$candidate" --format json runtime-info 2>/dev/null || true)
+  runtime_candidate=$1
+  runtime_info=$("$runtime_candidate" --format json runtime-info 2>/dev/null || true)
   project=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"project"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   major_version=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"major_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
   text_format=$(printf '%s\n' "$runtime_info" | sed -n 's/.*"text_format"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)

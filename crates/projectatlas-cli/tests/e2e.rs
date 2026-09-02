@@ -11558,6 +11558,30 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
                 .env(key, value);
             Ok(command.output()?)
         };
+    #[cfg(unix)]
+    let run_uninstall = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = StdCommand::new("bash");
+        command
+            .arg(
+                workspace_root
+                    .join("plugins")
+                    .join("projectatlas")
+                    .join("scripts")
+                    .join("install-runtime.sh"),
+            )
+            .arg("--uninstall")
+            .arg(&repo);
+        command
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("PROJECTATLAS_RUNTIME_PATH", &second_runtime)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &installer_path);
+        Ok(command.output()?)
+    };
     let clear_retirement_quarantine = |directory: &Path| -> Result<(), Box<dyn Error>> {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
@@ -11793,6 +11817,25 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
             String::from_utf8_lossy(&alias_output.stderr)
         ),
     )?;
+    #[cfg(unix)]
+    {
+        let uninstall_output = run_uninstall()?;
+        require(
+            uninstall_output.status.success()
+                && !second_forwarder.exists()
+                && !second_provenance.exists()
+                && second_runtime.is_file()
+                && installer_state_dir
+                    .read_dir()?
+                    .collect::<Result<Vec<_>, io::Error>>()?
+                    .is_empty(),
+            format!(
+                "owned POSIX forwarder uninstall did not retire only the migrated pair:\n{}\n{}",
+                String::from_utf8_lossy(&uninstall_output.stdout),
+                String::from_utf8_lossy(&uninstall_output.stderr)
+            ),
+        )?;
+    }
     Ok(())
 }
 
