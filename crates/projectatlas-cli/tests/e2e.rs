@@ -122,6 +122,13 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_COMMON_DIR",
 ];
 const OPENSPEC_DIR_NAME: &str = "openspec";
+const ISSUE_CHECKLISTS_SCRIPT_FILE_NAME: &str = "issue-checklists.py";
+const ISSUE_MAP_FILE_NAME: &str = "issue-map.json";
+const CHANGE_DIR_NAME: &str = "changes";
+const ISSUEOPS_CHANGE_NAME: &str = "scope-local-issueops-branch-validation";
+const TASKS_FILE_NAME: &str = "tasks.md";
+const CANDIDATE_FILE_NAME: &str = "candidate.txt";
+const DISPATCH_LOG_FILE_NAME: &str = "dispatch.log";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
@@ -9088,7 +9095,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let workspace_root = workspace_root()?;
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
-    let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
+    let issueops = fs::read_to_string(
+        github
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+    )?;
     let mermaid_parser = github.join("mermaid-parser");
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
@@ -9120,14 +9131,14 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let issue_map = fs::read_to_string(
         workspace_root
             .join(OPENSPEC_DIR_NAME)
-            .join("issue-map.json"),
+            .join(ISSUE_MAP_FILE_NAME),
     )?;
     let tasks = fs::read_to_string(
         workspace_root
             .join(OPENSPEC_DIR_NAME)
-            .join("changes")
+            .join(CHANGE_DIR_NAME)
             .join("enforce-rust-test-quality-gates")
-            .join("tasks.md"),
+            .join(TASKS_FILE_NAME),
     )?;
 
     let issueops_self_test_command = "python3 .github/scripts/issue-checklists.py --self-test";
@@ -10165,8 +10176,8 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
     fs::create_dir_all(
         fixture_repo
             .join(OPENSPEC_DIR_NAME)
-            .join("changes")
-            .join("scope-local-issueops-branch-validation"),
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME),
     )?;
     fs::copy(
         workspace_root
@@ -10180,22 +10191,24 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
         fixture_repo
             .join(".github")
             .join("scripts")
-            .join("issue-checklists.py"),
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
         "",
     )?;
     fs::write(
-        fixture_repo.join("openspec").join("issue-map.json"),
+        fixture_repo
+            .join(OPENSPEC_DIR_NAME)
+            .join(ISSUE_MAP_FILE_NAME),
         "{\"schema_version\": 2, \"changes\": {}}\n",
     )?;
     fs::write(
         fixture_repo
             .join(OPENSPEC_DIR_NAME)
-            .join("changes")
-            .join("scope-local-issueops-branch-validation")
-            .join("tasks.md"),
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join(TASKS_FILE_NAME),
         "- [x] 1.1 baseline\n",
     )?;
-    fs::write(fixture_repo.join("candidate.txt"), "candidate\n")?;
+    fs::write(fixture_repo.join(CANDIDATE_FILE_NAME), "candidate\n")?;
     git_success(&fixture_repo, &["init", "--initial-branch=main"])?;
     git_success(
         &fixture_repo,
@@ -10221,7 +10234,7 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
         &["update-ref", "refs/remotes/origin/main", &base],
     )?;
     fs::create_dir(&fake_path)?;
-    let dispatch_log = temp.path().join("dispatch.log");
+    let dispatch_log = temp.path().join(DISPATCH_LOG_FILE_NAME);
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
@@ -10410,8 +10423,8 @@ fn pre_push_candidate_rejects_dirty_worktree_before_issueops() -> Result<(), Box
     fs::create_dir_all(repo.join(".github").join("scripts"))?;
     fs::create_dir_all(
         repo.join(OPENSPEC_DIR_NAME)
-            .join("changes")
-            .join("scope-local-issueops-branch-validation"),
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME),
     )?;
     fs::create_dir_all(&fake_path)?;
     fs::copy(
@@ -10421,21 +10434,21 @@ fn pre_push_candidate_rejects_dirty_worktree_before_issueops() -> Result<(), Box
     fs::write(
         repo.join(".github")
             .join("scripts")
-            .join("issue-checklists.py"),
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
         "",
     )?;
     fs::write(
-        repo.join("openspec").join("issue-map.json"),
+        repo.join(OPENSPEC_DIR_NAME).join(ISSUE_MAP_FILE_NAME),
         "{\"schema_version\": 2, \"changes\": {}}\n",
     )?;
     fs::write(
         repo.join(OPENSPEC_DIR_NAME)
-            .join("changes")
-            .join("scope-local-issueops-branch-validation")
-            .join("tasks.md"),
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join(TASKS_FILE_NAME),
         "- [x] 1.1 baseline\n",
     )?;
-    fs::write(repo.join("candidate.txt"), "candidate\n")?;
+    fs::write(repo.join(CANDIDATE_FILE_NAME), "candidate\n")?;
 
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
@@ -10500,25 +10513,25 @@ exit 0
 
     fs::write(
         repo.join(OPENSPEC_DIR_NAME)
-            .join("changes")
-            .join("scope-local-issueops-branch-validation")
-            .join("tasks.md"),
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join(TASKS_FILE_NAME),
         "- [ ] 1.1 drifted checklist\n",
     )?;
     fs::write(
-        repo.join("openspec").join("issue-map.json"),
+        repo.join(OPENSPEC_DIR_NAME).join(ISSUE_MAP_FILE_NAME),
         "{\"schema_version\": 2, \"changes\": {\"drift\": 549}}\n",
     )?;
     git_success(&repo, &["add", "openspec/issue-map.json"])?;
     fs::write(
         repo.join(OPENSPEC_DIR_NAME)
-            .join("changes")
-            .join("scope-local-issueops-branch-validation")
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
             .join("untracked-notes.md"),
         "untracked relevant input\n",
     )?;
 
-    let dispatch_log = temp.path().join("dispatch.log");
+    let dispatch_log = temp.path().join(DISPATCH_LOG_FILE_NAME);
     fs::write(&dispatch_log, "")?;
     let mut command = StdCommand::new(&shell);
     command
