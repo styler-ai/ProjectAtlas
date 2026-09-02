@@ -684,8 +684,12 @@ migrate_managed_atlas_forwarder_locked() {
     restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
     return 1
   fi
+  if ! remove_atlas_forwarder_state "$candidate" "$managed_target"; then
+    restore_atlas_forwarder_quarantine "$provenance_quarantine" "$provenance"
+    restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    return 1
+  fi
   rm -f -- "$forwarder_quarantine" "$provenance_quarantine"
-  remove_atlas_forwarder_state "$candidate" "$managed_target" || return 1
   printf '%s\n' "Migrated ProjectAtlas atlas forwarder: $candidate -> $(atlas_forwarder_path "$(canonical_file "$verified")")"
 }
 

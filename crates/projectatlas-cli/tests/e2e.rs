@@ -11685,31 +11685,44 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     fs::remove_file(&first_provenance)?;
     fs::write(&first_provenance, &first_provenance_before_failure)?;
     clear_retirement_quarantine(&first_runtime_dir)?;
+    let second_forwarder_before_state_failure = fs::read(&second_forwarder)?;
+    let second_provenance_before_state_failure = fs::read(&second_provenance)?;
+    let state_files_before_state_failure = installer_state_dir
+        .read_dir()?
+        .map(|entry| entry.map(|value| value.path()))
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    require(
+        state_files_before_state_failure.len() == 2,
+        "migration fixture lost a capability state before retirement-failure proof",
+    )?;
+    let second_state = state_files_before_state_failure
+        .iter()
+        .find(|path| path.as_path() != first_state.as_path())
+        .ok_or_else(|| io::Error::other("replacement capability state was not published"))?;
+    let second_state_before_failure = fs::read(second_state)?;
 
-    #[cfg(windows)]
-    {
-        let state_retirement_failure = run_install_with_env(
-            &second_runtime,
-            "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
-            Path::new("1"),
-        )?;
-        let state_retirement_failure_text = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&state_retirement_failure.stdout),
-            String::from_utf8_lossy(&state_retirement_failure.stderr)
-        );
-        require(
-            !state_retirement_failure.status.success()
-                && fs::read(&first_forwarder)? == first_forwarder_before_failure
-                && fs::read(&first_provenance)? == first_provenance_before_failure
-                && fs::read(&first_state)? == first_state_before_failure
-                && second_forwarder.is_file()
-                && second_provenance.is_file(),
-            format!(
-                "Windows state retirement failure did not preserve both forwarder pairs and private state:\n{state_retirement_failure_text}"
-            ),
-        )?;
-    }
+    let state_retirement_failure = run_install_with_env(
+        &second_runtime,
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+        Path::new("1"),
+    )?;
+    let state_retirement_failure_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&state_retirement_failure.stdout),
+        String::from_utf8_lossy(&state_retirement_failure.stderr)
+    );
+    require(
+        !state_retirement_failure.status.success()
+            && fs::read(&first_forwarder)? == first_forwarder_before_failure
+            && fs::read(&first_provenance)? == first_provenance_before_failure
+            && fs::read(&first_state)? == first_state_before_failure
+            && fs::read(&second_forwarder)? == second_forwarder_before_state_failure
+            && fs::read(&second_provenance)? == second_provenance_before_state_failure
+            && fs::read(second_state)? == second_state_before_failure,
+        format!(
+            "State retirement failure did not preserve both forwarder pairs and private state:\n{state_retirement_failure_text}"
+        ),
+    )?;
 
     let second_output = run_install(&second_runtime)?;
     let second_output_text = format!(
