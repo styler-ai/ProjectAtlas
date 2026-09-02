@@ -4826,6 +4826,11 @@ fn local_relation_matches<'a>(
     } else {
         (target_name, None, None)
     };
+    let source_namespace = if is_php_call && scoped_parent.is_none() {
+        unique_php_source_namespace(graph, symbol_index, source_parent, control)?
+    } else {
+        None
+    };
     let candidate_indices = if is_php_call {
         symbol_index.get_php_call(lookup_name)
     } else {
@@ -4872,7 +4877,13 @@ fn local_relation_matches<'a>(
                     } else {
                         true
                     }
+                    && source_namespace.is_none_or(|namespace| {
+                        symbol.parent.as_deref().is_some_and(|symbol_parent| {
+                            symbol_parent.eq_ignore_ascii_case(namespace)
+                        })
+                    })
                     && (scoped_parent.is_some()
+                        || source_namespace.is_some()
                         || symbol.parent.is_none()
                         || symbol.parent.as_deref() == Some(relation.source_name.as_str())
                         || source_parent.is_some_and(|source_parent| {
@@ -4909,8 +4920,11 @@ fn php_call_lookup<'a>(
     if scope.is_empty() || member.is_empty() {
         return None;
     }
-    if scope.eq_ignore_ascii_case("self") || scope.eq_ignore_ascii_case("static") {
+    if scope.eq_ignore_ascii_case("self") {
         return source_parent.map(|parent| (member, Some(parent), None));
+    }
+    if scope.eq_ignore_ascii_case("static") {
+        return None;
     }
     if scope.eq_ignore_ascii_case("parent") {
         return None;
@@ -4959,6 +4973,40 @@ fn php_entity_matches_qualified_scope(
             namespace.is_empty() && parent.as_str().eq_ignore_ascii_case(scoped_parent)
         },
     )
+}
+
+/// Return the unique PHP namespace owned by a source method's containing type.
+fn unique_php_source_namespace<'a>(
+    graph: &'a SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
+    source_parent: Option<&str>,
+    control: &IndexWorkControl,
+) -> Result<Option<&'a str>, CliError> {
+    let Some(source_parent) = source_parent else {
+        return Ok(None);
+    };
+    let mut namespace = None;
+    let mut source_found = false;
+    for (candidate_index, &row_index) in symbol_index.get(source_parent).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(row_index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        if !matches!(
+            symbol.kind,
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait
+        ) {
+            continue;
+        }
+        let candidate = symbol.parent.as_deref();
+        if !source_found {
+            namespace = candidate;
+            source_found = true;
+        } else if namespace != candidate {
+            return Ok(None);
+        }
+    }
+    Ok(namespace)
 }
 
 /// Return one unambiguous containing scope for the parser relation source.
@@ -10568,6 +10616,13 @@ function relative_run(): void {
 namespace TopLevel;
 function top_level_helper(): void {}
 top_level_helper();
+namespace Foo;
+function helper(): void {}
+class NamespacedService {
+    public function namespaced_run(): void {
+        helper();
+    }
+}
 ",
         );
         require(
@@ -10681,6 +10736,18 @@ top_level_helper();
             ),
             "semicolon namespace top-level call did not resolve locally",
         )?;
+        require(
+            matches!(
+                staged_call("helper", "namespaced_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Foo")
+            ),
+            "namespaced PHP method call did not prefer its namespace helper",
+        )?;
         let mixed_call_line = u32::try_from(
             php_graph
                 .relations
@@ -10713,7 +10780,6 @@ top_level_helper();
         )?;
         for (name, parent) in [
             ("prepare", "Service"),
-            ("finish", "Service"),
             ("boot", "Service"),
             ("helper", "<module>"),
         ] {
@@ -10732,6 +10798,15 @@ top_level_helper();
                 &format!("PHP call did not resolve to {parent}::{name}"),
             )?;
         }
+        require(
+            matches!(
+                staged_call("static::finish", "run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Unresolved { reference })
+                    if reference.as_str() == "static::finish"
+            ),
+            "late-static PHP calls must remain unresolved without override proof",
+        )?;
         require(
             calls.iter().any(|relation| {
                 matches!(
