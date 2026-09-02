@@ -10437,28 +10437,28 @@ fn pre_push_candidate_rejects_dirty_worktree_before_issueops() -> Result<(), Box
     )?;
     fs::write(repo.join("candidate.txt"), "candidate\n")?;
 
-    let python_stub = r##"#!/bin/sh
+    let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
   *" --owner-from-commits "*) printf '%s\n' 549 ;;
 esac
 exit 0
-"##;
-    let cargo_stub = r##"#!/bin/sh
+"#;
+    let cargo_stub = r#"#!/bin/sh
 printf 'cargo %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 exit 0
-"##;
-    let npm_stub = r##"#!/bin/sh
+"#;
+    let npm_stub = r#"#!/bin/sh
 printf 'npm %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 exit 0
-"##;
-    let gh_stub = r##"#!/bin/sh
+"#;
+    let gh_stub = r#"#!/bin/sh
 printf 'gh %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 if [ "${1:-}" = repo ] && [ "${2:-}" = view ]; then
   printf '%s\n' styler-ai/ProjectAtlas
 fi
 exit 0
-"##;
+"#;
     for (name, script) in [
         ("python3", python_stub),
         ("cargo", cargo_stub),
