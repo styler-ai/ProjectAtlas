@@ -10689,6 +10689,22 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     let installer_state = installer_states[0].path();
 
+    #[cfg(unix)]
+    {
+        let ownership_retry = run_install()?;
+        require(
+            ownership_retry.status.success()
+                && forwarder.is_file()
+                && provenance.is_file()
+                && installer_state.is_file(),
+            format!(
+                "managed atlas forwarder was not recognized on a same-runtime retry:\n{}\n{}",
+                String::from_utf8_lossy(&ownership_retry.stdout),
+                String::from_utf8_lossy(&ownership_retry.stderr)
+            ),
+        )?;
+    }
+
     let unrelated_state = installer_state_dir.join("unrelated-state");
     let unrelated_state_content = if cfg!(windows) {
         b"unrelated installer state\r\n".as_slice()

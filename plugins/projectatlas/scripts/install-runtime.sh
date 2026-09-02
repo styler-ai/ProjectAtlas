@@ -622,19 +622,19 @@ remove_atlas_forwarder_state() {
 }
 
 managed_atlas_forwarder_target() {
-  candidate=$1
-  is_direct_regular_file "$candidate" || return 1
-  marker_target=$(sed -n 's/^# target: //p' "$candidate" | head -n 1)
+  forwarder_candidate=$1
+  is_direct_regular_file "$forwarder_candidate" || return 1
+  marker_target=$(sed -n 's/^# target: //p' "$forwarder_candidate" | head -n 1)
   [ -n "$marker_target" ] || return 1
   canonical_target=$(canonical_file "$marker_target") || return 1
   [ "$marker_target" = "$canonical_target" ] || return 1
   expected_forwarder=$(atlas_forwarder_path "$canonical_target") || return 1
-  [ "$(canonical_file "$candidate")" = "$(canonical_file "$expected_forwarder")" ] || return 1
+  [ "$(canonical_file "$forwarder_candidate")" = "$(canonical_file "$expected_forwarder")" ] || return 1
   is_projectatlas_runtime_contract "$canonical_target" || return 1
-  provenance=$(atlas_forwarder_provenance_path "$candidate") || return 1
-  is_atlas_forwarder_provenance "$provenance" "$candidate" "$canonical_target" || return 1
+  provenance=$(atlas_forwarder_provenance_path "$forwarder_candidate") || return 1
+  is_atlas_forwarder_provenance "$provenance" "$forwarder_candidate" "$canonical_target" || return 1
   expected_content=$(atlas_forwarder_content "$canonical_target") || return 1
-  actual_content=$(cat "$candidate" 2>/dev/null || true)
+  actual_content=$(cat "$forwarder_candidate" 2>/dev/null || true)
   [ "$actual_content" = "$expected_content" ] || return 1
   printf '%s\n' "$canonical_target"
 }
