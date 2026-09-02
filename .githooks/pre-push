@@ -26,11 +26,25 @@ python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
 command -v gh >/dev/null 2>&1
 repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-branch="$(git branch --show-current)"
-if [ "$branch" = "main" ]; then
+push_scope="$(
+  awk '
+    NF != 4 { invalid=1; next }
+    {
+      seen=1
+      if ($3 !~ /^refs\/heads\/[^[:space:]]+$/) invalid=1
+      if ($3 == "refs/heads/main") main=1
+    }
+    END {
+      if (!seen || invalid) exit 1
+      if (main) print "global"
+      else print "candidate"
+    }
+  '
+)"
+if [ "$push_scope" = "global" ]; then
   python3 .github/scripts/issue-checklists.py \
     --repo "$repo" --root . --issue-map openspec/issue-map.json
-else
+elif [ "$push_scope" = "candidate" ]; then
   if ! accepted_base="$(git merge-base origin/main HEAD)" || [ -z "$accepted_base" ]; then
     echo "candidate branch accepted origin/main base is unreadable" >&2
     exit 1
@@ -45,6 +59,9 @@ else
   python3 .github/scripts/issue-checklists.py \
     --repo "$repo" --root . --issue-map openspec/issue-map.json \
     --candidate-issue "$owner_issue" --base "$accepted_base"
+else
+  echo "pre-push validation scope is invalid" >&2
+  exit 1
 fi
 cargo run --locked -p projectatlas-cli -- --format json scan .
 cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low

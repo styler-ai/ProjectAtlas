@@ -15,7 +15,11 @@ flowchart LR
     Gates --> Contract
     PR[Hosted PR candidate] --> Owner[One open owner against live state]
     PR --> Base[Unrelated open slices against accepted PR base]
-    Candidate[Local candidate branch] --> CandidateOwner["One owner from (#NNN) commit subjects"]
+    Push[Git pre-push ref-update records] --> MainTarget["Any refs/heads/main target"]
+    Push --> CandidateTarget["All non-main refs/heads/* targets"]
+    MainTarget --> Global[Global live-state validation]
+    CandidateTarget --> Candidate[Local candidate branch]
+    Candidate --> CandidateOwner["One owner from (#NNN) commit subjects"]
     Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract
     Base --> Contract

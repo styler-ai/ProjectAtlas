@@ -9290,34 +9290,45 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
+    let normalized_hook = hook.replace("\r\n", "\n");
     for required in [
-        "branch=\"$(git branch --show-current)\"",
-        "if [ \"$branch\" = \"main\" ]; then",
+        "push_scope=\"$(\n  awk '",
+        "NF != 4",
+        "if (!seen || invalid) exit 1",
+        "refs/heads/main",
+        "if [ \"$push_scope\" = \"global\" ]; then",
+        "elif [ \"$push_scope\" = \"candidate\" ]; then",
         "git merge-base origin/main HEAD",
         "git log --format=%s",
         "--owner-from-commits",
         "--candidate-issue \"$owner_issue\"",
         "--base \"$accepted_base\"",
     ] {
-        if !hook.contains(required) {
+        if !normalized_hook.contains(required) {
             return Err(io::Error::other(format!(
                 "local pre-push hook is missing candidate/main IssueOps routing {required:?}"
             ))
             .into());
         }
     }
-    let main_route = hook
-        .find("if [ \"$branch\" = \"main\" ]; then")
+    let main_route = normalized_hook
+        .find("if [ \"$push_scope\" = \"global\" ]; then")
         .ok_or_else(|| io::Error::other("pre-push hook omitted main route"))?;
-    let global_route = hook
+    let global_route = normalized_hook
         .find("--repo \"$repo\" --root . --issue-map openspec/issue-map.json")
         .ok_or_else(|| io::Error::other("pre-push hook omitted global IssueOps route"))?;
-    let candidate_route = hook
+    let candidate_route = normalized_hook
         .find("--candidate-issue \"$owner_issue\"")
         .ok_or_else(|| io::Error::other("pre-push hook omitted candidate IssueOps route"))?;
     if !(main_route < global_route && global_route < candidate_route) {
         return Err(io::Error::other(
-            "pre-push hook must keep global IssueOps inside main and candidate IssueOps in the branch route",
+            "pre-push hook must keep global and candidate IssueOps routes in their target scopes",
+        )
+        .into());
+    }
+    if normalized_hook.contains("git branch --show-current") {
+        return Err(io::Error::other(
+            "pre-push hook must select validation from pushed remote refs, not checkout state",
         )
         .into());
     }
@@ -10133,6 +10144,126 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let temp = tempfile::tempdir()?;
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir(&fake_path)?;
+    let dispatch_log = temp.path().join("dispatch.log");
+    let python_stub = r#"#!/bin/sh
+printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+case " $* " in
+  *" --owner-from-commits "*) printf '%s\n' 549 ;;
+esac
+exit 0
+"#;
+    let cargo_stub = r#"#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let npm_stub = r#"#!/bin/sh
+printf 'npm %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let gh_stub = r#"#!/bin/sh
+printf 'gh %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+if [ "${1:-}" = repo ] && [ "${2:-}" = view ]; then
+  printf '%s\n' styler-ai/ProjectAtlas
+fi
+exit 0
+"#;
+    for (name, script) in [
+        ("python3", python_stub),
+        ("cargo", cargo_stub),
+        ("npm", npm_stub),
+        ("gh", gh_stub),
+    ] {
+        write_executable_script(&fake_path.join(name), script)?;
+    }
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let test_path = std::env::join_paths(
+        std::iter::once(fake_path).chain(std::env::split_paths(&current_path)),
+    )?;
+    let hook = workspace_root
+        .join(GITHOOKS_DIR_NAME)
+        .join(PRE_PUSH_HOOK_FILE_NAME);
+    let shell = if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+    } else {
+        PathBuf::from("sh")
+    };
+    let run_hook = |records: &str| -> Result<(bool, String), Box<dyn Error>> {
+        fs::write(&dispatch_log, "")?;
+        let mut command = StdCommand::new(&shell);
+        command
+            .current_dir(&workspace_root)
+            .arg(&hook)
+            .env("PATH", &test_path)
+            .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("pre-push hook stdin was not piped"))?
+            .write_all(records.as_bytes())?;
+        let output = child.wait_with_output()?;
+        Ok((output.status.success(), fs::read_to_string(&dispatch_log)?))
+    };
+    let final_issueops = |log: &str| {
+        log.lines()
+            .filter(|line| line.contains("issue-checklists.py --repo"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let (main_status, main_target) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+    )?;
+    let main_calls = final_issueops(&main_target);
+    if !main_status || main_calls.len() != 1 || main_calls[0].contains("--candidate-issue") {
+        return Err(io::Error::other(format!(
+            "feature-checkout push to refs/heads/main did not use global IssueOps dispatch:\n{main_target}"
+        ))
+        .into());
+    }
+    let (candidate_status, candidate_target) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\n",
+    )?;
+    let candidate_calls = final_issueops(&candidate_target);
+    if !candidate_status
+        || candidate_calls.len() != 1
+        || !candidate_calls[0].contains("--candidate-issue 549")
+    {
+        return Err(io::Error::other(format!(
+            "ordinary candidate push did not use candidate IssueOps dispatch:\n{candidate_target}"
+        ))
+        .into());
+    }
+    let (mixed_status, mixed_targets) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+    )?;
+    let mixed_calls = final_issueops(&mixed_targets);
+    if !mixed_status || mixed_calls.len() != 1 || mixed_calls[0].contains("--candidate-issue") {
+        return Err(io::Error::other(format!(
+            "mixed candidate/main push did not prefer global IssueOps dispatch:\n{mixed_targets}"
+        ))
+        .into());
+    }
+    let (malformed_status, malformed_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/tags/v0.5.0 2222222222222222222222222222222222222222\n",
+    )?;
+    if malformed_status || !final_issueops(&malformed_log).is_empty() {
+        return Err(io::Error::other(format!(
+            "unsupported pre-push target did not fail closed before IssueOps dispatch:\n{malformed_log}"
+        ))
+        .into());
+    }
     Ok(())
 }
 

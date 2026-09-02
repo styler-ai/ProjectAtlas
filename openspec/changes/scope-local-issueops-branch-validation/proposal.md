@@ -5,7 +5,7 @@ The local pre-push hook compares every open issue's mutable live checklist with 
 ## What Changes
 
 - Add a candidate-branch IssueOps mode that validates one owning issue against live state and compares every unrelated task slice with an accepted base.
-- Route ordinary branch pre-push validation through that mode while retaining global validation for `main` and release checks.
+- Route pre-push validation from its pushed remote refs: any `refs/heads/main` update remains global, while only all-non-main branch updates use candidate mode; release checks remain global.
 - Fail closed when candidate ownership or accepted-base authority is missing or ambiguous.
 - Cover concurrent task drift and the failure boundaries without adding a task store, branch registry, or workflow framework.
 
