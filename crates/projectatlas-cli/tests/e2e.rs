@@ -9089,19 +9089,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
     let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
-    let python = if cfg!(windows) { "python" } else { "python3" };
-    let issueops_self_test = StdCommand::new(python)
-        .current_dir(&workspace_root)
-        .args([".github/scripts/issue-checklists.py", "--self-test"])
-        .output()?;
-    if !issueops_self_test.status.success() {
-        return Err(io::Error::other(format!(
-            "IssueOps behavior self-test failed: {}{}",
-            String::from_utf8_lossy(&issueops_self_test.stdout),
-            String::from_utf8_lossy(&issueops_self_test.stderr)
-        ))
-        .into());
-    }
     let mermaid_parser = github.join("mermaid-parser");
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
@@ -9142,6 +9129,21 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .join("enforce-rust-test-quality-gates")
             .join("tasks.md"),
     )?;
+
+    let issueops_self_test_command = "python3 .github/scripts/issue-checklists.py --self-test";
+    for (name, owner) in [
+        ("pre-push", hook.as_str()),
+        ("CI", ci.as_str()),
+        ("IssueOps", issueops_workflow.as_str()),
+        ("release", release.as_str()),
+    ] {
+        if !owner.contains(issueops_self_test_command) {
+            return Err(io::Error::other(format!(
+                "{name} omitted the explicit IssueOps self-test owner"
+            ))
+            .into());
+        }
+    }
 
     if !mermaid_package.contains(r#""jsdom": "27.4.0""#)
         || !mermaid_package.contains(r#""mermaid": "11.16.1""#)
