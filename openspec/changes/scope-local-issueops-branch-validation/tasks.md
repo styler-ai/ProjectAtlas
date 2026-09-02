@@ -4,10 +4,10 @@
 
 ## 2. Candidate Branch Authority
 
-- [ ] 2.1 Add a local candidate-branch mode that reuses the existing owner-scoped accepted-base task comparison without requiring a hosted pull request.
-- [ ] 2.2 Route pre-push through that mode with exactly one mapped owning issue and an accepted `main` base; fail closed on zero or multiple owners, closed or unmapped ownership, and missing or unreadable base authority while leaving `main` global.
+- [x] 2.1 Add a local candidate-branch mode that reuses the existing owner-scoped accepted-base task comparison without requiring a hosted pull request.
+- [x] 2.2 Route pre-push through that mode with exactly one mapped owning issue and an accepted `main` base; fail closed on zero or multiple owners, closed or unmapped ownership, and missing or unreadable base authority while leaving `main` global.
 
 ## 3. Proof and Documentation
 
-- [ ] 3.1 Cover concurrent task drift and failure behavior: the owner must match live state, every unrelated slice must equal the accepted base, and owner/base ambiguity or unrelated candidate edits must fail.
-- [ ] 3.2 Reconcile workflow and architecture documentation, then pass the IssueOps self-test, focused hook contract, strict OpenSpec validation, and repository gates.
+- [x] 3.1 Cover concurrent task drift and failure behavior: the owner must match live state, every unrelated slice must equal the accepted base, and owner/base ambiguity or unrelated candidate edits must fail.
+- [x] 3.2 Reconcile workflow and architecture documentation, then pass the IssueOps self-test, focused hook contract, strict OpenSpec validation, and repository gates.

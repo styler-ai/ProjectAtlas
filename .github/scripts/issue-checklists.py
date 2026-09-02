@@ -127,6 +127,7 @@ REQUIRED_DESIGN_HEADINGS = {
 ISSUE_REFERENCE_RE = re.compile(
     r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)"
 )
+COMMIT_ISSUE_REFERENCE_RE = re.compile(r"\(#([1-9][0-9]*)\)")
 ISSUE_STATE_QUERY = """
 query($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
@@ -732,6 +733,23 @@ def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
     return candidates[0]
 
 
+def candidate_owner_issue_from_subjects(subjects: str) -> int:
+    """Resolve one owner from commit subjects using the required ``(#NNN)`` form."""
+
+    candidates = sorted(
+        {
+            int(match.group(1))
+            for match in COMMIT_ISSUE_REFERENCE_RE.finditer(subjects)
+        }
+    )
+    if len(candidates) != 1:
+        raise SystemExit(
+            "candidate branch commits must reference exactly one owning issue "
+            f"with (#NNN); found {len(candidates)} candidates"
+        )
+    return candidates[0]
+
+
 def issue_state_payloads(repo: str) -> list[dict[str, object]]:
     """Fetch complete native issue state and metadata for repository gates."""
 
@@ -831,6 +849,7 @@ def check_complexity_for_dispatch(
     *,
     pull_request: int | None,
     planned_issue: int | None,
+    candidate_issue: int | None = None,
     pull_request_owner: int | None = None,
     pull_request_owner_error: str | None = None,
     planned_issue_payload: dict[str, object] | None = None,
@@ -850,6 +869,8 @@ def check_complexity_for_dispatch(
             # The PR checker reports the fail-closed ownership error itself.
             return []
         return check_issue_complexity(repo, owner_issue)
+    if candidate_issue is not None:
+        return check_issue_complexity(repo, candidate_issue)
     if planned_issue is not None:
         return check_issue_complexity(repo, planned_issue, planned_issue_payload)
     return check_open_issue_complexity(repo)
@@ -1509,12 +1530,17 @@ def first_task_difference(
 
 
 def base_issue_map(
-    root: Path, issue_map_path: str | Path, base_ref: str
+    root: Path,
+    issue_map_path: str | Path,
+    base_ref: str,
+    *,
+    authority_label: str = "pull request",
 ) -> dict[str, tuple[Owner, ...]]:
-    """Read mapped owners from the accepted pull-request base."""
+    """Read mapped owners from an accepted base revision."""
 
+    base_label = "pull-request" if authority_label == "pull request" else authority_label
     if not base_ref.strip():
-        raise SystemExit("pull request accepted base is missing")
+        raise SystemExit(f"{authority_label} accepted base is missing")
     path = Path(issue_map_path)
     try:
         relative = path.resolve().relative_to(root.resolve())
@@ -1530,15 +1556,22 @@ def base_issue_map(
             return load_issue_map(path)
     except (OSError, UnicodeError, ValueError, SystemExit) as error:
         raise SystemExit(
-            f"accepted pull-request base {base_ref!r} is unreadable for {relative}"
+            f"accepted {base_label} base {base_ref!r} is unreadable for {relative}"
         ) from error
 
 
-def base_local_tasks(root: Path, path: Path, base_ref: str) -> list[tuple[bool, str]]:
-    """Read one mapped task file from the accepted pull-request base."""
+def base_local_tasks(
+    root: Path,
+    path: Path,
+    base_ref: str,
+    *,
+    authority_label: str = "pull request",
+) -> list[tuple[bool, str]]:
+    """Read one mapped task file from an accepted base revision."""
 
+    base_label = "pull-request" if authority_label == "pull request" else authority_label
     if not base_ref.strip():
-        raise SystemExit("pull request accepted base is missing")
+        raise SystemExit(f"{authority_label} accepted base is missing")
     try:
         relative = path.resolve().relative_to(root.resolve())
     except ValueError as error:
@@ -1550,17 +1583,17 @@ def base_local_tasks(root: Path, path: Path, base_ref: str) -> list[tuple[bool, 
         text = run(["git", "show", git_path])
     except SystemExit as error:
         raise SystemExit(
-            f"accepted pull-request base {base_ref!r} is unreadable for {relative}"
+            f"accepted {base_label} base {base_ref!r} is unreadable for {relative}"
         ) from error
     tasks = parse_tasks(text)
     if not tasks:
         raise SystemExit(
-            f"accepted pull-request base {base_ref!r} has no checkbox tasks in {relative}"
+            f"accepted {base_label} base {base_ref!r} has no checkbox tasks in {relative}"
         )
     ids = [task_id(task) for task in tasks]
     if len(ids) != len(set(ids)):
         raise SystemExit(
-            f"accepted pull-request base {base_ref!r} has duplicate task identifiers in {relative}"
+            f"accepted {base_label} base {base_ref!r} has duplicate task identifiers in {relative}"
         )
     return tasks
 
@@ -1569,25 +1602,28 @@ def check_pull_request_tasks(
     repo: str,
     root: Path,
     issue_map: dict[str, tuple[Owner, ...]],
-    pull_request: int,
+    pull_request: int | None,
     base_ref: str,
     *,
     issue_map_path: str | Path | None = None,
     owner_issue: int | None = None,
     owner_error: str | None = None,
     mermaid_budget: MermaidValidationBudget | None = None,
+    scope_label: str = "pull request",
 ) -> list[str]:
-    """Check one PR owner against live state and unrelated slices against its base."""
+    """Check one owner against live state and unrelated slices against its base."""
 
     if owner_error is not None:
-        return [f"pull request ownership {owner_error}"]
+        return [f"{scope_label} ownership {owner_error}"]
     if owner_issue is None:
+        if pull_request is None:
+            return [f"{scope_label} ownership is missing"]
         try:
             owner_issue = pull_request_owner_issue(
                 repo, pull_request_payload(repo, pull_request)
             )
         except SystemExit as error:
-            return [f"pull request ownership {error}"]
+            return [f"{scope_label} ownership {error}"]
     mapped = [
         (change, owner)
         for change, owners in issue_map.items()
@@ -1596,7 +1632,7 @@ def check_pull_request_tasks(
     ]
     if len(mapped) != 1:
         return [
-            f"pull request owner #{owner_issue} must have exactly one local OpenSpec mapping; "
+            f"{scope_label} owner #{owner_issue} must have exactly one local OpenSpec mapping; "
             f"found {len(mapped)}"
         ]
 
@@ -1611,7 +1647,7 @@ def check_pull_request_tasks(
             else:
                 issue_states[number] = state
     except SystemExit as error:
-        return [f"pull request issue state {error}"]
+        return [f"{scope_label} issue state {error}"]
     for number in sorted(mapped_issue_numbers(issue_map)):
         state = issue_states.get(number)
         if state is None:
@@ -1627,14 +1663,20 @@ def check_pull_request_tasks(
         return failures
     owner_state = issue_states[owner_issue]
     if owner_state != "OPEN":
-        return [f"pull request owner #{owner_issue} must be OPEN"]
+        return [f"{scope_label} owner #{owner_issue} must be OPEN"]
     configured_issue_map_path = (
         issue_map_path
         if issue_map_path is not None
         else root / "openspec" / "issue-map.json"
     )
+    base_label = "pull-request" if scope_label == "pull request" else scope_label
     try:
-        accepted_issue_map = base_issue_map(root, configured_issue_map_path, base_ref)
+        accepted_issue_map = base_issue_map(
+            root,
+            configured_issue_map_path,
+            base_ref,
+            authority_label=scope_label,
+        )
     except SystemExit as error:
         return [str(error)]
     for change in sorted(set(issue_map) | set(accepted_issue_map)):
@@ -1642,14 +1684,14 @@ def check_pull_request_tasks(
         accepted_owners = accepted_issue_map.get(change)
         if candidate_owners is None:
             failures.append(
-                f"{change} removes mapped OpenSpec authority from accepted pull-request base "
+                f"{change} removes mapped OpenSpec authority from accepted {base_label} base "
                 f"{base_ref}: owners {accepted_owners!r}"
             )
         elif accepted_owners is None:
             if any(owner.issue != owner_issue for owner in candidate_owners):
                 failures.append(
                     f"{change} adds unrelated mapped OpenSpec authority without an accepted "
-                    f"pull-request base slice"
+                    f"{base_label} base slice"
                 )
         elif candidate_owners != accepted_owners:
             owner_only_range_change = (
@@ -1664,7 +1706,7 @@ def check_pull_request_tasks(
             )
             if not owner_only_range_change:
                 failures.append(
-                    f"{change} changes mapped OpenSpec owners from accepted pull-request base "
+                    f"{change} changes mapped OpenSpec owners from accepted {base_label} base "
                     f"{base_ref}: expected {accepted_owners!r}, found {candidate_owners!r}"
                 )
     mermaid_budget = mermaid_budget or MermaidValidationBudget()
@@ -1685,7 +1727,12 @@ def check_pull_request_tasks(
         base_slices: dict[int, list[tuple[bool, str]]] = {}
         if unrelated_slices:
             try:
-                base_tasks = base_local_tasks(root, path, base_ref)
+                base_tasks = base_local_tasks(
+                    root,
+                    path,
+                    base_ref,
+                    authority_label=scope_label,
+                )
                 base_slices = dict(
                     (owner.issue, expected)
                     for owner, expected in owner_slices(
@@ -1703,12 +1750,12 @@ def check_pull_request_tasks(
                 if accepted is None:
                     failures.append(
                         f"#{owner.issue} {change} has no corresponding unrelated task slice "
-                        f"in accepted pull-request base {base_ref}"
+                        f"in accepted {base_label} base {base_ref}"
                     )
                 elif expected != accepted:
                     failures.append(
                         f"#{owner.issue} {change} changes an unrelated task slice from "
-                        f"accepted pull-request base {base_ref}: "
+                        f"accepted {base_label} base {base_ref}: "
                         f"{first_task_difference(accepted, expected)}"
                     )
                 continue
@@ -1740,6 +1787,31 @@ def check_pull_request_tasks(
             ):
                 failures.append(f"#{owner.issue} issue contract {failure}")
     return failures
+
+
+def check_candidate_tasks(
+    repo: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    owner_issue: int,
+    base_ref: str,
+    *,
+    issue_map_path: str | Path | None = None,
+    mermaid_budget: MermaidValidationBudget | None = None,
+) -> list[str]:
+    """Check one local candidate owner against live state and its accepted base."""
+
+    return check_pull_request_tasks(
+        repo,
+        root,
+        issue_map,
+        None,
+        base_ref,
+        issue_map_path=issue_map_path,
+        owner_issue=owner_issue,
+        mermaid_budget=mermaid_budget,
+        scope_label="candidate branch",
+    )
 
 
 def check_openspec_tasks(
@@ -2123,6 +2195,16 @@ Mitigations:
     assert pull_request_owner_issue(
         "owner/repo", {"title": "Work for OWNER/rePO#517", "body": ""}
     ) == 517
+    assert candidate_owner_issue_from_subjects(
+        "Implement candidate (#517)\nFollow-up candidate (#517)"
+    ) == 517
+    for subjects in ("", "Implement candidate (#517)\nAlso candidate (#518)"):
+        try:
+            candidate_owner_issue_from_subjects(subjects)
+        except SystemExit as error:
+            assert "exactly one owning issue" in str(error)
+        else:
+            raise AssertionError("ambiguous candidate commit ownership was accepted")
     assert complexity_label_failures(
         {"state": "OPEN", "labels": [{"name": "complexity:medium"}]}
     ) == []
@@ -2170,6 +2252,7 @@ Mitigations:
             "issue_state_payloads",
             "load_issue_map",
             "check_pull_request_tasks",
+            "check_candidate_tasks",
             "check_openspec_tasks",
             "planned_issue_failures",
             "check_milestone_complete",
@@ -2182,6 +2265,7 @@ Mitigations:
     complexity_fetches: list[int] = []
     pull_request_fetches: list[int] = []
     pull_request_issue_map_paths: list[object] = []
+    candidate_dispatches: list[tuple[int, object]] = []
     global_complexity_fetches: list[str] = []
     try:
         globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
@@ -2199,6 +2283,9 @@ Mitigations:
         globals()["load_issue_map"] = lambda _path, **_kwargs: {}
         globals()["check_pull_request_tasks"] = lambda *_args, **kwargs: (
             pull_request_issue_map_paths.append(kwargs["issue_map_path"]) or []
+        )
+        globals()["check_candidate_tasks"] = lambda *args, **kwargs: (
+            candidate_dispatches.append((args[3], args[4])) or []
         )
         globals()["check_openspec_tasks"] = lambda *_args, **_kwargs: []
         globals()["planned_issue_failures"] = lambda *_args, **_kwargs: []
@@ -2229,6 +2316,19 @@ Mitigations:
         ]
         main()
         assert complexity_fetches == [2]
+        complexity_fetches.clear()
+        sys.argv = [
+            "issue-checklists.py",
+            "--repo",
+            "owner/repo",
+            "--candidate-issue",
+            "2",
+            "--base",
+            "accepted-base",
+        ]
+        main()
+        assert complexity_fetches == [2]
+        assert candidate_dispatches == [(2, "accepted-base")]
         sys.argv = ["issue-checklists.py", "--repo", "owner/repo"]
         try:
             main()
@@ -3404,6 +3504,112 @@ Timeout --> Recovery
                 globals()[name] = helper
     with tempfile.TemporaryDirectory() as temporary:
         branch_root = Path(temporary)
+        candidate_tasks = "- [x] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n"
+        issue_map = {
+            "change-a": (Owner(1),),
+            "change-b": (Owner(2),),
+        }
+        for change in issue_map:
+            path = branch_root / "openspec" / "changes" / change / "tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(candidate_tasks, encoding="utf-8")
+        base_issue_map_text = json.dumps(
+            {"schema_version": 2, "changes": {"change-a": 1, "change-b": 2}}
+        )
+        saved_candidate_helpers = {
+            name: globals()[name]
+            for name in (
+                "run",
+                "issue_payload",
+                "issue_state_payloads",
+                "issue_contract_failures",
+            )
+        }
+        live_payloads = {
+            1: {"state": "OPEN", "body": issue_contract},
+            2: {"state": "OPEN", "body": issue_contract},
+        }
+        live_payloads[1]["body"] = issue_contract.replace("- [ ] 2.1", "- [x] 2.1")
+        live_reads: list[int] = []
+        base_reads: list[str] = []
+        try:
+            def fake_run(args: list[str]) -> str:
+                if len(args) == 3 and args[:2] == ["git", "show"]:
+                    path = args[2].split(":", 1)[1]
+                    if path == "openspec/issue-map.json":
+                        if args[2].startswith("unreadable-base:"):
+                            raise SystemExit("git show could not read accepted base")
+                        return base_issue_map_text
+                    base_reads.append(path)
+                    if args[2].startswith("unreadable-base:"):
+                        raise SystemExit("git show could not read accepted base")
+                    return candidate_tasks
+                raise AssertionError(f"unexpected candidate test command: {args!r}")
+
+            globals()["run"] = fake_run
+            globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
+                live_reads.append(number) or live_payloads[number]
+            )
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": number, "state": payload["state"]}
+                for number, payload in live_payloads.items()
+            ]
+            globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
+
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            ) == []
+            assert live_reads == [2], "candidate checks must read live state only for the owner"
+            assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            live_payloads[2] = {
+                "state": "OPEN",
+                "body": issue_contract.replace("- [x] 1.1", "- [ ] 1.1"),
+            }
+            live_reads.clear()
+            owner_drift_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            )
+            assert any("candidate does not mirror live issue state" in failure for failure in owner_drift_failures)
+
+            (branch_root / "openspec" / "changes" / "change-a" / "tasks.md").write_text(
+                "- [ ] 1.1 Unrelated candidate edit.\n- [ ] 2.1 Finish ordinary implementation.\n",
+                encoding="utf-8",
+            )
+            live_payloads[1] = {
+                "state": "OPEN",
+                "body": issue_contract.replace("- [x] 1.1", "- [ ] 1.1"),
+            }
+            unrelated_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            )
+            assert any("unrelated task slice" in failure for failure in unrelated_failures)
+
+            live_payloads[2] = {"state": "CLOSED", "body": issue_contract}
+            closed_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            )
+            assert closed_failures == ["candidate branch owner #2 must be OPEN"]
+
+            unmapped_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 99, "accepted-base"
+            )
+            assert any("candidate branch owner #99 must have exactly one local OpenSpec mapping" in failure for failure in unmapped_failures)
+
+            live_payloads[2] = {"state": "OPEN", "body": issue_contract}
+            missing_base_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, ""
+            )
+            assert missing_base_failures == ["candidate branch accepted base is missing"]
+            unreadable_base_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "unreadable-base"
+            )
+            assert any("accepted candidate branch base 'unreadable-base' is unreadable" in failure for failure in unreadable_base_failures)
+        finally:
+            for name, helper in saved_candidate_helpers.items():
+                globals()[name] = helper
+    with tempfile.TemporaryDirectory() as temporary:
+        branch_root = Path(temporary)
         legacy_path = branch_root / "openspec" / "changes" / "legacy-change" / "tasks.md"
         current_path = branch_root / "openspec" / "changes" / "current-change" / "tasks.md"
         legacy_path.parent.mkdir(parents=True)
@@ -3896,11 +4102,30 @@ def main() -> None:
     parser.add_argument("--milestone", action="append", default=[])
     parser.add_argument("--planned-issue", type=int)
     parser.add_argument("--pull-request", type=int)
+    parser.add_argument("--candidate-issue", type=int)
     parser.add_argument("--base", default="")
     parser.add_argument("--skip-openspec", action="store_true")
+    parser.add_argument("--owner-from-commits", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
+    if args.owner_from_commits:
+        if (
+            args.root != "."
+            or args.issue_map != "openspec/issue-map.json"
+            or args.skip_openspec
+            or args.self_test
+            or any(
+                value is not None
+                for value in (args.planned_issue, args.pull_request, args.candidate_issue)
+            )
+            or args.base
+            or args.milestone
+            or args.repo
+        ):
+            raise SystemExit("--owner-from-commits accepts only commit subjects on stdin")
+        print(candidate_owner_issue_from_subjects(sys.stdin.read()))
+        return
     if args.self_test:
         self_test()
         return
@@ -3910,14 +4135,24 @@ def main() -> None:
     root = Path(args.root)
     failures: list[str] = []
     issue_map = load_issue_map(args.issue_map)
-    if args.pull_request is not None and args.planned_issue is not None:
-        raise SystemExit("--pull-request cannot be combined with --planned-issue")
+    scoped_dispatches = sum(
+        value is not None
+        for value in (args.pull_request, args.planned_issue, args.candidate_issue)
+    )
+    if scoped_dispatches > 1:
+        raise SystemExit(
+            "--pull-request, --planned-issue, and --candidate-issue are mutually exclusive"
+        )
     if args.pull_request is not None and args.skip_openspec:
         raise SystemExit("--pull-request cannot be combined with --skip-openspec")
+    if args.candidate_issue is not None and args.skip_openspec:
+        raise SystemExit("--candidate-issue cannot be combined with --skip-openspec")
     if args.pull_request is not None and not args.base:
         raise SystemExit("--base is required with --pull-request")
-    if args.pull_request is None and args.base:
-        raise SystemExit("--base requires --pull-request")
+    if args.candidate_issue is not None and not args.base:
+        raise SystemExit("--base is required with --candidate-issue")
+    if args.pull_request is None and args.candidate_issue is None and args.base:
+        raise SystemExit("--base requires --pull-request or --candidate-issue")
     pull_request_owner = None
     pull_request_owner_error = None
     planned_issue_payload = None
@@ -3938,6 +4173,7 @@ def main() -> None:
             args.repo,
             pull_request=args.pull_request,
             planned_issue=args.planned_issue,
+            candidate_issue=args.candidate_issue,
             pull_request_owner=pull_request_owner,
             pull_request_owner_error=pull_request_owner_error,
             planned_issue_payload=planned_issue_payload,
@@ -3954,6 +4190,17 @@ def main() -> None:
                 issue_map_path=args.issue_map,
                 owner_issue=pull_request_owner,
                 owner_error=pull_request_owner_error,
+            )
+        )
+    elif args.candidate_issue is not None:
+        failures.extend(
+            check_candidate_tasks(
+                args.repo,
+                root,
+                issue_map,
+                args.candidate_issue,
+                args.base,
+                issue_map_path=args.issue_map,
             )
         )
     elif not args.skip_openspec:

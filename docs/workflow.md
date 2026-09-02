@@ -94,6 +94,8 @@ Ordinary pull requests require exact local/GitHub checklist synchronization but 
 
 Pull-request IssueOps resolves exactly one owning issue from the existing PR reference syntax. It compares that open issue's candidate implementation-task slice with mutable live state, while requiring every unrelated open mapped task slice to remain identical to the accepted PR base and excluding closed unrelated history; missing or ambiguous ownership and unreadable base authority fail closed. Pushes to `main` and milestone/release validation retain the complete active live-state comparison plus native closed-state gating, while ordinary issue events retain their affected-issue `--planned-issue` scope.
 
+Local candidate-branch IssueOps resolves exactly one mapped open owner from the `(#NNN)` references in commit subjects after the `origin/main` merge base, then runs the same owner/live and unrelated/base comparison with `--candidate-issue`. Zero or multiple references, closed or unmapped ownership, and missing or unreadable accepted-base authority fail closed. The hook keeps the existing self-test and quality gates mandatory; `main` continues through the global route.
+
 Commit identity is provenance, not a general test invalidation key. After a commit-only or metadata-only change, rerun cheap OpenSpec, IssueOps, review, topology, and release-policy checks, then reuse passed expensive proof whose behavior-relevant source, dependency, lockfile, toolchain, workflow, packaging, configuration, platform, and immutable artifact identities are unchanged. Unknown changes fail closed and every affected test or construction reruns.
 
 ## Issue hygiene

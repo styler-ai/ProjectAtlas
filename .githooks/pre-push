@@ -26,7 +26,25 @@ python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
 command -v gh >/dev/null 2>&1
 repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-python3 .github/scripts/issue-checklists.py \
-  --repo "$repo" --root . --issue-map openspec/issue-map.json
+branch="$(git branch --show-current)"
+if [ "$branch" = "main" ]; then
+  python3 .github/scripts/issue-checklists.py \
+    --repo "$repo" --root . --issue-map openspec/issue-map.json
+else
+  if ! accepted_base="$(git merge-base origin/main HEAD)" || [ -z "$accepted_base" ]; then
+    echo "candidate branch accepted origin/main base is unreadable" >&2
+    exit 1
+  fi
+  if ! owner_issue="$(
+    git log --format=%s "$accepted_base..HEAD" |
+      python3 .github/scripts/issue-checklists.py --owner-from-commits
+  )"; then
+    echo "candidate branch owner resolution failed" >&2
+    exit 1
+  fi
+  python3 .github/scripts/issue-checklists.py \
+    --repo "$repo" --root . --issue-map openspec/issue-map.json \
+    --candidate-issue "$owner_issue" --base "$accepted_base"
+fi
 cargo run --locked -p projectatlas-cli -- --format json scan .
 cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low

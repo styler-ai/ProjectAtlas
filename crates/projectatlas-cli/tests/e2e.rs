@@ -9234,10 +9234,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "must be OPEN",
         "ISSUE_REFERENCE_RE",
         "pull_request_owner_issue",
+        "COMMIT_ISSUE_REFERENCE_RE",
+        "candidate_owner_issue_from_subjects",
         "configured_issue_map_path",
         "base_issue_map(",
         "base_local_tasks",
         "check_pull_request_tasks",
+        "check_candidate_tasks",
         "issue_map_path=args.issue_map",
     ] {
         if !issueops.contains(required) {
@@ -9284,6 +9287,37 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if !hook.contains("python3 .github/scripts/verify-rust-toolchain.py") {
         return Err(io::Error::other(
             "local pre-push validation omitted the shared Rust toolchain preflight",
+        )
+        .into());
+    }
+    for required in [
+        "branch=\"$(git branch --show-current)\"",
+        "if [ \"$branch\" = \"main\" ]; then",
+        "git merge-base origin/main HEAD",
+        "git log --format=%s",
+        "--owner-from-commits",
+        "--candidate-issue \"$owner_issue\"",
+        "--base \"$accepted_base\"",
+    ] {
+        if !hook.contains(required) {
+            return Err(io::Error::other(format!(
+                "local pre-push hook is missing candidate/main IssueOps routing {required:?}"
+            ))
+            .into());
+        }
+    }
+    let main_route = hook
+        .find("if [ \"$branch\" = \"main\" ]; then")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted main route"))?;
+    let global_route = hook
+        .find("--repo \"$repo\" --root . --issue-map openspec/issue-map.json")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted global IssueOps route"))?;
+    let candidate_route = hook
+        .find("--candidate-issue \"$owner_issue\"")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted candidate IssueOps route"))?;
+    if !(main_route < global_route && global_route < candidate_route) {
+        return Err(io::Error::other(
+            "pre-push hook must keep global IssueOps inside main and candidate IssueOps in the branch route",
         )
         .into());
     }

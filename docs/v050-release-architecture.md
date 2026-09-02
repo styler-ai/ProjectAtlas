@@ -13,10 +13,14 @@ flowchart LR
     Acceptance --> Gates[Five ordered review gates]
     Sync --> Contract
     Gates --> Contract
-    PR[PR candidate branch] --> Owner[One open owner against live state]
+    PR[Hosted PR candidate] --> Owner[One open owner against live state]
     PR --> Base[Unrelated open slices against accepted PR base]
+    Candidate[Local candidate branch] --> CandidateOwner["One owner from (#NNN) commit subjects"]
+    Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract
     Base --> Contract
+    CandidateOwner --> Contract
+    CandidateBase --> Contract
     Closed[Already CLOSED mapped issue] --> Inert[Native closed state only; no body migration or validation]
     Reopened[Reopened mapped issue] --> Implementation
     Hidden[Hidden, duplicate, or legacy open fields] --> Reject[Fail closed]
