@@ -1,0 +1,49 @@
+## ADDED Requirements
+
+### Requirement: Local candidate branches use owner-scoped checklist authority
+ProjectAtlas SHALL validate one local candidate issue against its live GitHub checklist while comparing every unrelated open mapped task slice with the accepted base.
+
+#### Scenario: Independent live progress does not invalidate a candidate
+- **WHEN** the candidate owner's local tasks match its live issue and an unrelated issue's live tasks have advanced beyond the accepted base
+- **THEN** validation succeeds when the candidate preserves that unrelated accepted-base slice unchanged
+
+#### Scenario: Candidate owner differs from live tasks
+- **WHEN** the candidate owner's local task slice differs from its live issue checklist
+- **THEN** validation fails with the first owner-slice difference
+
+#### Scenario: Candidate changes an unrelated slice
+- **WHEN** the candidate changes an unrelated open issue's task slice from the accepted base
+- **THEN** validation fails even if that unrelated slice happens to match mutable live state
+
+### Requirement: Candidate ownership and base authority fail closed
+ProjectAtlas SHALL require exactly one mapped open owning issue and a readable accepted base for local candidate validation.
+
+#### Scenario: One owner is resolved
+- **WHEN** every post-base commit subject references the same owning issue with the repository's `(#NNN)` convention
+- **THEN** pre-push validates that issue through the local candidate route
+
+#### Scenario: Ownership is absent or ambiguous
+- **WHEN** post-base commits contain no issue reference or references to more than one issue
+- **THEN** pre-push fails before checklist comparison
+
+#### Scenario: Owner or base is invalid
+- **WHEN** the selected owner is closed or unmapped, or accepted-base task authority cannot be read
+- **THEN** candidate validation fails without falling back to global mutable state
+
+### Requirement: Global and hosted scopes remain unchanged
+ProjectAtlas SHALL retain global checklist validation for `main` and release operations, PR-scoped validation for hosted pull requests, and planned-issue validation for issue events.
+
+#### Scenario: Main and release validation
+- **WHEN** validation runs for `main` or a release milestone
+- **THEN** every active mapped live checklist is compared with the repository state as before
+
+#### Scenario: Existing hosted scopes
+- **WHEN** validation runs for a pull request or issue event
+- **THEN** the existing PR-owner or planned-issue route remains authoritative
+
+### Requirement: Real IssueOps execution remains mandatory
+ProjectAtlas SHALL keep the real IssueOps self-test and all other pre-push quality gates mandatory when candidate checklist scoping is used.
+
+#### Scenario: Candidate branch runs pre-push
+- **WHEN** a valid candidate branch is pushed
+- **THEN** the hook runs the existing quality gates and real IssueOps self-test before the scoped live checklist comparison
