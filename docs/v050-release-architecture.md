@@ -18,7 +18,8 @@ flowchart LR
     Push[Git pre-push ref-update records] --> MainTarget["Any refs/heads/main target"]
     Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
     MainTarget --> Global[Global live-state validation]
-    CandidateTarget --> Candidate[Local candidate branch]
+    CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
+    CandidateObject --> Candidate[Local candidate branch]
     Candidate --> CandidateOwner["One owner from (#NNN) commit subjects"]
     Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract

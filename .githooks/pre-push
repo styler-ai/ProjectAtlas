@@ -34,13 +34,14 @@ push_scope="$(
       else {
         seen=1
         updates += 1
+        local_oid = $2
         if ($3 == "refs/heads/main") main=1
       }
     }
     END {
       if (!seen || invalid) exit 1
       if (main) print "global"
-      else if (updates == 1) print "candidate"
+      else if (updates == 1) print "candidate:" local_oid
       else exit 1
     }
   '
@@ -48,7 +49,22 @@ push_scope="$(
 if [ "$push_scope" = "global" ]; then
   python3 .github/scripts/issue-checklists.py \
     --repo "$repo" --root . --issue-map openspec/issue-map.json
-elif [ "$push_scope" = "candidate" ]; then
+elif [ "${push_scope#candidate:}" != "$push_scope" ]; then
+  candidate_local_oid="${push_scope#candidate:}"
+  if [ -z "$candidate_local_oid" ] ||
+    [ "$candidate_local_oid" = "0000000000000000000000000000000000000000" ]; then
+    echo "candidate branch local object is missing or a deletion" >&2
+    exit 1
+  fi
+  if ! current_head="$(git rev-parse --verify 'HEAD^{commit}')" ||
+    [ -z "$current_head" ]; then
+    echo "candidate branch checked-out HEAD is unreadable" >&2
+    exit 1
+  fi
+  if [ "$candidate_local_oid" != "$current_head" ]; then
+    echo "candidate branch local object does not match checked-out HEAD" >&2
+    exit 1
+  fi
   if ! accepted_base="$(git merge-base origin/main HEAD)" || [ -z "$accepted_base" ]; then
     echo "candidate branch accepted origin/main base is unreadable" >&2
     exit 1

@@ -9296,10 +9296,15 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "NF != 4",
         "if (!seen || invalid) exit 1",
         "updates += 1",
-        "else if (updates == 1) print \"candidate\"",
+        "local_oid = $2",
+        "else if (updates == 1) print \"candidate:\" local_oid",
         "refs/heads/main",
         "if [ \"$push_scope\" = \"global\" ]; then",
-        "elif [ \"$push_scope\" = \"candidate\" ]; then",
+        "elif [ \"${push_scope#candidate:}\" != \"$push_scope\" ]; then",
+        "candidate_local_oid=\"${push_scope#candidate:}\"",
+        "candidate branch local object is missing or a deletion",
+        "git rev-parse --verify 'HEAD^{commit}'",
+        "candidate branch local object does not match checked-out HEAD",
         "git merge-base origin/main HEAD",
         "git log --format=%s",
         "--owner-from-commits",
@@ -10198,6 +10203,21 @@ exit 0
     } else {
         PathBuf::from("sh")
     };
+    let head_output = git_command_for_root(&workspace_root)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()?;
+    if !head_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git rev-parse --verify HEAD^{{commit}} failed: {}{}",
+            String::from_utf8_lossy(&head_output.stdout),
+            String::from_utf8_lossy(&head_output.stderr)
+        ))
+        .into());
+    }
+    let current_head = String::from_utf8(head_output.stdout)?.trim().to_owned();
+    if current_head.is_empty() {
+        return Err(io::Error::other("git rev-parse returned an empty HEAD").into());
+    }
     let run_hook = |records: &str| -> Result<(bool, String), Box<dyn Error>> {
         fs::write(&dispatch_log, "")?;
         let mut command = StdCommand::new(&shell);
@@ -10243,9 +10263,41 @@ exit 0
         ))
         .into());
     }
-    let (candidate_status, candidate_target) = run_hook(
-        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\n",
-    )?;
+    let mismatched_candidate_records = format!(
+        "refs/heads/fix/549 {} refs/heads/fix/549 2222222222222222222222222222222222222222\n",
+        if current_head == "1111111111111111111111111111111111111111" {
+            "2222222222222222222222222222222222222222"
+        } else {
+            "1111111111111111111111111111111111111111"
+        }
+    );
+    let (mismatched_candidate_status, mismatched_candidate_log) =
+        run_hook(&mismatched_candidate_records)?;
+    if mismatched_candidate_status
+        || !final_issueops(&mismatched_candidate_log).is_empty()
+        || mismatched_candidate_log.contains("--candidate-issue")
+        || mismatched_candidate_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "candidate local object mismatch did not fail closed before scoped validation:\n{mismatched_candidate_log}"
+        ))
+        .into());
+    }
+    let zero_candidate_records = "refs/heads/fix/549 0000000000000000000000000000000000000000 refs/heads/fix/549 2222222222222222222222222222222222222222\n";
+    let (zero_candidate_status, zero_candidate_log) = run_hook(zero_candidate_records)?;
+    if zero_candidate_status
+        || !final_issueops(&zero_candidate_log).is_empty()
+        || zero_candidate_log.contains("--candidate-issue")
+        || zero_candidate_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "candidate deletion did not fail closed before scoped validation:\n{zero_candidate_log}"
+        ))
+        .into());
+    }
+    let (candidate_status, candidate_target) = run_hook(&format!(
+        "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+    ))?;
     let candidate_calls = final_issueops(&candidate_target);
     if !candidate_status
         || candidate_calls.len() != 1

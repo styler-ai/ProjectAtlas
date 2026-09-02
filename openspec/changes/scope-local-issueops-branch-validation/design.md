@@ -26,19 +26,19 @@ This is smaller and safer than a second comparison implementation or a pre-push-
 
 ### Resolve candidate scope and ownership from push records
 
-Pre-push consumes Git's standard four-field ref-update records. Any valid update targeting `refs/heads/main` selects global validation, even from a feature checkout; candidate validation is allowed only when exactly one valid target is a non-main `refs/heads/*` branch. Multiple non-main updates, empty input, malformed records, or unsupported targets fail closed. For the candidate route, pre-push resolves the merge base with `origin/main`, extracts issue references in the repository's required `(#NNN)` commit-subject convention from commits after that base, and requires exactly one unique issue. Zero or several owners fail before live comparison. The candidate checker then independently rejects a closed or unmapped issue and unreadable base authority.
+Pre-push consumes Git's standard four-field ref-update records. Any valid update targeting `refs/heads/main` selects global validation, even from a feature checkout; candidate validation is allowed only when exactly one valid target is a non-main `refs/heads/*` branch whose non-zero local object ID equals the validated checked-out `HEAD`. Multiple non-main updates, deletions, empty input, malformed records, or unsupported targets fail closed before owner or base extraction. For the candidate route, pre-push resolves the merge base with `origin/main`, extracts issue references in the repository's required `(#NNN)` commit-subject convention from commits after that base, and requires exactly one unique issue. Zero or several owners fail before live comparison. The candidate checker then independently rejects a closed or unmapped issue and unreadable base authority.
 
 Using push-target scope plus commit ownership keeps first publication possible before a hosted PR exists. Guessing scope or ownership from a checkout branch name or mutable environment variable would be weaker and is rejected.
 
 ### Preserve global validation where it belongs
 
-The hook retains global validation for any push targeting `refs/heads/main`, and uses the candidate route only for one valid non-main branch target. Multiple non-main targets fail closed. CI pull requests remain PR-scoped, issue events remain planned-issue scoped, and release validation remains global. The real self-test remains an independent mandatory command in every existing owner.
+The hook retains global validation for any push targeting `refs/heads/main`, and uses the candidate route only for one valid non-main branch target whose local object is the current `HEAD`. Multiple non-main targets, deletions, or local-object mismatches fail closed. CI pull requests remain PR-scoped, issue events remain planned-issue scoped, and release validation remains global. The real self-test remains an independent mandatory command in every existing owner.
 
 ## Risks / Trade-offs
 
 - **A candidate contains commits for several issues** -> fail closed and require the work to be split or rebased into one owning issue.
 - **The remote base is missing or stale** -> fail closed rather than infer accepted authority; ordinary fetch/rebase resolves it.
-- **Push-target or shell ownership extraction drifts from the contract** -> cover main-from-feature, ordinary candidate, mixed refs, malformed records, zero, one, multiple non-main updates, duplicate-same, and multiple-owner inputs in the existing workflow-contract tests.
+- **Push-target or shell ownership extraction drifts from the contract** -> cover main-from-feature, ordinary candidate, mismatched local object, mixed refs, malformed records, zero, one, multiple non-main updates, duplicate-same, and multiple-owner inputs in the existing workflow-contract tests.
 - **A branch changes an unrelated task slice** -> the existing accepted-base comparison rejects it even though unrelated live progress is ignored.
 
 ## Migration Plan

@@ -31,18 +31,26 @@ ProjectAtlas SHALL require exactly one mapped open owning issue and a readable a
 - **THEN** candidate validation fails without falling back to global mutable state
 
 ### Requirement: Pre-push scope follows pushed remote refs
-ProjectAtlas SHALL select global checklist validation when any pre-push update targets `refs/heads/main`. Candidate validation SHALL be allowed only when exactly one valid pushed target is a non-main `refs/heads/*` branch; multiple non-main targets SHALL fail closed.
+ProjectAtlas SHALL select global checklist validation when any pre-push update targets `refs/heads/main`. Candidate validation SHALL be allowed only when exactly one valid pushed target is a non-main `refs/heads/*` branch whose non-zero local object ID equals the validated checked-out `HEAD`; multiple non-main, deleted, or mismatched candidate targets SHALL fail closed before scoped validation.
 
 #### Scenario: Feature checkout pushes main
 - **WHEN** a feature checkout pushes an update whose remote ref is `refs/heads/main`
 - **THEN** pre-push selects global checklist validation regardless of the checkout branch
 
 #### Scenario: One candidate ref is pushed
-- **WHEN** exactly one valid pre-push update targets a non-main `refs/heads/*` branch
+- **WHEN** exactly one valid pre-push update targets a non-main `refs/heads/*` branch and its non-zero local object ID equals the validated checked-out `HEAD`
 - **THEN** pre-push selects the local candidate route
 
 #### Scenario: Multiple candidate refs are pushed
 - **WHEN** two or more valid pre-push updates target non-main `refs/heads/*` branches
+- **THEN** pre-push fails closed without selecting candidate validation
+
+#### Scenario: Candidate local object differs from checkout HEAD
+- **WHEN** one candidate update has a non-zero local object ID that differs from the validated checked-out `HEAD`
+- **THEN** pre-push fails closed before owner, base, or scoped IssueOps validation
+
+#### Scenario: Candidate deletion is pushed
+- **WHEN** one candidate update has a zero local object ID
 - **THEN** pre-push fails closed without selecting candidate validation
 
 #### Scenario: Main and candidate refs are pushed together
