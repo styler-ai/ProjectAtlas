@@ -9442,6 +9442,28 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
+    let checklist_self_test_step = ci
+        .split("- name: Issue checklist self-test")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("ordinary IssueOps self-test step is missing"))?;
+    if ci.matches("- name: Issue checklist self-test").count() != 1 {
+        return Err(io::Error::other("CI must run the IssueOps self-test exactly once").into());
+    }
+    if checklist_self_test_step.contains("\n        if:") {
+        return Err(io::Error::other("CI IssueOps self-test must be unconditional").into());
+    }
+    for required in [
+        issueops_self_test_command,
+        "test-optional-parser-proof-inputs.py",
+    ] {
+        if !checklist_self_test_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "CI IssueOps self-test omitted gate {required:?}"
+            ))
+            .into());
+        }
+    }
     let checklist_step = ci
         .split("- name: Issue checklist check")
         .nth(1)
@@ -9488,6 +9510,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+    if checklist_step.contains(issueops_self_test_command)
+        || checklist_step.contains("test-optional-parser-proof-inputs.py")
+    {
+        return Err(
+            io::Error::other("CI mutable IssueOps check must not relaunch the self-test").into(),
+        );
     }
     if checklist_step.contains("--milestone") {
         return Err(io::Error::other(
