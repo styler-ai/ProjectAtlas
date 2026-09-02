@@ -64,12 +64,14 @@ def run_process(
     cwd: Path,
     *,
     trace_path: Path | None = None,
+    allocation_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run one bounded child process and retain its exact raw streams."""
 
-    environment = os.environ.copy()
-    if trace_path is not None:
-        environment["PROJECTATLAS_REVERSE_CALLER_TRACE"] = str(trace_path)
+    environment = process_environment(
+        trace_path=trace_path,
+        allocation_path=allocation_path,
+    )
     started = time.perf_counter()
     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
         process = subprocess.Popen(
@@ -113,6 +115,23 @@ def run_process(
         "stdout": stdout,
         "stderr": stderr,
     }
+
+
+def process_environment(
+    *,
+    trace_path: Path | None = None,
+    allocation_path: Path | None = None,
+) -> dict[str, str]:
+    """Build a child environment with explicit observer/allocation routing."""
+
+    environment = os.environ.copy()
+    environment.pop("PROJECTATLAS_REVERSE_CALLER_TRACE", None)
+    environment.pop("PROJECTATLAS_REVERSE_CALLER_ALLOCATIONS", None)
+    if trace_path is not None:
+        environment["PROJECTATLAS_REVERSE_CALLER_TRACE"] = str(trace_path)
+    if allocation_path is not None:
+        environment["PROJECTATLAS_REVERSE_CALLER_ALLOCATIONS"] = str(allocation_path)
+    return environment
 
 
 def require_success(measured: dict[str, Any], label: str) -> None:
@@ -579,6 +598,19 @@ def assert_semantics(payload: dict[str, Any], target: dict[str, Any], shape: str
         raise AssertionError("ambiguous alias produced a caller")
 
 
+def summary_command(target: dict[str, Any], limit: int) -> list[str]:
+    """Build the public summary command used by timed and replay samples."""
+
+    return [
+        "--format",
+        "json",
+        "summary",
+        target["path"],
+        "--limit",
+        str(limit),
+    ]
+
+
 def run_summary(
     binary: Path,
     root: Path,
@@ -588,34 +620,32 @@ def run_summary(
     arm: str,
     ordinal: int,
 ) -> dict[str, Any]:
-    """Run one public summary invocation and retain trace plus raw output."""
+    """Run one observer-free timed public summary invocation."""
 
-    # Keep observer output outside the indexed fixture so writing it cannot
-    # turn the following summary invocation into a ProjectAtlas refresh.
+    allocation_path = root.parent / f"{root.name}-allocations-{arm}-{ordinal:04d}.json"
     trace_path = root.parent / f"{root.name}-trace-{arm}-{ordinal:04d}.json"
+    if trace_path.exists():
+        raise AssertionError(f"timed summary trace path already exists: {trace_path}")
     measured = run_process(
-        [
-            str(binary),
-            "--format",
-            "json",
-            "summary",
-            target["path"],
-            "--limit",
-            str(limit),
-        ],
+        [str(binary), *summary_command(target, limit)],
         root,
-        trace_path=trace_path,
+        allocation_path=allocation_path,
     )
     result = serialize_process(measured, root)
     result["target"] = target["path"]
     result["limit"] = limit
-    trace = {"queries": [], "allocations": None}
+    if not allocation_path.is_file():
+        raise AssertionError("timed summary did not retain allocation metrics")
+    result["allocation_metrics"] = json.loads(
+        allocation_path.read_text(encoding="utf-8")
+    )
+    allocation_path.unlink()
     if trace_path.is_file():
-        trace = json.loads(trace_path.read_text(encoding="utf-8"))
         trace_path.unlink()
-        attach_query_plans(root / ".projectatlas" / "projectatlas.db", trace)
-    result["allocation_metrics"] = trace.get("allocations")
-    result["query_observations"] = trace.get("queries", [])
+        raise AssertionError("timed summary unexpectedly enabled the trace observer")
+    result["query_observations"] = []
+    result["trace_observed"] = False
+    result["timed"] = True
     if measured["returncode"] == 0:
         try:
             payload = json.loads(measured["stdout"])
@@ -623,9 +653,62 @@ def run_summary(
             raise AssertionError(f"summary emitted invalid JSON: {error}") from error
         assert_semantics(payload, target, shape)
         result["decoded_summary"] = payload
-        if result["allocation_metrics"] is None:
-            raise AssertionError("successful summary did not retain allocation metrics")
     return result
+
+
+def run_summary_evidence(
+    binary: Path,
+    root: Path,
+    target: dict[str, Any],
+    shape: str,
+    limit: int,
+    arm: str,
+    ordinal: int,
+    expected_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay one summary outside timing to capture production-owned evidence."""
+
+    trace_path = root.parent / f"{root.name}-trace-{arm}-{ordinal:04d}.json"
+    measured = run_process(
+        [str(binary), *summary_command(target, limit)],
+        root,
+        trace_path=trace_path,
+    )
+    if measured["returncode"] != 0:
+        raise AssertionError(
+            f"{arm} {shape} evidence replay failed: "
+            f"{measured['stderr'].decode('utf-8', errors='replace')}"
+        )
+    if not trace_path.is_file():
+        raise AssertionError(f"{arm} {shape} evidence replay omitted its trace")
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    trace_path.unlink()
+    require_production_trace_evidence(trace, f"{arm} {shape}")
+    payload = json.loads(measured["stdout"])
+    assert_semantics(payload, target, shape)
+    if payload != expected_summary:
+        raise AssertionError(f"{arm} {shape} evidence replay changed the summary")
+    return {
+        "events": trace.get("queries", []),
+        "engine": trace.get("engine"),
+        "plan_provenance": trace.get("plan_provenance"),
+        "timed": False,
+    }
+
+
+def require_production_trace_evidence(trace: dict[str, Any], label: str) -> None:
+    """Require plan evidence to identify the production engine and owner."""
+
+    if trace.get("plan_provenance") != "projectatlas-db::AtlasStore::connection":
+        raise AssertionError(f"{label} trace has no production plan provenance")
+    engine = trace.get("engine")
+    if not isinstance(engine, dict) or not isinstance(
+        engine.get("sqlite_version"), str
+    ):
+        raise AssertionError(f"{label} trace has no SQLite engine identity")
+    for event in trace.get("queries", []):
+        if not isinstance(event.get("query_plan"), list):
+            raise AssertionError(f"{label} trace omitted a production query plan")
 
 
 def multi_binding_alias_case(binary: Path, arm: str) -> dict[str, Any]:
@@ -671,9 +754,15 @@ def multi_binding_alias_case(binary: Path, arm: str) -> dict[str, Any]:
         if trace_path.is_file():
             trace = json.loads(trace_path.read_text(encoding="utf-8"))
             trace_path.unlink()
-            attach_query_plans(root / ".projectatlas" / "projectatlas.db", trace)
+            require_production_trace_evidence(
+                trace, f"{arm} Python multi-binding alias"
+            )
         result["allocation_metrics"] = trace.get("allocations")
         result["query_observations"] = trace.get("queries", [])
+        result["query_engine"] = trace.get("engine")
+        result["plan_provenance"] = trace.get("plan_provenance")
+        result["trace_observed"] = bool(result["query_observations"])
+        result["timed"] = False
         if measured["returncode"] != 0:
             raise AssertionError(
                 "Python multi-binding alias summary failed: "
@@ -711,13 +800,13 @@ def setup_fixture(binary: Path, root: Path) -> dict[str, Any]:
     return setup
 
 
-def aggregate_queries(runs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize observed production query events without synthetic SQL."""
+def aggregate_queries(evidence_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize untimed production query events without synthetic SQL."""
 
     observations = [
         observation
-        for run in runs
-        for observation in run["query_observations"]
+        for run in evidence_runs
+        for observation in run["events"]
     ]
     by_family: dict[str, dict[str, Any]] = {}
     for observation in observations:
@@ -738,41 +827,12 @@ def aggregate_queries(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "events": observations,
         "by_family": by_family,
+        "engine": evidence_runs[0].get("engine") if evidence_runs else None,
+        "plan_provenance": (
+            evidence_runs[0].get("plan_provenance") if evidence_runs else None
+        ),
+        "timed": False,
     }
-
-
-def sqlite_parameter(value: Any) -> Any:
-    """Decode one benchmark trace binding for Python's SQLite adapter."""
-
-    if isinstance(value, list):
-        return bytes(value)
-    return value
-
-
-def attach_query_plans(database: Path, trace: dict[str, Any]) -> None:
-    """Collect exact production plans after the measured child has exited."""
-
-    connection = sqlite3.connect(database)
-    try:
-        for observation in trace.get("queries", []):
-            sql = observation.get("sql")
-            parameters = observation.get("parameters")
-            if not isinstance(sql, str) or not isinstance(parameters, list):
-                raise AssertionError(
-                    f"production query trace omitted exact SQL bindings: {observation!r}"
-                )
-            try:
-                rows = connection.execute(
-                    f"EXPLAIN QUERY PLAN {sql}",
-                    tuple(sqlite_parameter(value) for value in parameters),
-                ).fetchall()
-            except sqlite3.Error as error:
-                raise AssertionError(
-                    f"production query plan replay failed for {sql!r}: {error}"
-                ) from error
-            observation["query_plan"] = [row[3] for row in rows]
-    finally:
-        connection.close()
 
 
 def measure_shape(
@@ -789,7 +849,9 @@ def measure_shape(
         targets = write_fixture(root, shape)
         setup = setup_fixture(binary, root)
         runs: list[dict[str, Any]] = []
+        evidence_runs: list[dict[str, Any]] = []
         ordinal = 0
+        evidence_ordinal = 0
         for target in targets:
             limits = [1, SUMMARY_LIMIT] if target is targets[0] else [SUMMARY_LIMIT]
             for limit in limits:
@@ -806,6 +868,19 @@ def measure_shape(
                         )
                     )
                     ordinal += 1
+                evidence_runs.append(
+                    run_summary_evidence(
+                        binary,
+                        root,
+                        target,
+                        shape,
+                        limit,
+                        arm,
+                        evidence_ordinal,
+                        runs[-1]["decoded_summary"],
+                    )
+                )
+                evidence_ordinal += 1
         metrics = {
             key: statistics.median(run[key] for run in runs)
             for key in ("wall_ms", "cpu_ms", "peak_rss_bytes", "stdout_bytes")
@@ -828,7 +903,7 @@ def measure_shape(
             "setup": setup,
             "runs": runs,
             "aggregate": metrics,
-            "query_observations": aggregate_queries(runs),
+            "query_observations": aggregate_queries(evidence_runs),
         }
 
 
@@ -900,12 +975,19 @@ def failure_case(binary: Path, name: str, arm: str) -> dict[str, Any]:
         result["case"] = name
         result["target"] = target_path
         trace = {"queries": [], "allocations": None}
+        trace_observed = False
         if trace_path.is_file():
             trace = json.loads(trace_path.read_text(encoding="utf-8"))
             trace_path.unlink()
-            attach_query_plans(root / ".projectatlas" / "projectatlas.db", trace)
+            trace_observed = True
+            if trace.get("queries"):
+                require_production_trace_evidence(trace, f"{arm} {name}")
         result["allocation_metrics"] = trace.get("allocations")
         result["query_observations"] = trace.get("queries", [])
+        result["query_engine"] = trace.get("engine")
+        result["plan_provenance"] = trace.get("plan_provenance")
+        result["trace_observed"] = trace_observed
+        result["timed"] = False
         if name == "corrupt-relation":
             if measured["returncode"] == 0:
                 raise AssertionError("malformed relation unexpectedly succeeded")
@@ -932,6 +1014,9 @@ def compare_raw_runs(
         findings.append("decoded summary drift")
     if baseline.get("query_observations") != candidate.get("query_observations"):
         findings.append("production query observation drift")
+    for field in ("query_engine", "plan_provenance"):
+        if baseline.get(field) != candidate.get(field):
+            findings.append(f"{field} drift")
     return findings
 
 
@@ -1014,6 +1099,10 @@ def compact_process_evidence(record: dict[str, Any]) -> dict[str, Any]:
         "case",
         "target",
         "limit",
+        "trace_observed",
+        "timed",
+        "query_engine",
+        "plan_provenance",
     )
     return {field: record[field] for field in fields if field in record}
 
@@ -1080,6 +1169,9 @@ def compact_query_plan_evidence(observations: dict[str, Any]) -> dict[str, Any]:
     return {
         "by_family": observations.get("by_family", {}),
         "representative_events": representatives,
+        "engine": observations.get("engine"),
+        "plan_provenance": observations.get("plan_provenance"),
+        "timed": observations.get("timed") is True,
     }
 
 
@@ -1320,6 +1412,8 @@ def main() -> None:
                 f"{shape}[{index}]: {finding}"
                 for finding in compare_raw_runs(base_run, candidate_run)
             )
+        if baseline[shape]["query_observations"] != candidate[shape]["query_observations"]:
+            semantic_findings.append(f"{shape}: production query evidence drift")
 
     failures: dict[str, dict[str, Any]] = {}
     for case in ("missing-summary", "corrupt-relation", "stale-source"):
@@ -1357,7 +1451,7 @@ def main() -> None:
     )
 
     result = {
-        "schema": "projectatlas.reverse-caller-performance.v5",
+        "schema": "projectatlas.reverse-caller-performance.v6",
         "issue": 342,
         "repository_revision": git_revision(),
         "repeats": args.repeats,

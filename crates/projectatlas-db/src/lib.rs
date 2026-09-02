@@ -1079,6 +1079,33 @@ pub struct ReverseCallerBenchmarkQuery {
     pub parameters: Vec<serde_json::Value>,
     /// `EXPLAIN QUERY PLAN` details for the exact production SQL.
     pub query_plan: Vec<String>,
+    /// Exact rusqlite bindings retained only until the untimed plan replay.
+    #[serde(skip)]
+    bindings: Vec<Value>,
+}
+
+/// Bundled SQLite engine identity for benchmark-only plan evidence.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Clone, Debug, Serialize)]
+pub struct ReverseCallerBenchmarkEngine {
+    /// Version reported by the SQLite library linked into `rusqlite`.
+    pub sqlite_version: String,
+    /// Numeric version reported by the SQLite library linked into `rusqlite`.
+    pub sqlite_version_number: i32,
+    /// Compile options reported by the production connection's SQLite engine.
+    pub compile_options: Vec<String>,
+}
+
+/// Untimed production-connection evidence for one reverse-caller capture.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Clone, Debug, Serialize)]
+pub struct ReverseCallerBenchmarkTrace {
+    /// Stable statement that identifies the plan-producing ownership boundary.
+    pub plan_provenance: &'static str,
+    /// Bundled SQLite engine identity used for every plan in this trace.
+    pub engine: ReverseCallerBenchmarkEngine,
+    /// Exact production query observations and plans.
+    pub queries: Vec<ReverseCallerBenchmarkQuery>,
 }
 
 #[cfg(feature = "reverse-caller-benchmark")]
@@ -1120,8 +1147,60 @@ fn record_reverse_caller_benchmark_query(
                 })
                 .collect(),
             query_plan: Vec::new(),
+            bindings: values.to_vec(),
         });
     });
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
+/// Read the bounded SQLite engine identity from the production connection.
+fn reverse_caller_benchmark_engine(
+    connection: &Connection,
+) -> DbResult<ReverseCallerBenchmarkEngine> {
+    const MAX_COMPILE_OPTIONS: usize = 128;
+    const MAX_COMPILE_OPTION_BYTES: usize = 256;
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT compile_options FROM pragma_compile_options ORDER BY compile_options",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut compile_options = Vec::new();
+    for row in rows {
+        let option = row?;
+        if option.len() > MAX_COMPILE_OPTION_BYTES {
+            return Err(DbError::DatabaseOperatingProfile {
+                setting: "reverse_caller.sqlite_compile_options.option_bytes",
+                expected: format!("at most {MAX_COMPILE_OPTION_BYTES}"),
+                found: option.len().to_string(),
+            });
+        }
+        compile_options.push(option);
+        if compile_options.len() > MAX_COMPILE_OPTIONS {
+            return Err(DbError::DatabaseOperatingProfile {
+                setting: "reverse_caller.sqlite_compile_options.count",
+                expected: format!("at most {MAX_COMPILE_OPTIONS}"),
+                found: compile_options.len().to_string(),
+            });
+        }
+    }
+    Ok(ReverseCallerBenchmarkEngine {
+        sqlite_version: rusqlite::version().to_string(),
+        sqlite_version_number: rusqlite::version_number(),
+        compile_options,
+    })
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
+/// Replay one captured statement's plan through the same production connection.
+fn reverse_caller_benchmark_query_plan(
+    connection: &Connection,
+    query: &ReverseCallerBenchmarkQuery,
+) -> DbResult<Vec<String>> {
+    let sql = format!("EXPLAIN QUERY PLAN {}", query.sql);
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(query.bindings.iter()), |row| {
+        row.get::<_, String>(3)
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 #[cfg(feature = "reverse-caller-benchmark")]
@@ -1808,11 +1887,27 @@ impl AtlasStore {
         REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow_mut().clear());
     }
 
-    /// Take the production-owned reverse-caller query observations.
+    /// Take untimed reverse-caller observations and replay their plans on the
+    /// same production `rusqlite` connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQLite engine identity or any captured query plan
+    /// cannot be read from the production connection.
     #[cfg(feature = "reverse-caller-benchmark")]
-    pub fn take_reverse_caller_benchmark_trace(&self) -> Vec<ReverseCallerBenchmarkQuery> {
-        REVERSE_CALLER_BENCHMARK_QUERIES
-            .with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+    pub fn take_reverse_caller_benchmark_trace(&self) -> DbResult<ReverseCallerBenchmarkTrace> {
+        let mut queries = REVERSE_CALLER_BENCHMARK_QUERIES
+            .with(|observations| std::mem::take(&mut *observations.borrow_mut()));
+        let engine = reverse_caller_benchmark_engine(&self.connection)?;
+        for query in &mut queries {
+            query.query_plan = reverse_caller_benchmark_query_plan(&self.connection, query)?;
+            query.bindings.clear();
+        }
+        Ok(ReverseCallerBenchmarkTrace {
+            plan_provenance: "projectatlas-db::AtlasStore::connection",
+            engine,
+            queries,
+        })
     }
 
     /// Open with an optional source-owned project identity.

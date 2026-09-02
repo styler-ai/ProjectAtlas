@@ -2003,11 +2003,16 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             #[cfg(feature = "reverse-caller-benchmark")]
             let benchmark_trace_path =
                 std::env::var_os("PROJECTATLAS_REVERSE_CALLER_TRACE").map(PathBuf::from);
+            #[cfg(feature = "reverse-caller-benchmark")]
+            let benchmark_allocation_path =
+                std::env::var_os("PROJECTATLAS_REVERSE_CALLER_ALLOCATIONS").map(PathBuf::from);
             let file_key = validated_indexed_file_key(&store, file)?;
             let content = read_indexed_file_content(&store, &file_key)?;
             #[cfg(feature = "reverse-caller-benchmark")]
-            if benchmark_trace_path.is_some() {
-                store.start_reverse_caller_benchmark_trace();
+            if benchmark_trace_path.is_some() || benchmark_allocation_path.is_some() {
+                if benchmark_trace_path.is_some() {
+                    store.start_reverse_caller_benchmark_trace();
+                }
                 reverse_caller_benchmark::reset();
             }
             let report_result = build_file_summary_from_source_with_selection(
@@ -2018,14 +2023,22 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 content_selection.unwrap_or_default(),
             );
             #[cfg(feature = "reverse-caller-benchmark")]
-            if let Some(path) = benchmark_trace_path {
+            if benchmark_trace_path.is_some() || benchmark_allocation_path.is_some() {
                 let allocation_metrics = reverse_caller_benchmark::snapshot();
-                let trace = store.take_reverse_caller_benchmark_trace();
-                let encoded = serde_json::to_vec_pretty(&json!({
-                    "queries": trace,
-                    "allocations": allocation_metrics,
-                }))?;
-                fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })?;
+                if let Some(path) = benchmark_trace_path {
+                    let trace = store.take_reverse_caller_benchmark_trace()?;
+                    let encoded = serde_json::to_vec_pretty(&json!({
+                        "queries": trace.queries,
+                        "engine": trace.engine,
+                        "plan_provenance": trace.plan_provenance,
+                        "allocations": allocation_metrics,
+                    }))?;
+                    fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })?;
+                }
+                if let Some(path) = benchmark_allocation_path {
+                    let encoded = serde_json::to_vec_pretty(&allocation_metrics)?;
+                    fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })?;
+                }
             }
             let report = report_result?;
             let toon = render_file_summary(&report);
