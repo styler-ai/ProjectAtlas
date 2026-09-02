@@ -1,16 +1,16 @@
 {
   "artifact_kind": "compact-review-evidence",
   "baseline": {
-    "binary_sha256": "384108953de178d110981b82df1245f97f1a4c9bbcb8ca6f5492e7f03ee7e0c0",
+    "binary_sha256": "097b0ec75267bfe52c3f34e2b3eea7f7a67383678afabdef39bffd371b88180a",
     "fixtures": {
       "duplicate-alias": {
         "aggregate": {
           "allocation_bytes": 37281.0,
           "allocation_calls": 508.5,
           "cpu_ms": 156.25,
-          "peak_rss_bytes": 23871488.0,
+          "peak_rss_bytes": 23924736.0,
           "stdout_bytes": 1697.0,
-          "wall_ms": 190.6460499158129
+          "wall_ms": 193.17315006628633
         },
         "query_plan_evidence": {
           "by_family": {
@@ -131,36 +131,16 @@
               "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 140.625,
             "limit": 1,
-            "peak_rss_bytes": 23891968,
+            "peak_rss_bytes": 24072192,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1696,
             "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
             "target": "src/rust_target.rs",
-            "wall_ms": 188.26740002259612
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 36847,
-              "allocation_calls": 506,
-              "deallocation_bytes": 34992,
-              "deallocation_calls": 463,
-              "reallocation_bytes": 7403,
-              "reallocation_calls": 77
-            },
-            "cpu_ms": 156.25,
-            "limit": 1,
-            "peak_rss_bytes": 23769088,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1696,
-            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
-            "target": "src/rust_target.rs",
-            "wall_ms": 188.3572000078857
+            "wall_ms": 190.9660000819713
           },
           {
             "allocation_metrics": {
@@ -173,14 +153,14 @@
             },
             "cpu_ms": 156.25,
             "limit": 1,
-            "peak_rss_bytes": 23785472,
+            "peak_rss_bytes": 23838720,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1696,
             "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
             "target": "src/rust_target.rs",
-            "wall_ms": 190.66739990375936
+            "wall_ms": 194.44840005598962
           },
           {
             "allocation_metrics": {
@@ -191,36 +171,16 @@
               "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
-            "cpu_ms": 171.875,
-            "limit": 500,
-            "peak_rss_bytes": 23953408,
+            "cpu_ms": 187.5,
+            "limit": 1,
+            "peak_rss_bytes": 23904256,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1698,
-            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
+            "stdout_bytes": 1696,
+            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
             "target": "src/rust_target.rs",
-            "wall_ms": 183.28380002640188
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 36847,
-              "allocation_calls": 506,
-              "deallocation_bytes": 34992,
-              "deallocation_calls": 463,
-              "reallocation_bytes": 7403,
-              "reallocation_calls": 77
-            },
-            "cpu_ms": 171.875,
-            "limit": 500,
-            "peak_rss_bytes": 23916544,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1698,
-            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
-            "target": "src/rust_target.rs",
-            "wall_ms": 190.62469992786646
+            "wall_ms": 189.22790000215173
           },
           {
             "allocation_metrics": {
@@ -233,34 +193,54 @@
             },
             "cpu_ms": 140.625,
             "limit": 500,
-            "peak_rss_bytes": 23699456,
+            "peak_rss_bytes": 24141824,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1698,
             "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
             "target": "src/rust_target.rs",
-            "wall_ms": 184.45639999117702
+            "wall_ms": 192.25490000098944
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 37715,
-              "allocation_calls": 511,
-              "deallocation_bytes": 35788,
-              "deallocation_calls": 468,
-              "reallocation_bytes": 8269,
+              "allocation_bytes": 36847,
+              "allocation_calls": 506,
+              "deallocation_bytes": 34992,
+              "deallocation_calls": 463,
+              "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
             "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 23699456,
+            "peak_rss_bytes": 23801856,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1706,
-            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
-            "target": "src/ts_target.ts",
-            "wall_ms": 188.43909993302077
+            "stdout_bytes": 1698,
+            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
+            "target": "src/rust_target.rs",
+            "wall_ms": 190.49259996972978
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 36847,
+              "allocation_calls": 506,
+              "deallocation_bytes": 34992,
+              "deallocation_calls": 463,
+              "reallocation_bytes": 7403,
+              "reallocation_calls": 77
+            },
+            "cpu_ms": 171.875,
+            "limit": 500,
+            "peak_rss_bytes": 23945216,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1698,
+            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
+            "target": "src/rust_target.rs",
+            "wall_ms": 192.66310008242726
           },
           {
             "allocation_metrics": {
@@ -271,16 +251,36 @@
               "reallocation_bytes": 8269,
               "reallocation_calls": 77
             },
-            "cpu_ms": 218.75,
+            "cpu_ms": 171.875,
             "limit": 500,
-            "peak_rss_bytes": 23920640,
+            "peak_rss_bytes": 24018944,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1706,
             "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
             "target": "src/ts_target.ts",
-            "wall_ms": 215.3337000636384
+            "wall_ms": 193.6832000501454
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 37715,
+              "allocation_calls": 511,
+              "deallocation_bytes": 35788,
+              "deallocation_calls": 468,
+              "reallocation_bytes": 8269,
+              "reallocation_calls": 77
+            },
+            "cpu_ms": 140.625,
+            "limit": 500,
+            "peak_rss_bytes": 23826432,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1706,
+            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
+            "target": "src/ts_target.ts",
+            "wall_ms": 195.57909993454814
           },
           {
             "allocation_metrics": {
@@ -293,34 +293,14 @@
             },
             "cpu_ms": 203.125,
             "limit": 500,
-            "peak_rss_bytes": 24002560,
+            "peak_rss_bytes": 24088576,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1706,
             "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
             "target": "src/ts_target.ts",
-            "wall_ms": 206.8817000836134
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 43827,
-              "allocation_calls": 576,
-              "deallocation_bytes": 40868,
-              "deallocation_calls": 519,
-              "reallocation_bytes": 11009,
-              "reallocation_calls": 109
-            },
-            "cpu_ms": 218.75,
-            "limit": 500,
-            "peak_rss_bytes": 23773184,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1694,
-            "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
-            "target": "src/package/py_target.py",
-            "wall_ms": 204.14759998675436
+            "wall_ms": 204.17689997702837
           },
           {
             "allocation_metrics": {
@@ -333,14 +313,14 @@
             },
             "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 24051712,
+            "peak_rss_bytes": 23715840,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1694,
             "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
             "target": "src/package/py_target.py",
-            "wall_ms": 198.26719991397113
+            "wall_ms": 194.05329995788634
           },
           {
             "allocation_metrics": {
@@ -351,16 +331,36 @@
               "reallocation_bytes": 11009,
               "reallocation_calls": 109
             },
-            "cpu_ms": 125.0,
+            "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 23851008,
+            "peak_rss_bytes": 23777280,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1694,
             "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
             "target": "src/package/py_target.py",
-            "wall_ms": 195.426500053145
+            "wall_ms": 189.40599996130913
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 43827,
+              "allocation_calls": 576,
+              "deallocation_bytes": 40868,
+              "deallocation_calls": 519,
+              "reallocation_bytes": 11009,
+              "reallocation_calls": 109
+            },
+            "cpu_ms": 140.625,
+            "limit": 500,
+            "peak_rss_bytes": 24002560,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1694,
+            "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
+            "target": "src/package/py_target.py",
+            "wall_ms": 201.02409995160997
           }
         ],
         "targets": [
@@ -395,9 +395,9 @@
           "allocation_bytes": 1063248.5,
           "allocation_calls": 16027.0,
           "cpu_ms": 390.625,
-          "peak_rss_bytes": 25761792.0,
+          "peak_rss_bytes": 25923584.0,
           "stdout_bytes": 2612.0,
-          "wall_ms": 249.61230001645163
+          "wall_ms": 251.41870003426448
         },
         "query_plan_evidence": {
           "by_family": {
@@ -519,16 +519,56 @@
               "reallocation_bytes": 296717,
               "reallocation_calls": 2585
             },
-            "cpu_ms": 406.25,
+            "cpu_ms": 390.625,
             "limit": 1,
-            "peak_rss_bytes": 26157056,
+            "peak_rss_bytes": 25866240,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2592,
             "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
             "target": "src/rust_target.rs",
-            "wall_ms": 241.97219999041408
+            "wall_ms": 244.96759998146445
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1002516,
+              "allocation_calls": 15547,
+              "deallocation_bytes": 994810,
+              "deallocation_calls": 14526,
+              "reallocation_bytes": 296717,
+              "reallocation_calls": 2585
+            },
+            "cpu_ms": 218.75,
+            "limit": 1,
+            "peak_rss_bytes": 25907200,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2592,
+            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
+            "target": "src/rust_target.rs",
+            "wall_ms": 252.25200003478676
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1002516,
+              "allocation_calls": 15547,
+              "deallocation_bytes": 994810,
+              "deallocation_calls": 14526,
+              "reallocation_bytes": 296717,
+              "reallocation_calls": 2585
+            },
+            "cpu_ms": 375.0,
+            "limit": 1,
+            "peak_rss_bytes": 25849856,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2592,
+            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
+            "target": "src/rust_target.rs",
+            "wall_ms": 248.10700002126396
           },
           {
             "allocation_metrics": {
@@ -540,15 +580,15 @@
               "reallocation_calls": 2585
             },
             "cpu_ms": 390.625,
-            "limit": 1,
-            "peak_rss_bytes": 25219072,
+            "limit": 500,
+            "peak_rss_bytes": 26083328,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2592,
-            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
             "target": "src/rust_target.rs",
-            "wall_ms": 247.11180001031607
+            "wall_ms": 259.3151999171823
           },
           {
             "allocation_metrics": {
@@ -560,15 +600,15 @@
               "reallocation_calls": 2585
             },
             "cpu_ms": 390.625,
-            "limit": 1,
-            "peak_rss_bytes": 25722880,
+            "limit": 500,
+            "peak_rss_bytes": 25968640,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2592,
-            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
             "target": "src/rust_target.rs",
-            "wall_ms": 247.9103000368923
+            "wall_ms": 250.5854000337422
           },
           {
             "allocation_metrics": {
@@ -579,96 +619,56 @@
               "reallocation_bytes": 296717,
               "reallocation_calls": 2585
             },
-            "cpu_ms": 437.5,
-            "limit": 500,
-            "peak_rss_bytes": 25759744,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "wall_ms": 253.06349992752075
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1002516,
-              "allocation_calls": 15547,
-              "deallocation_bytes": 994810,
-              "deallocation_calls": 14526,
-              "reallocation_bytes": 296717,
-              "reallocation_calls": 2585
-            },
-            "cpu_ms": 265.625,
-            "limit": 500,
-            "peak_rss_bytes": 25821184,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "wall_ms": 245.27049995958805
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1002516,
-              "allocation_calls": 15547,
-              "deallocation_bytes": 994810,
-              "deallocation_calls": 14526,
-              "reallocation_bytes": 296717,
-              "reallocation_calls": 2585
-            },
-            "cpu_ms": 406.25,
-            "limit": 500,
-            "peak_rss_bytes": 25694208,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "wall_ms": 247.1693999832496
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1123981,
-              "allocation_calls": 16507,
-              "deallocation_bytes": 1094705,
-              "deallocation_calls": 15486,
-              "reallocation_bytes": 386239,
-              "reallocation_calls": 2366
-            },
-            "cpu_ms": 421.875,
-            "limit": 500,
-            "peak_rss_bytes": 26030080,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "wall_ms": 251.31429999601096
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1123981,
-              "allocation_calls": 16507,
-              "deallocation_bytes": 1094705,
-              "deallocation_calls": 15486,
-              "reallocation_bytes": 386239,
-              "reallocation_calls": 2366
-            },
-            "cpu_ms": 390.625,
+            "cpu_ms": 359.375,
             "limit": 500,
             "peak_rss_bytes": 25931776,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
+            "wall_ms": 254.5637000584975
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1123981,
+              "allocation_calls": 16507,
+              "deallocation_bytes": 1094705,
+              "deallocation_calls": 15486,
+              "reallocation_bytes": 386239,
+              "reallocation_calls": 2366
+            },
+            "cpu_ms": 218.75,
+            "limit": 500,
+            "peak_rss_bytes": 26157056,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2722,
             "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
             "target": "src/ts_target.ts",
-            "wall_ms": 260.6693999841809
+            "wall_ms": 248.22819989640266
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1123981,
+              "allocation_calls": 16507,
+              "deallocation_bytes": 1094705,
+              "deallocation_calls": 15486,
+              "reallocation_bytes": 386239,
+              "reallocation_calls": 2366
+            },
+            "cpu_ms": 406.25,
+            "limit": 500,
+            "peak_rss_bytes": 26058752,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "wall_ms": 249.3554000975564
           },
           {
             "allocation_metrics": {
@@ -681,14 +681,14 @@
             },
             "cpu_ms": 390.625,
             "limit": 500,
-            "peak_rss_bytes": 25763840,
+            "peak_rss_bytes": 25825280,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2722,
             "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
             "target": "src/ts_target.ts",
-            "wall_ms": 254.5230999821797
+            "wall_ms": 246.6916999546811
           },
           {
             "allocation_metrics": {
@@ -699,16 +699,16 @@
               "reallocation_bytes": 534382,
               "reallocation_calls": 4993
             },
-            "cpu_ms": 265.625,
+            "cpu_ms": 406.25,
             "limit": 500,
-            "peak_rss_bytes": 25554944,
+            "peak_rss_bytes": 25751552,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2630,
             "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
             "target": "src/package/py_target.py",
-            "wall_ms": 244.21240005176514
+            "wall_ms": 253.6632000701502
           },
           {
             "allocation_metrics": {
@@ -719,16 +719,16 @@
               "reallocation_bytes": 534382,
               "reallocation_calls": 4993
             },
-            "cpu_ms": 453.125,
+            "cpu_ms": 437.5,
             "limit": 500,
-            "peak_rss_bytes": 25985024,
+            "peak_rss_bytes": 25915392,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2630,
             "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
             "target": "src/package/py_target.py",
-            "wall_ms": 494.8730000760406
+            "wall_ms": 254.2949999915436
           },
           {
             "allocation_metrics": {
@@ -739,16 +739,16 @@
               "reallocation_bytes": 534382,
               "reallocation_calls": 4993
             },
-            "cpu_ms": 375.0,
+            "cpu_ms": 281.25,
             "limit": 500,
-            "peak_rss_bytes": 25743360,
+            "peak_rss_bytes": 26030080,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2630,
             "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
             "target": "src/package/py_target.py",
-            "wall_ms": 251.52420008089393
+            "wall_ms": 475.2283999696374
           }
         ],
         "targets": [
@@ -782,10 +782,10 @@
         "aggregate": {
           "allocation_bytes": 3658796.0,
           "allocation_calls": 59348.0,
-          "cpu_ms": 234.375,
-          "peak_rss_bytes": 26161152.0,
+          "cpu_ms": 242.1875,
+          "peak_rss_bytes": 26341376.0,
           "stdout_bytes": 82730.0,
-          "wall_ms": 275.4680499783717
+          "wall_ms": 281.82619996368885
         },
         "query_plan_evidence": {
           "by_family": {
@@ -907,36 +907,16 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 156.25,
             "limit": 1,
-            "peak_rss_bytes": 23949312,
+            "peak_rss_bytes": 23838720,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1812,
             "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
             "target": "src/rust_target.rs",
-            "wall_ms": 201.16579998284578
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 34026,
-              "allocation_calls": 456,
-              "deallocation_bytes": 30752,
-              "deallocation_calls": 410,
-              "reallocation_bytes": 4881,
-              "reallocation_calls": 56
-            },
-            "cpu_ms": 125.0,
-            "limit": 1,
-            "peak_rss_bytes": 23908352,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
-            "target": "src/rust_target.rs",
-            "wall_ms": 192.58249993436038
+            "wall_ms": 192.0717000029981
           },
           {
             "allocation_metrics": {
@@ -949,14 +929,34 @@
             },
             "cpu_ms": 156.25,
             "limit": 1,
-            "peak_rss_bytes": 24027136,
+            "peak_rss_bytes": 24010752,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1812,
             "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
             "target": "src/rust_target.rs",
-            "wall_ms": 199.39680001698434
+            "wall_ms": 190.06489997263998
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 34026,
+              "allocation_calls": 456,
+              "deallocation_bytes": 30752,
+              "deallocation_calls": 410,
+              "reallocation_bytes": 4881,
+              "reallocation_calls": 56
+            },
+            "cpu_ms": 171.875,
+            "limit": 1,
+            "peak_rss_bytes": 24289280,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
+            "target": "src/rust_target.rs",
+            "wall_ms": 197.33860006090254
           },
           {
             "allocation_metrics": {
@@ -969,14 +969,14 @@
             },
             "cpu_ms": 234.375,
             "limit": 500,
-            "peak_rss_bytes": 26128384,
+            "peak_rss_bytes": 26607616,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 85495,
             "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
             "target": "src/rust_target.rs",
-            "wall_ms": 288.7879000045359
+            "wall_ms": 285.0780999287963
           },
           {
             "allocation_metrics": {
@@ -986,37 +986,57 @@
               "deallocation_calls": 57553,
               "reallocation_bytes": 1505936,
               "reallocation_calls": 18600
+            },
+            "cpu_ms": 234.375,
+            "limit": 500,
+            "peak_rss_bytes": 26435584,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "wall_ms": 284.7771999659017
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3871328,
+              "allocation_calls": 60789,
+              "deallocation_bytes": 4300965,
+              "deallocation_calls": 57553,
+              "reallocation_bytes": 1505936,
+              "reallocation_calls": 18600
+            },
+            "cpu_ms": 234.375,
+            "limit": 500,
+            "peak_rss_bytes": 26447872,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "wall_ms": 273.57810002285987
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3446264,
+              "allocation_calls": 57907,
+              "deallocation_bytes": 3887209,
+              "deallocation_calls": 54990,
+              "reallocation_bytes": 1527895,
+              "reallocation_calls": 18642
             },
             "cpu_ms": 250.0,
             "limit": 500,
-            "peak_rss_bytes": 26464256,
+            "peak_rss_bytes": 26365952,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "wall_ms": 276.00579999852926
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3871328,
-              "allocation_calls": 60789,
-              "deallocation_bytes": 4300965,
-              "deallocation_calls": 57553,
-              "reallocation_bytes": 1505936,
-              "reallocation_calls": 18600
-            },
-            "cpu_ms": 406.25,
-            "limit": 500,
-            "peak_rss_bytes": 26312704,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "wall_ms": 273.6338999820873
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "wall_ms": 277.2357000503689
           },
           {
             "allocation_metrics": {
@@ -1027,16 +1047,16 @@
               "reallocation_bytes": 1527895,
               "reallocation_calls": 18642
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 250.0,
             "limit": 500,
-            "peak_rss_bytes": 26144768,
+            "peak_rss_bytes": 26411008,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 86147,
             "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
             "target": "src/ts_target.ts",
-            "wall_ms": 274.2049000225961
+            "wall_ms": 278.875199961476
           },
           {
             "allocation_metrics": {
@@ -1047,36 +1067,16 @@
               "reallocation_bytes": 1527895,
               "reallocation_calls": 18642
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 250.0,
             "limit": 500,
-            "peak_rss_bytes": 26210304,
+            "peak_rss_bytes": 26398720,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 86147,
             "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
             "target": "src/ts_target.ts",
-            "wall_ms": 274.93029995821416
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3446264,
-              "allocation_calls": 57907,
-              "deallocation_bytes": 3887209,
-              "deallocation_calls": 54990,
-              "reallocation_bytes": 1527895,
-              "reallocation_calls": 18642
-            },
-            "cpu_ms": 234.375,
-            "limit": 500,
-            "peak_rss_bytes": 26382336,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "wall_ms": 276.4390999218449
+            "wall_ms": 285.93519993592054
           },
           {
             "allocation_metrics": {
@@ -1089,14 +1089,34 @@
             },
             "cpu_ms": 265.625,
             "limit": 500,
-            "peak_rss_bytes": 26103808,
+            "peak_rss_bytes": 26316800,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 79965,
             "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
             "target": "src/package/py_target.py",
-            "wall_ms": 309.49979997240007
+            "wall_ms": 309.9966000299901
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 5228545,
+              "allocation_calls": 71696,
+              "deallocation_bytes": 5660993,
+              "deallocation_calls": 66532,
+              "reallocation_bytes": 2189186,
+              "reallocation_calls": 31153
+            },
+            "cpu_ms": 281.25,
+            "limit": 500,
+            "peak_rss_bytes": 26193920,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "wall_ms": 307.97149997670203
           },
           {
             "allocation_metrics": {
@@ -1109,34 +1129,14 @@
             },
             "cpu_ms": 296.875,
             "limit": 500,
-            "peak_rss_bytes": 26177536,
+            "peak_rss_bytes": 26128384,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 79965,
             "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
             "target": "src/package/py_target.py",
-            "wall_ms": 306.036299909465
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 5228545,
-              "allocation_calls": 71696,
-              "deallocation_bytes": 5660993,
-              "deallocation_calls": 66532,
-              "reallocation_bytes": 2189186,
-              "reallocation_calls": 31153
-            },
-            "cpu_ms": 312.5,
-            "limit": 500,
-            "peak_rss_bytes": 26300416,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
-            "wall_ms": 311.6515999427065
+            "wall_ms": 315.9217999782413
           }
         ],
         "targets": [
@@ -1170,10 +1170,10 @@
         "aggregate": {
           "allocation_bytes": 37618355.0,
           "allocation_calls": 805367.5,
-          "cpu_ms": 976.5625,
-          "peak_rss_bytes": 25917440.0,
+          "cpu_ms": 875.0,
+          "peak_rss_bytes": 26083328.0,
           "stdout_bytes": 37929.0,
-          "wall_ms": 884.15644998895
+          "wall_ms": 898.5789499711245
         },
         "query_plan_evidence": {
           "by_family": {
@@ -1295,16 +1295,16 @@
               "reallocation_bytes": 143897,
               "reallocation_calls": 1262
             },
-            "cpu_ms": 203.125,
+            "cpu_ms": 156.25,
             "limit": 1,
-            "peak_rss_bytes": 25145344,
+            "peak_rss_bytes": 25550848,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1812,
             "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
             "target": "src/rust_target.rs",
-            "wall_ms": 221.39449999667704
+            "wall_ms": 218.40980008710176
           },
           {
             "allocation_metrics": {
@@ -1315,16 +1315,16 @@
               "reallocation_bytes": 143897,
               "reallocation_calls": 1262
             },
-            "cpu_ms": 203.125,
+            "cpu_ms": 281.25,
             "limit": 1,
-            "peak_rss_bytes": 25063424,
+            "peak_rss_bytes": 25165824,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1812,
             "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
             "target": "src/rust_target.rs",
-            "wall_ms": 228.15549990627915
+            "wall_ms": 214.28779989946634
           },
           {
             "allocation_metrics": {
@@ -1335,16 +1335,16 @@
               "reallocation_bytes": 143897,
               "reallocation_calls": 1262
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 421.875,
             "limit": 1,
-            "peak_rss_bytes": 24875008,
+            "peak_rss_bytes": 25505792,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1812,
             "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
             "target": "src/rust_target.rs",
-            "wall_ms": 224.17780000250787
+            "wall_ms": 213.4749999968335
           },
           {
             "allocation_metrics": {
@@ -1355,16 +1355,16 @@
               "reallocation_bytes": 9737975,
               "reallocation_calls": 214506
             },
-            "cpu_ms": 1015.625,
+            "cpu_ms": 859.375,
             "limit": 500,
-            "peak_rss_bytes": 31870976,
+            "peak_rss_bytes": 32092160,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 38775,
             "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
             "target": "src/rust_target.rs",
-            "wall_ms": 888.6434000451118
+            "wall_ms": 893.5544999549165
           },
           {
             "allocation_metrics": {
@@ -1375,16 +1375,16 @@
               "reallocation_bytes": 9737975,
               "reallocation_calls": 214506
             },
-            "cpu_ms": 812.5,
+            "cpu_ms": 1062.5,
             "limit": 500,
-            "peak_rss_bytes": 31944704,
+            "peak_rss_bytes": 32346112,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 38775,
             "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
             "target": "src/rust_target.rs",
-            "wall_ms": 879.6694999327883
+            "wall_ms": 884.8789000185207
           },
           {
             "allocation_metrics": {
@@ -1395,16 +1395,16 @@
               "reallocation_bytes": 9737975,
               "reallocation_calls": 214506
             },
-            "cpu_ms": 1078.125,
+            "cpu_ms": 890.625,
             "limit": 500,
-            "peak_rss_bytes": 31961088,
+            "peak_rss_bytes": 31936512,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 38775,
             "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
             "target": "src/rust_target.rs",
-            "wall_ms": 937.6772999530658
+            "wall_ms": 947.8149999631569
           },
           {
             "allocation_metrics": {
@@ -1415,16 +1415,16 @@
               "reallocation_bytes": 11214637,
               "reallocation_calls": 232236
             },
-            "cpu_ms": 968.75,
+            "cpu_ms": 1046.875,
             "limit": 500,
-            "peak_rss_bytes": 26095616,
+            "peak_rss_bytes": 26267648,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 39741,
             "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
             "target": "src/ts_target.ts",
-            "wall_ms": 1085.4054000228643
+            "wall_ms": 903.6033999873325
           },
           {
             "allocation_metrics": {
@@ -1435,16 +1435,16 @@
               "reallocation_bytes": 11214637,
               "reallocation_calls": 232236
             },
-            "cpu_ms": 984.375,
+            "cpu_ms": 734.375,
             "limit": 500,
-            "peak_rss_bytes": 26152960,
+            "peak_rss_bytes": 26042368,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 39741,
             "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
             "target": "src/ts_target.ts",
-            "wall_ms": 864.9548999965191
+            "wall_ms": 1048.336400068365
           },
           {
             "allocation_metrics": {
@@ -1457,14 +1457,14 @@
             },
             "cpu_ms": 765.625,
             "limit": 500,
-            "peak_rss_bytes": 25812992,
+            "peak_rss_bytes": 26075136,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 39741,
             "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
             "target": "src/ts_target.ts",
-            "wall_ms": 824.9775000149384
+            "wall_ms": 810.4562000371516
           },
           {
             "allocation_metrics": {
@@ -1475,16 +1475,16 @@
               "reallocation_bytes": 22662659,
               "reallocation_calls": 514024
             },
-            "cpu_ms": 1093.75,
+            "cpu_ms": 1140.625,
             "limit": 500,
-            "peak_rss_bytes": 25849856,
+            "peak_rss_bytes": 26124288,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 37083,
             "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
             "target": "src/package/py_target.py",
-            "wall_ms": 1129.8550999490544
+            "wall_ms": 1164.2180000199005
           },
           {
             "allocation_metrics": {
@@ -1495,16 +1495,16 @@
               "reallocation_bytes": 22662659,
               "reallocation_calls": 514024
             },
-            "cpu_ms": 1031.25,
+            "cpu_ms": 1078.125,
             "limit": 500,
-            "peak_rss_bytes": 25899008,
+            "peak_rss_bytes": 26075136,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 37083,
             "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
             "target": "src/package/py_target.py",
-            "wall_ms": 1110.699599958025
+            "wall_ms": 1116.2111000157893
           },
           {
             "allocation_metrics": {
@@ -1515,16 +1515,16 @@
               "reallocation_bytes": 22662659,
               "reallocation_calls": 514024
             },
-            "cpu_ms": 1234.375,
+            "cpu_ms": 1046.875,
             "limit": 500,
-            "peak_rss_bytes": 25935872,
+            "peak_rss_bytes": 26091520,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 37083,
             "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
             "target": "src/package/py_target.py",
-            "wall_ms": 1128.4070999827236
+            "wall_ms": 1098.7403000472113
           }
         ],
         "targets": [
@@ -1559,9 +1559,9 @@
           "allocation_bytes": 67981.0,
           "allocation_calls": 1017.5,
           "cpu_ms": 156.25,
-          "peak_rss_bytes": 24033280.0,
+          "peak_rss_bytes": 24023040.0,
           "stdout_bytes": 2540.0,
-          "wall_ms": 195.54580003023148
+          "wall_ms": 195.19979995675385
         },
         "query_plan_evidence": {
           "by_family": {
@@ -1683,16 +1683,16 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 125.0,
+            "cpu_ms": 171.875,
             "limit": 1,
-            "peak_rss_bytes": 23838720,
+            "peak_rss_bytes": 24014848,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1800,
             "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
             "target": "src/rust_target.rs",
-            "wall_ms": 192.49239994678646
+            "wall_ms": 195.2543999068439
           },
           {
             "allocation_metrics": {
@@ -1703,7 +1703,7 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 140.625,
             "limit": 1,
             "peak_rss_bytes": 24055808,
             "returncode": 0,
@@ -1712,7 +1712,7 @@
             "stdout_bytes": 1800,
             "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
             "target": "src/rust_target.rs",
-            "wall_ms": 201.86300005298108
+            "wall_ms": 193.6289999866858
           },
           {
             "allocation_metrics": {
@@ -1725,54 +1725,14 @@
             },
             "cpu_ms": 156.25,
             "limit": 1,
-            "peak_rss_bytes": 24092672,
+            "peak_rss_bytes": 23908352,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1800,
             "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
             "target": "src/rust_target.rs",
-            "wall_ms": 213.07060006074607
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 69147,
-              "allocation_calls": 1030,
-              "deallocation_bytes": 68630,
-              "deallocation_calls": 954,
-              "reallocation_bytes": 16077,
-              "reallocation_calls": 205
-            },
-            "cpu_ms": 140.625,
-            "limit": 500,
-            "peak_rss_bytes": 23785472,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "wall_ms": 204.92120005656034
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 69147,
-              "allocation_calls": 1030,
-              "deallocation_bytes": 68630,
-              "deallocation_calls": 954,
-              "reallocation_bytes": 16077,
-              "reallocation_calls": 205
-            },
-            "cpu_ms": 218.75,
-            "limit": 500,
-            "peak_rss_bytes": 24174592,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "wall_ms": 196.7541000340134
+            "wall_ms": 198.59689997974783
           },
           {
             "allocation_metrics": {
@@ -1785,114 +1745,114 @@
             },
             "cpu_ms": 171.875,
             "limit": 500,
-            "peak_rss_bytes": 23584768,
+            "peak_rss_bytes": 23990272,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2565,
             "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
             "target": "src/rust_target.rs",
-            "wall_ms": 189.54519997350872
+            "wall_ms": 200.0654999865219
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 66815,
-              "allocation_calls": 1005,
-              "deallocation_bytes": 66354,
-              "deallocation_calls": 932,
-              "reallocation_bytes": 16695,
-              "reallocation_calls": 203
+              "allocation_bytes": 69147,
+              "allocation_calls": 1030,
+              "deallocation_bytes": 68630,
+              "deallocation_calls": 954,
+              "reallocation_bytes": 16077,
+              "reallocation_calls": 205
             },
             "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 23781376,
+            "peak_rss_bytes": 24100864,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
-            "wall_ms": 201.85979991219938
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "wall_ms": 193.36949998978525
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 66815,
-              "allocation_calls": 1005,
-              "deallocation_bytes": 66354,
-              "deallocation_calls": 932,
-              "reallocation_bytes": 16695,
-              "reallocation_calls": 203
-            },
-            "cpu_ms": 171.875,
-            "limit": 500,
-            "peak_rss_bytes": 23973888,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
-            "wall_ms": 194.33750002644956
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 66815,
-              "allocation_calls": 1005,
-              "deallocation_bytes": 66354,
-              "deallocation_calls": 932,
-              "reallocation_bytes": 16695,
-              "reallocation_calls": 203
-            },
-            "cpu_ms": 140.625,
-            "limit": 500,
-            "peak_rss_bytes": 24113152,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
-            "wall_ms": 191.29300001077354
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 87662,
-              "allocation_calls": 1205,
-              "deallocation_bytes": 86110,
-              "deallocation_calls": 1097,
-              "reallocation_bytes": 25770,
-              "reallocation_calls": 364
-            },
-            "cpu_ms": 156.25,
-            "limit": 500,
-            "peak_rss_bytes": 24023040,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2515,
-            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
-            "target": "src/package/py_target.py",
-            "wall_ms": 199.01899993419647
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 87662,
-              "allocation_calls": 1205,
-              "deallocation_bytes": 86110,
-              "deallocation_calls": 1097,
-              "reallocation_bytes": 25770,
-              "reallocation_calls": 364
+              "allocation_bytes": 69147,
+              "allocation_calls": 1030,
+              "deallocation_bytes": 68630,
+              "deallocation_calls": 954,
+              "reallocation_bytes": 16077,
+              "reallocation_calls": 205
             },
             "cpu_ms": 187.5,
             "limit": 500,
-            "peak_rss_bytes": 24043520,
+            "peak_rss_bytes": 24514560,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2515,
-            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
-            "target": "src/package/py_target.py",
-            "wall_ms": 193.380199954845
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "wall_ms": 196.21800002641976
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 66815,
+              "allocation_calls": 1005,
+              "deallocation_bytes": 66354,
+              "deallocation_calls": 932,
+              "reallocation_bytes": 16695,
+              "reallocation_calls": 203
+            },
+            "cpu_ms": 156.25,
+            "limit": 500,
+            "peak_rss_bytes": 23953408,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "wall_ms": 201.63320004940033
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 66815,
+              "allocation_calls": 1005,
+              "deallocation_bytes": 66354,
+              "deallocation_calls": 932,
+              "reallocation_bytes": 16695,
+              "reallocation_calls": 203
+            },
+            "cpu_ms": 218.75,
+            "limit": 500,
+            "peak_rss_bytes": 23994368,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "wall_ms": 195.1452000066638
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 66815,
+              "allocation_calls": 1005,
+              "deallocation_bytes": 66354,
+              "deallocation_calls": 932,
+              "reallocation_bytes": 16695,
+              "reallocation_calls": 203
+            },
+            "cpu_ms": 156.25,
+            "limit": 500,
+            "peak_rss_bytes": 24027136,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "wall_ms": 194.35919995885342
           },
           {
             "allocation_metrics": {
@@ -1903,16 +1863,56 @@
               "reallocation_bytes": 25770,
               "reallocation_calls": 364
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 24072192,
+            "peak_rss_bytes": 24064000,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2515,
             "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
             "target": "src/package/py_target.py",
-            "wall_ms": 189.94549999479204
+            "wall_ms": 206.66859997436404
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 87662,
+              "allocation_calls": 1205,
+              "deallocation_bytes": 86110,
+              "deallocation_calls": 1097,
+              "reallocation_bytes": 25770,
+              "reallocation_calls": 364
+            },
+            "cpu_ms": 171.875,
+            "limit": 500,
+            "peak_rss_bytes": 24195072,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2515,
+            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
+            "target": "src/package/py_target.py",
+            "wall_ms": 189.95269993320107
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 87662,
+              "allocation_calls": 1205,
+              "deallocation_bytes": 86110,
+              "deallocation_calls": 1097,
+              "reallocation_bytes": 25770,
+              "reallocation_calls": 364
+            },
+            "cpu_ms": 156.25,
+            "limit": 500,
+            "peak_rss_bytes": 24018944,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2515,
+            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
+            "target": "src/package/py_target.py",
+            "wall_ms": 194.74589999299496
           }
         ],
         "targets": [
@@ -1987,7 +1987,7 @@
     }
   },
   "candidate": {
-    "binary_sha256": "1b2487327c4cc6cdea4c546c3185ab6b4e81c264a09242efaba8cfe86290ba23",
+    "binary_sha256": "97563b186f2f0d9ce19d8f05a4ee5f491f81820611367eac82dcbc538b78678e",
     "candidate_patch": {
       "path": "docs/benchmarks/reverse-caller-candidate.patch",
       "sha256": "e4779fc73c4f149c7a1b27822aac4f47a7b731a8e06bc123e13d7622576d78ca"
@@ -1995,12 +1995,12 @@
     "fixtures": {
       "duplicate-alias": {
         "aggregate": {
-          "allocation_bytes": 37281.0,
-          "allocation_calls": 508.5,
-          "cpu_ms": 156.25,
-          "peak_rss_bytes": 23832576.0,
+          "allocation_bytes": 37079.0,
+          "allocation_calls": 504.5,
+          "cpu_ms": 171.875,
+          "peak_rss_bytes": 24039424.0,
           "stdout_bytes": 1697.0,
-          "wall_ms": 196.91619998775423
+          "wall_ms": 193.63680004607886
         },
         "query_plan_evidence": {
           "by_family": {
@@ -2114,243 +2114,243 @@
         "runs": [
           {
             "allocation_metrics": {
-              "allocation_bytes": 36847,
-              "allocation_calls": 506,
-              "deallocation_bytes": 34992,
-              "deallocation_calls": 463,
-              "reallocation_bytes": 7403,
-              "reallocation_calls": 77
+              "allocation_bytes": 36828,
+              "allocation_calls": 502,
+              "deallocation_bytes": 35005,
+              "deallocation_calls": 459,
+              "reallocation_bytes": 7115,
+              "reallocation_calls": 73
+            },
+            "cpu_ms": 203.125,
+            "limit": 1,
+            "peak_rss_bytes": 23920640,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1696,
+            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
+            "target": "src/rust_target.rs",
+            "wall_ms": 193.08549992274493
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 36828,
+              "allocation_calls": 502,
+              "deallocation_bytes": 35005,
+              "deallocation_calls": 459,
+              "reallocation_bytes": 7115,
+              "reallocation_calls": 73
             },
             "cpu_ms": 140.625,
             "limit": 1,
-            "peak_rss_bytes": 23732224,
+            "peak_rss_bytes": 24031232,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1696,
             "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
             "target": "src/rust_target.rs",
-            "wall_ms": 197.63760000932962
+            "wall_ms": 200.57700003962964
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 36847,
-              "allocation_calls": 506,
-              "deallocation_bytes": 34992,
-              "deallocation_calls": 463,
-              "reallocation_bytes": 7403,
-              "reallocation_calls": 77
+              "allocation_bytes": 36828,
+              "allocation_calls": 502,
+              "deallocation_bytes": 35005,
+              "deallocation_calls": 459,
+              "reallocation_bytes": 7115,
+              "reallocation_calls": 73
             },
-            "cpu_ms": 125.0,
+            "cpu_ms": 171.875,
             "limit": 1,
-            "peak_rss_bytes": 23924736,
+            "peak_rss_bytes": 24240128,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1696,
             "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
             "target": "src/rust_target.rs",
-            "wall_ms": 188.46410000696778
+            "wall_ms": 193.73460009228438
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 36847,
-              "allocation_calls": 506,
-              "deallocation_bytes": 34992,
-              "deallocation_calls": 463,
-              "reallocation_bytes": 7403,
-              "reallocation_calls": 77
-            },
-            "cpu_ms": 156.25,
-            "limit": 1,
-            "peak_rss_bytes": 23932928,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1696,
-            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
-            "target": "src/rust_target.rs",
-            "wall_ms": 197.6382000138983
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 36847,
-              "allocation_calls": 506,
-              "deallocation_bytes": 34992,
-              "deallocation_calls": 463,
-              "reallocation_bytes": 7403,
-              "reallocation_calls": 77
+              "allocation_bytes": 36828,
+              "allocation_calls": 502,
+              "deallocation_bytes": 35005,
+              "deallocation_calls": 459,
+              "reallocation_bytes": 7115,
+              "reallocation_calls": 73
             },
             "cpu_ms": 171.875,
             "limit": 500,
-            "peak_rss_bytes": 23764992,
+            "peak_rss_bytes": 24100864,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1698,
             "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
             "target": "src/rust_target.rs",
-            "wall_ms": 202.39860005676746
+            "wall_ms": 192.8689000196755
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 36847,
-              "allocation_calls": 506,
-              "deallocation_bytes": 34992,
-              "deallocation_calls": 463,
-              "reallocation_bytes": 7403,
-              "reallocation_calls": 77
+              "allocation_bytes": 36828,
+              "allocation_calls": 502,
+              "deallocation_bytes": 35005,
+              "deallocation_calls": 459,
+              "reallocation_bytes": 7115,
+              "reallocation_calls": 73
             },
             "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 23846912,
+            "peak_rss_bytes": 24465408,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1698,
             "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
             "target": "src/rust_target.rs",
-            "wall_ms": 197.99400004558265
+            "wall_ms": 190.5154000269249
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 36847,
-              "allocation_calls": 506,
-              "deallocation_bytes": 34992,
-              "deallocation_calls": 463,
-              "reallocation_bytes": 7403,
-              "reallocation_calls": 77
+              "allocation_bytes": 36828,
+              "allocation_calls": 502,
+              "deallocation_bytes": 35005,
+              "deallocation_calls": 459,
+              "reallocation_bytes": 7115,
+              "reallocation_calls": 73
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 23904256,
+            "peak_rss_bytes": 23977984,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1698,
             "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
             "target": "src/rust_target.rs",
-            "wall_ms": 196.64810004178435
+            "wall_ms": 191.651500063017
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 37715,
-              "allocation_calls": 511,
-              "deallocation_bytes": 35788,
-              "deallocation_calls": 468,
-              "reallocation_bytes": 8269,
-              "reallocation_calls": 77
-            },
-            "cpu_ms": 156.25,
-            "limit": 500,
-            "peak_rss_bytes": 23859200,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1706,
-            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
-            "target": "src/ts_target.ts",
-            "wall_ms": 192.52709997817874
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 37715,
-              "allocation_calls": 511,
-              "deallocation_bytes": 35788,
-              "deallocation_calls": 468,
-              "reallocation_bytes": 8269,
-              "reallocation_calls": 77
-            },
-            "cpu_ms": 156.25,
-            "limit": 500,
-            "peak_rss_bytes": 23879680,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1706,
-            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
-            "target": "src/ts_target.ts",
-            "wall_ms": 194.24940005410463
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 37715,
-              "allocation_calls": 511,
-              "deallocation_bytes": 35788,
-              "deallocation_calls": 468,
-              "reallocation_bytes": 8269,
-              "reallocation_calls": 77
-            },
-            "cpu_ms": 140.625,
-            "limit": 500,
-            "peak_rss_bytes": 23601152,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1706,
-            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
-            "target": "src/ts_target.ts",
-            "wall_ms": 194.04440000653267
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 43827,
-              "allocation_calls": 576,
-              "deallocation_bytes": 40868,
-              "deallocation_calls": 519,
-              "reallocation_bytes": 11009,
-              "reallocation_calls": 109
-            },
-            "cpu_ms": 156.25,
-            "limit": 500,
-            "peak_rss_bytes": 23818240,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1694,
-            "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
-            "target": "src/package/py_target.py",
-            "wall_ms": 197.1842999337241
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 43827,
-              "allocation_calls": 576,
-              "deallocation_bytes": 40868,
-              "deallocation_calls": 519,
-              "reallocation_bytes": 11009,
-              "reallocation_calls": 109
-            },
-            "cpu_ms": 140.625,
-            "limit": 500,
-            "peak_rss_bytes": 23654400,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1694,
-            "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
-            "target": "src/package/py_target.py",
-            "wall_ms": 198.98200000170618
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 43827,
-              "allocation_calls": 576,
-              "deallocation_bytes": 40868,
-              "deallocation_calls": 519,
-              "reallocation_bytes": 11009,
-              "reallocation_calls": 109
+              "allocation_bytes": 37330,
+              "allocation_calls": 507,
+              "deallocation_bytes": 35435,
+              "deallocation_calls": 464,
+              "reallocation_bytes": 7021,
+              "reallocation_calls": 73
             },
             "cpu_ms": 171.875,
             "limit": 500,
-            "peak_rss_bytes": 23691264,
+            "peak_rss_bytes": 24100864,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1706,
+            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
+            "target": "src/ts_target.ts",
+            "wall_ms": 201.89939998090267
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 37330,
+              "allocation_calls": 507,
+              "deallocation_bytes": 35435,
+              "deallocation_calls": 464,
+              "reallocation_bytes": 7021,
+              "reallocation_calls": 73
+            },
+            "cpu_ms": 156.25,
+            "limit": 500,
+            "peak_rss_bytes": 24047616,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1706,
+            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
+            "target": "src/ts_target.ts",
+            "wall_ms": 193.9526000060141
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 37330,
+              "allocation_calls": 507,
+              "deallocation_bytes": 35435,
+              "deallocation_calls": 464,
+              "reallocation_bytes": 7021,
+              "reallocation_calls": 73
+            },
+            "cpu_ms": 171.875,
+            "limit": 500,
+            "peak_rss_bytes": 24031232,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1706,
+            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
+            "target": "src/ts_target.ts",
+            "wall_ms": 191.5842000162229
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 43438,
+              "allocation_calls": 572,
+              "deallocation_bytes": 40511,
+              "deallocation_calls": 515,
+              "reallocation_bytes": 9761,
+              "reallocation_calls": 105
+            },
+            "cpu_ms": 171.875,
+            "limit": 500,
+            "peak_rss_bytes": 24141824,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1694,
             "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
             "target": "src/package/py_target.py",
-            "wall_ms": 189.5288999658078
+            "wall_ms": 193.53899999987334
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 43438,
+              "allocation_calls": 572,
+              "deallocation_bytes": 40511,
+              "deallocation_calls": 515,
+              "reallocation_bytes": 9761,
+              "reallocation_calls": 105
+            },
+            "cpu_ms": 171.875,
+            "limit": 500,
+            "peak_rss_bytes": 24002560,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1694,
+            "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
+            "target": "src/package/py_target.py",
+            "wall_ms": 194.28429997060448
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 43438,
+              "allocation_calls": 572,
+              "deallocation_bytes": 40511,
+              "deallocation_calls": 515,
+              "reallocation_bytes": 9761,
+              "reallocation_calls": 105
+            },
+            "cpu_ms": 171.875,
+            "limit": 500,
+            "peak_rss_bytes": 23867392,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1694,
+            "stdout_sha256": "8715db654f72c76dd2f5fdd6365527e92658092a6ec738cc884d304be822605f",
+            "target": "src/package/py_target.py",
+            "wall_ms": 194.80539998039603
           }
         ],
         "targets": [
@@ -2382,12 +2382,12 @@
       },
       "high-import": {
         "aggregate": {
-          "allocation_bytes": 1063248.5,
-          "allocation_calls": 16027.0,
-          "cpu_ms": 398.4375,
-          "peak_rss_bytes": 25876480.0,
+          "allocation_bytes": 1049808.5,
+          "allocation_calls": 15548.0,
+          "cpu_ms": 375.0,
+          "peak_rss_bytes": 26054656.0,
           "stdout_bytes": 2612.0,
-          "wall_ms": 247.94299999484792
+          "wall_ms": 248.3692499808967
         },
         "query_plan_evidence": {
           "by_family": {
@@ -2502,243 +2502,243 @@
         "runs": [
           {
             "allocation_metrics": {
-              "allocation_bytes": 1002516,
-              "allocation_calls": 15547,
-              "deallocation_bytes": 994810,
-              "deallocation_calls": 14526,
-              "reallocation_bytes": 296717,
-              "reallocation_calls": 2585
+              "allocation_bytes": 1010436,
+              "allocation_calls": 15068,
+              "deallocation_bytes": 1006570,
+              "deallocation_calls": 14047,
+              "reallocation_bytes": 262157,
+              "reallocation_calls": 2105
+            },
+            "cpu_ms": 421.875,
+            "limit": 1,
+            "peak_rss_bytes": 26136576,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2592,
+            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
+            "target": "src/rust_target.rs",
+            "wall_ms": 246.14499998278916
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1010436,
+              "allocation_calls": 15068,
+              "deallocation_bytes": 1006570,
+              "deallocation_calls": 14047,
+              "reallocation_bytes": 262157,
+              "reallocation_calls": 2105
+            },
+            "cpu_ms": 406.25,
+            "limit": 1,
+            "peak_rss_bytes": 26267648,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2592,
+            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
+            "target": "src/rust_target.rs",
+            "wall_ms": 248.1934999814257
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1010436,
+              "allocation_calls": 15068,
+              "deallocation_bytes": 1006570,
+              "deallocation_calls": 14047,
+              "reallocation_bytes": 262157,
+              "reallocation_calls": 2105
+            },
+            "cpu_ms": 500.0,
+            "limit": 1,
+            "peak_rss_bytes": 25944064,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2592,
+            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
+            "target": "src/rust_target.rs",
+            "wall_ms": 244.68550004530698
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1010436,
+              "allocation_calls": 15068,
+              "deallocation_bytes": 1006570,
+              "deallocation_calls": 14047,
+              "reallocation_bytes": 262157,
+              "reallocation_calls": 2105
+            },
+            "cpu_ms": 359.375,
+            "limit": 500,
+            "peak_rss_bytes": 25976832,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
+            "wall_ms": 245.10889989323914
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1010436,
+              "allocation_calls": 15068,
+              "deallocation_bytes": 1006570,
+              "deallocation_calls": 14047,
+              "reallocation_bytes": 262157,
+              "reallocation_calls": 2105
             },
             "cpu_ms": 343.75,
-            "limit": 1,
-            "peak_rss_bytes": 25632768,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2592,
-            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
-            "target": "src/rust_target.rs",
-            "wall_ms": 240.77100004069507
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1002516,
-              "allocation_calls": 15547,
-              "deallocation_bytes": 994810,
-              "deallocation_calls": 14526,
-              "reallocation_bytes": 296717,
-              "reallocation_calls": 2585
-            },
-            "cpu_ms": 421.875,
-            "limit": 1,
-            "peak_rss_bytes": 25882624,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2592,
-            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
-            "target": "src/rust_target.rs",
-            "wall_ms": 251.9931000424549
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1002516,
-              "allocation_calls": 15547,
-              "deallocation_bytes": 994810,
-              "deallocation_calls": 14526,
-              "reallocation_bytes": 296717,
-              "reallocation_calls": 2585
-            },
-            "cpu_ms": 375.0,
-            "limit": 1,
-            "peak_rss_bytes": 25743360,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2592,
-            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
-            "target": "src/rust_target.rs",
-            "wall_ms": 248.2111999997869
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1002516,
-              "allocation_calls": 15547,
-              "deallocation_bytes": 994810,
-              "deallocation_calls": 14526,
-              "reallocation_bytes": 296717,
-              "reallocation_calls": 2585
-            },
-            "cpu_ms": 375.0,
-            "limit": 500,
-            "peak_rss_bytes": 25862144,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "wall_ms": 242.40079999435693
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1002516,
-              "allocation_calls": 15547,
-              "deallocation_bytes": 994810,
-              "deallocation_calls": 14526,
-              "reallocation_bytes": 296717,
-              "reallocation_calls": 2585
-            },
-            "cpu_ms": 421.875,
-            "limit": 500,
-            "peak_rss_bytes": 25997312,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "wall_ms": 247.1153000369668
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1002516,
-              "allocation_calls": 15547,
-              "deallocation_bytes": 994810,
-              "deallocation_calls": 14526,
-              "reallocation_bytes": 296717,
-              "reallocation_calls": 2585
-            },
-            "cpu_ms": 406.25,
-            "limit": 500,
-            "peak_rss_bytes": 25792512,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "wall_ms": 252.33439996372908
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1123981,
-              "allocation_calls": 16507,
-              "deallocation_bytes": 1094705,
-              "deallocation_calls": 15486,
-              "reallocation_bytes": 386239,
-              "reallocation_calls": 2366
-            },
-            "cpu_ms": 406.25,
-            "limit": 500,
-            "peak_rss_bytes": 25870336,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "wall_ms": 249.25919994711876
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1123981,
-              "allocation_calls": 16507,
-              "deallocation_bytes": 1094705,
-              "deallocation_calls": 15486,
-              "reallocation_bytes": 386239,
-              "reallocation_calls": 2366
-            },
-            "cpu_ms": 437.5,
-            "limit": 500,
-            "peak_rss_bytes": 25899008,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "wall_ms": 247.28330003563315
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1123981,
-              "allocation_calls": 16507,
-              "deallocation_bytes": 1094705,
-              "deallocation_calls": 15486,
-              "reallocation_bytes": 386239,
-              "reallocation_calls": 2366
-            },
-            "cpu_ms": 406.25,
             "limit": 500,
             "peak_rss_bytes": 26058752,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "wall_ms": 252.24119995255023
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
+            "wall_ms": 249.67980000656098
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 1328646,
-              "allocation_calls": 17945,
-              "deallocation_bytes": 1373616,
-              "deallocation_calls": 16910,
-              "reallocation_bytes": 534382,
-              "reallocation_calls": 4993
+              "allocation_bytes": 1010436,
+              "allocation_calls": 15068,
+              "deallocation_bytes": 1006570,
+              "deallocation_calls": 14047,
+              "reallocation_bytes": 262157,
+              "reallocation_calls": 2105
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 312.5,
             "limit": 500,
-            "peak_rss_bytes": 25907200,
+            "peak_rss_bytes": 26009600,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2630,
-            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
-            "target": "src/package/py_target.py",
-            "wall_ms": 247.67479998990893
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
+            "wall_ms": 246.66310008615255
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 1328646,
-              "allocation_calls": 17945,
-              "deallocation_bytes": 1373616,
-              "deallocation_calls": 16910,
-              "reallocation_bytes": 534382,
-              "reallocation_calls": 4993
+              "allocation_bytes": 1089181,
+              "allocation_calls": 16028,
+              "deallocation_bytes": 1063745,
+              "deallocation_calls": 15007,
+              "reallocation_bytes": 236479,
+              "reallocation_calls": 1886
             },
             "cpu_ms": 390.625,
             "limit": 500,
-            "peak_rss_bytes": 25993216,
+            "peak_rss_bytes": 26079232,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2630,
-            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
-            "target": "src/package/py_target.py",
-            "wall_ms": 253.76360001973808
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "wall_ms": 255.62650000210851
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 1328646,
-              "allocation_calls": 17945,
-              "deallocation_bytes": 1373616,
-              "deallocation_calls": 16910,
-              "reallocation_bytes": 534382,
-              "reallocation_calls": 4993
+              "allocation_bytes": 1089181,
+              "allocation_calls": 16028,
+              "deallocation_bytes": 1063745,
+              "deallocation_calls": 15007,
+              "reallocation_bytes": 236479,
+              "reallocation_calls": 1886
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 343.75,
             "limit": 500,
-            "peak_rss_bytes": 25825280,
+            "peak_rss_bytes": 26185728,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "wall_ms": 248.1952999951318
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1089181,
+              "allocation_calls": 16028,
+              "deallocation_bytes": 1063745,
+              "deallocation_calls": 15007,
+              "reallocation_bytes": 236479,
+              "reallocation_calls": 1886
+            },
+            "cpu_ms": 406.25,
+            "limit": 500,
+            "peak_rss_bytes": 26050560,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "wall_ms": 251.66980002541095
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1293366,
+              "allocation_calls": 17466,
+              "deallocation_bytes": 1342176,
+              "deallocation_calls": 16431,
+              "reallocation_bytes": 384622,
+              "reallocation_calls": 4513
+            },
+            "cpu_ms": 328.125,
+            "limit": 500,
+            "peak_rss_bytes": 25821184,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2630,
             "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
             "target": "src/package/py_target.py",
-            "wall_ms": 245.15870003961027
+            "wall_ms": 249.26349997986108
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1293366,
+              "allocation_calls": 17466,
+              "deallocation_bytes": 1342176,
+              "deallocation_calls": 16431,
+              "reallocation_bytes": 384622,
+              "reallocation_calls": 4513
+            },
+            "cpu_ms": 250.0,
+            "limit": 500,
+            "peak_rss_bytes": 26238976,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2630,
+            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
+            "target": "src/package/py_target.py",
+            "wall_ms": 248.54319996666163
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1293366,
+              "allocation_calls": 17466,
+              "deallocation_bytes": 1342176,
+              "deallocation_calls": 16431,
+              "reallocation_bytes": 384622,
+              "reallocation_calls": 4513
+            },
+            "cpu_ms": 406.25,
+            "limit": 500,
+            "peak_rss_bytes": 26025984,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2630,
+            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
+            "target": "src/package/py_target.py",
+            "wall_ms": 250.49919995944947
           }
         ],
         "targets": [
@@ -2770,12 +2770,12 @@
       },
       "high-symbol": {
         "aggregate": {
-          "allocation_bytes": 3658796.0,
-          "allocation_calls": 59348.0,
-          "cpu_ms": 250.0,
-          "peak_rss_bytes": 26281984.0,
+          "allocation_bytes": 3588560.0,
+          "allocation_calls": 58230.5,
+          "cpu_ms": 242.1875,
+          "peak_rss_bytes": 26327040.0,
           "stdout_bytes": 82730.0,
-          "wall_ms": 278.65494997240603
+          "wall_ms": 276.62330004386604
         },
         "query_plan_evidence": {
           "by_family": {
@@ -2890,243 +2890,243 @@
         "runs": [
           {
             "allocation_metrics": {
-              "allocation_bytes": 34026,
-              "allocation_calls": 456,
-              "deallocation_bytes": 30752,
-              "deallocation_calls": 410,
-              "reallocation_bytes": 4881,
-              "reallocation_calls": 56
-            },
-            "cpu_ms": 171.875,
-            "limit": 1,
-            "peak_rss_bytes": 24125440,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
-            "target": "src/rust_target.rs",
-            "wall_ms": 187.9114001058042
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 34026,
-              "allocation_calls": 456,
-              "deallocation_bytes": 30752,
-              "deallocation_calls": 410,
-              "reallocation_bytes": 4881,
-              "reallocation_calls": 56
-            },
-            "cpu_ms": 171.875,
-            "limit": 1,
-            "peak_rss_bytes": 23949312,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
-            "target": "src/rust_target.rs",
-            "wall_ms": 189.7752999793738
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 34026,
-              "allocation_calls": 456,
-              "deallocation_bytes": 30752,
-              "deallocation_calls": 410,
-              "reallocation_bytes": 4881,
-              "reallocation_calls": 56
+              "allocation_bytes": 34059,
+              "allocation_calls": 455,
+              "deallocation_bytes": 30801,
+              "deallocation_calls": 409,
+              "reallocation_bytes": 4737,
+              "reallocation_calls": 54
             },
             "cpu_ms": 156.25,
             "limit": 1,
-            "peak_rss_bytes": 23855104,
+            "peak_rss_bytes": 24289280,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1812,
             "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
             "target": "src/rust_target.rs",
-            "wall_ms": 196.76730001810938
+            "wall_ms": 191.00779993459582
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 3871328,
-              "allocation_calls": 60789,
-              "deallocation_bytes": 4300965,
-              "deallocation_calls": 57553,
-              "reallocation_bytes": 1505936,
-              "reallocation_calls": 18600
+              "allocation_bytes": 34059,
+              "allocation_calls": 455,
+              "deallocation_bytes": 30801,
+              "deallocation_calls": 409,
+              "reallocation_bytes": 4737,
+              "reallocation_calls": 54
             },
-            "cpu_ms": 265.625,
-            "limit": 500,
-            "peak_rss_bytes": 26501120,
+            "cpu_ms": 156.25,
+            "limit": 1,
+            "peak_rss_bytes": 24236032,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
             "target": "src/rust_target.rs",
-            "wall_ms": 283.82989997044206
+            "wall_ms": 192.86210008431226
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 3871328,
-              "allocation_calls": 60789,
-              "deallocation_bytes": 4300965,
-              "deallocation_calls": 57553,
-              "reallocation_bytes": 1505936,
-              "reallocation_calls": 18600
+              "allocation_bytes": 34059,
+              "allocation_calls": 455,
+              "deallocation_bytes": 30801,
+              "deallocation_calls": 409,
+              "reallocation_bytes": 4737,
+              "reallocation_calls": 54
             },
-            "cpu_ms": 265.625,
-            "limit": 500,
-            "peak_rss_bytes": 26300416,
+            "cpu_ms": 156.25,
+            "limit": 1,
+            "peak_rss_bytes": 24461312,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
             "target": "src/rust_target.rs",
-            "wall_ms": 295.9657000610605
+            "wall_ms": 198.64670000970364
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 3871328,
-              "allocation_calls": 60789,
-              "deallocation_bytes": 4300965,
-              "deallocation_calls": 57553,
-              "reallocation_bytes": 1505936,
-              "reallocation_calls": 18600
-            },
-            "cpu_ms": 265.625,
-            "limit": 500,
-            "peak_rss_bytes": 26357760,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "wall_ms": 277.4728999938816
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3446264,
-              "allocation_calls": 57907,
-              "deallocation_bytes": 3887209,
-              "deallocation_calls": 54990,
-              "reallocation_bytes": 1527895,
-              "reallocation_calls": 18642
-            },
-            "cpu_ms": 265.625,
-            "limit": 500,
-            "peak_rss_bytes": 26279936,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "wall_ms": 278.7201999453828
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3446264,
-              "allocation_calls": 57907,
-              "deallocation_bytes": 3887209,
-              "deallocation_calls": 54990,
-              "reallocation_bytes": 1527895,
-              "reallocation_calls": 18642
+              "allocation_bytes": 3844884,
+              "allocation_calls": 59831,
+              "deallocation_bytes": 4277089,
+              "deallocation_calls": 56595,
+              "reallocation_bytes": 1482824,
+              "reallocation_calls": 18279
             },
             "cpu_ms": 250.0,
             "limit": 500,
-            "peak_rss_bytes": 26238976,
+            "peak_rss_bytes": 26382336,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "wall_ms": 278.5896999994293
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "wall_ms": 291.3325000554323
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 3446264,
-              "allocation_calls": 57907,
-              "deallocation_bytes": 3887209,
-              "deallocation_calls": 54990,
-              "reallocation_bytes": 1527895,
-              "reallocation_calls": 18642
-            },
-            "cpu_ms": 250.0,
-            "limit": 500,
-            "peak_rss_bytes": 26312704,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "wall_ms": 277.4664000608027
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 5228545,
-              "allocation_calls": 71696,
-              "deallocation_bytes": 5660993,
-              "deallocation_calls": 66532,
-              "reallocation_bytes": 2189186,
-              "reallocation_calls": 31153
+              "allocation_bytes": 3844884,
+              "allocation_calls": 59831,
+              "deallocation_bytes": 4277089,
+              "deallocation_calls": 56595,
+              "reallocation_bytes": 1482824,
+              "reallocation_calls": 18279
             },
             "cpu_ms": 234.375,
             "limit": 500,
-            "peak_rss_bytes": 26263552,
+            "peak_rss_bytes": 26689536,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
-            "wall_ms": 304.132999968715
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "wall_ms": 276.44340007100254
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 5228545,
-              "allocation_calls": 71696,
-              "deallocation_bytes": 5660993,
-              "deallocation_calls": 66532,
-              "reallocation_bytes": 2189186,
-              "reallocation_calls": 31153
+              "allocation_bytes": 3844884,
+              "allocation_calls": 59831,
+              "deallocation_bytes": 4277089,
+              "deallocation_calls": 56595,
+              "reallocation_bytes": 1482824,
+              "reallocation_calls": 18279
             },
-            "cpu_ms": 281.25,
+            "cpu_ms": 234.375,
             "limit": 500,
-            "peak_rss_bytes": 26284032,
+            "peak_rss_bytes": 26529792,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
-            "wall_ms": 312.9069999558851
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "wall_ms": 280.07310000248253
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 5228545,
-              "allocation_calls": 71696,
-              "deallocation_bytes": 5660993,
-              "deallocation_calls": 66532,
-              "reallocation_bytes": 2189186,
-              "reallocation_calls": 31153
+              "allocation_bytes": 3332236,
+              "allocation_calls": 56630,
+              "deallocation_bytes": 3775749,
+              "deallocation_calls": 53713,
+              "reallocation_bytes": 1427743,
+              "reallocation_calls": 18321
+            },
+            "cpu_ms": 234.375,
+            "limit": 500,
+            "peak_rss_bytes": 26513408,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "wall_ms": 274.7170999646187
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3332236,
+              "allocation_calls": 56630,
+              "deallocation_bytes": 3775749,
+              "deallocation_calls": 53713,
+              "reallocation_bytes": 1427743,
+              "reallocation_calls": 18321
             },
             "cpu_ms": 250.0,
             "limit": 500,
-            "peak_rss_bytes": 26517504,
+            "peak_rss_bytes": 26271744,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "wall_ms": 276.80320001672953
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3332236,
+              "allocation_calls": 56630,
+              "deallocation_bytes": 3775749,
+              "deallocation_calls": 53713,
+              "reallocation_bytes": 1427743,
+              "reallocation_calls": 18321
+            },
+            "cpu_ms": 250.0,
+            "limit": 500,
+            "peak_rss_bytes": 26259456,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "wall_ms": 275.3948000026867
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 5113877,
+              "allocation_calls": 70419,
+              "deallocation_bytes": 5548893,
+              "deallocation_calls": 65255,
+              "reallocation_bytes": 2089034,
+              "reallocation_calls": 30832
+            },
+            "cpu_ms": 265.625,
+            "limit": 500,
+            "peak_rss_bytes": 26222592,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 79965,
             "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
             "target": "src/package/py_target.py",
-            "wall_ms": 304.5194000005722
+            "wall_ms": 306.5273000393063
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 5113877,
+              "allocation_calls": 70419,
+              "deallocation_bytes": 5548893,
+              "deallocation_calls": 65255,
+              "reallocation_bytes": 2089034,
+              "reallocation_calls": 30832
+            },
+            "cpu_ms": 265.625,
+            "limit": 500,
+            "peak_rss_bytes": 26599424,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "wall_ms": 309.6057999646291
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 5113877,
+              "allocation_calls": 70419,
+              "deallocation_bytes": 5548893,
+              "deallocation_calls": 65255,
+              "reallocation_bytes": 2089034,
+              "reallocation_calls": 30832
+            },
+            "cpu_ms": 265.625,
+            "limit": 500,
+            "peak_rss_bytes": 26439680,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "wall_ms": 309.70039998646826
           }
         ],
         "targets": [
@@ -3158,12 +3158,12 @@
       },
       "representative-large": {
         "aggregate": {
-          "allocation_bytes": 37618355.0,
-          "allocation_calls": 805367.5,
-          "cpu_ms": 1007.8125,
-          "peak_rss_bytes": 25958400.0,
+          "allocation_bytes": 34454435.0,
+          "allocation_calls": 755148.5,
+          "cpu_ms": 718.75,
+          "peak_rss_bytes": 26144768.0,
           "stdout_bytes": 37929.0,
-          "wall_ms": 1007.7176500344649
+          "wall_ms": 755.3042499930598
         },
         "query_plan_evidence": {
           "by_family": {
@@ -3278,243 +3278,243 @@
         "runs": [
           {
             "allocation_metrics": {
-              "allocation_bytes": 504106,
-              "allocation_calls": 7730,
-              "deallocation_bytes": 496197,
-              "deallocation_calls": 7208,
-              "reallocation_bytes": 143897,
-              "reallocation_calls": 1262
+              "allocation_bytes": 508066,
+              "allocation_calls": 7491,
+              "deallocation_bytes": 502077,
+              "deallocation_calls": 6969,
+              "reallocation_bytes": 126617,
+              "reallocation_calls": 1022
+            },
+            "cpu_ms": 390.625,
+            "limit": 1,
+            "peak_rss_bytes": 25227264,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
+            "target": "src/rust_target.rs",
+            "wall_ms": 215.57230001781136
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 508066,
+              "allocation_calls": 7491,
+              "deallocation_bytes": 502077,
+              "deallocation_calls": 6969,
+              "reallocation_bytes": 126617,
+              "reallocation_calls": 1022
             },
             "cpu_ms": 375.0,
             "limit": 1,
-            "peak_rss_bytes": 25460736,
+            "peak_rss_bytes": 25423872,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1812,
             "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
             "target": "src/rust_target.rs",
-            "wall_ms": 229.0770000545308
+            "wall_ms": 214.9538000812754
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 504106,
-              "allocation_calls": 7730,
-              "deallocation_bytes": 496197,
-              "deallocation_calls": 7208,
-              "reallocation_bytes": 143897,
-              "reallocation_calls": 1262
+              "allocation_bytes": 508066,
+              "allocation_calls": 7491,
+              "deallocation_bytes": 502077,
+              "deallocation_calls": 6969,
+              "reallocation_bytes": 126617,
+              "reallocation_calls": 1022
             },
-            "cpu_ms": 203.125,
+            "cpu_ms": 375.0,
             "limit": 1,
-            "peak_rss_bytes": 25337856,
+            "peak_rss_bytes": 25292800,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 1812,
             "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
             "target": "src/rust_target.rs",
-            "wall_ms": 231.0408999910578
+            "wall_ms": 218.51210005115718
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 504106,
-              "allocation_calls": 7730,
-              "deallocation_bytes": 496197,
-              "deallocation_calls": 7208,
-              "reallocation_bytes": 143897,
-              "reallocation_calls": 1262
+              "allocation_bytes": 40252742,
+              "allocation_calls": 797812,
+              "deallocation_bytes": 44751304,
+              "deallocation_calls": 795862,
+              "reallocation_bytes": 8692535,
+              "reallocation_calls": 199986
             },
-            "cpu_ms": 359.375,
-            "limit": 1,
-            "peak_rss_bytes": 24993792,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
-            "target": "src/rust_target.rs",
-            "wall_ms": 232.37849993165582
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 41434022,
-              "allocation_calls": 840891,
-              "deallocation_bytes": 45816424,
-              "deallocation_calls": 838941,
-              "reallocation_bytes": 9737975,
-              "reallocation_calls": 214506
-            },
-            "cpu_ms": 1125.0,
+            "cpu_ms": 687.5,
             "limit": 500,
-            "peak_rss_bytes": 31948800,
+            "peak_rss_bytes": 32358400,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 38775,
             "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
             "target": "src/rust_target.rs",
-            "wall_ms": 1065.6680000247434
+            "wall_ms": 750.0884999753907
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 41434022,
-              "allocation_calls": 840891,
-              "deallocation_bytes": 45816424,
-              "deallocation_calls": 838941,
-              "reallocation_bytes": 9737975,
-              "reallocation_calls": 214506
+              "allocation_bytes": 40252742,
+              "allocation_calls": 797812,
+              "deallocation_bytes": 44751304,
+              "deallocation_calls": 795862,
+              "reallocation_bytes": 8692535,
+              "reallocation_calls": 199986
             },
-            "cpu_ms": 1031.25,
+            "cpu_ms": 718.75,
             "limit": 500,
-            "peak_rss_bytes": 32174080,
+            "peak_rss_bytes": 32284672,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 38775,
             "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
             "target": "src/rust_target.rs",
-            "wall_ms": 1090.6116999685764
+            "wall_ms": 763.1277000764385
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 41434022,
-              "allocation_calls": 840891,
-              "deallocation_bytes": 45816424,
-              "deallocation_calls": 838941,
-              "reallocation_bytes": 9737975,
-              "reallocation_calls": 214506
+              "allocation_bytes": 40252742,
+              "allocation_calls": 797812,
+              "deallocation_bytes": 44751304,
+              "deallocation_calls": 795862,
+              "reallocation_bytes": 8692535,
+              "reallocation_calls": 199986
             },
-            "cpu_ms": 921.875,
+            "cpu_ms": 718.75,
             "limit": 500,
-            "peak_rss_bytes": 32018432,
+            "peak_rss_bytes": 32649216,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 38775,
             "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
             "target": "src/rust_target.rs",
-            "wall_ms": 949.7673000441864
+            "wall_ms": 760.5200000107288
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 33802688,
-              "allocation_calls": 769844,
-              "deallocation_bytes": 36837098,
-              "deallocation_calls": 767894,
-              "reallocation_bytes": 11214637,
-              "reallocation_calls": 232236
+              "allocation_bytes": 28656128,
+              "allocation_calls": 712485,
+              "deallocation_bytes": 31806698,
+              "deallocation_calls": 710535,
+              "reallocation_bytes": 6684397,
+              "reallocation_calls": 217716
             },
-            "cpu_ms": 984.375,
-            "limit": 500,
-            "peak_rss_bytes": 25927680,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 39741,
-            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
-            "target": "src/ts_target.ts",
-            "wall_ms": 1077.3376999422908
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 33802688,
-              "allocation_calls": 769844,
-              "deallocation_bytes": 36837098,
-              "deallocation_calls": 767894,
-              "reallocation_bytes": 11214637,
-              "reallocation_calls": 232236
-            },
-            "cpu_ms": 1109.375,
-            "limit": 500,
-            "peak_rss_bytes": 25853952,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 39741,
-            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
-            "target": "src/ts_target.ts",
-            "wall_ms": 949.6593999210745
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 33802688,
-              "allocation_calls": 769844,
-              "deallocation_bytes": 36837098,
-              "deallocation_calls": 767894,
-              "reallocation_bytes": 11214637,
-              "reallocation_calls": 232236
-            },
-            "cpu_ms": 984.375,
-            "limit": 500,
-            "peak_rss_bytes": 25989120,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 39741,
-            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
-            "target": "src/ts_target.ts",
-            "wall_ms": 890.2948000468314
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 54897461,
-              "allocation_calls": 932470,
-              "deallocation_bytes": 63530418,
-              "deallocation_calls": 929673,
-              "reallocation_bytes": 22662659,
-              "reallocation_calls": 514024
-            },
-            "cpu_ms": 1421.875,
+            "cpu_ms": 593.75,
             "limit": 500,
             "peak_rss_bytes": 26161152,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 37083,
-            "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
-            "target": "src/package/py_target.py",
-            "wall_ms": 1464.7173999110237
+            "stdout_bytes": 39741,
+            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
+            "target": "src/ts_target.ts",
+            "wall_ms": 640.0929999072105
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 54897461,
-              "allocation_calls": 932470,
-              "deallocation_bytes": 63530418,
-              "deallocation_calls": 929673,
-              "reallocation_bytes": 22662659,
-              "reallocation_calls": 514024
+              "allocation_bytes": 28656128,
+              "allocation_calls": 712485,
+              "deallocation_bytes": 31806698,
+              "deallocation_calls": 710535,
+              "reallocation_bytes": 6684397,
+              "reallocation_calls": 217716
             },
-            "cpu_ms": 1453.125,
+            "cpu_ms": 734.375,
             "limit": 500,
-            "peak_rss_bytes": 26234880,
+            "peak_rss_bytes": 26099712,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 39741,
+            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
+            "target": "src/ts_target.ts",
+            "wall_ms": 858.8664000853896
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 28656128,
+              "allocation_calls": 712485,
+              "deallocation_bytes": 31806698,
+              "deallocation_calls": 710535,
+              "reallocation_bytes": 6684397,
+              "reallocation_calls": 217716
+            },
+            "cpu_ms": 796.875,
+            "limit": 500,
+            "peak_rss_bytes": 26124288,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 39741,
+            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
+            "target": "src/ts_target.ts",
+            "wall_ms": 634.6238000551239
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 49722101,
+              "allocation_calls": 875111,
+              "deallocation_bytes": 58471218,
+              "deallocation_calls": 872314,
+              "reallocation_bytes": 18132419,
+              "reallocation_calls": 499504
+            },
+            "cpu_ms": 1046.875,
+            "limit": 500,
+            "peak_rss_bytes": 26152960,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 37083,
             "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
             "target": "src/package/py_target.py",
-            "wall_ms": 1304.0180000243708
+            "wall_ms": 926.004899898544
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 54897461,
-              "allocation_calls": 932470,
-              "deallocation_bytes": 63530418,
-              "deallocation_calls": 929673,
-              "reallocation_bytes": 22662659,
-              "reallocation_calls": 514024
+              "allocation_bytes": 49722101,
+              "allocation_calls": 875111,
+              "deallocation_bytes": 58471218,
+              "deallocation_calls": 872314,
+              "reallocation_bytes": 18132419,
+              "reallocation_calls": 499504
             },
-            "cpu_ms": 1328.125,
+            "cpu_ms": 859.375,
             "limit": 500,
-            "peak_rss_bytes": 25915392,
+            "peak_rss_bytes": 26136576,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 37083,
             "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
             "target": "src/package/py_target.py",
-            "wall_ms": 1443.9640999771655
+            "wall_ms": 920.7259999820963
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 49722101,
+              "allocation_calls": 875111,
+              "deallocation_bytes": 58471218,
+              "deallocation_calls": 872314,
+              "reallocation_bytes": 18132419,
+              "reallocation_calls": 499504
+            },
+            "cpu_ms": 875.0,
+            "limit": 500,
+            "peak_rss_bytes": 26353664,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 37083,
+            "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
+            "target": "src/package/py_target.py",
+            "wall_ms": 925.954099977389
           }
         ],
         "targets": [
@@ -3546,12 +3546,12 @@
       },
       "small": {
         "aggregate": {
-          "allocation_bytes": 67981.0,
-          "allocation_calls": 1017.5,
-          "cpu_ms": 164.0625,
-          "peak_rss_bytes": 24016896.0,
+          "allocation_bytes": 67265.0,
+          "allocation_calls": 1006.0,
+          "cpu_ms": 156.25,
+          "peak_rss_bytes": 24115200.0,
           "stdout_bytes": 2540.0,
-          "wall_ms": 193.3203000226058
+          "wall_ms": 193.9945500344038
         },
         "query_plan_evidence": {
           "by_family": {
@@ -3666,243 +3666,243 @@
         "runs": [
           {
             "allocation_metrics": {
-              "allocation_bytes": 34017,
-              "allocation_calls": 456,
-              "deallocation_bytes": 30747,
-              "deallocation_calls": 410,
-              "reallocation_bytes": 4881,
-              "reallocation_calls": 56
+              "allocation_bytes": 34050,
+              "allocation_calls": 455,
+              "deallocation_bytes": 30796,
+              "deallocation_calls": 409,
+              "reallocation_bytes": 4737,
+              "reallocation_calls": 54
+            },
+            "cpu_ms": 171.875,
+            "limit": 1,
+            "peak_rss_bytes": 24244224,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1800,
+            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
+            "target": "src/rust_target.rs",
+            "wall_ms": 195.6391999265179
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 34050,
+              "allocation_calls": 455,
+              "deallocation_bytes": 30796,
+              "deallocation_calls": 409,
+              "reallocation_bytes": 4737,
+              "reallocation_calls": 54
+            },
+            "cpu_ms": 156.25,
+            "limit": 1,
+            "peak_rss_bytes": 24190976,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1800,
+            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
+            "target": "src/rust_target.rs",
+            "wall_ms": 194.028600002639
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 34050,
+              "allocation_calls": 455,
+              "deallocation_bytes": 30796,
+              "deallocation_calls": 409,
+              "reallocation_bytes": 4737,
+              "reallocation_calls": 54
+            },
+            "cpu_ms": 156.25,
+            "limit": 1,
+            "peak_rss_bytes": 24100864,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1800,
+            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
+            "target": "src/rust_target.rs",
+            "wall_ms": 191.80899998173118
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 68931,
+              "allocation_calls": 1020,
+              "deallocation_bytes": 68454,
+              "deallocation_calls": 944,
+              "reallocation_bytes": 15717,
+              "reallocation_calls": 200
+            },
+            "cpu_ms": 156.25,
+            "limit": 500,
+            "peak_rss_bytes": 24088576,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "wall_ms": 198.69450002443045
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 68931,
+              "allocation_calls": 1020,
+              "deallocation_bytes": 68454,
+              "deallocation_calls": 944,
+              "reallocation_bytes": 15717,
+              "reallocation_calls": 200
             },
             "cpu_ms": 218.75,
-            "limit": 1,
-            "peak_rss_bytes": 24023040,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1800,
-            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
-            "target": "src/rust_target.rs",
-            "wall_ms": 191.15460000466555
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 34017,
-              "allocation_calls": 456,
-              "deallocation_bytes": 30747,
-              "deallocation_calls": 410,
-              "reallocation_bytes": 4881,
-              "reallocation_calls": 56
-            },
-            "cpu_ms": 156.25,
-            "limit": 1,
-            "peak_rss_bytes": 24096768,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1800,
-            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
-            "target": "src/rust_target.rs",
-            "wall_ms": 198.05180002003908
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 34017,
-              "allocation_calls": 456,
-              "deallocation_bytes": 30747,
-              "deallocation_calls": 410,
-              "reallocation_bytes": 4881,
-              "reallocation_calls": 56
-            },
-            "cpu_ms": 187.5,
-            "limit": 1,
-            "peak_rss_bytes": 23924736,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1800,
-            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
-            "target": "src/rust_target.rs",
-            "wall_ms": 202.6688999030739
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 69147,
-              "allocation_calls": 1030,
-              "deallocation_bytes": 68630,
-              "deallocation_calls": 954,
-              "reallocation_bytes": 16077,
-              "reallocation_calls": 205
-            },
-            "cpu_ms": 187.5,
             "limit": 500,
-            "peak_rss_bytes": 23924736,
+            "peak_rss_bytes": 24076288,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2565,
             "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
             "target": "src/rust_target.rs",
-            "wall_ms": 206.5366000169888
+            "wall_ms": 192.49470008071512
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 69147,
-              "allocation_calls": 1030,
-              "deallocation_bytes": 68630,
-              "deallocation_calls": 954,
-              "reallocation_bytes": 16077,
-              "reallocation_calls": 205
+              "allocation_bytes": 68931,
+              "allocation_calls": 1020,
+              "deallocation_bytes": 68454,
+              "deallocation_calls": 944,
+              "reallocation_bytes": 15717,
+              "reallocation_calls": 200
+            },
+            "cpu_ms": 187.5,
+            "limit": 500,
+            "peak_rss_bytes": 24072192,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "wall_ms": 191.9237000402063
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 65599,
+              "allocation_calls": 992,
+              "deallocation_bytes": 65178,
+              "deallocation_calls": 919,
+              "reallocation_bytes": 15135,
+              "reallocation_calls": 198
             },
             "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 24227840,
+            "peak_rss_bytes": 24182784,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "wall_ms": 193.33939999341965
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "wall_ms": 197.4546000128612
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 69147,
-              "allocation_calls": 1030,
-              "deallocation_bytes": 68630,
-              "deallocation_calls": 954,
-              "reallocation_bytes": 16077,
-              "reallocation_calls": 205
+              "allocation_bytes": 65599,
+              "allocation_calls": 992,
+              "deallocation_bytes": 65178,
+              "deallocation_calls": 919,
+              "reallocation_bytes": 15135,
+              "reallocation_calls": 198
             },
             "cpu_ms": 187.5,
             "limit": 500,
-            "peak_rss_bytes": 23826432,
+            "peak_rss_bytes": 24113152,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "wall_ms": 192.90669995825738
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "wall_ms": 197.85789994057268
           },
           {
             "allocation_metrics": {
-              "allocation_bytes": 66815,
-              "allocation_calls": 1005,
-              "deallocation_bytes": 66354,
-              "deallocation_calls": 932,
-              "reallocation_bytes": 16695,
-              "reallocation_calls": 203
+              "allocation_bytes": 65599,
+              "allocation_calls": 992,
+              "deallocation_bytes": 65178,
+              "deallocation_calls": 919,
+              "reallocation_bytes": 15135,
+              "reallocation_calls": 198
+            },
+            "cpu_ms": 156.25,
+            "limit": 500,
+            "peak_rss_bytes": 24182784,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "wall_ms": 193.9605000661686
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 86438,
+              "allocation_calls": 1192,
+              "deallocation_bytes": 84926,
+              "deallocation_calls": 1084,
+              "reallocation_bytes": 24210,
+              "reallocation_calls": 359
+            },
+            "cpu_ms": 156.25,
+            "limit": 500,
+            "peak_rss_bytes": 24117248,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2515,
+            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
+            "target": "src/package/py_target.py",
+            "wall_ms": 198.08810006361455
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 86438,
+              "allocation_calls": 1192,
+              "deallocation_bytes": 84926,
+              "deallocation_calls": 1084,
+              "reallocation_bytes": 24210,
+              "reallocation_calls": 359
+            },
+            "cpu_ms": 140.625,
+            "limit": 500,
+            "peak_rss_bytes": 24043520,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2515,
+            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
+            "target": "src/package/py_target.py",
+            "wall_ms": 192.5158000085503
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 86438,
+              "allocation_calls": 1192,
+              "deallocation_bytes": 84926,
+              "deallocation_calls": 1084,
+              "reallocation_bytes": 24210,
+              "reallocation_calls": 359
             },
             "cpu_ms": 171.875,
             "limit": 500,
-            "peak_rss_bytes": 24129536,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
-            "wall_ms": 202.3938000202179
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 66815,
-              "allocation_calls": 1005,
-              "deallocation_bytes": 66354,
-              "deallocation_calls": 932,
-              "reallocation_bytes": 16695,
-              "reallocation_calls": 203
-            },
-            "cpu_ms": 156.25,
-            "limit": 500,
-            "peak_rss_bytes": 23883776,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
-            "wall_ms": 192.04989995341748
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 66815,
-              "allocation_calls": 1005,
-              "deallocation_bytes": 66354,
-              "deallocation_calls": 932,
-              "reallocation_bytes": 16695,
-              "reallocation_calls": 203
-            },
-            "cpu_ms": 140.625,
-            "limit": 500,
-            "peak_rss_bytes": 24010752,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
-            "wall_ms": 190.28470001649112
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 87662,
-              "allocation_calls": 1205,
-              "deallocation_bytes": 86110,
-              "deallocation_calls": 1097,
-              "reallocation_bytes": 25770,
-              "reallocation_calls": 364
-            },
-            "cpu_ms": 140.625,
-            "limit": 500,
-            "peak_rss_bytes": 23912448,
+            "peak_rss_bytes": 24178688,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2515,
             "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
             "target": "src/package/py_target.py",
-            "wall_ms": 193.30120005179197
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 87662,
-              "allocation_calls": 1205,
-              "deallocation_bytes": 86110,
-              "deallocation_calls": 1097,
-              "reallocation_bytes": 25770,
-              "reallocation_calls": 364
-            },
-            "cpu_ms": 171.875,
-            "limit": 500,
-            "peak_rss_bytes": 24145920,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2515,
-            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
-            "target": "src/package/py_target.py",
-            "wall_ms": 191.15810003131628
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 87662,
-              "allocation_calls": 1205,
-              "deallocation_bytes": 86110,
-              "deallocation_calls": 1097,
-              "reallocation_bytes": 25770,
-              "reallocation_calls": 364
-            },
-            "cpu_ms": 140.625,
-            "limit": 500,
-            "peak_rss_bytes": 24084480,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2515,
-            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
-            "target": "src/package/py_target.py",
-            "wall_ms": 195.21720008924603
+            "wall_ms": 193.29810002818704
           }
         ],
         "targets": [
@@ -3936,7 +3936,7 @@
   },
   "candidate_patch_preflight": {
     "baseline_source_sha256": "e61ec46ef05de848bd9367fff6957870f9af395dcd1fa878255e1dc54c061712",
-    "repository_revision": "02ed53fcdbe0c855fa0bce453529c7407146f2ce",
+    "repository_revision": "0243d5c6da0e66210abbe1c95b2815d651a77c2d",
     "status": "passed"
   },
   "decision": {
@@ -3952,11 +3952,11 @@
       "small_max_regression_fraction": 0.05
     },
     "wall_change_fraction": {
-      "duplicate-alias": 0.03288895875214903,
-      "high-import": -0.006687571171347254,
-      "high-symbol": 0.011569036751392906,
-      "representative-large": 0.13975038020370611,
-      "small": -0.01138096551949265
+      "duplicate-alias": 0.002400178180215192,
+      "high-import": -0.012128970728717358,
+      "high-symbol": -0.018461377687713797,
+      "representative-large": -0.15944586725815113,
+      "small": -0.006174442405253847
     }
   },
   "failure_cases": {
@@ -3971,37 +3971,37 @@
           "reallocation_calls": 170
         },
         "case": "corrupt-relation",
-        "cpu_ms": 156.25,
+        "cpu_ms": 125.0,
         "diagnostic": "error: sqlite error: Invalid column type Text at index: 4, name: line\n",
-        "peak_rss_bytes": 22433792,
+        "peak_rss_bytes": 22327296,
         "returncode": 1,
         "stderr_bytes": 70,
         "stderr_sha256": "af7c0330be60c8e95ea61672654fe8cd87c5f7c1c5b57b3379716ab1da246e8c",
         "stdout_bytes": 0,
         "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "target": "src/rust_target.rs",
-        "wall_ms": 168.24370005633682
+        "wall_ms": 164.1065999865532
       },
       "candidate": {
         "allocation_metrics": {
-          "allocation_bytes": 55564,
-          "allocation_calls": 818,
-          "deallocation_bytes": 59163,
-          "deallocation_calls": 800,
-          "reallocation_bytes": 12301,
-          "reallocation_calls": 170
+          "allocation_bytes": 55348,
+          "allocation_calls": 808,
+          "deallocation_bytes": 58987,
+          "deallocation_calls": 790,
+          "reallocation_bytes": 11941,
+          "reallocation_calls": 165
         },
         "case": "corrupt-relation",
-        "cpu_ms": 156.25,
+        "cpu_ms": 140.625,
         "diagnostic": "error: sqlite error: Invalid column type Text at index: 4, name: line\n",
-        "peak_rss_bytes": 22368256,
+        "peak_rss_bytes": 22417408,
         "returncode": 1,
         "stderr_bytes": 70,
         "stderr_sha256": "af7c0330be60c8e95ea61672654fe8cd87c5f7c1c5b57b3379716ab1da246e8c",
         "stdout_bytes": 0,
         "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "target": "src/rust_target.rs",
-        "wall_ms": 166.55149997677654
+        "wall_ms": 165.63439997844398
       }
     },
     "missing-summary": {
@@ -4010,28 +4010,28 @@
         "case": "missing-summary",
         "cpu_ms": 140.625,
         "diagnostic": "error: invalid input: file \"src/missing.rs\" is not indexed\n",
-        "peak_rss_bytes": 20869120,
+        "peak_rss_bytes": 20455424,
         "returncode": 1,
         "stderr_bytes": 59,
         "stderr_sha256": "d7918848ac4c48843ccecb85dadba65320a5ae44b36bbfebb42cc450edd3668c",
         "stdout_bytes": 0,
         "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "target": "src/missing.rs",
-        "wall_ms": 173.34440001286566
+        "wall_ms": 169.74990000016987
       },
       "candidate": {
         "allocation_metrics": null,
         "case": "missing-summary",
-        "cpu_ms": 125.0,
+        "cpu_ms": 187.5,
         "diagnostic": "error: invalid input: file \"src/missing.rs\" is not indexed\n",
-        "peak_rss_bytes": 20598784,
+        "peak_rss_bytes": 20725760,
         "returncode": 1,
         "stderr_bytes": 59,
         "stderr_sha256": "d7918848ac4c48843ccecb85dadba65320a5ae44b36bbfebb42cc450edd3668c",
         "stdout_bytes": 0,
         "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "target": "src/missing.rs",
-        "wall_ms": 173.84320008568466
+        "wall_ms": 161.80569992866367
       }
     },
     "stale-source": {
@@ -4045,7 +4045,7 @@
           "reallocation_calls": 96
         },
         "case": "stale-source",
-        "cpu_ms": 218.75,
+        "cpu_ms": 250.0,
         "decoded_summary": {
           "file_path": "src/rust_target.rs",
           "functions": [
@@ -4073,26 +4073,26 @@
           "symbol_count": 2,
           "truncated": false
         },
-        "peak_rss_bytes": 28495872,
+        "peak_rss_bytes": 28942336,
         "returncode": 0,
         "stderr_bytes": 0,
         "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "stdout_bytes": 2041,
         "stdout_sha256": "06430376350f952df5f524c55c9df047f08a4b4e7a0804eae4709d0e0b5876da",
         "target": "src/rust_target.rs",
-        "wall_ms": 340.76199994888157
+        "wall_ms": 325.3416999941692
       },
       "candidate": {
         "allocation_metrics": {
-          "allocation_bytes": 40799,
-          "allocation_calls": 597,
-          "deallocation_bytes": 37472,
-          "deallocation_calls": 541,
-          "reallocation_bytes": 6709,
-          "reallocation_calls": 96
+          "allocation_bytes": 40749,
+          "allocation_calls": 593,
+          "deallocation_bytes": 37446,
+          "deallocation_calls": 537,
+          "reallocation_bytes": 6493,
+          "reallocation_calls": 93
         },
         "case": "stale-source",
-        "cpu_ms": 234.375,
+        "cpu_ms": 265.625,
         "decoded_summary": {
           "file_path": "src/rust_target.rs",
           "functions": [
@@ -4120,14 +4120,14 @@
           "symbol_count": 2,
           "truncated": false
         },
-        "peak_rss_bytes": 28000256,
+        "peak_rss_bytes": 28794880,
         "returncode": 0,
         "stderr_bytes": 0,
         "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "stdout_bytes": 2041,
         "stdout_sha256": "06430376350f952df5f524c55c9df047f08a4b4e7a0804eae4709d0e0b5876da",
         "target": "src/rust_target.rs",
-        "wall_ms": 329.9824999412522
+        "wall_ms": 325.99339995067567
       }
     }
   },
@@ -4145,6 +4145,48 @@
         "deallocation_calls": 471,
         "reallocation_bytes": 7974,
         "reallocation_calls": 91
+      },
+      "case": "python-multi-binding-same-local-alias",
+      "cpu_ms": 218.75,
+      "decoded_summary": {
+        "file_path": "src/package/py_target.py",
+        "functions": [
+          {
+            "called_by": [
+              "src/py_caller.py::caller"
+            ],
+            "kind": "function",
+            "line": 1,
+            "name": "a"
+          }
+        ],
+        "language": "python",
+        "limit": 1,
+        "line_count": 5,
+        "parser_kind": "tree-sitter-symbol-graph",
+        "source_status": "live-source",
+        "summary_status": "ok",
+        "symbol_count": 2,
+        "truncated": true
+      },
+      "limit": 1,
+      "peak_rss_bytes": 23945216,
+      "returncode": 0,
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 1715,
+      "stdout_sha256": "289605b415dbf8a4a60bc30104898197c44587a61cd15a797fa0500cb9e6b0aa",
+      "target": "src/package/py_target.py",
+      "wall_ms": 431.44120008219033
+    },
+    "candidate": {
+      "allocation_metrics": {
+        "allocation_bytes": 39484,
+        "allocation_calls": 526,
+        "deallocation_bytes": 35431,
+        "deallocation_calls": 466,
+        "reallocation_bytes": 7350,
+        "reallocation_calls": 89
       },
       "case": "python-multi-binding-same-local-alias",
       "cpu_ms": 171.875,
@@ -4170,67 +4212,25 @@
         "truncated": true
       },
       "limit": 1,
-      "peak_rss_bytes": 23818240,
+      "peak_rss_bytes": 24285184,
       "returncode": 0,
       "stderr_bytes": 0,
       "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "stdout_bytes": 1715,
       "stdout_sha256": "289605b415dbf8a4a60bc30104898197c44587a61cd15a797fa0500cb9e6b0aa",
       "target": "src/package/py_target.py",
-      "wall_ms": 194.61350003257394
-    },
-    "candidate": {
-      "allocation_metrics": {
-        "allocation_bytes": 39646,
-        "allocation_calls": 531,
-        "deallocation_bytes": 35577,
-        "deallocation_calls": 471,
-        "reallocation_bytes": 7974,
-        "reallocation_calls": 91
-      },
-      "case": "python-multi-binding-same-local-alias",
-      "cpu_ms": 203.125,
-      "decoded_summary": {
-        "file_path": "src/package/py_target.py",
-        "functions": [
-          {
-            "called_by": [
-              "src/py_caller.py::caller"
-            ],
-            "kind": "function",
-            "line": 1,
-            "name": "a"
-          }
-        ],
-        "language": "python",
-        "limit": 1,
-        "line_count": 5,
-        "parser_kind": "tree-sitter-symbol-graph",
-        "source_status": "live-source",
-        "summary_status": "ok",
-        "symbol_count": 2,
-        "truncated": true
-      },
-      "limit": 1,
-      "peak_rss_bytes": 23871488,
-      "returncode": 0,
-      "stderr_bytes": 0,
-      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "stdout_bytes": 1715,
-      "stdout_sha256": "289605b415dbf8a4a60bc30104898197c44587a61cd15a797fa0500cb9e6b0aa",
-      "target": "src/package/py_target.py",
-      "wall_ms": 224.57700001541525
+      "wall_ms": 427.57900001015514
     }
   },
   "repeats": 3,
-  "repository_revision": "02ed53fcdbe0c855fa0bce453529c7407146f2ce",
+  "repository_revision": "0243d5c6da0e66210abbe1c95b2815d651a77c2d",
   "reproduction": {
     "note": "Full raw streams remain in ignored local output and are recoverable by rerunning the existing harness; this tracked file contains only bounded review evidence.",
-    "raw_trace_bytes": 35645423,
+    "raw_trace_bytes": 35645404,
     "raw_trace_ignored": true,
-    "raw_trace_path": "target/benchmarks/reverse-caller/02ed53fcdbe0c855fa0bce453529c7407146f2ce-full-results.json",
+    "raw_trace_path": "target/benchmarks/reverse-caller/0243d5c6-full-results.json",
     "raw_trace_schema": "projectatlas.reverse-caller-performance.v5",
-    "raw_trace_sha256": "ffc0f4bc725e7ef73af723faffa13157bdd89bf89e89633e489f5bfd7f3092b0"
+    "raw_trace_sha256": "2f55230c6302ced431ddfeae60b842c2ec239c4222f9c1d773f50821ed7c7dcd"
   },
   "schema": "projectatlas.reverse-caller-performance.v5"
 }

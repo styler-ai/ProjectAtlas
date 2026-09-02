@@ -21,10 +21,10 @@
 
 ## 4. Reverse-caller performance decision (#342)
 
-- [ ] 4.1 Benchmark the current `load_import_relations_for_symbols -> import_alias_map -> called_by_map` path on small, high-symbol, high-import, duplicate-alias, and large representative SQLite databases; record wall/CPU/RSS/allocations, statements/rows/bytes, `EXPLAIN QUERY PLAN`, and output bytes, and freeze a material-improvement threshold before changing code.
-- [ ] 4.2 Compare the current path with the smallest shared candidate, preserving exact symbol identity, Rust/TypeScript/Python aliases, ambiguity rejection, per-target fairness, deterministic ordering, truncation, freshness, cancellation, and all-or-error SQLite failure behavior.
-- [ ] 4.3 Adopt only the measured winner at the shared service/database boundary or retain current code with reproducible no-change evidence; run the existing alias unit/E2E checks plus negative, stale, duplicate, large, corrupt-row, bounded-output, and representative-plan checks.
-- [ ] 4.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 4.1 Benchmark the current `load_import_relations_for_symbols -> import_alias_map -> called_by_map` path on small, high-symbol, high-import, duplicate-alias, and large representative SQLite databases; record wall/CPU/RSS/allocations, statements/rows/bytes, `EXPLAIN QUERY PLAN`, and output bytes, and freeze a material-improvement threshold before changing code.
+- [x] 4.2 Compare the current path with the smallest shared candidate, preserving exact symbol identity, Rust/TypeScript/Python aliases, ambiguity rejection, per-target fairness, deterministic ordering, truncation, freshness, cancellation, and all-or-error SQLite failure behavior.
+- [x] 4.3 Adopt only the measured winner at the shared service/database boundary or retain current code with reproducible no-change evidence; run the existing alias unit/E2E checks plus negative, stale, duplicate, large, corrupt-row, bounded-output, and representative-plan checks.
+- [x] 4.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 5. Graph-construction scale and parallelism (#358)
 
