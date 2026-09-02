@@ -1489,25 +1489,39 @@ mod windows_file_identity {
 
 /// Read exactly one `prefix path` pointer record.
 fn read_prefixed_pointer(path: &Path, prefix: &str) -> Result<PathBuf, GitStructureIssue> {
-    let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
-    let value = single_pointer_line(path, &text)?;
-    let Some(value) = value.strip_prefix(prefix).map(str::trim) else {
+    let bytes = read_bounded_bytes(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
+    let value = single_pointer_line_bytes(path, &bytes)?;
+    let Some(value) = value
+        .strip_prefix(prefix.as_bytes())
+        .map(trim_pointer_whitespace)
+    else {
         return Err(issue(
             path.to_path_buf(),
-            GitStructureIssueKind::MalformedPointer,
+            if std::str::from_utf8(value).is_err() {
+                GitStructureIssueKind::PointerNotUtf8
+            } else {
+                GitStructureIssueKind::MalformedPointer
+            },
         ));
     };
-    path_value(path, value)
+    path_value_bytes(path, value)
 }
 
 /// Read exactly one plain path pointer record.
 fn read_plain_pointer(path: &Path) -> Result<PathBuf, GitStructureIssue> {
-    let text = read_bounded_text(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
-    path_value(path, single_pointer_line(path, &text)?)
+    let bytes = read_bounded_bytes(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
+    path_value_bytes(path, single_pointer_line_bytes(path, &bytes)?)
 }
 
 /// Read one bounded UTF-8 control file without following a symbolic-link leaf.
 fn read_bounded_text(path: &Path, limit: u64) -> Result<String, GitStructureIssue> {
+    let bytes = read_bounded_bytes(path, limit)?;
+    String::from_utf8(bytes)
+        .map_err(|_source| issue(path.to_path_buf(), GitStructureIssueKind::PointerNotUtf8))
+}
+
+/// Read one bounded control file without following a symbolic-link leaf.
+fn read_bounded_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, GitStructureIssue> {
     let metadata = structural_metadata(path)?;
     if !metadata.is_file() {
         return Err(issue(
@@ -1553,20 +1567,25 @@ fn read_bounded_text(path: &Path, limit: u64) -> Result<String, GitStructureIssu
             },
         ));
     }
-    String::from_utf8(bytes)
-        .map_err(|_source| issue(path.to_path_buf(), GitStructureIssueKind::PointerNotUtf8))
+    Ok(bytes)
 }
 
-/// Return one non-empty path record and reject ambiguous extra content.
-fn single_pointer_line<'a>(path: &Path, text: &'a str) -> Result<&'a str, GitStructureIssue> {
-    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+/// Return one non-empty native path record and reject ambiguous extra content.
+fn single_pointer_line_bytes<'a>(
+    path: &Path,
+    bytes: &'a [u8],
+) -> Result<&'a [u8], GitStructureIssue> {
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .map(trim_pointer_whitespace)
+        .filter(|line| !line.is_empty());
     let Some(value) = lines.next() else {
         return Err(issue(
             path.to_path_buf(),
             GitStructureIssueKind::MalformedPointer,
         ));
     };
-    if lines.next().is_some() || value.contains('\0') {
+    if lines.next().is_some() || value.contains(&0) {
         return Err(issue(
             path.to_path_buf(),
             GitStructureIssueKind::MalformedPointer,
@@ -1575,15 +1594,31 @@ fn single_pointer_line<'a>(path: &Path, text: &'a str) -> Result<&'a str, GitStr
     Ok(value)
 }
 
-/// Convert one non-empty path record into a platform path.
-fn path_value(path: &Path, value: &str) -> Result<PathBuf, GitStructureIssue> {
+/// Trim only the ASCII whitespace accepted around Git pointer records.
+fn trim_pointer_whitespace(value: &[u8]) -> &[u8] {
+    value.trim_ascii_start().trim_ascii_end()
+}
+
+/// Convert one non-empty native path record into a platform path.
+fn path_value_bytes(path: &Path, value: &[u8]) -> Result<PathBuf, GitStructureIssue> {
     if value.is_empty() {
-        Err(issue(
+        return Err(issue(
             path.to_path_buf(),
             GitStructureIssueKind::MalformedPointer,
-        ))
-    } else {
-        Ok(PathBuf::from(value))
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        Ok(PathBuf::from(OsString::from_vec(value.to_vec())))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(value.to_vec())
+            .map(PathBuf::from)
+            .map_err(|_source| issue(path.to_path_buf(), GitStructureIssueKind::PointerNotUtf8))
     }
 }
 
