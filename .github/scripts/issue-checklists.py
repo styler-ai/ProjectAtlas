@@ -9,7 +9,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -28,6 +30,8 @@ ARCHITECTURE_NA_RE = re.compile(r"(?is)^N/A:\s*(\S(?:.*\S)?)$")
 GITHUB_RENDERED_HEADING_PREFIX = "user-content-"
 IMPLEMENTATION_TASK_HEADING = "implementation tasks"
 ACCEPTANCE_TASK_HEADING = "acceptance and review tasks"
+MERMAID_ATTEMPT_TIMEOUT_SECONDS = 30
+MERMAID_VALIDATION_BUDGET_SECONDS = 120
 ACCEPTANCE_REVIEW_TASKS = (
     "Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary.",
     "Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding.",
@@ -157,6 +161,26 @@ class Owner:
     issue: int
     first_task: str | None = None
     last_task: str | None = None
+
+
+class MermaidValidationOutcome(Enum):
+    VALID = "valid"
+    INVALID = "invalid syntax"
+    TIMED_OUT = "timed out"
+    UNAVAILABLE = "unavailable execution"
+
+
+class MermaidValidationBudget:
+    """One fixed parser deadline shared by an IssueOps validation run."""
+
+    def __init__(self) -> None:
+        self.deadline = time.monotonic() + MERMAID_VALIDATION_BUDGET_SECONDS
+
+    def can_admit(self, attempts: int) -> bool:
+        return (
+            self.deadline - time.monotonic()
+            >= attempts * MERMAID_ATTEMPT_TIMEOUT_SECONDS
+        )
 
 
 def run(args: list[str]) -> str:
@@ -393,36 +417,80 @@ def mermaid_diagram_blocks(section: str) -> list[str]:
     return diagrams
 
 
-@lru_cache(maxsize=64)
-def mermaid_syntax_is_valid(diagram: str) -> bool:
-    """Validate one diagram with the repository-locked Mermaid parser."""
+def _run_mermaid_parser(diagram: str) -> MermaidValidationOutcome:
+    """Run one uncached attempt against the repository-locked Mermaid parser."""
 
     node = shutil.which("node")
     validator = Path(__file__).resolve().parents[1] / "mermaid-parser" / "validate.mjs"
     mermaid_package = validator.parent / "node_modules" / "mermaid" / "package.json"
     if node is None or not mermaid_package.is_file():
-        raise RuntimeError(
-            "IssueOps Mermaid validation requires `npm ci --ignore-scripts --prefix "
-            ".github/mermaid-parser`"
-        )
+        return MermaidValidationOutcome.UNAVAILABLE
+    return _run_mermaid_process([node, str(validator)], diagram)
+
+
+def _run_mermaid_process(command: list[str], diagram: str) -> MermaidValidationOutcome:
+    """Run one bounded Mermaid process and preserve its failure class."""
+
     try:
         result = subprocess.run(
-            [node, str(validator)],
+            command,
             input=f"{diagram}\n",
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=MERMAID_ATTEMPT_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return False
-    return result.returncode == 0
+        return MermaidValidationOutcome.TIMED_OUT
+    except OSError:
+        return MermaidValidationOutcome.UNAVAILABLE
+    if result.returncode == 0:
+        return MermaidValidationOutcome.VALID
+    if result.returncode == 1:
+        return MermaidValidationOutcome.INVALID
+    return MermaidValidationOutcome.UNAVAILABLE
 
 
-def contains_mermaid_diagram(section: str) -> bool:
+@lru_cache(maxsize=64)
+def mermaid_syntax_is_valid(
+    diagram: str, mermaid_budget: MermaidValidationBudget | None = None
+) -> MermaidValidationOutcome:
+    """Return the final bounded result for one diagram."""
+
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
+    if not mermaid_budget.can_admit(2):
+        return MermaidValidationOutcome.TIMED_OUT
+    outcome = _run_mermaid_parser(diagram)
+    if outcome is not MermaidValidationOutcome.TIMED_OUT:
+        return outcome
+    if not mermaid_budget.can_admit(1):
+        return MermaidValidationOutcome.TIMED_OUT
+    return _run_mermaid_parser(diagram)
+
+
+def mermaid_diagram_outcomes(
+    section: str, mermaid_budget: MermaidValidationBudget | None = None
+) -> list[MermaidValidationOutcome]:
+    """Validate eligible blocks until one is accepted or blocks are exhausted."""
+
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
+    outcomes: list[MermaidValidationOutcome] = []
+    for diagram in mermaid_diagram_blocks(section):
+        outcome = mermaid_syntax_is_valid(diagram, mermaid_budget)
+        outcomes.append(outcome)
+        if outcome is MermaidValidationOutcome.VALID:
+            break
+    return outcomes
+
+
+def contains_mermaid_diagram(
+    section: str, mermaid_budget: MermaidValidationBudget | None = None
+) -> bool:
     """Return whether a fenced Mermaid block is structurally and syntactically real."""
 
-    return any(mermaid_syntax_is_valid(diagram) for diagram in mermaid_diagram_blocks(section))
+    return MermaidValidationOutcome.VALID in mermaid_diagram_outcomes(
+        section, mermaid_budget
+    )
 
 
 def parse_tasks(text: str) -> list[tuple[bool, str]]:
@@ -1018,9 +1086,15 @@ def planned_issue_failures(
     return failures
 
 
-def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> list[str]:
+def architecture_diagram_link_failures(
+    section: str,
+    repo: str,
+    root: Path,
+    mermaid_budget: MermaidValidationBudget | None = None,
+) -> list[str]:
     """Validate durable local architecture-document links for one issue section."""
 
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
     if ARCHITECTURE_NA_RE.fullmatch(section.strip()):
         return []
     if re.match(r"(?is)^\s*N/?A\b", section):
@@ -1118,11 +1192,21 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
                 failures.append(
                     f"architecture diagram link {url!r} has no matching GitHub-style heading fragment"
                 )
-            elif not contains_mermaid_diagram(diagram_section):
-                failures.append(
-                    f"architecture diagram link {url!r} must target a section containing a non-empty "
-                    "fenced Mermaid block accepted by the locked syntax parser"
-                )
+            else:
+                outcomes = mermaid_diagram_outcomes(diagram_section, mermaid_budget)
+                if MermaidValidationOutcome.VALID not in outcomes:
+                    if outcomes:
+                        classes = ", ".join(
+                            dict.fromkeys(outcome.value for outcome in outcomes)
+                        )
+                        diagnostic = f"; parser outcome: {classes}"
+                    else:
+                        diagnostic = ""
+                    failures.append(
+                        f"architecture diagram link {url!r} must target a section containing a non-empty "
+                        "fenced Mermaid block accepted by the locked syntax parser"
+                        f"{diagnostic}"
+                    )
     return failures
 
 
@@ -1195,6 +1279,7 @@ def issue_contract_failures(
     expected_tasks: list[tuple[bool, str]],
     repo: str,
     root: Path,
+    mermaid_budget: MermaidValidationBudget | None = None,
 ) -> list[str]:
     """Validate the two-list #305 issue shape and its state transition."""
 
@@ -1271,7 +1356,9 @@ def issue_contract_failures(
             visible_body, headings, architecture_indexes[0]
         )
         failures.extend(
-            architecture_diagram_link_failures(architecture_section, repo, root)
+            architecture_diagram_link_failures(
+                architecture_section, repo, root, mermaid_budget
+            )
         )
 
     try:
@@ -1488,6 +1575,7 @@ def check_pull_request_tasks(
     issue_map_path: str | Path | None = None,
     owner_issue: int | None = None,
     owner_error: str | None = None,
+    mermaid_budget: MermaidValidationBudget | None = None,
 ) -> list[str]:
     """Check one PR owner against live state and unrelated slices against its base."""
 
@@ -1579,6 +1667,7 @@ def check_pull_request_tasks(
                     f"{change} changes mapped OpenSpec owners from accepted pull-request base "
                     f"{base_ref}: expected {accepted_owners!r}, found {candidate_owners!r}"
                 )
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
     for change, owners in sorted(issue_map.items()):
         if all(issue_states[owner.issue] != "OPEN" for owner in owners):
             continue
@@ -1647,6 +1736,7 @@ def check_pull_request_tasks(
                 expected,
                 repo,
                 root,
+                mermaid_budget,
             ):
                 failures.append(f"#{owner.issue} issue contract {failure}")
     return failures
@@ -1658,6 +1748,7 @@ def check_openspec_tasks(
     issue_map: dict[str, tuple[Owner, ...]],
     planned_issue: int | None = None,
     planned_issue_payload: dict[str, object] | None = None,
+    mermaid_budget: MermaidValidationBudget | None = None,
 ) -> list[str]:
     failures: list[str] = []
     issue_states: dict[int, str] | None = None
@@ -1711,6 +1802,7 @@ def check_openspec_tasks(
         except SystemExit as error:
             return [f"#{planned_issue} issue contract {error}"]
         failures.extend(planned_issue_failures(planned_payload, issue_map, root))
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
     for change, owners in sorted(issue_map.items()):
         for owner in owners:
             if planned_issue is not None and owner.issue != planned_issue:
@@ -1754,6 +1846,7 @@ def check_openspec_tasks(
                 expected,
                 repo,
                 root,
+                mermaid_budget,
             ):
                 failures.append(f"#{owner.issue} issue contract {failure}")
     return failures
@@ -1942,6 +2035,13 @@ Mitigations:
 - [ ] Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.
 """
     self_test_root = Path(__file__).resolve().parents[2]
+    saved_mermaid_runner = _run_mermaid_parser
+
+    def default_mermaid_runner(_diagram: str) -> MermaidValidationOutcome:
+        return MermaidValidationOutcome.VALID
+
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
 
     rendered_issue_form = "\n".join(
         [
@@ -2262,6 +2362,179 @@ Mitigations:
             {"state": "OPEN", "body": invalid_na_delimiter}, expected
         )
     )
+
+    try:
+        def stub_mermaid_runner(outcomes: list[MermaidValidationOutcome]):
+            calls: list[str] = []
+            pending = iter(outcomes)
+
+            def run_stub(diagram: str) -> MermaidValidationOutcome:
+                calls.append(diagram)
+                return next(pending)
+
+            globals()["_run_mermaid_parser"] = run_stub
+            mermaid_syntax_is_valid.cache_clear()
+            return calls
+
+        timeout_then_success = """```mermaid
+flowchart LR
+Timeout --> Recovery
+```"""
+        calls = stub_mermaid_runner(
+            [MermaidValidationOutcome.TIMED_OUT, MermaidValidationOutcome.VALID]
+        )
+        assert contains_mermaid_diagram(
+            timeout_then_success, MermaidValidationBudget()
+        )
+        assert len(calls) == 2
+
+        for outcome in (
+            MermaidValidationOutcome.INVALID,
+            MermaidValidationOutcome.UNAVAILABLE,
+        ):
+            calls = stub_mermaid_runner([outcome])
+            diagram = f"```mermaid\nflowchart LR\nTerminal{outcome.name} --> End\n```"
+            assert mermaid_syntax_is_valid(diagram, MermaidValidationBudget()) is outcome
+            assert len(calls) == 1
+
+        calls = stub_mermaid_runner(
+            [MermaidValidationOutcome.INVALID, MermaidValidationOutcome.VALID]
+        )
+        assert contains_mermaid_diagram(
+            "\n".join(
+                [
+                    "```mermaid",
+                    "flowchart LR",
+                    "Invalid --> First",
+                    "```",
+                    "```mermaid",
+                    "flowchart LR",
+                    "Second --> Valid",
+                    "```",
+                ]
+            ),
+            MermaidValidationBudget(),
+        )
+        assert len(calls) == 2
+
+        budget = MermaidValidationBudget()
+        calls: list[str] = []
+
+        def exhaust_budget(diagram: str) -> MermaidValidationOutcome:
+            calls.append(diagram)
+            if len(calls) == 2:
+                budget.deadline = time.monotonic() - 1
+            return MermaidValidationOutcome.TIMED_OUT
+
+        globals()["_run_mermaid_parser"] = exhaust_budget
+        mermaid_syntax_is_valid.cache_clear()
+        outcomes = mermaid_diagram_outcomes(
+            "\n".join(
+                [
+                    "```mermaid",
+                    "flowchart LR",
+                    "Stalled --> First",
+                    "```",
+                    "```mermaid",
+                    "flowchart LR",
+                    "Never --> Spawned",
+                    "```",
+                ]
+            ),
+            budget,
+        )
+        assert outcomes == [
+            MermaidValidationOutcome.TIMED_OUT,
+            MermaidValidationOutcome.TIMED_OUT,
+        ]
+        assert len(calls) == 2
+
+        with tempfile.TemporaryDirectory() as temporary:
+            architecture_root = Path(temporary)
+            docs = architecture_root / "docs"
+            docs.mkdir()
+            architecture = docs / "target.md"
+            architecture.write_text(
+                "## Target View\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+                encoding="utf-8",
+            )
+            link = (
+                "[Target](https://github.com/owner/repo/blob/main/docs/"
+                "target.md#user-content-target-view)"
+            )
+            calls = stub_mermaid_runner(
+                [MermaidValidationOutcome.TIMED_OUT, MermaidValidationOutcome.TIMED_OUT]
+            )
+            failures = architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root, MermaidValidationBudget()
+            )
+            assert len(calls) == 2
+            assert link[link.index("https://") : -1] in failures[0]
+            assert "parser outcome: timed out" in failures[0]
+
+            calls = stub_mermaid_runner([MermaidValidationOutcome.INVALID])
+            failures = architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root, MermaidValidationBudget()
+            )
+            assert len(calls) == 1
+            assert link[link.index("https://") : -1] in failures[0]
+            assert "parser outcome: invalid syntax" in failures[0]
+
+            calls = stub_mermaid_runner([MermaidValidationOutcome.UNAVAILABLE])
+            failures = architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root, MermaidValidationBudget()
+            )
+            assert len(calls) == 1
+            assert link[link.index("https://") : -1] in failures[0]
+            assert "parser outcome: unavailable execution" in failures[0]
+
+    finally:
+        globals()["_run_mermaid_parser"] = default_mermaid_runner
+        mermaid_syntax_is_valid.cache_clear()
+
+    globals()["_run_mermaid_parser"] = saved_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
+    node = shutil.which("node")
+    validator = Path(__file__).resolve().parents[1] / "mermaid-parser" / "validate.mjs"
+    valid_outcome = mermaid_syntax_is_valid(
+        "flowchart LR\nA --> B\n", MermaidValidationBudget()
+    )
+    assert valid_outcome is MermaidValidationOutcome.VALID, valid_outcome.value
+    invalid_outcome = _run_mermaid_parser("this is not mermaid\n")
+    assert invalid_outcome is MermaidValidationOutcome.INVALID, invalid_outcome.value
+    with tempfile.TemporaryDirectory() as temporary:
+        loader = Path(temporary) / "fail-mermaid-loader.mjs"
+        loader.write_text(
+            "export async function resolve(specifier, context, nextResolve) {\n"
+            "  if (specifier === \"mermaid\") throw new Error(\"controlled bootstrap failure\");\n"
+            "  return nextResolve(specifier, context);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        assert node is not None
+        unavailable_outcome = _run_mermaid_process(
+            [node, "--experimental-loader", loader.as_uri(), str(validator)],
+            "flowchart LR\nA --> B\n",
+        )
+    assert (
+        unavailable_outcome is MermaidValidationOutcome.UNAVAILABLE
+    ), unavailable_outcome.value
+
+    saved_subprocess_run = subprocess.run
+    try:
+        def timeout_subprocess_run(*_args: object, **_kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(
+                "mermaid", MERMAID_ATTEMPT_TIMEOUT_SECONDS
+            )
+
+        subprocess.run = timeout_subprocess_run
+        timeout_outcome = _run_mermaid_parser("flowchart LR\nA --> B\n")
+    finally:
+        subprocess.run = saved_subprocess_run
+    assert timeout_outcome is MermaidValidationOutcome.TIMED_OUT
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
+
     assert contains_mermaid_diagram("```mermaid\nflowchart LR\nA --> B\n```")
     assert contains_mermaid_diagram(
         "```mermaid\n---\ntitle: Typed graph\n---\nerDiagram\nA ||--o{ B : owns\n```"
@@ -2269,9 +2542,13 @@ Mitigations:
     assert contains_mermaid_diagram(
         "```mermaid\nkanban\n  column1[Backlog]\n    task1[Add feature]\n```"
     )
+    calls = stub_mermaid_runner([MermaidValidationOutcome.INVALID])
     assert not contains_mermaid_diagram(
         "```mermaid\nflowchart LR\nthis is not valid mermaid ???\n```"
     )
+    assert len(calls) == 1
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
     assert not contains_mermaid_diagram("```mermaid\nThis is only prose.\n```")
     assert not contains_mermaid_diagram("```mermaid\nflowchart LR\n```")
     assert not contains_mermaid_diagram("```mermaid\n---\ntitle: Missing close\nflowchart LR\n```")
@@ -3606,6 +3883,8 @@ Mitigations:
                 readiness_root, "ready-change"
             )
         )
+    globals()["_run_mermaid_parser"] = saved_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
     print("issue checklist self-test passed")
 
 
