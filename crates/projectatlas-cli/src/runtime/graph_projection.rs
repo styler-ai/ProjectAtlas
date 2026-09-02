@@ -4851,7 +4851,15 @@ fn local_relation_matches<'a>(
                     symbol.name == lookup_name
                 };
                 name_matches
-                    && scoped_parent.is_none_or(|parent| symbol.parent.as_deref() == Some(parent))
+                    && scoped_parent.is_none_or(|parent| {
+                        symbol.parent.as_deref().is_some_and(|symbol_parent| {
+                            if is_php_call {
+                                symbol_parent.eq_ignore_ascii_case(parent)
+                            } else {
+                                symbol_parent == parent
+                            }
+                        })
+                    })
                     && (scoped_parent.is_some()
                         || symbol.parent.is_none()
                         || symbol.parent.as_deref() == Some(relation.source_name.as_str())
@@ -10477,6 +10485,7 @@ class Service {
         self::prepare();
         static::finish();
         Service::boot();
+        SERVICE::BOOT();
         parent::inherited();
         $this->boot();
     }
@@ -10521,6 +10530,36 @@ function caller(): void { HELPER(); }
             .iter()
             .filter(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls))
             .collect::<Vec<_>>();
+        let mixed_call_line = u32::try_from(
+            php_graph
+                .relations
+                .iter()
+                .find(|relation| relation.target_name == "SERVICE::BOOT")
+                .ok_or("mixed-case PHP call fixture was missing")?
+                .line,
+        )?;
+        let mixed_call_occurrence = staged
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.span().start_line() == mixed_call_line)
+            .ok_or("mixed-case PHP call occurrence was missing")?;
+        let mixed_call_relation = staged
+            .relations
+            .iter()
+            .find(|relation| relation.key() == mixed_call_occurrence.relation())
+            .ok_or("mixed-case PHP logical call was missing")?;
+        require(
+            matches!(
+                mixed_call_relation.resolution(),
+                RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                } if symbol.name.as_str() == "boot"
+                    && symbol.kind == SymbolKind::Method
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Service")
+            ),
+            "mixed-case scoped PHP call did not resolve to Service::boot method",
+        )?;
         for (name, parent) in [
             ("prepare", "Service"),
             ("finish", "Service"),
