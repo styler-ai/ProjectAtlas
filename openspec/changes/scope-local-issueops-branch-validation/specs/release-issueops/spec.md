@@ -31,15 +31,19 @@ ProjectAtlas SHALL require exactly one mapped open owning issue and a readable a
 - **THEN** candidate validation fails without falling back to global mutable state
 
 ### Requirement: Pre-push scope follows pushed remote refs
-ProjectAtlas SHALL select global checklist validation when any pre-push update targets `refs/heads/main`. Candidate validation SHALL be allowed only when every pushed target is a non-main `refs/heads/*` branch.
+ProjectAtlas SHALL select global checklist validation when any pre-push update targets `refs/heads/main`. Candidate validation SHALL be allowed only when exactly one valid pushed target is a non-main `refs/heads/*` branch; multiple non-main targets SHALL fail closed.
 
 #### Scenario: Feature checkout pushes main
 - **WHEN** a feature checkout pushes an update whose remote ref is `refs/heads/main`
 - **THEN** pre-push selects global checklist validation regardless of the checkout branch
 
-#### Scenario: Candidate refs are pushed
-- **WHEN** every pre-push update targets a non-main `refs/heads/*` branch
+#### Scenario: One candidate ref is pushed
+- **WHEN** exactly one valid pre-push update targets a non-main `refs/heads/*` branch
 - **THEN** pre-push selects the local candidate route
+
+#### Scenario: Multiple candidate refs are pushed
+- **WHEN** two or more valid pre-push updates target non-main `refs/heads/*` branches
+- **THEN** pre-push fails closed without selecting candidate validation
 
 #### Scenario: Main and candidate refs are pushed together
 - **WHEN** one pre-push update targets `refs/heads/main` and another targets a non-main branch

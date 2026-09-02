@@ -30,14 +30,18 @@ push_scope="$(
   awk '
     NF != 4 { invalid=1; next }
     {
-      seen=1
       if ($3 !~ /^refs\/heads\/[^[:space:]]+$/) invalid=1
-      if ($3 == "refs/heads/main") main=1
+      else {
+        seen=1
+        updates += 1
+        if ($3 == "refs/heads/main") main=1
+      }
     }
     END {
       if (!seen || invalid) exit 1
       if (main) print "global"
-      else print "candidate"
+      else if (updates == 1) print "candidate"
+      else exit 1
     }
   '
 )"

@@ -9295,6 +9295,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "push_scope=\"$(\n  awk '",
         "NF != 4",
         "if (!seen || invalid) exit 1",
+        "updates += 1",
+        "else if (updates == 1) print \"candidate\"",
         "refs/heads/main",
         "if [ \"$push_scope\" = \"global\" ]; then",
         "elif [ \"$push_scope\" = \"candidate\" ]; then",
@@ -10229,6 +10231,15 @@ exit 0
     if !main_status || main_calls.len() != 1 || main_calls[0].contains("--candidate-issue") {
         return Err(io::Error::other(format!(
             "feature-checkout push to refs/heads/main did not use global IssueOps dispatch:\n{main_target}"
+        ))
+        .into());
+    }
+    let (multiple_candidate_status, multiple_candidate_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/547 3333333333333333333333333333333333333333 refs/heads/fix/547 4444444444444444444444444444444444444444\n",
+    )?;
+    if multiple_candidate_status || !final_issueops(&multiple_candidate_log).is_empty() {
+        return Err(io::Error::other(format!(
+            "multiple candidate refs did not fail closed before IssueOps dispatch:\n{multiple_candidate_log}"
         ))
         .into());
     }

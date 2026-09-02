@@ -16,7 +16,7 @@ flowchart LR
     PR[Hosted PR candidate] --> Owner[One open owner against live state]
     PR --> Base[Unrelated open slices against accepted PR base]
     Push[Git pre-push ref-update records] --> MainTarget["Any refs/heads/main target"]
-    Push --> CandidateTarget["All non-main refs/heads/* targets"]
+    Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
     MainTarget --> Global[Global live-state validation]
     CandidateTarget --> Candidate[Local candidate branch]
     Candidate --> CandidateOwner["One owner from (#NNN) commit subjects"]
