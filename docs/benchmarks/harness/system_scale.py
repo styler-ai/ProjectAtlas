@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import statistics
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -3709,6 +3710,103 @@ def candidate_source_identity(preregistration_path: Path) -> dict[str, str]:
     }
 
 
+def runtime_artifact_identity(runtime: Path) -> dict[str, Any]:
+    """Capture executable bytes and the Git revision containing that executable."""
+
+    resolved = runtime.resolve(strict=True)
+    payload = resolved.read_bytes()
+    source_root = subprocess.run(
+        ["git", "-C", str(resolved.parent), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if source_root.returncode != 0:
+        raise RuntimeError(
+            "candidate runtime source checkout could not be resolved: "
+            + source_root.stderr.strip()
+        )
+    source_checkout = source_root.stdout.strip()
+    if not source_checkout:
+        raise RuntimeError("candidate runtime source checkout was empty")
+    revision = subprocess.run(
+        ["git", "-C", source_checkout, "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if revision.returncode != 0:
+        raise RuntimeError(
+            "candidate runtime source revision could not be resolved: "
+            + revision.stderr.strip()
+        )
+    source_revision = revision.stdout.strip()
+    if not source_revision or any(character.isspace() for character in source_revision):
+        raise RuntimeError("candidate runtime source revision was malformed")
+    return {
+        "runtime": str(resolved),
+        "source_revision": source_revision,
+        "source_revision_method": "git-rev-parse-head-from-runtime-checkout",
+        "runtime_sha256": hashlib.sha256(payload).hexdigest(),
+        "runtime_bytes": len(payload),
+    }
+
+
+def runtime_artifact_identity_or_unavailable(runtime: Path) -> dict[str, Any]:
+    """Retain an explicit unavailable identity when failure precedes execution."""
+
+    try:
+        return runtime_artifact_identity(runtime)
+    except (OSError, RuntimeError) as error:
+        identity: dict[str, Any] = {
+            "runtime": str(runtime),
+            "source_revision": None,
+            "source_revision_method": None,
+            "runtime_sha256": None,
+            "runtime_bytes": None,
+            "error": f"{type(error).__name__}: {error}",
+        }
+        try:
+            resolved = runtime.resolve(strict=True)
+            payload = resolved.read_bytes()
+        except OSError as read_error:
+            identity["error"] += (
+                f"; runtime bytes unavailable: {type(read_error).__name__}: "
+                f"{read_error}"
+            )
+        else:
+            identity.update(
+                {
+                    "runtime": str(resolved),
+                    "runtime_sha256": hashlib.sha256(payload).hexdigest(),
+                    "runtime_bytes": len(payload),
+                }
+            )
+        return identity
+
+
+def execution_provenance(
+    command_argv: list[str] | None,
+    *,
+    passed: bool,
+    failure: str | None = None,
+) -> dict[str, Any]:
+    """Retain exact process arguments and the harness result/exit contract."""
+
+    command = None
+    if command_argv is not None:
+        command = [sys.executable, *command_argv]
+    result: dict[str, Any] = {
+        "status": "passed" if passed else "failed",
+        "exit_code": 0 if passed else 1,
+    }
+    if failure is not None:
+        result["failure"] = failure
+    return {"command": command, "result": result}
+
+
 def validate_publication_identity(
     runtime: Path,
     preregistration: dict[str, Any],
@@ -3869,8 +3967,9 @@ def main() -> None:
         except (OSError, json.JSONDecodeError):
             pass
     try:
-        run_benchmark(args)
+        run_benchmark(args, command_argv=list(sys.argv))
     except Exception as error:
+        failure = f"{type(error).__name__}: {error}"
         write_result(
             {
                 "schema_version": 1,
@@ -3882,6 +3981,10 @@ def main() -> None:
                 ),
                 "publication_eligible": False,
                 "passed": False,
+                "candidate": runtime_artifact_identity_or_unavailable(args.runtime),
+                "execution": execution_provenance(
+                    list(sys.argv), passed=False, failure=failure
+                ),
                 "failure": {
                     "type": type(error).__name__,
                     "message": str(error),
@@ -3891,7 +3994,9 @@ def main() -> None:
         )
 
 
-def run_benchmark(args: argparse.Namespace) -> None:
+def run_benchmark(
+    args: argparse.Namespace, *, command_argv: list[str] | None = None
+) -> None:
     clear_git_repository_environment()
     runtime = args.runtime.resolve(strict=True)
     preregistration_path = args.preregistration.resolve(strict=True)
@@ -3917,6 +4022,19 @@ def run_benchmark(args: argparse.Namespace) -> None:
         and not measurement_eligibility["final_platform_eligible"]
     ):
         raise RuntimeError(measurement_eligibility["ineligible_reason"])
+    work_root = args.work_root.resolve()
+    allowed = (ROOT / "target/benchmarks/system-scale").resolve()
+    corpus_cache = args.corpus_cache.resolve()
+    if not preflight_only:
+        if work_root == allowed or allowed not in work_root.parents:
+            raise ValueError(f"--work-root must be a child of {allowed}")
+        if corpus_cache != allowed and allowed not in corpus_cache.parents:
+            raise ValueError(
+                f"--corpus-cache must be {allowed} or one of its children"
+            )
+        if corpus_cache == work_root or work_root in corpus_cache.parents:
+            raise ValueError("--corpus-cache must not be inside --work-root")
+    runtime_identity = runtime_artifact_identity(runtime)
     if args.only == "all":
         publication_identity, source_identity = validate_publication_identity(
             runtime,
@@ -3936,6 +4054,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                 "final_measurement_eligibility": measurement_eligibility,
                 "publication_eligible": False,
                 "preflight_only": True,
+                "candidate": runtime_identity,
                 "preflight": {
                     "scope": "all-route publication identity and MCP routing",
                     "passed": True,
@@ -3943,21 +4062,11 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     "candidate_source_identity": source_identity,
                 },
                 "passed": True,
+                "execution": execution_provenance(command_argv, passed=True),
             },
             args.output,
         )
         return
-    work_root = args.work_root.resolve()
-    allowed = (ROOT / "target/benchmarks/system-scale").resolve()
-    if work_root == allowed or allowed not in work_root.parents:
-        raise ValueError(f"--work-root must be a child of {allowed}")
-    corpus_cache = args.corpus_cache.resolve()
-    if corpus_cache != allowed and allowed not in corpus_cache.parents:
-        raise ValueError(
-            f"--corpus-cache must be {allowed} or one of its children"
-        )
-    if corpus_cache == work_root or work_root in corpus_cache.parents:
-        raise ValueError("--corpus-cache must not be inside --work-root")
     if work_root.exists():
         remove_tree(work_root, allowed_parent=allowed)
     work_root.mkdir(parents=True)
@@ -4131,9 +4240,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
         "publication_eligible": False,
         "candidate": {
             "version": subprocess.check_output([runtime, "--version"], text=True).strip(),
-            "runtime": str(runtime),
-            "runtime_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
-            "runtime_bytes": runtime.stat().st_size,
+            **runtime_identity,
             "publication_identity": publication_identity,
         },
         "candidate_source_identity": source_identity,
@@ -4172,6 +4279,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
         args.only == "all"
         and measurement_eligibility["final_platform_eligible"]
         and result["passed"]
+    )
+    result["execution"] = execution_provenance(
+        command_argv, passed=result["passed"]
     )
     write_result(result, args.output)
 

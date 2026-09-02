@@ -654,6 +654,97 @@ class SystemScaleHarnessTests(unittest.TestCase):
             ["git", "rev-parse", "HEAD"], cwd=root, text=True
         )
 
+    def test_runtime_artifact_identity_captures_runtime_and_source_revision(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "target/debug/projectatlas.exe"
+            runtime.parent.mkdir(parents=True)
+            payload = b"candidate runtime"
+            runtime.write_bytes(payload)
+            source_checkout = root / "candidate-checkout"
+            source_checkout.mkdir()
+            responses = [
+                subprocess.CompletedProcess(
+                    ["git"], 0, stdout=f"{source_checkout}\n", stderr=""
+                ),
+                subprocess.CompletedProcess(
+                    ["git"], 0, stdout=("c" * 40) + "\n", stderr=""
+                ),
+            ]
+            with mock.patch.object(
+                system_scale.subprocess, "run", side_effect=responses
+            ) as run:
+                identity = system_scale.runtime_artifact_identity(runtime)
+
+        self.assertEqual(
+            identity,
+            {
+                "runtime": str(runtime.resolve()),
+                "source_revision": "c" * 40,
+                "source_revision_method": "git-rev-parse-head-from-runtime-checkout",
+                "runtime_sha256": hashlib.sha256(payload).hexdigest(),
+                "runtime_bytes": len(payload),
+            },
+        )
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            [
+                "git",
+                "-C",
+                str(runtime.resolve().parent),
+                "rev-parse",
+                "--show-toplevel",
+            ],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["git", "-C", str(source_checkout), "rev-parse", "HEAD"],
+        )
+
+    def test_execution_provenance_retains_exact_command_and_result(self) -> None:
+        argv = ["system_scale.py", "--runtime", "candidate.exe", "--only", "small"]
+        self.assertEqual(
+            system_scale.execution_provenance(argv, passed=True),
+            {
+                "command": [sys.executable, *argv],
+                "result": {"status": "passed", "exit_code": 0},
+            },
+        )
+        self.assertEqual(
+            system_scale.execution_provenance(
+                argv, passed=False, failure="RuntimeError: scan failed"
+            ),
+            {
+                "command": [sys.executable, *argv],
+                "result": {
+                    "status": "failed",
+                    "exit_code": 1,
+                    "failure": "RuntimeError: scan failed",
+                },
+            },
+        )
+
+    def test_unavailable_runtime_source_keeps_observed_binary_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "projectatlas.exe"
+            payload = b"candidate runtime"
+            runtime.write_bytes(payload)
+            with mock.patch.object(
+                system_scale,
+                "runtime_artifact_identity",
+                side_effect=RuntimeError("not a Git checkout"),
+            ):
+                identity = system_scale.runtime_artifact_identity_or_unavailable(
+                    runtime
+                )
+
+        self.assertIsNone(identity["source_revision"])
+        self.assertEqual(identity["runtime_sha256"], hashlib.sha256(payload).hexdigest())
+        self.assertEqual(identity["runtime_bytes"], len(payload))
+        self.assertIn("not a Git checkout", identity["error"])
+
     def test_database_profile_uses_real_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "projectatlas.db"
@@ -1356,6 +1447,22 @@ time.sleep(60)
             result = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(result["publication_eligible"])
             self.assertEqual(result["failure"]["type"], "TimeoutError")
+            self.assertEqual(
+                result["execution"],
+                system_scale.redact_local_paths(
+                    {
+                        "command": [sys.executable, *argv],
+                        "result": {
+                            "status": "failed",
+                            "exit_code": 1,
+                            "failure": "TimeoutError: stalled MCP",
+                        },
+                    }
+                ),
+            )
+            self.assertIsNone(result["candidate"]["source_revision"])
+            self.assertIsNone(result["candidate"]["runtime_sha256"])
+            self.assertIn("FileNotFoundError", result["candidate"]["error"])
 
     def test_main_persists_external_input_when_huge_run_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
