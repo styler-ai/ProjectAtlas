@@ -31,7 +31,7 @@ ProjectAtlas SHALL require exactly one mapped open owning issue and a readable a
 - **THEN** candidate validation fails without falling back to global mutable state
 
 ### Requirement: Pre-push scope follows pushed remote refs
-ProjectAtlas SHALL select global checklist validation when any pre-push update targets `refs/heads/main`. Candidate validation SHALL be allowed only when exactly one valid pushed target is a non-main `refs/heads/*` branch whose non-zero local object ID equals the validated checked-out `HEAD` and whose worktree has no tracked, staged, or non-ignored untracked changes; multiple non-main, deleted, mismatched, or dirty candidate targets SHALL fail closed before scoped validation.
+ProjectAtlas SHALL select global checklist validation when any pre-push update targets `refs/heads/main`. Candidate validation SHALL be allowed only when exactly one valid pushed target is a non-main `refs/heads/*` branch whose non-zero local object ID equals the validated checked-out `HEAD`, whose worktree has no tracked, staged, or non-ignored untracked changes, and whose tracked index entries are not marked `assume-unchanged` or `skip-worktree`; multiple non-main, deleted, mismatched, dirty, or hidden-index candidate targets SHALL fail closed before scoped validation.
 
 #### Scenario: Feature checkout pushes main
 - **WHEN** a feature checkout pushes an update whose remote ref is `refs/heads/main`
@@ -55,6 +55,10 @@ ProjectAtlas SHALL select global checklist validation when any pre-push update t
 
 #### Scenario: Candidate worktree has mutable IssueOps input
 - **WHEN** one candidate update has a non-zero local object ID equal to the validated checked-out `HEAD`, but the worktree has a tracked, staged, or non-ignored untracked issue-map, task, or documentation input
+- **THEN** pre-push fails closed before owner, base, or scoped IssueOps validation
+
+#### Scenario: Candidate worktree hides tracked IssueOps input
+- **WHEN** one candidate update has a non-zero local object ID equal to the validated checked-out `HEAD`, but a tracked issue-map, task, or documentation input is marked `assume-unchanged` or `skip-worktree` and its filesystem content diverges while porcelain remains clean
 - **THEN** pre-push fails closed before owner, base, or scoped IssueOps validation
 
 #### Scenario: Main and candidate refs are pushed together

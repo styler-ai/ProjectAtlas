@@ -73,6 +73,17 @@ elif [ "${push_scope#candidate:}" != "$push_scope" ]; then
     echo "candidate branch worktree must be clean before scoped validation" >&2
     exit 1
   fi
+  if ! index_state="$(git ls-files -v)"; then
+    echo "candidate branch tracked index state is unreadable" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$index_state" | awk '
+    substr($0, 1, 1) == "S" || substr($0, 1, 1) ~ /^[[:lower:]]$/ { hidden=1 }
+    END { exit hidden ? 0 : 1 }
+  '; then
+    echo "candidate branch index hides tracked state" >&2
+    exit 1
+  fi
   if ! accepted_base="$(git merge-base origin/main HEAD)" || [ -z "$accepted_base" ]; then
     echo "candidate branch accepted origin/main base is unreadable" >&2
     exit 1

@@ -127,6 +127,8 @@ const ISSUE_MAP_FILE_NAME: &str = "issue-map.json";
 const CHANGE_DIR_NAME: &str = "changes";
 const ISSUEOPS_CHANGE_NAME: &str = "scope-local-issueops-branch-validation";
 const TASKS_FILE_NAME: &str = "tasks.md";
+const ISSUEOPS_TASKS_RELATIVE_PATH: &str =
+    "openspec/changes/scope-local-issueops-branch-validation/tasks.md";
 const CANDIDATE_FILE_NAME: &str = "candidate.txt";
 const DISPATCH_LOG_FILE_NAME: &str = "dispatch.log";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
@@ -10200,14 +10202,12 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
             .join(ISSUE_MAP_FILE_NAME),
         "{\"schema_version\": 2, \"changes\": {}}\n",
     )?;
-    fs::write(
-        fixture_repo
-            .join(OPENSPEC_DIR_NAME)
-            .join(CHANGE_DIR_NAME)
-            .join(ISSUEOPS_CHANGE_NAME)
-            .join(TASKS_FILE_NAME),
-        "- [x] 1.1 baseline\n",
-    )?;
+    let issueops_tasks = fixture_repo
+        .join(OPENSPEC_DIR_NAME)
+        .join(CHANGE_DIR_NAME)
+        .join(ISSUEOPS_CHANGE_NAME)
+        .join(TASKS_FILE_NAME);
+    fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
     fs::write(fixture_repo.join(CANDIDATE_FILE_NAME), "candidate\n")?;
     git_success(&fixture_repo, &["init", "--initial-branch=main"])?;
     git_success(
@@ -10381,6 +10381,67 @@ exit 0
             "ordinary candidate push did not use candidate IssueOps dispatch:\n{candidate_target}"
         ))
         .into());
+    }
+    for index_flag in ["--assume-unchanged", "--skip-worktree"] {
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-assume-unchanged",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-skip-worktree",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &["update-index", index_flag, ISSUEOPS_TASKS_RELATIVE_PATH],
+        )?;
+        fs::write(&issueops_tasks, "- [ ] 1.1 hidden index state\n")?;
+        let status_output = git_command_for_root(&fixture_repo)
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .output()?;
+        if !status_output.status.success() || !status_output.stdout.is_empty() {
+            return Err(io::Error::other(format!(
+                "{index_flag} did not hide the tracked fixture edit from porcelain"
+            ))
+            .into());
+        }
+        let (hidden_status, hidden_log) = run_hook(&format!(
+            "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+        ))?;
+        if hidden_status
+            || !final_issueops(&hidden_log).is_empty()
+            || hidden_log.contains("--owner-from-commits")
+        {
+            return Err(io::Error::other(format!(
+                "{index_flag} tracked fixture edit did not fail before scoped IssueOps dispatch:\n{hidden_log}"
+            ))
+            .into());
+        }
+        fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-assume-unchanged",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-skip-worktree",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
     }
     let (mixed_status, mixed_targets) = run_hook(
         "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
