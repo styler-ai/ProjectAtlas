@@ -4891,7 +4891,8 @@ fn local_relation_matches<'a>(
                     && source_namespace.is_none_or(|namespace| {
                         symbol.parent.as_deref().is_some_and(|symbol_parent| {
                             symbol_parent.eq_ignore_ascii_case(namespace)
-                        }) || (target_namespace.is_none() && symbol.parent.is_none())
+                        }) || (target_namespace.is_none_or(str::is_empty)
+                            && symbol.parent.is_none())
                     })
                     && (scoped_parent.is_some()
                         || source_namespace.is_some()
@@ -4947,7 +4948,7 @@ fn php_call_lookup<'a>(
             return Some((target_name, None, None, None));
         };
         let Some((namespace, function)) = qualified_target.rsplit_once('\\') else {
-            return Some((target_name, None, None, None));
+            return Some((qualified_target, None, None, Some("")));
         };
         if namespace.is_empty() || function.is_empty() {
             return None;
@@ -10678,6 +10679,9 @@ function helper(): void {}
 function qualified_helper_run(): void {
     \Foo\helper();
 }
+function rooted_global_helper_run(): void {
+    \helper();
+}
 function missing_helper_run(): void {
     \Missing\helper();
 }
@@ -10839,6 +10843,17 @@ class DuplicateB {
                     && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Foo")
             ),
             "fully qualified PHP function call did not resolve to its namespace function",
+        )?;
+        require(
+            matches!(
+                staged_call("\\helper", "rooted_global_helper_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper" && symbol.parent.is_none()
+            ),
+            "rooted PHP global function call did not resolve explicitly to the global helper",
         )?;
         require(
             matches!(
