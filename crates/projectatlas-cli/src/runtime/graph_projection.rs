@@ -2052,25 +2052,48 @@ struct GraphOwners {
 struct GraphSymbolIndex<'graph> {
     /// Parser symbol indices grouped by exact source name.
     indices_by_name: BTreeMap<&'graph str, Vec<usize>>,
+    /// PHP call target indices grouped by their case-insensitive source name.
+    php_call_indices_by_name: BTreeMap<String, Vec<usize>>,
 }
 
 impl<'graph> GraphSymbolIndex<'graph> {
     /// Build one bounded name index instead of rescanning all symbols per relation.
     fn new(graph: &'graph SymbolGraph, control: &IndexWorkControl) -> Result<Self, CliError> {
         let mut indices_by_name = BTreeMap::new();
+        let mut php_call_indices_by_name = BTreeMap::new();
+        let is_php = graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
         for (index, symbol) in graph.symbols.iter().enumerate() {
             check_graph_work(control, index)?;
             indices_by_name
                 .entry(symbol.name.as_str())
                 .or_insert_with(Vec::new)
                 .push(index);
+            if is_php && matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method) {
+                php_call_indices_by_name
+                    .entry(symbol.name.to_ascii_lowercase())
+                    .or_insert_with(Vec::new)
+                    .push(index);
+            }
         }
-        Ok(Self { indices_by_name })
+        Ok(Self {
+            indices_by_name,
+            php_call_indices_by_name,
+        })
     }
 
     /// Return exact parser symbol rows for one source name.
     fn get(&self, name: &str) -> &[usize] {
         self.indices_by_name.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Return PHP parser symbol rows for one case-insensitive call name.
+    fn get_php_call(&self, name: &str) -> &[usize] {
+        self.php_call_indices_by_name
+            .get(&name.to_ascii_lowercase())
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -4782,12 +4805,33 @@ fn local_relation_matches<'a>(
 ) -> Result<ResolutionMatches<'a>, CliError> {
     let mut targets = BTreeMap::<&str, &GraphEntity>::new();
     let target_name = relation.target_name.trim();
+    let is_php_call = relation.kind == RelationKind::Calls
+        && graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
     let source_parent = if relation.kind == RelationKind::Calls {
         unique_source_parent(graph, symbol_index, &relation.source_name, control)?
     } else {
         None
     };
-    for (candidate_index, &row_index) in symbol_index.get(target_name).iter().enumerate() {
+    let (lookup_name, scoped_parent) = if is_php_call {
+        let Some(lookup) = php_call_lookup(target_name, source_parent) else {
+            return Ok(ResolutionMatches {
+                first: None,
+                count: 0,
+            });
+        };
+        lookup
+    } else {
+        (target_name, None)
+    };
+    let candidate_indices = if is_php_call {
+        symbol_index.get_php_call(lookup_name)
+    } else {
+        symbol_index.get(lookup_name)
+    };
+    for (candidate_index, &row_index) in candidate_indices.iter().enumerate() {
         check_graph_work(control, candidate_index)?;
         let symbol = graph.symbols.get(row_index).ok_or_else(|| {
             CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
@@ -4797,12 +4841,19 @@ fn local_relation_matches<'a>(
         })?;
         let exact_match = match relation.kind {
             RelationKind::Contains => {
-                symbol.name == target_name
+                symbol.name == lookup_name
                     && symbol.parent.as_deref() == Some(relation.source_name.as_str())
             }
             RelationKind::Calls => {
-                symbol.name == target_name
-                    && (symbol.parent.is_none()
+                let name_matches = if is_php_call {
+                    symbol.name.eq_ignore_ascii_case(lookup_name)
+                } else {
+                    symbol.name == lookup_name
+                };
+                name_matches
+                    && scoped_parent.is_none_or(|parent| symbol.parent.as_deref() == Some(parent))
+                    && (scoped_parent.is_some()
+                        || symbol.parent.is_none()
                         || symbol.parent.as_deref() == Some(relation.source_name.as_str())
                         || source_parent.is_some_and(|source_parent| {
                             symbol.parent.as_deref() == Some(source_parent)
@@ -4825,6 +4876,26 @@ fn local_relation_matches<'a>(
         first: targets.into_values().next(),
         count,
     })
+}
+
+/// Select the local PHP call member and, for scoped calls, its owning type.
+fn php_call_lookup<'a>(
+    target_name: &'a str,
+    source_parent: Option<&'a str>,
+) -> Option<(&'a str, Option<&'a str>)> {
+    let Some((scope, member)) = target_name.rsplit_once("::") else {
+        return Some((target_name, None));
+    };
+    if scope.is_empty() || member.is_empty() {
+        return None;
+    }
+    if scope.eq_ignore_ascii_case("self") || scope.eq_ignore_ascii_case("static") {
+        return source_parent.map(|parent| (member, Some(parent)));
+    }
+    if scope.eq_ignore_ascii_case("parent") {
+        return None;
+    }
+    Some((member, Some(scope)))
 }
 
 /// Return one unambiguous containing scope for the parser relation source.
@@ -10383,6 +10454,154 @@ mod tests {
                 )
             }),
             "duplicate same-file declarations did not remain ambiguous",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn php_scoped_and_case_insensitive_calls_resolve_without_member_edges()
+    -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([31; 16])?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let php_graph = extract_symbol_graph(
+            "src/service.php",
+            Some("php"),
+            r"<?php
+class Service {
+    public string $boot;
+    public static function prepare(): void {}
+    public static function finish(): void {}
+    public static function boot(): void {}
+    public function run(): void {
+        self::prepare();
+        static::finish();
+        Service::boot();
+        parent::inherited();
+        $this->boot();
+    }
+}
+function helper(): void {}
+function caller(): void { HELPER(); }
+",
+        );
+        require(
+            php_graph
+                .relations
+                .iter()
+                .filter(|relation| relation.kind == RelationKind::Calls)
+                .all(|relation| relation.target_name != "boot"),
+            "dynamic member calls must not become unscoped PHP calls",
+        )?;
+        let finish_graph = |graph: &SymbolGraph| {
+            let packages = PackageIndex::from_graphs(std::slice::from_ref(graph))?;
+            let projection = build_entity_projection(
+                project,
+                generation,
+                &[],
+                std::slice::from_ref(graph),
+                &packages,
+                true,
+                &control,
+            )?;
+            let candidates = resolution_registry_from_exports(&projection, &control)?;
+            finish_projection(
+                project,
+                generation,
+                RepositoryGraphMutation::Full,
+                std::slice::from_ref(graph),
+                projection,
+                &candidates,
+                &control,
+            )
+        };
+        let staged = finish_graph(&php_graph)?;
+        let calls = staged
+            .relations
+            .iter()
+            .filter(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls))
+            .collect::<Vec<_>>();
+        for (name, parent) in [
+            ("prepare", "Service"),
+            ("finish", "Service"),
+            ("boot", "Service"),
+            ("helper", "<module>"),
+        ] {
+            require(
+                calls.iter().any(|relation| {
+                    matches!(
+                        relation.resolution(),
+                        RelationResolution::Resolved {
+                            selector: ReusableTargetSelector::Symbol { symbol },
+                            ..
+                        } if symbol.name.as_str() == name
+                            && symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                                == (parent != "<module>").then_some(parent)
+                    )
+                }),
+                &format!("PHP call did not resolve to {parent}::{name}"),
+            )?;
+        }
+        require(
+            calls.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Unresolved { reference } if reference.as_str() == "parent::inherited"
+                )
+            }),
+            "parent-scoped PHP calls must remain unresolved without a proven base type",
+        )?;
+        require(
+            calls.iter().all(|relation| {
+                !matches!(
+                    relation.resolution(),
+                    RelationResolution::Resolved {
+                        selector: ReusableTargetSelector::Symbol { symbol },
+                        ..
+                    } if symbol.name.as_str() == "boot"
+                        && symbol.parent.is_none()
+                )
+            }),
+            "PHP scoped calls must not resolve through an unrelated global member",
+        )?;
+
+        let mut ambiguous_graph = php_graph;
+        let mut duplicate = ambiguous_graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "helper")
+            .cloned()
+            .ok_or("PHP ambiguity fixture helper was missing")?;
+        duplicate.name = "HELPER".to_string();
+        ambiguous_graph.symbols.push(duplicate);
+        let ambiguous = finish_graph(&ambiguous_graph)?;
+        require(
+            ambiguous.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Ambiguous {
+                        reference,
+                        candidates,
+                    } if reference.as_str() == "HELPER" && candidates.get() == 2
+                )
+            }),
+            "case-insensitive PHP duplicate declarations must remain ambiguous",
+        )?;
+
+        let case_sensitive_graph = extract_symbol_graph(
+            "src/case-sensitive.js",
+            Some("javascript"),
+            "function helper() {}\nfunction caller() { HELPER(); }\n",
+        );
+        let staged = finish_graph(&case_sensitive_graph)?;
+        require(
+            staged.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Unresolved { reference } if reference.as_str() == "HELPER"
+                )
+            }),
+            "non-PHP call matching must remain case-sensitive",
         )?;
         Ok(())
     }

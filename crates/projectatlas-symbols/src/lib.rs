@@ -1170,7 +1170,7 @@ fn tree_contains_php_tag_outside_literals<E>(
     )
 }
 
-/// Collect top-level literal/comment ranges from the PHP-only parse in source order.
+/// Collect PHP literal/comment ranges in source order and mark top-level output nodes.
 fn collect_php_only_opaque_ranges<E>(
     node: Node<'_>,
     ranges: &mut Vec<(usize, usize, bool)>,
@@ -1180,7 +1180,10 @@ fn collect_php_only_opaque_ranges<E>(
     *examined_nodes += 1;
     check_parser_iteration(*examined_nodes, check)?;
     if is_php_opaque_node(node.kind()) {
-        ranges.push((node.start_byte(), node.end_byte(), node.kind() == "comment"));
+        let top_level_output = node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "program");
+        ranges.push((node.start_byte(), node.end_byte(), top_level_output));
         return Ok(());
     }
     let mut cursor = node.walk();
@@ -1214,10 +1217,10 @@ fn tree_contains_php_tag_outside_ranges<E>(
         let outside_opaque_range =
             opaque_ranges
                 .get(*next_opaque)
-                .is_none_or(|&(start, end, is_comment)| {
+                .is_none_or(|&(start, end, top_level_output)| {
                     start >= node.end_byte()
                         || end <= node.start_byte()
-                        || (is_comment && is_php_inline_output_opening(node, content))
+                        || (top_level_output && is_php_inline_output_opening(node, content))
                 });
         if outside_opaque_range {
             return Ok(true);
@@ -1777,6 +1780,7 @@ fn symbol_parent(
     }
     if node.kind() == "property_promotion_parameter"
         && let Some(class) = nearest_ancestor_kind(node.parent(), "class_declaration")
+            .or_else(|| nearest_ancestor_kind(node.parent(), "trait_declaration"))
     {
         return node_name(class, content);
     }
@@ -5340,6 +5344,28 @@ class Account {
         assert!(!graph.symbols.iter().any(|symbol| {
             symbol.name == "name" && symbol.parent.as_deref() == Some("__construct")
         }));
+
+        let trait_graph = extract_symbol_graph(
+            "src/Contract.php",
+            Some("php"),
+            r"<?php
+trait Contract {
+    public function __construct(public int $version) {}
+}
+",
+        );
+        let promoted = trait_graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "version" && symbol.kind == SymbolKind::Value);
+        assert_eq!(
+            promoted.and_then(|symbol| symbol.parent.as_deref()),
+            Some("Contract"),
+            "trait-promoted properties must belong to the trait"
+        );
+        assert!(!trait_graph.symbols.iter().any(|symbol| {
+            symbol.name == "version" && symbol.parent.as_deref() == Some("__construct")
+        }));
     }
 
     #[test]
@@ -6451,6 +6477,24 @@ TEXT;
                     && relation.parser == ParserKind::TreeSitter
             }));
         }
+    }
+
+    #[test]
+    fn php_template_attribute_output_does_not_hide_php_tag() {
+        let source = "<div title='<?php function boot(): void {} ?>'>";
+        assert!(super::contains_php_opening_tag(source));
+        let graph = extract_symbol_graph("src/template.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+        assert!(
+            graph.symbols.iter().any(|symbol| symbol.name == "boot"),
+            "PHP inside contiguous template output must remain navigable: {graph:?}"
+        );
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .all(|symbol| { !matches!(symbol.name.as_str(), "div" | "title") })
+        );
     }
 
     #[test]
