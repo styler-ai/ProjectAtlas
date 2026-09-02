@@ -97,7 +97,8 @@ elif [ "${push_scope#candidate:}" != "$push_scope" ]; then
   fi
   python3 .github/scripts/issue-checklists.py \
     --repo "$repo" --root . --issue-map openspec/issue-map.json \
-    --candidate-issue "$owner_issue" --base "$accepted_base"
+    --candidate-issue "$owner_issue" --candidate-local-oid "$candidate_local_oid" \
+    --base "$accepted_base"
 else
   echo "pre-push validation scope is invalid" >&2
   exit 1

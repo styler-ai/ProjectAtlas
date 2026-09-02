@@ -741,7 +741,12 @@ def candidate_owner_issue_from_subjects(subjects: str) -> int:
     for subject in subjects.splitlines():
         markers = COMMIT_ISSUE_MARKER_RE.findall(subject)
         references = COMMIT_ISSUE_REFERENCE_RE.findall(subject)
-        if len(markers) != 1 or len(references) != 1 or markers[0] != references[0]:
+        if (
+            subject.count("(#") != len(markers)
+            or len(markers) != 1
+            or len(references) != 1
+            or markers[0] != references[0]
+        ):
             raise SystemExit(
                 "candidate branch commits must reference exactly one owning issue "
                 "with one well-formed (#NNN) marker per subject"
@@ -1117,6 +1122,7 @@ def architecture_diagram_link_failures(
     repo: str,
     root: Path,
     mermaid_budget: MermaidValidationBudget | None = None,
+    candidate_tree_ref: str | None = None,
 ) -> list[str]:
     """Validate durable local architecture-document links for one issue section."""
 
@@ -1177,6 +1183,25 @@ def architecture_diagram_link_failures(
                 f"architecture diagram link {url!r} must target one direct document under /blob/main/docs/"
             )
             continue
+        if candidate_tree_ref is not None:
+            candidate_tree_path = Path("docs", relative_parts[0]).as_posix()
+            try:
+                tree_type = run(
+                    [
+                        "git",
+                        "cat-file",
+                        "-t",
+                        f"{candidate_tree_ref}:{candidate_tree_path}",
+                    ]
+                ).strip()
+            except SystemExit:
+                tree_type = ""
+            if tree_type != "blob":
+                failures.append(
+                    f"architecture diagram link {url!r} has no tracked Markdown file "
+                    f"in candidate tree {candidate_tree_ref!r}"
+                )
+                continue
         candidate = docs_root.joinpath(*relative_parts).resolve()
         try:
             candidate.relative_to(docs_root)
@@ -1306,6 +1331,7 @@ def issue_contract_failures(
     repo: str,
     root: Path,
     mermaid_budget: MermaidValidationBudget | None = None,
+    candidate_tree_ref: str | None = None,
 ) -> list[str]:
     """Validate the two-list #305 issue shape and its state transition."""
 
@@ -1383,7 +1409,11 @@ def issue_contract_failures(
         )
         failures.extend(
             architecture_diagram_link_failures(
-                architecture_section, repo, root, mermaid_budget
+                architecture_section,
+                repo,
+                root,
+                mermaid_budget,
+                candidate_tree_ref,
             )
         )
 
@@ -1615,6 +1645,7 @@ def check_pull_request_tasks(
     owner_error: str | None = None,
     mermaid_budget: MermaidValidationBudget | None = None,
     scope_label: str = "pull request",
+    candidate_tree_ref: str | None = None,
 ) -> list[str]:
     """Check one owner against live state and unrelated slices against its base."""
 
@@ -1789,6 +1820,7 @@ def check_pull_request_tasks(
                 repo,
                 root,
                 mermaid_budget,
+                candidate_tree_ref,
             ):
                 failures.append(f"#{owner.issue} issue contract {failure}")
     return failures
@@ -1803,6 +1835,7 @@ def check_candidate_tasks(
     *,
     issue_map_path: str | Path | None = None,
     mermaid_budget: MermaidValidationBudget | None = None,
+    candidate_tree_ref: str | None = None,
 ) -> list[str]:
     """Check one local candidate owner against live state and its accepted base."""
 
@@ -1816,6 +1849,7 @@ def check_candidate_tasks(
         owner_issue=owner_issue,
         mermaid_budget=mermaid_budget,
         scope_label="candidate branch",
+        candidate_tree_ref=candidate_tree_ref,
     )
 
 
@@ -2211,6 +2245,7 @@ Mitigations:
         "Implement candidate (#517)\n\nFollow-up candidate (#517)",
         "Implement candidate (#517) (#517)",
         "Implement candidate (#517) (#bad)",
+        "Implement candidate (#517) (#518",
         "Implement candidate (#517)\nAlso candidate (#518)",
     ):
         try:
@@ -2339,6 +2374,8 @@ Mitigations:
             "2",
             "--base",
             "accepted-base",
+            "--candidate-local-oid",
+            "accepted-head",
         ]
         main()
         assert complexity_fetches == [2]
@@ -4117,6 +4154,7 @@ def main() -> None:
     parser.add_argument("--planned-issue", type=int)
     parser.add_argument("--pull-request", type=int)
     parser.add_argument("--candidate-issue", type=int)
+    parser.add_argument("--candidate-local-oid")
     parser.add_argument("--base", default="")
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--owner-from-commits", action="store_true")
@@ -4165,6 +4203,10 @@ def main() -> None:
         raise SystemExit("--base is required with --pull-request")
     if args.candidate_issue is not None and not args.base:
         raise SystemExit("--base is required with --candidate-issue")
+    if args.candidate_issue is not None and not args.candidate_local_oid:
+        raise SystemExit("--candidate-local-oid is required with --candidate-issue")
+    if args.candidate_local_oid and args.candidate_issue is None:
+        raise SystemExit("--candidate-local-oid requires --candidate-issue")
     if args.pull_request is None and args.candidate_issue is None and args.base:
         raise SystemExit("--base requires --pull-request or --candidate-issue")
     pull_request_owner = None
@@ -4215,6 +4257,7 @@ def main() -> None:
                 args.candidate_issue,
                 args.base,
                 issue_map_path=args.issue_map,
+                candidate_tree_ref=args.candidate_local_oid,
             )
         )
     elif not args.skip_openspec:

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Local candidate branches use owner-scoped checklist authority
-ProjectAtlas SHALL validate one local candidate issue against its live GitHub checklist while comparing every unrelated open mapped task slice with the accepted base.
+ProjectAtlas SHALL validate one local candidate issue against its live GitHub checklist while comparing every unrelated open mapped task slice with the accepted base. Before content validation, every linked architecture document SHALL be a tracked Markdown blob in the submitted candidate tree.
 
 #### Scenario: Independent live progress does not invalidate a candidate
 - **WHEN** the candidate owner's local tasks match its live issue and an unrelated issue's live tasks have advanced beyond the accepted base
@@ -23,7 +23,7 @@ ProjectAtlas SHALL require exactly one mapped open owning issue and a readable a
 - **THEN** pre-push validates that issue through the local candidate route
 
 #### Scenario: Ownership is absent or ambiguous
-- **WHEN** post-base commits contain empty or blank subjects, an unreferenced or malformed subject, multiple references in one subject, or references to more than one issue
+- **WHEN** post-base commits contain empty or blank subjects, an unreferenced or malformed subject, an unmatched `(#` fragment, multiple references in one subject, or references to more than one issue
 - **THEN** pre-push fails before checklist comparison
 
 #### Scenario: Owner or base is invalid
@@ -60,6 +60,10 @@ ProjectAtlas SHALL select global checklist validation when any pre-push update t
 #### Scenario: Candidate worktree hides tracked IssueOps input
 - **WHEN** one candidate update has a non-zero local object ID equal to the validated checked-out `HEAD`, but a tracked issue-map, task, or documentation input is marked `assume-unchanged` or `skip-worktree` and its filesystem content diverges while porcelain remains clean
 - **THEN** pre-push fails closed before owner, base, or scoped IssueOps validation
+
+#### Scenario: Candidate links an ignored document outside its tree
+- **WHEN** a candidate issue links an architecture document that is present only as an ignored untracked worktree file and absent from the candidate tree identified by the pushed local object ID
+- **THEN** pre-push fails closed before scoped IssueOps validation rather than reading the mutable file
 
 #### Scenario: Main and candidate refs are pushed together
 - **WHEN** one pre-push update targets `refs/heads/main` and another targets a non-main branch
