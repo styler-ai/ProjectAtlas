@@ -69,6 +69,33 @@ def medium_corpus_variant(caller_files: int, default_caller_files: int) -> str:
     )
 
 
+def preregistered_external_corpus(
+    preregistration: dict[str, Any], mode: str
+) -> dict[str, Any] | None:
+    """Retain the locked external input when a huge run fails before a case result."""
+
+    if mode not in {"huge", "all"}:
+        return None
+    corpora = preregistration.get("corpora")
+    if not isinstance(corpora, dict):
+        return None
+    corpus = corpora.get("huge")
+    if not isinstance(corpus, dict):
+        return None
+    return {
+        key: corpus[key]
+        for key in (
+            "repository",
+            "tag",
+            "commit",
+            "minimum_indexed_files",
+            "minimum_tracked_bytes",
+            "target_file",
+        )
+        if key in corpus
+    }
+
+
 def committed_git_object_sha256(
     relative: str,
     *,
@@ -3829,6 +3856,18 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    external_corpus = None
+    if args.only in {"huge", "all"}:
+        try:
+            external_preregistration = json.loads(
+                args.preregistration.read_text(encoding="utf-8")
+            )
+            if isinstance(external_preregistration, dict):
+                external_corpus = preregistered_external_corpus(
+                    external_preregistration, args.only
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
     try:
         run_benchmark(args)
     except Exception as error:
@@ -3837,6 +3876,7 @@ def main() -> None:
                 "schema_version": 1,
                 "preregistration": str(args.preregistration.resolve()),
                 "mode": args.only,
+                "external_corpus": external_corpus,
                 "final_measurement_eligibility": final_measurement_eligibility(
                     args.only
                 ),
@@ -4080,6 +4120,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
         "effective_preregistration": preregistration,
         "mode": args.only,
         "required_version": required_version,
+        "external_corpus": preregistered_external_corpus(
+            preregistration, args.only
+        ),
         "corpus_overrides": {
             "medium.caller_files": caller_files,
             "small.variant": args.small_variant or "all",

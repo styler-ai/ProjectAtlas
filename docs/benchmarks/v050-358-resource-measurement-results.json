@@ -123,6 +123,13 @@
   },
   "remediation_replay": {
     "scope": "exact-head contention-only replay after fail-fast writer-availability probe",
+    "source_revision": "32f0297b487a74dc07da50f4a37f842125452204",
+    "runtime": {
+      "version": "projectatlas 0.4.5",
+      "path": "{REPO_ROOT}/target/debug/projectatlas.exe",
+      "sha256": "9755f0c7b14e0b2de7b92dbc8d275d7b45bd0cf87cf9d8caa0cb42465c61734d",
+      "bytes": 76446208
+    },
     "blocked_wall_seconds": 0.799257,
     "maximum_contention_failure_seconds": 1,
     "blocked_error": "database is locked",
@@ -136,6 +143,40 @@
     "publication_eligible": false,
     "matrix_complete": false,
     "notes": "This causal replay does not replace the historical baseline/candidate matrix or check OpenSpec tasks 5.1-5.4."
+  },
+  "external_huge_replay": {
+    "status": "attempted_failed",
+    "repository": "https://github.com/microsoft/vscode.git",
+    "tag": "1.130.0",
+    "commit": "1b6a188127eeaf9194f945eb6eb89a657e93c54c",
+    "target_file": "src/vs/platform/instantiation/common/instantiation.ts",
+    "corpus": {
+      "tracked_files": 16646,
+      "tracked_bytes": 235792515,
+      "manifest_sha256": "16eef7c9e5612568fb2def78f3fde1827ee0faa228862f26ec92da19fdc03a9a",
+      "git_tree": "f796245e1336739091b65fe9f3353c9e615c8022"
+    },
+    "source_revision": "32f0297b487a74dc07da50f4a37f842125452204",
+    "runtime": {
+      "version": "projectatlas 0.4.5",
+      "path": "{REPO_ROOT}/target/debug/projectatlas.exe",
+      "sha256": "9755f0c7b14e0b2de7b92dbc8d275d7b45bd0cf87cf9d8caa0cb42465c61734d",
+      "bytes": 76446208
+    },
+    "command": "python docs/benchmarks/harness/system_scale.py --runtime target/debug/projectatlas.exe --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only huge",
+    "failure_phase": "scan",
+    "failure": "invalid input: compiler configuration 'extensions/copilot/test/simulation/fixtures/tests/simple-ts-proj-with-test-file-1/tsconfig.json' must contain a JSON object",
+    "measurement_available": false,
+    "publication_eligible": false
+  },
+  "failed_cells": {
+    "medium_explicit_rebuild_read_transfer_cap": {
+      "threshold_bytes": 134217728,
+      "baseline_bytes": 149323652,
+      "candidate_bytes": 148916441,
+      "passed": false,
+      "disposition": "retained_red_cell"
+    }
   },
   "cancellation": {
     "baseline": {"seconds": 0.104863, "active_work_observed": true, "terminal_state": "canceled", "generation_unchanged": true, "writer_released": true, "survivors": [], "passed": true},
@@ -160,7 +201,7 @@
   },
   "unavailable": {
     "allocations": {"status": "unavailable", "reason": "existing harness exposes no allocator-event sampler on this host"},
-    "external_huge_corpus": {"status": "unavailable", "reason": "the preregistered external VS Code corpus was not run in this bounded representative replay"},
+    "external_huge_corpus": {"status": "unavailable", "reason": "exact-head attempt reached the preregistered VS Code commit (16,646 tracked files; 235,792,515 tracked bytes) but the full scan failed on a malformed tsconfig fixture before a valid measurement result was produced"},
     "linux_macos": {"status": "unavailable", "reason": "only Windows was exercised"},
     "transaction_duration": {"status": "unavailable", "reason": "the runtime does not emit transaction duration; atomicity is covered by the real E2E and final generation/WAL checks"},
     "checkpoint_trace": {"status": "unavailable", "reason": "the harness records final WAL/SHM and configured autocheckpoint state, not checkpoint frame timing"}

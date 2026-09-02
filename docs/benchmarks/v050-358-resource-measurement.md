@@ -21,7 +21,7 @@ rebuild was not sufficient to offset a cold-scan regression.
 The existing `docs/benchmarks/harness/system_scale.py` is the measurement
 owner. It now accepts `--required-version` and `--caller-files`, so the reviewed
 v0.4.5 runtime and both generated corpus sizes are selected by the harness
-itself; no command-line shim is required. The exact six invocations, runtime
+itself; no command-line shim is required. The exact invocations, runtime
 identities, source revisions, corpus inputs, environment lock, threshold, and
 path placeholders are recorded in
 [`v050-358-resource-measurement-input.json`](v050-358-resource-measurement-input.json).
@@ -44,12 +44,14 @@ The sampler records terminal process-tree CPU and I/O bytes, sampled peak RSS
 and threads, SQLite rows/profile/storage, and persistent database/WAL/SHM/stage
 bytes. The harness also records representative read-only `EXPLAIN QUERY PLAN`
 details and confirms owning-index use without a temporary B-tree. Allocator
-events, transaction duration, checkpoint frame timing, an external huge
-repository, and Linux/macOS measurements are explicitly typed **unavailable**
-in the results artifact; no unavailable field is used to justify adoption. All
-runs used the same host and telemetry-disabled measurement environment. Both
-compared binaries were local debug builds; the measurements are a comparative
-no-change decision, not a release performance claim.
+events, transaction duration, checkpoint frame timing, and Linux/macOS
+measurements are explicitly typed **unavailable** in the results artifact; no
+unavailable field is used to justify adoption. The existing external-corpus
+path was also attempted against the locked VS Code commit, but its full scan
+failed before a valid measurement result (see below). All successful runs used
+the same host and telemetry-disabled measurement environment. Both compared
+binaries were local debug builds; the measurements are a comparative no-change
+decision, not a release performance claim.
 
 The graph digest is emitted by the existing harness as a canonical JSON digest
 of logical graph entities, relations, occurrences, coverage, resolution keys,
@@ -123,9 +125,25 @@ check OpenSpec tasks 5.1–5.4.
 | Exact-head corrected runtime, same-root writer contention | 0.799257 | `database is locked` | yes | +1 | none observed | pass |
 
 The replay retained the historical explicit-rebuild read-transfer failure and
-does not supply allocator events, an external huge repository, Linux/macOS
-runs, transaction duration, or WAL checkpoint-frame timing. Those fields remain
-explicitly unavailable below.
+does not supply allocator events, a successful external huge-repository
+measurement, Linux/macOS runs, transaction duration, or WAL checkpoint-frame
+timing. Those fields remain explicitly unavailable below. The replay identity
+is the exact source head `32f0297b487a74dc07da50f4a37f842125452204` and the
+local `projectatlas 0.4.5` runtime digest is
+`9755f0c7b14e0b2de7b92dbc8d275d7b45bd0cf87cf9d8caa0cb42465c61734d`.
+
+## External huge-corpus attempt
+
+The existing `prepare_huge` path fetched and verified the preregistered
+external input `https://github.com/microsoft/vscode.git` at commit
+`1b6a188127eeaf9194f945eb6eb89a657e93c54c` (tag `1.130.0`), with
+`GIT_LFS_SKIP_SMUDGE=1`, a detached clean checkout, 16,646 tracked files, and
+235,792,515 tracked bytes. The exact-head `--only huge` command is retained in
+the results artifact with the runtime revision and digest. The scan then
+failed closed on the real repository's malformed compiler configuration at
+`extensions/copilot/test/simulation/fixtures/tests/simple-ts-proj-with-test-file-1/tsconfig.json`;
+there is no external huge-corpus timing, resource, or digest claim. This is a
+real failed gate, not a substitute fixture or a completed task.
 
 ## Graph equivalence and SQLite profile
 
@@ -144,7 +162,10 @@ details in the results artifact; the owning query-plan assertion
 the complete proof for indexed, bounded graph reads. Transaction duration and
 checkpoint frame timing are unavailable from the existing runtime, while the
 real E2E proves one-generation atomicity, rollback, cancellation, and retry.
-This issue adds no schema or query.
+This issue adds no schema or query. The explicit-rebuild read-transfer red
+cell remains machine-readable in the results artifact: the locked 134,217,728
+byte medium cap was exceeded by both historical arms (149,323,652 baseline;
+148,916,441 candidate), so the failure was retained rather than normalized.
 
 ## Disposition
 
@@ -154,7 +175,11 @@ graph derivation and identity admission, synchronous atomic publication, bounded
 staging, cancellation, late-failure rollback, writer contention, and platform
 behavior remain owned by the existing runtime boundaries. OpenSpec tasks 5.1–5.4
 remain unchecked: the corrected Windows evidence and no-change decision are
-recorded, but allocator events, a real external huge repository, Linux/macOS
-measurements, transaction duration, and checkpoint frame timing remain
-unavailable from this bounded existing harness run. Hosted/reviewer acceptance
-is not a local implementation gate.
+recorded, but allocator events, a successful real external huge-repository
+measurement, Linux/macOS measurements, transaction duration, and checkpoint
+frame timing remain unavailable from this bounded existing harness run. The
+external corpus gate is specifically blocked by the fail-closed scan error
+above; platform evidence requires the existing hosted Linux/macOS matrix; and
+allocator/transaction/checkpoint evidence require measurement sources not
+exposed by this runtime/harness. Hosted/reviewer acceptance is not a local
+implementation gate.

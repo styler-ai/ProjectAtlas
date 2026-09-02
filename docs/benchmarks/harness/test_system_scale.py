@@ -430,6 +430,35 @@ class SystemScaleHarnessTests(unittest.TestCase):
         self.assertTrue(result["preflight"]["passed"])
         self.assertFalse(result["publication_eligible"])
 
+    def test_huge_failure_retains_preregistered_external_input(self) -> None:
+        corpus = {
+            "repository": "https://github.com/example/repository.git",
+            "tag": "1.0.0",
+            "commit": "a" * 40,
+            "minimum_indexed_files": 5_000,
+            "minimum_tracked_bytes": 20 * 1024 * 1024,
+            "target_file": "src/entry.ts",
+            "unrelated": "not retained",
+        }
+        preregistration = {"corpora": {"huge": corpus}}
+        self.assertEqual(
+            system_scale.preregistered_external_corpus(preregistration, "huge"),
+            {
+                key: corpus[key]
+                for key in (
+                    "repository",
+                    "tag",
+                    "commit",
+                    "minimum_indexed_files",
+                    "minimum_tracked_bytes",
+                    "target_file",
+                )
+            },
+        )
+        self.assertIsNone(
+            system_scale.preregistered_external_corpus(preregistration, "medium")
+        )
+
     def test_termination_recovery_requires_reopen_integrity_and_cleanup(
         self,
     ) -> None:
@@ -1327,6 +1356,54 @@ time.sleep(60)
             result = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(result["publication_eligible"])
             self.assertEqual(result["failure"]["type"], "TimeoutError")
+
+    def test_main_persists_external_input_when_huge_run_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preregistration = root / "preregistration.json"
+            preregistration.write_text(
+                json.dumps(
+                    {
+                        "corpora": {
+                            "huge": {
+                                "repository": "https://github.com/example/repo.git",
+                                "commit": "b" * 40,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "result.json"
+            argv = [
+                "system_scale.py",
+                "--runtime",
+                str(root / "runtime"),
+                "--preregistration",
+                str(preregistration),
+                "--output",
+                str(output),
+                "--only",
+                "huge",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    system_scale,
+                    "run_benchmark",
+                    side_effect=RuntimeError("scan failed"),
+                ),
+                self.assertRaisesRegex(SystemExit, "1"),
+            ):
+                system_scale.main()
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                result["external_corpus"],
+                {
+                    "repository": "https://github.com/example/repo.git",
+                    "commit": "b" * 40,
+                },
+            )
 
     def test_main_persists_invalid_benchmark_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

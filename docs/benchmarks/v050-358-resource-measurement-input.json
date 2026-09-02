@@ -41,6 +41,7 @@
       "python docs/benchmarks/harness/system_scale.py --runtime {CANDIDATE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only medium --caller-files 1024 --work-root target/benchmarks/system-scale/issue-358-candidate-medium --output target/benchmarks/system-scale/issue-358-candidate-medium.json",
       "python docs/benchmarks/harness/system_scale.py --runtime {BASELINE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only medium --caller-files 4096 --work-root target/benchmarks/system-scale/issue-358-baseline-high-edge --output target/benchmarks/system-scale/issue-358-baseline-high-edge.json",
       "python docs/benchmarks/harness/system_scale.py --runtime {CANDIDATE_RUNTIME} --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only medium --caller-files 4096 --work-root target/benchmarks/system-scale/issue-358-candidate-high-edge --output target/benchmarks/system-scale/issue-358-candidate-high-edge.json",
+      "python docs/benchmarks/harness/system_scale.py --runtime {REPO_ROOT}/target/debug/projectatlas.exe --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only huge --work-root target/benchmarks/system-scale/issue-358-exact-huge --corpus-cache target/benchmarks/system-scale/issue-358-external-corpus-cache --output target/benchmarks/system-scale/issue-358-exact-huge.json",
       "python docs/benchmarks/harness/system_scale.py --runtime {CANDIDATE_RUNTIME} --preregistration docs/benchmarks/v050-358-resource-measurement-preregistration.json --required-version 0.4.5 --only all --preflight-only --output target/benchmarks/system-scale/issue-358-all-route-preflight.json"
     ],
     "all_route_replay": {
@@ -115,7 +116,7 @@
   },
   "unavailable": {
     "allocator_events": "existing harness exposes no allocator-event sampler on this host",
-    "external_huge_repository": "the preregistered external VS Code corpus was not run in this bounded representative replay",
+    "external_huge_repository": "the exact-head attempt reached the preregistered VS Code commit but failed closed during scan on a malformed tsconfig fixture before a valid measurement result",
     "platforms": "only Windows was exercised; Linux and macOS measurements remain unproven",
     "transaction_trace": "transaction duration and checkpoint frame trace are not emitted by the existing harness"
   }
