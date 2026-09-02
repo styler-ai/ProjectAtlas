@@ -19,7 +19,8 @@ flowchart LR
     Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
     MainTarget --> Global[Global live-state validation]
     CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
-    CandidateObject --> Candidate[Local candidate branch]
+    CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes"]
+    CandidateClean --> Candidate[Local candidate branch]
     Candidate --> CandidateOwner["One owner from (#NNN) commit subjects"]
     Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract

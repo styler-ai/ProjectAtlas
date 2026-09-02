@@ -65,6 +65,14 @@ elif [ "${push_scope#candidate:}" != "$push_scope" ]; then
     echo "candidate branch local object does not match checked-out HEAD" >&2
     exit 1
   fi
+  if ! worktree_status="$(git status --porcelain=v1 --untracked-files=all)"; then
+    echo "candidate branch worktree status is unreadable" >&2
+    exit 1
+  fi
+  if [ -n "$worktree_status" ]; then
+    echo "candidate branch worktree must be clean before scoped validation" >&2
+    exit 1
+  fi
   if ! accepted_base="$(git merge-base origin/main HEAD)" || [ -z "$accepted_base" ]; then
     echo "candidate branch accepted origin/main base is unreadable" >&2
     exit 1
