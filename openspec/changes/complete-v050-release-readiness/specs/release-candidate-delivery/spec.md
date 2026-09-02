@@ -39,7 +39,7 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 - **THEN** authorization fails and cannot arm or preserve a merge decision based on the earlier snapshot
 
 ### Requirement: Mermaid validation distinguishes syntax from bounded parser failure
-#544 SHALL keep the repository-locked Mermaid parser and classify each attempt as valid, invalid, timed out, or unavailable. A timeout MAY receive exactly one retry with the same fixed per-attempt bound. Invalid syntax and unavailable execution SHALL fail without retry, and no timeout or execution failure SHALL be reported as invalid source syntax or treated as success.
+#544 SHALL keep the repository-locked Mermaid parser and classify each attempt as valid, invalid, timed out, or unavailable. A first timeout SHALL receive exactly one retry with the same fixed per-attempt bound. Invalid syntax and unavailable execution SHALL fail without retry, and no timeout or execution failure SHALL be reported as invalid source syntax or treated as success.
 
 #### Scenario: A transient parser timeout recovers
 - **WHEN** the first locked-parser attempt times out and the single retry accepts the same exact diagram
