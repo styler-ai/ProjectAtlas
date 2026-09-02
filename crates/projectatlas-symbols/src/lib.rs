@@ -1324,7 +1324,7 @@ fn visit_node<E>(
         } else if is_import_node(node.kind()) {
             push_import_relation(graph, node, content);
         } else if is_call_node(node.kind()) {
-            push_call_relation(graph, node, content);
+            push_call_relation(graph, node, content, php_namespace_context.as_deref_mut());
         }
     }
     let mut cursor = node.walk();
@@ -1997,6 +1997,9 @@ fn is_php_language(language: Option<&str>) -> bool {
 
 /// Return whether a PHP node's facts require conservative partial coverage.
 fn php_node_is_incomplete(node: Node<'_>, content: &str) -> bool {
+    if node.kind() == "anonymous_class" {
+        return true;
+    }
     if is_call_node(node.kind()) {
         if is_php_first_class_callable_acquisition(node) {
             return false;
@@ -2321,7 +2324,12 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
 }
 
 /// Push a call relation from a call node.
-fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+fn push_call_relation(
+    graph: &mut SymbolGraph,
+    node: Node<'_>,
+    content: &str,
+    php_namespace_context: Option<&mut PhpNamespaceContext>,
+) {
     if is_php_language(graph.language.as_deref()) && is_inside_php_anonymous_class(node) {
         return;
     }
@@ -2346,7 +2354,13 @@ fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
     if target.is_empty() || (!is_php && target.len() > MAX_SNIPPET_CHARS) {
         return;
     }
-    let source = enclosing_symbol_name(node.parent(), content).unwrap_or_else(|| "<module>".into());
+    let source = enclosing_symbol_name(node.parent(), content)
+        .or_else(|| {
+            is_php
+                .then(|| php_namespace_context.and_then(|context| context.parent_for(node)))
+                .flatten()
+        })
+        .unwrap_or_else(|| "<module>".into());
     let context = compact_text(node_text(node, content).as_deref().unwrap_or(""));
     push_relation(
         graph,
@@ -5965,6 +5979,7 @@ namespace First;
 use Vendor\First as FirstAlias;
 class FirstService {}
 function first_helper(): void {}
+first_helper();
 namespace Second;
 class SecondService {}
 function second_helper(): void {}
@@ -6003,6 +6018,11 @@ class OutsideGlobal {}
                     && relation.target_name == name
             }));
         }
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Calls
+                && relation.source_name == "First"
+                && relation.target_name == "first_helper"
+        }));
 
         let global_symbol = graph
             .symbols
@@ -6715,6 +6735,7 @@ class NamedOwner {
 }
 ";
         let graph = extract_symbol_graph("src/AnonymousMembers.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::Fallback, "graph: {graph:?}");
 
         for name in [
             "factory",
