@@ -233,7 +233,7 @@ const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
     "PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS";
 #[cfg(windows)]
 const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS";
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 const REAL_HOST_READER_TIMEOUT: Duration = Duration::from_millis(250);
 // Parallel workspace test binaries can delay the owned child identity write;
 // retain a bounded capture window without making cleanup depend on scheduling.
