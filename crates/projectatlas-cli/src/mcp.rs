@@ -12220,7 +12220,7 @@ mod tests {
             "native administrative identities collapsed into one selector",
         )?;
         let repository = GitRepositoryStructure {
-            common_directory: common_directory.clone(),
+            common_directory,
             selection: projectatlas_fs::worktree::GitRepositorySelection::CommonManager {
                 source_selection: projectatlas_fs::worktree::GitManagerSourceSelection::Ambiguous {
                     worktree_count: entries.len(),
