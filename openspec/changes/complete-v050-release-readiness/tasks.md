@@ -119,10 +119,10 @@
 
 ## 18. Native non-UTF-8 worktree identity (#484)
 
-- [ ] 18.1 After #481, reuse its native identity and lossless/versioned SQLite codec for worktree root, Git common directory, and Git administrative directory; land the smallest key/constraint/migration/transaction/rollback/recovery delta with real write/read and duplicate-key proof before adapters change.
-- [ ] 18.2 Remove premature UTF-8 conversion from registration, alias routing, duplicate detection, retirement, capacity, watcher, filesystem, Git process, CLI, and MCP boundaries; keep identity native and make UTF-8 display a terminal typed-unavailable conversion.
+- [x] 18.1 After #481, reuse its native identity and lossless/versioned SQLite codec for worktree root, Git common directory, and Git administrative directory; land the smallest key/constraint/migration/transaction/rollback/recovery delta with real write/read and duplicate-key proof before adapters change.
+- [x] 18.2 Remove premature UTF-8 conversion from registration, alias routing, duplicate detection, retirement, capacity, watcher, filesystem, Git process, CLI, and MCP boundaries; keep identity native and make UTF-8 display a terminal typed-unavailable conversion.
 - [ ] 18.3 Cover invalid UTF-8 bytes independently in root/common/admin paths, valid Unicode, aliases, duplicate native registration, capacity, retirement, watcher and Git command invocation, UTF-8-only CLI/MCP output, migration, injected failure, rollback, retry, and supported Linux/macOS compatibility.
-- [ ] 18.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 18.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 19. Clean macOS Apple Silicon installed lifecycle (#485)
 
