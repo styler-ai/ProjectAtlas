@@ -38,21 +38,6 @@ Every issue assigned to `v0.5.0-00` with `status:ready` SHALL resolve its mapped
 - **WHEN** the live default-branch SHA differs between published-snapshot admission, merge preflight, or final authorization reread
 - **THEN** authorization fails and cannot arm or preserve a merge decision based on the earlier snapshot
 
-### Requirement: Mermaid validation distinguishes syntax from bounded parser failure
-#544 SHALL keep the repository-locked Mermaid parser and classify each attempt as valid, invalid, timed out, or unavailable. A first timeout SHALL receive exactly one retry with the same fixed per-attempt bound. Invalid syntax and unavailable execution SHALL fail without retry, and no timeout or execution failure SHALL be reported as invalid source syntax or treated as success.
-
-#### Scenario: A transient parser timeout recovers
-- **WHEN** the first locked-parser attempt times out and the single retry accepts the same exact diagram
-- **THEN** the architecture target passes without weakening any link, heading, repository, or diagram requirement
-
-#### Scenario: The parser times out twice
-- **WHEN** both bounded attempts time out
-- **THEN** validation fails with a timeout-specific diagnostic naming the architecture target
-
-#### Scenario: Syntax is invalid or execution is unavailable
-- **WHEN** the locked parser rejects the diagram or cannot be executed correctly
-- **THEN** validation fails with the actual invalid-syntax or unavailable-execution class and does not enter a generic retry or process framework
-
 ### Requirement: Native relationship changes are prevalidated and reverse drift is repaired
 IssueOps SHALL derive a bounded transition plan from the declared release graph and current native state before any relationship mutation or zero-mutation success. The requested relation kind, orientation, issue, related issue, and operation SHALL match exactly one graph-owned missing-or-extra transition toward the declaration. For `blocked_by`, the source SHALL belong to exactly one release graph; for `sub_issue`, the source SHALL be exactly one graph's release issue. Post-mutation readback and complete graph reconciliation SHALL remain mandatory. Issue events SHALL repair invalid closed state in both blocker directions within the declared graph and SHALL validate a declared issue even when a `demilestoned` event removed its live milestone.
 
