@@ -36,7 +36,7 @@
         "525": { "blocked_by": [523] },
         "533": { "blocked_by": [] },
         "544": { "blocked_by": [] },
-        "547": { "blocked_by": [544] },
+        "547": { "blocked_by": [] },
         "549": { "blocked_by": [] }
       }
     },

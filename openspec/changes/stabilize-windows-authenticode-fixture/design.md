@@ -34,7 +34,7 @@ No product migration is required. Replace the fixture behavior, run the required
 
 ## Dependencies / Cross-Issue Impact
 
-#547 requires #544's bounded Mermaid self-test fix on `main` before its normal full gate can publish. It is one direct child and blocker of release owner #492 and a genuine test-gate prerequisite for publishing the already accepted local heads for #477 and #484 and for completing #518 because their mandatory Windows gate reproduces this fixture failure. The issues refresh onto `main` after #547 lands; no product, schema, crate, or public compatibility dependency is introduced.
+The former #544 prerequisite is satisfied on `main`; no active direct blocker remains for #547. It is one direct child and blocker of release owner #492 and a genuine test-gate prerequisite for publishing the already accepted local heads for #477 and #484 and for completing #518 because their mandatory Windows gate reproduces this fixture failure. The issues refresh onto `main` after #547 lands; no product, schema, crate, or public compatibility dependency is introduced.
 
 ## Open Questions
 
