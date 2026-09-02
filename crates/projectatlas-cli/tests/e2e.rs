@@ -10616,7 +10616,11 @@ fn pre_push_candidate_rejects_ignored_linked_document_outside_tree() -> Result<(
         .join(TASKS_FILE_NAME);
     fs::create_dir_all(fixture_repo.join(GITHOOKS_DIR_NAME))?;
     fs::create_dir_all(fixture_repo.join(".github").join("scripts"))?;
-    fs::create_dir_all(&issueops_tasks.parent().unwrap())?;
+    fs::create_dir_all(
+        issueops_tasks
+            .parent()
+            .ok_or_else(|| io::Error::other("issueops tasks fixture has no parent"))?,
+    )?;
     fs::create_dir_all(&fake_path)?;
     fs::copy(
         workspace_root
@@ -10641,7 +10645,7 @@ fn pre_push_candidate_rejects_ignored_linked_document_outside_tree() -> Result<(
         format!("{{\"schema_version\": 2, \"changes\": {{\"{ISSUEOPS_CHANGE_NAME}\": 549}}}}\n"),
     )?;
     fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
-    let issue_body = r#"## Why
+    let issue_body = r"## Why
 
 Candidate validation needs the linked architecture document from its committed tree.
 
@@ -10684,7 +10688,7 @@ Mitigations:
 - [ ] Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed.
 - [ ] Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes.
 - [ ] Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.
-"#;
+";
     fs::write(
         &issue_payload,
         serde_json::to_vec(&json!({
