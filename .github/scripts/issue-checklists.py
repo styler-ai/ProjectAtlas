@@ -2029,6 +2029,13 @@ Mitigations:
 - [ ] Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.
 """
     self_test_root = Path(__file__).resolve().parents[2]
+    saved_mermaid_runner = _run_mermaid_parser
+
+    def default_mermaid_runner(_diagram: str) -> MermaidValidationOutcome:
+        return MermaidValidationOutcome.VALID
+
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
 
     rendered_issue_form = "\n".join(
         [
@@ -2350,7 +2357,6 @@ Mitigations:
         )
     )
 
-    saved_mermaid_runner = _run_mermaid_parser
     try:
         def stub_mermaid_runner(outcomes: list[MermaidValidationOutcome]):
             calls: list[str] = []
@@ -2477,7 +2483,7 @@ Timeout --> Recovery
             assert "parser outcome: unavailable execution" in failures[0]
 
     finally:
-        globals()["_run_mermaid_parser"] = saved_mermaid_runner
+        globals()["_run_mermaid_parser"] = default_mermaid_runner
         mermaid_syntax_is_valid.cache_clear()
 
     node = shutil.which("node")
@@ -2518,6 +2524,8 @@ Timeout --> Recovery
             check=False,
         )
     assert unavailable_process.returncode == 2, unavailable_process.stderr
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
 
     assert contains_mermaid_diagram("```mermaid\nflowchart LR\nA --> B\n```")
     assert contains_mermaid_diagram(
@@ -2526,9 +2534,13 @@ Timeout --> Recovery
     assert contains_mermaid_diagram(
         "```mermaid\nkanban\n  column1[Backlog]\n    task1[Add feature]\n```"
     )
+    calls = stub_mermaid_runner([MermaidValidationOutcome.INVALID])
     assert not contains_mermaid_diagram(
         "```mermaid\nflowchart LR\nthis is not valid mermaid ???\n```"
     )
+    assert len(calls) == 1
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
     assert not contains_mermaid_diagram("```mermaid\nThis is only prose.\n```")
     assert not contains_mermaid_diagram("```mermaid\nflowchart LR\n```")
     assert not contains_mermaid_diagram("```mermaid\n---\ntitle: Missing close\nflowchart LR\n```")
@@ -3863,6 +3875,8 @@ Timeout --> Recovery
                 readiness_root, "ready-change"
             )
         )
+    globals()["_run_mermaid_parser"] = saved_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
     print("issue checklist self-test passed")
 
 
