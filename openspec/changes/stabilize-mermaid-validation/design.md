@@ -10,6 +10,7 @@ The change stays inside this existing Python IssueOps boundary. It does not affe
 
 - Preserve valid, invalid, timed-out, and unavailable parser outcomes through the architecture-link diagnostic.
 - Retry the same exact block once only after its first timeout, with the existing fixed per-attempt timeout.
+- Bound all parser subprocess work across one validation run below the existing five-minute workflow timeout.
 - Preserve every existing architecture target and syntax rejection.
 - Prove the behavior with focused deterministic self-tests.
 
@@ -33,17 +34,26 @@ The uncached runner returns one closed outcome. The cached validation boundary c
 
 Alternative rejected: a generic retry helper or configurable policy adds machinery for one fixed recovery rule.
 
+### Share one fixed deadline across the validation run
+
+Create one monotonic 120-second Mermaid deadline for the complete IssueOps validation run and pass it only through the existing architecture-link helpers. A new diagram starts only when at least two 30-second attempt ceilings remain, so any admitted first timeout still receives its required single retry. When less budget remains, the validator launches no subprocess and returns the timed-out class for the current architecture target. Fast valid, invalid, and unavailable results consume only their actual elapsed time; no per-target timer or generic deadline framework is introduced.
+
+This keeps all parser work bounded well below the existing five-minute `issue-contract` workflow timeout while preserving headroom for dependency installation, audit, self-tests, and ordinary issue validation.
+
+Alternative rejected: raising the workflow timeout hides an unbounded serial multiplication, while a separate budget per target can still multiply across many issues.
+
 ### Preserve target-level diagnostics without weakening `any valid block` behavior
 
 The architecture-link validator still accepts a target when any non-empty fenced Mermaid block validates. When none validate, it reports the observed terminal class or classes together with the existing architecture URL. Missing or empty blocks keep their existing structural failure.
 
 ### Test the result boundary directly
 
-Focused self-tests inject parser outcomes and count attempts. They cover timeout recovery, terminal timeout, invalid syntax without retry, unavailable execution without retry, exact attempt bounds, target-specific diagnostics, and the unchanged planned-issue and milestone checks. A real locked-validator integration check also distinguishes an invalid diagram from a controlled dependency/bootstrap failure by process result, so the Python mapping is not proven only by a mocked return code. No wall-clock sleep or real timeout is needed for causal unit proof.
+Focused self-tests inject parser outcomes and count attempts. They cover timeout recovery, terminal timeout, validation-run budget exhaustion without another spawn, invalid syntax without retry, unavailable execution without retry, exact attempt bounds, target-specific diagnostics, and the unchanged planned-issue and milestone checks. A real locked-validator integration check also distinguishes an invalid diagram from a controlled dependency/bootstrap failure by process result, so the Python mapping is not proven only by a mocked return code. No wall-clock sleep or real timeout is needed for causal unit proof.
 
 ## Risks / Trade-offs
 
 - Two real timeouts can extend one failing diagram check to at most 60 seconds. → Keep the existing 30-second per-attempt bound and exactly one retry.
+- Serial stalled blocks can multiply that cost across a validation run. → Admit a new block only when the shared fixed deadline can contain both attempts; otherwise fail with the target-specific timeout class without spawning.
 - Cached terminal outcomes could hide a later recovery in the same process. → Cache only the final validation result after the bounded retry, preserving the existing per-diagram cache contract.
 - Multiple failing blocks can produce ambiguous classification. → Report the bounded set of observed terminal classes for the target rather than inventing one source defect.
 

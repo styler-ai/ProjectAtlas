@@ -1,11 +1,12 @@
 ## Why
 
-The mandatory IssueOps architecture check currently collapses a locked Mermaid parser timeout into an invalid-diagram result. Under ordinary concurrent validation, that can misreport a healthy diagram as defective and block delivery for the wrong reason.
+The mandatory IssueOps architecture check currently collapses a locked Mermaid parser timeout into an invalid-diagram result. Under ordinary concurrent validation, that can misreport a healthy diagram as defective and block delivery for the wrong reason. Because linked targets may contain several Mermaid blocks, independent per-block timeouts can also consume the five-minute IssueOps job before it emits the target-specific failure.
 
 ## What Changes
 
 - Classify locked Mermaid parser attempts as valid, invalid, timed out, or unavailable.
 - Retry the same exact diagram once only after the first timeout, using the existing fixed per-attempt bound.
+- Bound all Mermaid parser work in one IssueOps validation run with a fixed aggregate deadline that leaves headroom inside the existing workflow timeout.
 - Keep all existing architecture-link, heading, repository, and syntax checks fail-closed while reporting the actual failure class and target.
 - Add focused causal tests at the existing IssueOps boundary.
 
