@@ -121,6 +121,22 @@
     "baseline": {"blocked_wall_seconds": 1.263722, "blocked_error": "database is locked", "generation_unchanged": true, "retry_generation_increment": 1, "passed": false, "failed_cell": "maximum_contention_failure_seconds"},
     "candidate": {"blocked_wall_seconds": 1.264615, "blocked_error": "database is locked", "generation_unchanged": true, "retry_generation_increment": 1, "passed": false, "failed_cell": "maximum_contention_failure_seconds"}
   },
+  "remediation_replay": {
+    "scope": "exact-head contention-only replay after fail-fast writer-availability probe",
+    "blocked_wall_seconds": 0.799257,
+    "maximum_contention_failure_seconds": 1,
+    "blocked_error": "database is locked",
+    "typed_writer_refusal": true,
+    "generation_unchanged": true,
+    "complete_snapshot_unchanged": true,
+    "retry_generation_increment": 1,
+    "retry_successful": true,
+    "stage_directories": 0,
+    "passed": true,
+    "publication_eligible": false,
+    "matrix_complete": false,
+    "notes": "This causal replay does not replace the historical baseline/candidate matrix or check OpenSpec tasks 5.1-5.4."
+  },
   "cancellation": {
     "baseline": {"seconds": 0.104863, "active_work_observed": true, "terminal_state": "canceled", "generation_unchanged": true, "writer_released": true, "survivors": [], "passed": true},
     "candidate": {"seconds": 0.114796, "active_work_observed": true, "terminal_state": "canceled", "generation_unchanged": true, "writer_released": true, "survivors": [], "passed": true}
@@ -139,7 +155,7 @@
     "stages": ["scan", "text and symbol parsing", "graph derivation and identity admission", "structural summaries", "bounded staging", "one-generation SQLite publication", "cleanup"],
     "graph_digest_equal_for_every_shape": true,
     "cancellation_rollback_and_retry": true,
-    "same_root_writer_contention": "atomic refusal and retry passed; contention timing threshold failed",
+    "same_root_writer_contention": "historical baseline/candidate timing failed at 1.263722s/1.264615s; exact-head contention-only replay passed at 0.799257s",
     "process_worker_budget": "one 16-worker host envelope, eight configured workers per concurrent process"
   },
   "unavailable": {

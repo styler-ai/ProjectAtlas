@@ -5,8 +5,10 @@
 The existing separate-pool indexing lifecycle is retained. The candidate that
 reused one Rayon pool for parsing, graph-identity admission, and structural
 summaries was removed after comparison because it did not produce a material
-full-envelope win. No schema, dependency, or production resource boundary was
-changed by this decision.
+full-envelope win. No schema or dependency boundary changed by the historical
+candidate decision. The exact-head remediation now adds one production
+writer-availability probe before expensive staging; it does not change the
+publication schema or staged projection ownership.
 
 The frozen remediation threshold was a reduction of at least 10% in both cold
 scan wall time and CPU time for every representative shape, with no more than a
@@ -56,7 +58,11 @@ storage-generated row/key identifiers, and rejection generation numbers are
 excluded or joined to canonical identities, allowing independent fixture
 databases to compare graph content rather than allocation order.
 
-## Cold and incremental comparison
+## Historical baseline-versus-shared-pool comparison
+
+The following matrix is the preregistered baseline-versus-candidate comparison
+that rejected the shared-pool candidate. It is separate from the exact-head
+contention-only replay below; the replay is not a replacement for this matrix.
 
 Values are baseline/candidate pairs. CPU is process-tree CPU seconds, RSS is
 peak bytes, and I/O is terminal process-tree transfer bytes. Every database
@@ -81,13 +87,13 @@ failed the all-shape threshold and was not adopted.
 
 ## Concurrency, cancellation, and writer behavior
 
-The existing concurrent-isolation and contention harness paths were run for
-both binaries with two roots and eight configured workers per process from a
-16-worker host budget. Both binaries preserved cross-root/same-root correctness,
-worker-budget, and concurrent RSS limits; the values below are conservative sums
-of per-process peaks. Both runs missed the existing medium rebuild read-transfer
-cap (149,323,652 baseline; 148,916,441 candidate); the failed cell is retained
-and is part of the no-adoption decision.
+The existing concurrent-isolation and historical contention harness paths were
+run for both binaries with two roots and eight configured workers per process
+from a 16-worker host budget. Both binaries preserved cross-root/same-root
+correctness, worker-budget, and concurrent RSS limits; the values below are
+conservative sums of per-process peaks. Both runs missed the existing medium
+rebuild read-transfer cap (149,323,652 baseline; 148,916,441 candidate); the
+failed cell is retained and is part of the no-adoption decision.
 
 | Scenario | Baseline | Candidate |
 | --- | --- | --- |
@@ -98,11 +104,28 @@ and is part of the no-adoption decision.
 | Cooperative MCP cancellation | 0.104863s; terminal `canceled`, generation unchanged, writer released, no survivors | 0.114796s; terminal `canceled`, generation unchanged, writer released, no survivors |
 
 The existing Rust E2E cancellation helper additionally reopens the canceled
-database and compares its bounded logical SQLite snapshot. The new
+database and compares its bounded logical SQLite snapshot. The
 `resource_measurement_baseline_pipeline_preserves_atomic_graph_publication`
 test exercises the real CLI scan/watch, timeout rollback, MCP watch, two-root
 watch, same-root writer lock, retry, and that cancellation helper in one
-bounded fixture.
+bounded fixture. The historical writer-lock rows above include process/setup
+overhead and failed the frozen one-second cell in both binaries.
+
+## Exact-head contention-only remediation replay
+
+After the production writer-availability probe was added, the exact-head
+runtime was replayed only for same-root contention. This bounded replay is a
+causal refusal check, not a complete eligible resource matrix and does not
+check OpenSpec tasks 5.1–5.4.
+
+| Runtime scope | Blocked wall (s) | Error | Complete generation/snapshot unchanged | Retry generation | Staging residue | Result |
+| --- | ---: | --- | --- | ---: | --- | --- |
+| Exact-head corrected runtime, same-root writer contention | 0.799257 | `database is locked` | yes | +1 | none observed | pass |
+
+The replay retained the historical explicit-rebuild read-transfer failure and
+does not supply allocator events, an external huge repository, Linux/macOS
+runs, transaction duration, or WAL checkpoint-frame timing. Those fields remain
+explicitly unavailable below.
 
 ## Graph equivalence and SQLite profile
 

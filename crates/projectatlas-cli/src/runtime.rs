@@ -3304,6 +3304,45 @@ pub(crate) fn run_scan_pipeline_controlled(
     })
 }
 
+/// Execute the scan pipeline with one test-only interposer immediately before
+/// final publication.
+///
+/// The interposer is deliberately unavailable to production builds. It lets a
+/// runtime test acquire a competing writer after the advisory probe and all
+/// expensive staging/revalidation, proving the final publication remains the
+/// authoritative fail-fast boundary without adding a production callback or
+/// configurable policy.
+#[cfg(test)]
+fn run_scan_pipeline_controlled_with_publication_interposer(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+    before_publication: Box<dyn FnOnce(&mut AtlasStore) -> Result<(), CliError>>,
+) -> Result<ScanReport, CliError> {
+    let bounded_control = bounded_index_work_control(control);
+    let control = &bounded_control;
+    control.check(IndexWorkStage::Publication)?;
+    store.probe_index_publication_writer()?;
+    let batch = stage_full_index_publication(store, plan, symbol_options, false, true, control)?;
+    revalidate_staged_publication_inputs_with_purpose_snapshot(
+        plan,
+        batch.nodes.expected_nodes(),
+        batch.purpose_import.as_ref(),
+        control,
+    )?;
+    before_publication(store)?;
+    let outcome = publish_index_batch(store, batch, control)?;
+    let overview = store.overview()?;
+    Ok(ScanReport {
+        overview,
+        purpose_import: outcome.purpose_import,
+        text_index: outcome.text_index,
+        structural_summaries: outcome.structural_summaries,
+        symbols: outcome.symbols,
+    })
+}
+
 /// Reconcile a copied worktree baseline through exact no-op, incremental, or full refresh.
 pub(crate) fn reconcile_hydrated_index_controlled(
     store: &mut AtlasStore,
@@ -11295,6 +11334,171 @@ mod tests {
             )
             .into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_scan_pipeline_rejects_delayed_writer_after_advisory_probe()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("delayed-writer-root");
+        let config_dir = root.join(".projectatlas");
+        let database = config_dir.join("projectatlas.db");
+        let source = root.join("lib.rs");
+        fs::create_dir_all(&config_dir)?;
+        fs::write(&source, "pub fn initial() -> u32 { 1 }\n")?;
+
+        let plan = ScanRuntimePlan::for_path(None, &root, None)?;
+        let symbol_options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store = open_atlas_store_for_project(&database, &plan.root)?;
+        run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+        let before = (
+            store.index_publication()?,
+            store.load_nodes()?,
+            store.load_file_text("lib.rs")?,
+            store.overview()?,
+            store.symbol_count()?,
+            store.symbol_relation_count()?,
+        );
+        let before_generation = before
+            .0
+            .as_ref()
+            .ok_or_else(|| io::Error::other("delayed-writer baseline publication missing"))?
+            .generation;
+
+        fs::write(&source, "pub fn delayed() -> u32 { 2 }\n")?;
+        let contract_fingerprint = plan.publication_contract_fingerprint();
+        let (handoff_tx, handoff_rx) = std::sync::mpsc::sync_channel(1);
+        let competitor_database = database.clone();
+        let competitor_root = plan.root.clone();
+        let competitor_contract = contract_fingerprint.clone();
+        let interposer = Box::new(move |_store: &mut AtlasStore| -> Result<(), CliError> {
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let competitor = thread::spawn(move || -> Result<(), CliError> {
+                let mut competing =
+                    open_atlas_store_for_project(&competitor_database, &competitor_root)?;
+                let publication = competing.begin_index_publication(&competitor_contract)?;
+                ready_tx.send(()).map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "delayed-writer competitor could not report readiness: {error}"
+                    ))
+                })?;
+                release_rx.recv().map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "delayed-writer competitor release was not delivered: {error}"
+                    ))
+                })?;
+                drop(publication);
+                Ok(())
+            });
+            ready_rx
+                .recv_timeout(Duration::from_secs(1))
+                .map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "delayed-writer competitor did not acquire the writer: {error}"
+                    ))
+                })?;
+            handoff_tx.send((release_tx, competitor)).map_err(|error| {
+                CliError::InvalidInput(format!("delayed-writer competitor handoff failed: {error}"))
+            })?;
+            Ok(())
+        });
+        let blocked = run_scan_pipeline_controlled_with_publication_interposer(
+            &mut store,
+            &plan,
+            &symbol_options,
+            &standalone_index_work_control(),
+            interposer,
+        );
+        let (release_tx, competitor) =
+            handoff_rx
+                .recv_timeout(Duration::from_secs(1))
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "delayed-writer competitor handoff was not observed: {error}"
+                    ))
+                })?;
+        release_tx.send(()).map_err(|error| {
+            io::Error::other(format!("delayed-writer competitor release failed: {error}"))
+        })?;
+        competitor
+            .join()
+            .map_err(|_| io::Error::other("delayed-writer competitor panicked"))??;
+        let Err(CliError::Db(contention)) = blocked else {
+            return Err(io::Error::other(
+                "scan pipeline accepted or misclassified a writer acquired after its advisory probe",
+            )
+            .into());
+        };
+        if !contention.is_write_unavailable() {
+            return Err(io::Error::other(
+                "delayed-writer refusal was not typed as writer-unavailable",
+            )
+            .into());
+        }
+
+        let after_refusal = (
+            store.index_publication()?,
+            store.load_nodes()?,
+            store.load_file_text("lib.rs")?,
+            store.overview()?,
+            store.symbol_count()?,
+            store.symbol_relation_count()?,
+        );
+        require_eq(
+            &after_refusal,
+            &before,
+            "complete publication snapshot after delayed-writer refusal",
+        )?;
+        let stage_directories = fs::read_dir(&config_dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("graph-stage-"))
+            })
+            .count();
+        require_eq(
+            &stage_directories,
+            &0,
+            "graph staging residue after delayed-writer refusal",
+        )?;
+
+        run_scan_pipeline(&mut store, &plan, &symbol_options)?;
+        let retried = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("delayed-writer retry publication missing"))?;
+        require_eq(
+            &retried.generation,
+            &before_generation
+                .checked_next()
+                .ok_or_else(|| io::Error::other("delayed-writer generation overflowed"))?,
+            "generation after delayed-writer retry",
+        )?;
+        require_eq(
+            &store
+                .load_file_text("lib.rs")?
+                .ok_or_else(|| io::Error::other("delayed-writer retry text missing"))?
+                .content,
+            &"pub fn delayed() -> u32 { 2 }\n".to_string(),
+            "source after delayed-writer retry",
+        )?;
+        let retry_stage_directories = fs::read_dir(&config_dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("graph-stage-"))
+            })
+            .count();
+        require_eq(
+            &retry_stage_directories,
+            &0,
+            "graph staging residue after delayed-writer retry",
+        )?;
         Ok(())
     }
 
