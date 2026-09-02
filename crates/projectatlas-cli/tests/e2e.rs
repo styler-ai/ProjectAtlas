@@ -9489,7 +9489,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if mermaid_setup_step.contains("\n        if:") {
         return Err(io::Error::other("CI Mermaid setup must be unconditional").into());
     }
-    for event in ["pull_request_review:", "pull_request_review_comment:"] {
+    for event in [
+        "pull_request_review:",
+        "pull_request_review_comment:",
+        "workflow_dispatch:",
+    ] {
         if !ci.contains(event) {
             return Err(io::Error::other(format!(
                 "CI must retain review-event coverage for {event:?}"
