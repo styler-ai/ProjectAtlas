@@ -59,6 +59,16 @@ SYSTEM_SCALE_MEASUREMENT_INPUTS = (
 )
 
 
+def medium_corpus_variant(caller_files: int, default_caller_files: int) -> str:
+    """Name generated medium fixtures by their actual caller cardinality."""
+
+    return (
+        "high-degree"
+        if caller_files == default_caller_files
+        else f"high-edge-{caller_files}"
+    )
+
+
 def committed_git_object_sha256(
     relative: str,
     *,
@@ -1470,6 +1480,49 @@ def database_profile(database: Path) -> dict[str, Any]:
         project_root = connection.execute(
             "SELECT value FROM metadata WHERE key = 'project_root'"
         ).fetchone()
+        query_plan_cases = {
+            "entity_path_lookup": (
+                "graph_entities",
+                "SELECT entity_key FROM graph_entities "
+                "WHERE project_instance_id = zeroblob(16) "
+                "AND repository_path = 'src/Äuth.rs' "
+                "ORDER BY entity_kind, entity_key LIMIT 11"
+            ),
+            "outbound_relation_lookup": (
+                "graph_relations",
+                "SELECT relation_key FROM graph_relations "
+                "WHERE source_entity_key = zeroblob(32) "
+                "ORDER BY relation_scope, relation_kind, relation_key LIMIT 11"
+            ),
+            "relation_occurrence_lookup": (
+                "graph_relation_occurrences",
+                "SELECT file_path FROM graph_relation_occurrences "
+                "WHERE relation_key = zeroblob(32) "
+                "ORDER BY file_path, start_line, start_column, end_line, end_column "
+                "LIMIT 11"
+            ),
+        }
+        existing_tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table'"
+            )
+        }
+        query_plans = {}
+        for name, (table, sql) in query_plan_cases.items():
+            if table not in existing_tables:
+                continue
+            details = [
+                str(row[3])
+                for row in connection.execute(f"EXPLAIN QUERY PLAN {sql}")
+            ]
+            query_plans[name] = {
+                "details": details,
+                "uses_temporary_btree": any(
+                    "USE TEMP B-TREE" in detail for detail in details
+                ),
+                "uses_index": any("INDEX" in detail for detail in details),
+            }
         return {
             "page_size": page_size,
             "page_count": page_count,
@@ -1484,6 +1537,7 @@ def database_profile(database: Path) -> dict[str, Any]:
             "wal_autocheckpoint": wal_autocheckpoint,
             "sqlite_stat1_present": stat1_present,
             "project_root": project_root[0] if project_root else None,
+            "query_plans": query_plans,
         }
     finally:
         connection.close()
@@ -1908,6 +1962,7 @@ def evaluate_case(
         ),
     )
     process_io = evaluate_process_io_contract(result, preregistration)
+    query_plans = profile.get("query_plans", {})
     full_read_ratio = process_io["full_source_input_read_ratio"]
     full_write_ratio = process_io["full_source_input_write_ratio"]
     full_output_efficiency_read_ratio = process_io[
@@ -2261,6 +2316,28 @@ def evaluate_case(
             "==",
             "ok",
             profile["quick_check"] == "ok",
+        ),
+        (
+            "representative SQLite query plans",
+            {
+                "shape_count": len(query_plans),
+                "all_use_index": all(
+                    details.get("uses_index", False)
+                    for details in query_plans.values()
+                ),
+                "temporary_btree": any(
+                    details.get("uses_temporary_btree", True)
+                    for details in query_plans.values()
+                ),
+            },
+            "==",
+            {"shape_count": 3, "all_use_index": True, "temporary_btree": False},
+            len(query_plans) == 3
+            and all(
+                details.get("uses_index", False)
+                and not details.get("uses_temporary_btree", True)
+                for details in query_plans.values()
+            ),
         ),
         (
             "database page bytes",
@@ -3892,13 +3969,19 @@ def run_benchmark(args: argparse.Namespace) -> None:
     medium = work_root / "medium"
     prepare_medium(medium, caller_files)
     if args.only in {"medium", "all"}:
+        default_caller_files = int(
+            preregistration.get("corpora", {})
+            .get("medium", {})
+            .get("caller_files", caller_files)
+        )
+        medium_variant = medium_corpus_variant(caller_files, default_caller_files)
         cases.append(
             run_case(
                 runtime,
                 medium,
                 env,
                 scale="medium",
-                variant="high-degree",
+                variant=medium_variant,
                 preregistration=preregistration,
                 query={
                     "target_file": "src/hub.rs",

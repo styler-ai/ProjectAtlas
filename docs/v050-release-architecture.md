@@ -72,9 +72,11 @@ flowchart LR
 ```mermaid
 flowchart LR
     budget[Existing bounded stage worker ceilings] --> parse[Symbol parsing]
+    budget --> derive[Graph derivation]
     budget --> admission[Graph-identity admission]
     budget --> summaries[Structural summaries]
-    parse --> admission
+    parse --> derive
+    derive --> admission
     admission --> summaries
     summaries --> staged[Prepared generation]
     staged --> tx[(Short SQLite publication transaction)]
@@ -86,8 +88,9 @@ The arrows show owning stage order in the publication pipeline, not a claim that
 structural summaries consume graph rows; summaries reuse parser inputs after
 graph projection. For #358, the existing bounded stage worker ceilings remain in
 place because the measured shared-pool candidate did not produce a material
-full-envelope improvement. Graph-identity admission remains the existing
-sequential owning stage, and publication keeps its current atomic transaction.
+full-envelope improvement. Graph derivation and graph-identity admission remain
+the existing sequential owning stages, and publication keeps its current atomic
+transaction.
 The reproducible baseline/candidate evidence is recorded in
 [`docs/benchmarks/v050-358-resource-measurement.md`](benchmarks/v050-358-resource-measurement.md).
 

@@ -19,6 +19,14 @@ import mcp_composition
 
 
 class SystemScaleHarnessTests(unittest.TestCase):
+    def test_generated_medium_variant_reports_actual_shape(self) -> None:
+        self.assertEqual(
+            system_scale.medium_corpus_variant(1024, 1024), "high-degree"
+        )
+        self.assertEqual(
+            system_scale.medium_corpus_variant(4096, 1024), "high-edge-4096"
+        )
+
     def test_remove_tree_tolerates_entry_disappearing_during_permission_retry(
         self,
     ) -> None:
