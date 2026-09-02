@@ -12674,9 +12674,8 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
         "POSIX installer did not place the forwarder beside the canonical runtime",
     )?;
     let inherited_path = env::var_os("PATH").unwrap_or_default();
-    let bare_path = env::join_paths(
-        std::iter::once(runtime_dir.clone()).chain(env::split_paths(&inherited_path)),
-    )?;
+    let bare_path =
+        env::join_paths(std::iter::once(runtime_dir).chain(env::split_paths(&inherited_path)))?;
     let bare_output = StdCommand::new("atlas")
         .env("PATH", &bare_path)
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
