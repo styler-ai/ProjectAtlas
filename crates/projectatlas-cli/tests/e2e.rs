@@ -28528,17 +28528,26 @@ fn resource_measurement_baseline_pipeline_preserves_atomic_graph_publication()
     )?;
     let blocker = Connection::open(&contention_database)?;
     blocker.execute_batch("BEGIN IMMEDIATE")?;
+    let blocked_started = Instant::now();
     let blocked = Command::new(&executable)
         .current_dir(&contention_root)
         .arg("--db")
         .arg(&contention_database)
         .args(["watch", ".", "--once", "--timeout-seconds", "1"])
         .output()?;
+    let blocked_elapsed = blocked_started.elapsed();
+    let maximum_contention_failure = Duration::from_secs(1);
     if blocked.status.success()
         || !String::from_utf8_lossy(&blocked.stderr).contains("database is locked")
         || derived_result_snapshot(&contention_database)? != contention_before
+        || blocked_elapsed > maximum_contention_failure
     {
-        return Err(io::Error::other("same-root writer contention was not atomic").into());
+        return Err(io::Error::other(format!(
+            "same-root writer contention was not atomic within the one-second contract: elapsed={blocked_elapsed:?}, status={}, stderr={}",
+            blocked.status,
+            String::from_utf8_lossy(&blocked.stderr),
+        ))
+        .into());
     }
     blocker.execute_batch("ROLLBACK")?;
     drop(blocker);
