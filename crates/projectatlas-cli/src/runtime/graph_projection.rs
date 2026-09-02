@@ -10616,18 +10616,12 @@ function relative_run(): void {
 namespace TopLevel;
 function top_level_helper(): void {}
 top_level_helper();
-namespace Foo {
+namespace Foo;
 function helper(): void {}
 class NamespacedService {
     public function namespaced_run(): void {
         helper();
     }
-}
-enum NamespacedState {
-    public function enum_run(): void {
-        helper();
-    }
-}
 }
 ",
         );
@@ -10754,11 +10748,43 @@ enum NamespacedState {
             ),
             "namespaced PHP method call did not prefer its namespace helper",
         )?;
-        let enum_call = staged_call("helper", "enum_run")
-            .map(projectatlas_core::graph::LogicalRelation::resolution);
+        let enum_graph = extract_symbol_graph(
+            "src/enum.php",
+            Some("php"),
+            r"<?php
+namespace {
+function helper(): void {}
+}
+namespace Foo {
+function helper(): void {}
+enum NamespacedState {
+    case Ready;
+    public function enum_run(): void {
+        helper();
+    }
+}
+}
+",
+        );
+        let enum_staged = finish_graph(&enum_graph)?;
+        let enum_call = |target: &str, source: &str| {
+            let parser_relation = enum_graph.relations.iter().find(|relation| {
+                relation.target_name == target && relation.source_name == source
+            })?;
+            let line = u32::try_from(parser_relation.line).ok()?;
+            let occurrence = enum_staged
+                .occurrences
+                .iter()
+                .find(|occurrence| occurrence.span().start_line() == line)?;
+            enum_staged
+                .relations
+                .iter()
+                .find(|relation| relation.key() == occurrence.relation())
+        };
         require(
             matches!(
-                enum_call,
+                enum_call("helper", "enum_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
                 Some(RelationResolution::Resolved {
                     selector: ReusableTargetSelector::Symbol { symbol },
                     ..
