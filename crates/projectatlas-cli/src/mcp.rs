@@ -6388,7 +6388,11 @@ impl ProjectAtlasMcpServer {
 
     /// Preserve one active alias when Git no longer reports its worktree registration.
     fn missing_registered_worktree_row(registration: &WorktreeRegistration) -> McpWorktreeRow {
-        let path_display = if registration.last_root_identity.display_string().is_ok()
+        let path_display = if registration
+            .git_common_directory_identity
+            .display_string()
+            .is_ok()
+            && registration.last_root_identity.display_string().is_ok()
             && registration
                 .git_administrative_directory_identity
                 .display_string()
@@ -8074,6 +8078,8 @@ impl ProjectAtlasMcpServer {
                 None => None,
             };
             let retired_at_epoch = Self::current_epoch_seconds()?;
+            let retained_path_display =
+                Self::missing_registered_worktree_row(&registration).path_display;
             let (root_display, active_root) = match entry.map(|entry| &entry.state) {
                 Some(GitWorktreeState::Active { root, .. }) => {
                     (lossless_project_root_display(root), Some(root.as_path()))
@@ -8108,26 +8114,17 @@ impl ProjectAtlasMcpServer {
                     alias: Some(alias.to_string()),
                     root: root_display,
                     path_display: Some(entry.map_or_else(
-                        || {
-                            if registration.last_root_identity.display_string().is_ok()
-                                && registration
-                                    .git_administrative_directory_identity
-                                    .display_string()
-                                    .is_ok()
+                        || retained_path_display,
+                        |entry| match &entry.state {
+                            GitWorktreeState::Active { root, .. }
+                                if root.to_str().is_some()
+                                    && repository.common_directory.to_str().is_some()
+                                    && entry.administrative_directory.to_str().is_some() =>
                             {
                                 McpWorktreePathDisplayState::Available
-                            } else {
-                                McpWorktreePathDisplayState::Unavailable
                             }
-                        },
-                        |entry| {
-                            if Self::active_worktree_root(entry).is_some_and(|root| {
-                                root.to_str().is_some()
-                                    && repository.common_directory.to_str().is_some()
-                                    && entry.administrative_directory.to_str().is_some()
-                            }) {
-                                McpWorktreePathDisplayState::Available
-                            } else {
+                            GitWorktreeState::Missing { .. } => retained_path_display,
+                            GitWorktreeState::Active { .. } | GitWorktreeState::Invalid { .. } => {
                                 McpWorktreePathDisplayState::Unavailable
                             }
                         },
@@ -12143,6 +12140,39 @@ mod tests {
             listed.contains("total_worktrees: 1025") && listed.contains("retired-at-capacity"),
             "full structural inventory starved the requested retired registration",
         )
+    }
+
+    #[test]
+    fn worktree_remove_retains_display_for_git_known_missing_registration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = registered_worktree_race_fixture("missing-remove")?;
+        fs::remove_file(fixture.linked.join(".git"))?;
+        let repository = fixture.server.control_git_repository()?;
+        let missing_entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| entry.administrative_directory == fixture.administrative_directory)
+            .ok_or_else(|| io::Error::other("missing Git worktree entry was not discovered"))?;
+        require(
+            matches!(missing_entry.state, GitWorktreeState::Missing { .. }),
+            "Git-known missing worktree did not retain its structural entry",
+        )?;
+        let root_display = normalize_native_path_display(&fixture.linked.canonicalize()?);
+        let removed = fixture
+            .server
+            .atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+                worktree: fixture.alias.to_string(),
+            }));
+        require(
+            removed.contains("status: retired")
+                && removed.contains("path_display: available")
+                && removed.contains(&root_display)
+                && removed.contains(MCP_WORKTREE_MISSING_RETENTION_REASON),
+            &format!(
+                "Git-known missing worktree retirement lost its retained display identity: {removed}"
+            ),
+        )?;
+        Ok(())
     }
 
     #[cfg(unix)]
