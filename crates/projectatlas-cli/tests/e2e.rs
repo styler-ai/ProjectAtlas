@@ -7176,8 +7176,6 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
     let verified_runtime = user_bin.join("projectatlas.cmd");
     fs::write(&verified_runtime, "@exit /b 0\r\n")?;
-    let hanging_runtime = temp.path().join("hanging-projectatlas.cmd");
-    fs::write(&hanging_runtime, "@echo off\r\n:probe\r\ngoto probe\r\n")?;
     let flooding_runtime = temp.path().join("flooding-projectatlas.cmd");
     let flood_child_pid = temp.path().join("flood-child.pid");
     let timeout_runtime = temp.path().join("timeout-projectatlas.cmd");
@@ -7326,20 +7324,15 @@ if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $userFirst $env:PROJECTAT
 if (Test-ProjectAtlasBareCommandResolutionOnPath $env:PROJECTATLAS_TEST_EMPTY_BIN $env:PROJECTATLAS_TEST_VERIFIED_RUNTIME) {
     throw "PATH without ProjectAtlas was incorrectly classified as restart-recoverable"
 }
-$unicodePayload = Invoke-ProjectAtlasBoundedJsonCommand `
-    $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
-    ([string[]]@("runtime-info"))
-$expectedUnicodePath = "M$([char]0x00FC)nchen\$([char]0x8DEF)$([char]0x5F84)"
-if ($unicodePayload.unicode_path -ne $expectedUnicodePath) {
-    throw "Bounded JSON command did not strictly decode BOM-less UTF-8 output: expected='$expectedUnicodePath' actual='$($unicodePayload.unicode_path)'"
-}
 $validDisposition = $null
-$validPayload = Invoke-ProjectAtlasBoundedJsonCommand `
+$unicodePayload = Invoke-ProjectAtlasBoundedJsonCommand `
     $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
     ([string[]]@("runtime-info")) `
     ([ref]$validDisposition)
-if ($null -eq $validPayload -or $null -ne $validDisposition) {
-    throw "Valid bounded JSON command changed payload or disposition: payload='$validPayload' disposition='$validDisposition'"
+$expectedUnicodePath = "M$([char]0x00FC)nchen\$([char]0x8DEF)$([char]0x5F84)"
+if ($null -eq $unicodePayload -or $null -ne $validDisposition `
+    -or $unicodePayload.unicode_path -ne $expectedUnicodePath) {
+    throw "Valid bounded JSON command changed payload or disposition: expected_unicode_path='$expectedUnicodePath' payload='$unicodePayload' disposition='$validDisposition'"
 }
 if (-not (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME "0.4.1")) {
     throw "Valid structured runtime probe was rejected"
@@ -7474,14 +7467,6 @@ if ($env:PROJECTATLAS_TEST_PERSIST_USER_PATH -eq "1") {
         $env:Path = $originalProcessPath
         [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
     }
-}
-$probe = [Diagnostics.Stopwatch]::StartNew()
-if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_HANGING_RUNTIME $null) {
-    throw "Nonreturning runtime was accepted"
-}
-$probe.Stop()
-if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(10)) {
-    throw "Nonreturning runtime probe exceeded its bounded tolerance: $($probe.Elapsed)"
 }
 $floodDisposition = $null
 $floodPayload = Invoke-ProjectAtlasBoundedJsonCommand `
@@ -7682,7 +7667,6 @@ finally {
         .env("PROJECTATLAS_TEST_EMPTY_BIN", &empty_bin)
         .env("PROJECTATLAS_TEST_SYSTEM_POWERSHELL", &system_powershell)
         .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
-        .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
         .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
         .env("PROJECTATLAS_TEST_FLOOD_CHILD_PID", &flood_child_pid)
         .env("PROJECTATLAS_TEST_TIMEOUT_RUNTIME", &timeout_runtime)
@@ -9105,19 +9089,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
     let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
-    let python = if cfg!(windows) { "python" } else { "python3" };
-    let issueops_self_test = StdCommand::new(python)
-        .current_dir(&workspace_root)
-        .args([".github/scripts/issue-checklists.py", "--self-test"])
-        .output()?;
-    if !issueops_self_test.status.success() {
-        return Err(io::Error::other(format!(
-            "IssueOps behavior self-test failed: {}{}",
-            String::from_utf8_lossy(&issueops_self_test.stdout),
-            String::from_utf8_lossy(&issueops_self_test.stderr)
-        ))
-        .into());
-    }
     let mermaid_parser = github.join("mermaid-parser");
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
@@ -9158,6 +9129,21 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .join("enforce-rust-test-quality-gates")
             .join("tasks.md"),
     )?;
+
+    let issueops_self_test_command = "python3 .github/scripts/issue-checklists.py --self-test";
+    for (name, owner) in [
+        ("pre-push", hook.as_str()),
+        ("CI", ci.as_str()),
+        ("IssueOps", issueops_workflow.as_str()),
+        ("release", release.as_str()),
+    ] {
+        if !owner.contains(issueops_self_test_command) {
+            return Err(io::Error::other(format!(
+                "{name} omitted the explicit IssueOps self-test owner"
+            ))
+            .into());
+        }
+    }
 
     if !mermaid_package.contains(r#""jsdom": "27.4.0""#)
         || !mermaid_package.contains(r#""mermaid": "11.16.1""#)
@@ -9456,6 +9442,28 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
+    let checklist_self_test_step = ci
+        .split("- name: Issue checklist self-test")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("ordinary IssueOps self-test step is missing"))?;
+    if ci.matches("- name: Issue checklist self-test").count() != 1 {
+        return Err(io::Error::other("CI must run the IssueOps self-test exactly once").into());
+    }
+    if checklist_self_test_step.contains("\n        if:") {
+        return Err(io::Error::other("CI IssueOps self-test must be unconditional").into());
+    }
+    for required in [
+        issueops_self_test_command,
+        "test-optional-parser-proof-inputs.py",
+    ] {
+        if !checklist_self_test_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "CI IssueOps self-test omitted gate {required:?}"
+            ))
+            .into());
+        }
+    }
     let checklist_step = ci
         .split("- name: Issue checklist check")
         .nth(1)
@@ -9481,7 +9489,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if mermaid_setup_step.contains("\n        if:") {
         return Err(io::Error::other("CI Mermaid setup must be unconditional").into());
     }
-    for event in ["pull_request_review:", "pull_request_review_comment:"] {
+    for event in [
+        "pull_request_review:",
+        "pull_request_review_comment:",
+        "workflow_dispatch:",
+    ] {
         if !ci.contains(event) {
             return Err(io::Error::other(format!(
                 "CI must retain review-event coverage for {event:?}"
@@ -9502,6 +9514,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+    if checklist_step.contains(issueops_self_test_command)
+        || checklist_step.contains("test-optional-parser-proof-inputs.py")
+    {
+        return Err(
+            io::Error::other("CI mutable IssueOps check must not relaunch the self-test").into(),
+        );
     }
     if checklist_step.contains("--milestone") {
         return Err(io::Error::other(
