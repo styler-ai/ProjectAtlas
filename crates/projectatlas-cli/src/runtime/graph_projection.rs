@@ -4994,7 +4994,7 @@ fn unique_php_source_namespace<'a>(
         })?;
         if !matches!(
             symbol.kind,
-            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Enum
         ) {
             continue;
         }
@@ -10616,12 +10616,18 @@ function relative_run(): void {
 namespace TopLevel;
 function top_level_helper(): void {}
 top_level_helper();
-namespace Foo;
+namespace Foo {
 function helper(): void {}
 class NamespacedService {
     public function namespaced_run(): void {
         helper();
     }
+}
+enum NamespacedState {
+    public function enum_run(): void {
+        helper();
+    }
+}
 }
 ",
         );
@@ -10747,6 +10753,19 @@ class NamespacedService {
                     && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Foo")
             ),
             "namespaced PHP method call did not prefer its namespace helper",
+        )?;
+        let enum_call = staged_call("helper", "enum_run")
+            .map(projectatlas_core::graph::LogicalRelation::resolution);
+        require(
+            matches!(
+                enum_call,
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Foo")
+            ),
+            "namespaced PHP enum method call did not prefer its namespace helper",
         )?;
         let mixed_call_line = u32::try_from(
             php_graph
