@@ -11581,6 +11581,15 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     let second_provenance = second_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
     let first_forwarder_before_failure = fs::read(&first_forwarder)?;
     let first_provenance_before_failure = fs::read(&first_provenance)?;
+    let first_states = installer_state_dir
+        .read_dir()?
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    require(
+        first_states.len() == 1,
+        "migration fixture did not publish exactly one initial capability state",
+    )?;
+    let first_state = first_states[0].path();
+    let first_state_before_failure = fs::read(&first_state)?;
 
     let staging_failure = run_install_with_env(
         &second_runtime,
@@ -11676,6 +11685,31 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     fs::remove_file(&first_provenance)?;
     fs::write(&first_provenance, &first_provenance_before_failure)?;
     clear_retirement_quarantine(&first_runtime_dir)?;
+
+    #[cfg(windows)]
+    {
+        let state_retirement_failure = run_install_with_env(
+            &second_runtime,
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+            Path::new("1"),
+        )?;
+        let state_retirement_failure_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&state_retirement_failure.stdout),
+            String::from_utf8_lossy(&state_retirement_failure.stderr)
+        );
+        require(
+            !state_retirement_failure.status.success()
+                && fs::read(&first_forwarder)? == first_forwarder_before_failure
+                && fs::read(&first_provenance)? == first_provenance_before_failure
+                && fs::read(&first_state)? == first_state_before_failure
+                && second_forwarder.is_file()
+                && second_provenance.is_file(),
+            format!(
+                "Windows state retirement failure did not preserve both forwarder pairs and private state:\n{state_retirement_failure_text}"
+            ),
+        )?;
+    }
 
     let second_output = run_install(&second_runtime)?;
     let second_output_text = format!(

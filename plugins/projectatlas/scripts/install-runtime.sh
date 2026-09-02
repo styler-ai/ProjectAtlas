@@ -336,15 +336,15 @@ release_atlas_forwarder_lifecycle_lock() {
   if [ -z "$atlas_forwarder_lifecycle_lock_path" ]; then
     return 0
   fi
-  result=0
+  lock_release_result=0
   release_atlas_forwarder_lifecycle_lock_fd 8 \
     "$atlas_forwarder_lifecycle_lock_path" \
     "$atlas_forwarder_lifecycle_lock_root" \
-    "$atlas_forwarder_lifecycle_lock_identity" || result=$?
+    "$atlas_forwarder_lifecycle_lock_identity" || lock_release_result=$?
   atlas_forwarder_lifecycle_lock_path=
   atlas_forwarder_lifecycle_lock_root=
   atlas_forwarder_lifecycle_lock_identity=
-  return "$result"
+  return "$lock_release_result"
 }
 
 acquire_atlas_forwarder_lifecycle_lock_set() {
@@ -399,18 +399,18 @@ acquire_atlas_forwarder_lifecycle_lock_set() {
 }
 
 release_atlas_forwarder_lifecycle_lock_set() {
-  result=0
+  lock_release_result=0
   if [ "$atlas_forwarder_lifecycle_lock_count" -eq 2 ]; then
     release_atlas_forwarder_lifecycle_lock_fd 7 \
       "$atlas_forwarder_lifecycle_lock_path_2" \
       "$atlas_forwarder_lifecycle_lock_root_2" \
-      "$atlas_forwarder_lifecycle_lock_identity_2" || result=$?
+      "$atlas_forwarder_lifecycle_lock_identity_2" || lock_release_result=$?
   fi
   if [ "$atlas_forwarder_lifecycle_lock_count" -ge 1 ]; then
     release_atlas_forwarder_lifecycle_lock_fd 8 \
       "$atlas_forwarder_lifecycle_lock_path_1" \
       "$atlas_forwarder_lifecycle_lock_root_1" \
-      "$atlas_forwarder_lifecycle_lock_identity_1" || result=$?
+      "$atlas_forwarder_lifecycle_lock_identity_1" || lock_release_result=$?
   fi
   atlas_forwarder_lifecycle_lock_count=0
   atlas_forwarder_lifecycle_lock_path_1=
@@ -419,7 +419,7 @@ release_atlas_forwarder_lifecycle_lock_set() {
   atlas_forwarder_lifecycle_lock_path_2=
   atlas_forwarder_lifecycle_lock_root_2=
   atlas_forwarder_lifecycle_lock_identity_2=
-  return "$result"
+  return "$lock_release_result"
 }
 
 new_atlas_forwarder_capability() {
@@ -487,18 +487,18 @@ ensure_atlas_forwarder_state() {
   mkdir -p -- "$state_root" || return 1
   chmod 700 "$state_root" 2>/dev/null || true
   capability=$(new_atlas_forwarder_capability) || return 1
-  temporary=$(mktemp "$state_root/.atlas-forwarder-state.XXXXXX") || return 1
-  chmod 600 "$temporary" 2>/dev/null || true
-  if ! atlas_forwarder_state_content "$forwarder" "$verified" "$capability" >"$temporary"; then
-    rm -f -- "$temporary"
+  state_temporary=$(mktemp "$state_root/.atlas-forwarder-state.XXXXXX") || return 1
+  chmod 600 "$state_temporary" 2>/dev/null || true
+  if ! atlas_forwarder_state_content "$forwarder" "$verified" "$capability" >"$state_temporary"; then
+    rm -f -- "$state_temporary"
     return 1
   fi
-  if ln "$temporary" "$state_path" 2>/dev/null; then
-    rm -f -- "$temporary"
+  if ln "$state_temporary" "$state_path" 2>/dev/null; then
+    rm -f -- "$state_temporary"
     ATLAS_FORWARDER_STATE_PUBLISHED=1
     return 0
   fi
-  rm -f -- "$temporary"
+  rm -f -- "$state_temporary"
   atlas_forwarder_state_capability "$forwarder" "$verified" >/dev/null || return 1
   return 0
 }

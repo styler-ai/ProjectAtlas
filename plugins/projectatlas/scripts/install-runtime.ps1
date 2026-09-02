@@ -2626,9 +2626,9 @@ function Move-ProjectAtlasManagedAtlasForwarderLocked {
         if (Test-Path -LiteralPath $provenancePath) {
             throw "ProjectAtlas atlas forwarder provenance was replaced during retirement: $provenancePath"
         }
+        Remove-ProjectAtlasAtlasForwarderState $FilePath $target
         Remove-Item -LiteralPath $forwarderQuarantine -Force
         Remove-Item -LiteralPath $provenanceQuarantine -Force
-        Remove-ProjectAtlasAtlasForwarderState $FilePath $target
         Write-Output "Migrated ProjectAtlas atlas forwarder: $FilePath -> $(Get-ProjectAtlasAtlasForwarderPath $VerifiedPath)"
         return $true
     }
