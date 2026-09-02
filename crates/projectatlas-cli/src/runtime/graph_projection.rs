@@ -4804,6 +4804,7 @@ fn local_relation_matches<'a>(
     control: &IndexWorkControl,
 ) -> Result<ResolutionMatches<'a>, CliError> {
     let mut targets = BTreeMap::<&str, &GraphEntity>::new();
+    let mut global_fallback_targets = BTreeMap::<&str, &GraphEntity>::new();
     let target_name = relation.target_name.trim();
     let is_php_call = relation.kind == RelationKind::Calls
         && graph
@@ -4890,7 +4891,7 @@ fn local_relation_matches<'a>(
                     && source_namespace.is_none_or(|namespace| {
                         symbol.parent.as_deref().is_some_and(|symbol_parent| {
                             symbol_parent.eq_ignore_ascii_case(namespace)
-                        })
+                        }) || (target_namespace.is_none() && symbol.parent.is_none())
                     })
                     && (scoped_parent.is_some()
                         || source_namespace.is_some()
@@ -4906,12 +4907,29 @@ fn local_relation_matches<'a>(
             let entity = staged_entities.get(digest).ok_or_else(|| {
                 CliError::InvalidInput("graph symbol owner entity was not staged".to_string())
             })?;
-            if !targets.contains_key(entity.key().digest()) {
-                enforce_resolution_match_budget(targets.len().saturating_add(1))?;
+            let is_global_fallback = is_php_call
+                && scoped_parent.is_none()
+                && target_namespace.is_none()
+                && source_namespace.is_some()
+                && symbol.kind == SymbolKind::Function
+                && symbol.parent.is_none();
+            let distinct_target_count = targets.len().saturating_add(global_fallback_targets.len());
+            let destination = if is_global_fallback {
+                &mut global_fallback_targets
+            } else {
+                &mut targets
+            };
+            if !destination.contains_key(entity.key().digest()) {
+                enforce_resolution_match_budget(distinct_target_count.saturating_add(1))?;
             }
-            targets.insert(entity.key().digest(), entity);
+            destination.insert(entity.key().digest(), entity);
         }
     }
+    let targets = if targets.is_empty() {
+        global_fallback_targets
+    } else {
+        targets
+    };
     let count = distinct_resolution_count(targets.len())?;
     Ok(ResolutionMatches {
         first: targets.into_values().next(),
@@ -10878,6 +10896,11 @@ enum NamespacedState {
     }
 }
 }
+namespace Bar {
+function fallback_run(): void {
+    helper();
+}
+}
 ",
         );
         let enum_staged = finish_graph(&enum_graph)?;
@@ -10906,6 +10929,17 @@ enum NamespacedState {
                     && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Foo")
             ),
             "namespaced PHP enum method call did not prefer its namespace helper",
+        )?;
+        require(
+            matches!(
+                enum_call("helper", "fallback_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper" && symbol.parent.is_none()
+            ),
+            "namespaced PHP function call did not fall back to the global helper",
         )?;
         let mixed_call_line = u32::try_from(
             php_graph

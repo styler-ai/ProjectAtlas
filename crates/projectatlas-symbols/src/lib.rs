@@ -1374,7 +1374,8 @@ fn declaration_is_method_context(node: Node<'_>) -> bool {
         || has_ancestor_kind(node.parent(), "class_body")
         || has_ancestor_kind(node.parent(), "class_specifier")
         || has_ancestor_kind(node.parent(), "struct_specifier")
-        || has_ancestor_kind(node.parent(), "interface_declaration"))
+        || has_ancestor_kind(node.parent(), "interface_declaration")
+        || has_ancestor_kind(node.parent(), "trait_declaration"))
 }
 
 /// Return whether this declaration node should become its own symbol row.
@@ -5916,7 +5917,9 @@ include_once(Vendor\BOOTSTRAP);
     #[test]
     fn php_trait_use_relations_preserve_type_ownership_and_ignore_adaptations() {
         let source = r"<?php
-trait Auditable {}
+trait Auditable {
+    public function audit(): void {}
+}
 trait FirstTrait {}
 class Service {
     use Auditable;
@@ -5941,6 +5944,16 @@ class Service {
                 "missing class-owned PHP trait relation {target}: {imports:?}"
             );
         }
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "audit"
+                && symbol.parent.as_deref() == Some("Auditable")
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Contains
+                && relation.source_name == "Auditable"
+                && relation.target_name == "audit"
+        }));
         assert!(imports.iter().all(|relation| {
             relation.source_name != "<module>"
                 && !relation.target_name.starts_with("use ")
