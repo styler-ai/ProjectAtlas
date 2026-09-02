@@ -2496,7 +2496,9 @@ Timeout --> Recovery
     mermaid_syntax_is_valid.cache_clear()
     node = shutil.which("node")
     validator = Path(__file__).resolve().parents[1] / "mermaid-parser" / "validate.mjs"
-    valid_outcome = _run_mermaid_parser("flowchart LR\nA --> B\n")
+    valid_outcome = mermaid_syntax_is_valid(
+        "flowchart LR\nA --> B\n", MermaidValidationBudget()
+    )
     assert valid_outcome is MermaidValidationOutcome.VALID, valid_outcome.value
     invalid_outcome = _run_mermaid_parser("this is not mermaid\n")
     assert invalid_outcome is MermaidValidationOutcome.INVALID, invalid_outcome.value
