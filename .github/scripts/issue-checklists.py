@@ -2460,6 +2460,22 @@ Timeout --> Recovery
             assert link[link.index("https://") : -1] in failures[0]
             assert "parser outcome: timed out" in failures[0]
 
+            calls = stub_mermaid_runner([MermaidValidationOutcome.INVALID])
+            failures = architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root, MermaidValidationBudget()
+            )
+            assert len(calls) == 1
+            assert link[link.index("https://") : -1] in failures[0]
+            assert "parser outcome: invalid syntax" in failures[0]
+
+            calls = stub_mermaid_runner([MermaidValidationOutcome.UNAVAILABLE])
+            failures = architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root, MermaidValidationBudget()
+            )
+            assert len(calls) == 1
+            assert link[link.index("https://") : -1] in failures[0]
+            assert "parser outcome: unavailable execution" in failures[0]
+
     finally:
         globals()["_run_mermaid_parser"] = saved_mermaid_runner
         mermaid_syntax_is_valid.cache_clear()
