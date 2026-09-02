@@ -127,6 +127,7 @@ const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
 const DOCS_WORKFLOW_FILE_NAME: &str = "04-docs.yml";
 const AUTO_RELEASE_WORKFLOW_FILE_NAME: &str = "03-auto-release.yml";
+const CI_WORKFLOW_RELATIVE_PATH: &str = ".github/workflows/ci.yml";
 const CARGO_LOCK_FILE_NAME: &str = "Cargo.lock";
 const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled";
 const CODEX_CONFIG_DIR: &str = ".codex";
@@ -10116,7 +10117,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
 #[test]
 fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
-    let ci = fs::read_to_string(workspace_root.join(".github/workflows/ci.yml"))?;
+    let ci = fs::read_to_string(workspace_root.join(CI_WORKFLOW_RELATIVE_PATH))?;
     let e2e_smoke = workflow_job_block(&ci, "e2e-smoke")?;
     for required in [
         "label: macos-x64\n            os: macos-15-intel",
@@ -11526,7 +11527,7 @@ fn required_real_host_readers_reject_missing_discovery() -> Result<(), Box<dyn E
 
 #[test]
 fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> {
-    let workflow = fs::read_to_string(workspace_root()?.join(".github/workflows/ci.yml"))?;
+    let workflow = fs::read_to_string(workspace_root()?.join(CI_WORKFLOW_RELATIVE_PATH))?;
     let step = workflow_job_step(&workflow, "e2e-smoke", "Real installed host reader proof")?;
     require(
         step["env"][REQUIRE_REAL_HOST_READERS_ENV].as_str() == Some("1"),
