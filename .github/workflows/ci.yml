@@ -68,6 +68,11 @@ jobs:
           npm ci --ignore-scripts --prefix .github/mermaid-parser
           npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
 
+      - name: Issue checklist self-test
+        run: |
+          python3 .github/scripts/issue-checklists.py --self-test
+          python3 .github/scripts/test-optional-parser-proof-inputs.py
+
       - name: Issue checklist check
         if: github.event_name == 'pull_request' || github.event_name == 'push'
         env:
@@ -75,8 +80,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          python3 .github/scripts/issue-checklists.py --self-test
-          python3 .github/scripts/test-optional-parser-proof-inputs.py
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
             python3 .github/scripts/issue-checklists.py \

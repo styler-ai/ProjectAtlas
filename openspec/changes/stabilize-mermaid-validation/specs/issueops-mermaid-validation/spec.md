@@ -26,3 +26,7 @@ IssueOps SHALL validate architecture Mermaid blocks with the repository-locked p
 #### Scenario: Existing architecture admission remains fail-closed
 - **WHEN** an architecture target is malformed, empty, missing, unsafe, points at another repository, has no matching heading, or has no accepted non-empty Mermaid block
 - **THEN** IssueOps rejects it under the existing bounded architecture contract
+
+#### Scenario: Parallel workspace proof does not duplicate the real parser self-test
+- **WHEN** the parallel Rust workspace gate verifies the IssueOps and workflow quality contract
+- **THEN** it verifies that the explicit IssueOps self-test remains wired into the required local and hosted gates without launching a duplicate locked-parser self-test process, while the explicit IssueOps self-test continues to exercise the real locked validator

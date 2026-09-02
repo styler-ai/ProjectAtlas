@@ -9,6 +9,7 @@ The mandatory IssueOps architecture check currently collapses a locked Mermaid p
 - Bound all Mermaid parser work in one IssueOps validation run with a fixed aggregate deadline that leaves headroom inside the existing workflow timeout.
 - Keep all existing architecture-link, heading, repository, and syntax checks fail-closed while reporting the actual failure class and target.
 - Add focused causal tests at the existing IssueOps boundary.
+- Keep the real locked-validator process check in the explicit IssueOps self-test gate; the parallel Rust workflow-contract test verifies that wiring without launching the same external parser again.
 
 ## Capabilities
 
@@ -22,7 +23,7 @@ None.
 
 ## Impact
 
-- Affects `.github/scripts/issue-checklists.py`, `.github/mermaid-parser/validate.mjs`, and their existing tests.
+- Affects `.github/scripts/issue-checklists.py`, `.github/mermaid-parser/validate.mjs`, `crates/projectatlas-cli/tests/e2e.rs`, and their existing tests.
 - Keeps the repository-locked Node/Mermaid parser, fixed timeout, and current issue/architecture contract.
 - Adds no dependency, daemon, pool, configurable retry policy, generic subprocess framework, Rust behavior, database behavior, or public ProjectAtlas runtime surface.
 - Planned for implementation in `v0.5.0-00` through issue #544.
