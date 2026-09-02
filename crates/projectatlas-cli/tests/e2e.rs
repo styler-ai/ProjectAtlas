@@ -10292,12 +10292,31 @@ exit 0
     if current_head.is_empty() {
         return Err(io::Error::other("git rev-parse returned an empty HEAD").into());
     }
-    let run_hook = |records: &str| -> Result<(bool, String), Box<dyn Error>> {
+    let run_hook = |records: &str, fail_ls_files: bool| -> Result<(bool, String), Box<dyn Error>> {
         fs::write(&dispatch_log, "")?;
         let mut command = StdCommand::new(&shell);
+        command.current_dir(&fixture_repo);
+        if fail_ls_files {
+            command
+                .arg("-c")
+                .arg(
+                    r#"git() {
+  printf 'git %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+  if [ "${1:-}" = ls-files ] && [ "${2:-}" = -v ]; then
+    printf 'git ls-files forced failure\n' >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+    return 1
+  fi
+  command git "$@"
+}
+. "$1"
+"#,
+                )
+                .arg("projectatlas-pre-push")
+                .arg(&hook);
+        } else {
+            command.arg(&hook);
+        }
         command
-            .current_dir(&fixture_repo)
-            .arg(&hook)
             .env("PATH", &test_path)
             .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
             .stdin(Stdio::piped())
@@ -10318,8 +10337,32 @@ exit 0
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
+    let (empty_status, empty_log) = run_hook("", false)?;
+    if empty_status
+        || !final_issueops(&empty_log).is_empty()
+        || empty_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "empty pre-push input did not fail closed before validation:\n{empty_log}"
+        ))
+        .into());
+    }
+    let (short_record_status, short_record_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549\n",
+        false,
+    )?;
+    if short_record_status
+        || !final_issueops(&short_record_log).is_empty()
+        || short_record_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "malformed pre-push input did not fail closed before validation:\n{short_record_log}"
+        ))
+        .into());
+    }
     let (main_status, main_target) = run_hook(
         "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
     )?;
     let main_calls = final_issueops(&main_target);
     if !main_status || main_calls.len() != 1 || main_calls[0].contains("--candidate-issue") {
@@ -10330,6 +10373,7 @@ exit 0
     }
     let (multiple_candidate_status, multiple_candidate_log) = run_hook(
         "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/547 3333333333333333333333333333333333333333 refs/heads/fix/547 4444444444444444444444444444444444444444\n",
+        false,
     )?;
     if multiple_candidate_status || !final_issueops(&multiple_candidate_log).is_empty() {
         return Err(io::Error::other(format!(
@@ -10346,7 +10390,7 @@ exit 0
         }
     );
     let (mismatched_candidate_status, mismatched_candidate_log) =
-        run_hook(&mismatched_candidate_records)?;
+        run_hook(&mismatched_candidate_records, false)?;
     if mismatched_candidate_status
         || !final_issueops(&mismatched_candidate_log).is_empty()
         || mismatched_candidate_log.contains("--candidate-issue")
@@ -10358,7 +10402,7 @@ exit 0
         .into());
     }
     let zero_candidate_records = "refs/heads/fix/549 0000000000000000000000000000000000000000 refs/heads/fix/549 2222222222222222222222222222222222222222\n";
-    let (zero_candidate_status, zero_candidate_log) = run_hook(zero_candidate_records)?;
+    let (zero_candidate_status, zero_candidate_log) = run_hook(zero_candidate_records, false)?;
     if zero_candidate_status
         || !final_issueops(&zero_candidate_log).is_empty()
         || zero_candidate_log.contains("--candidate-issue")
@@ -10369,9 +10413,12 @@ exit 0
         ))
         .into());
     }
-    let (candidate_status, candidate_target) = run_hook(&format!(
-        "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
-    ))?;
+    let (candidate_status, candidate_target) = run_hook(
+        &format!(
+            "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+        ),
+        false,
+    )?;
     let candidate_calls = final_issueops(&candidate_target);
     if !candidate_status
         || candidate_calls.len() != 1
@@ -10379,6 +10426,24 @@ exit 0
     {
         return Err(io::Error::other(format!(
             "ordinary candidate push did not use candidate IssueOps dispatch:\n{candidate_target}"
+        ))
+        .into());
+    }
+    let (index_failure_status, index_failure_log) = run_hook(
+        &format!(
+            "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+        ),
+        true,
+    )?;
+    if index_failure_status
+        || !index_failure_log.contains("git ls-files forced failure")
+        || !final_issueops(&index_failure_log).is_empty()
+        || index_failure_log.contains("--owner-from-commits")
+        || index_failure_log.contains("git merge-base")
+        || index_failure_log.contains("git log")
+    {
+        return Err(io::Error::other(format!(
+            "tracked index inspection failure did not fail before scoped validation:\n{index_failure_log}"
         ))
         .into());
     }
@@ -10413,9 +10478,12 @@ exit 0
             ))
             .into());
         }
-        let (hidden_status, hidden_log) = run_hook(&format!(
-            "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
-        ))?;
+        let (hidden_status, hidden_log) = run_hook(
+            &format!(
+                "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+            ),
+            false,
+        )?;
         if hidden_status
             || !final_issueops(&hidden_log).is_empty()
             || hidden_log.contains("--owner-from-commits")
@@ -10445,6 +10513,7 @@ exit 0
     }
     let (mixed_status, mixed_targets) = run_hook(
         "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
     )?;
     let mixed_calls = final_issueops(&mixed_targets);
     if !mixed_status || mixed_calls.len() != 1 || mixed_calls[0].contains("--candidate-issue") {
@@ -10455,6 +10524,7 @@ exit 0
     }
     let (malformed_status, malformed_log) = run_hook(
         "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/tags/v0.5.0 2222222222222222222222222222222222222222\n",
+        false,
     )?;
     if malformed_status || !final_issueops(&malformed_log).is_empty() {
         return Err(io::Error::other(format!(
