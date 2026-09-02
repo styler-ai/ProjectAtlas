@@ -2898,10 +2898,10 @@ mod tests {
             .ok_or_else(|| io::Error::other("native linked worktree was not discovered"))?;
 
         require(
-            !primary.to_str().is_some()
-                && !linked.to_str().is_some()
-                && !structure.common_directory.to_str().is_some()
-                && !entry.administrative_directory.to_str().is_some(),
+            primary.to_str().is_none()
+                && linked.to_str().is_none()
+                && structure.common_directory.to_str().is_none()
+                && entry.administrative_directory.to_str().is_none(),
             "native invalid-byte worktree paths unexpectedly became UTF-8",
         )?;
         require(

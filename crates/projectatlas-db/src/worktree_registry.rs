@@ -2199,6 +2199,238 @@ mod tests {
     }
 
     #[test]
+    fn schema_twentytwo_worktree_identity_migration_rejects_legacy_collisions_atomically()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control = temp.path().join("control");
+        let common = temp.path().join("common.git");
+        let administrative_a = common.join("worktrees/legacy-a");
+        let administrative_b = common.join("worktrees/legacy-b");
+        let administrative_distinct = common.join("worktrees/distinct");
+        let collision_root = temp.path().join("legacy-\u{fffd}-root");
+        let repaired_root = temp.path().join("repaired-root");
+        let unaffected_root = temp.path().join("unaffected-root");
+        for path in [
+            &control,
+            &common,
+            &administrative_a,
+            &administrative_b,
+            &administrative_distinct,
+            &collision_root,
+            &repaired_root,
+            &unaffected_root,
+        ] {
+            fs::create_dir_all(path)?;
+        }
+
+        let database = control.join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, &control)?;
+        let common_display = projectatlas_core::normalize_native_path_display(&common);
+        let collision_display = projectatlas_core::normalize_native_path_display(&collision_root);
+        let repaired_display = projectatlas_core::normalize_native_path_display(&repaired_root);
+        let unaffected_display = projectatlas_core::normalize_native_path_display(&unaffected_root);
+        crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
+        store.connection.execute(
+            "UPDATE metadata SET value = '22' WHERE key = 'schema_version'",
+            [],
+        )?;
+        for (alias, administrative, root, identity) in [
+            (
+                "legacy-a",
+                &administrative_a,
+                &collision_display,
+                administrative_identity(11),
+            ),
+            (
+                "legacy-b",
+                &administrative_b,
+                &collision_display,
+                administrative_identity(12),
+            ),
+            (
+                "distinct",
+                &administrative_distinct,
+                &unaffected_display,
+                administrative_identity(13),
+            ),
+        ] {
+            let administrative_display =
+                projectatlas_core::normalize_native_path_display(administrative);
+            store.connection.execute(
+                "INSERT INTO worktree_registrations(
+                    alias, state, git_common_directory, git_administrative_directory,
+                    git_administrative_identity, last_root, created_at_epoch
+                 ) VALUES(?1, 'active', ?2, ?3, ?4, ?5, 1)",
+                params![
+                    alias,
+                    common_display,
+                    administrative_display,
+                    identity,
+                    root,
+                ],
+            )?;
+        }
+        drop(store);
+
+        let migration_result = AtlasStore::open_for_project(&database, &control);
+        require(
+            matches!(
+                &migration_result,
+                Err(DbError::WorktreeRegistrationMigrationConflict {
+                    field: "last_root_identity",
+                    first_registration_id: 1,
+                    second_registration_id: 2,
+                })
+            ),
+            &format!(
+                "legacy native identity collision was not rejected deterministically: {:?}",
+                migration_result.as_ref().err().map(ToString::to_string)
+            ),
+        )?;
+
+        let inspect = Connection::open(&database)?;
+        let marker = inspect.query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        require_eq(&marker, &"22".to_string(), "collision migration marker")?;
+        require_eq(
+            &inspect.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('worktree_registrations')
+                 WHERE name IN (
+                     'git_common_directory_identity',
+                     'git_administrative_directory_identity',
+                     'last_root_identity'
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &0,
+            "collision migration native columns",
+        )?;
+        require_eq(
+            &inspect.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'index' AND name IN (
+                     'idx_worktree_registrations_active_native_administrative_directory',
+                     'idx_worktree_registrations_active_native_root'
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &0,
+            "collision migration native indexes",
+        )?;
+        require_eq(
+            &inspect.query_row(
+                "SELECT COUNT(*) FROM worktree_registrations
+                 WHERE state = 'active'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &3,
+            "collision migration registered rows",
+        )?;
+        let legacy_rows = inspect
+            .prepare(
+                "SELECT alias, last_root FROM worktree_registrations
+                 ORDER BY registration_id",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require_eq(
+            &legacy_rows,
+            &vec![
+                ("legacy-a".to_string(), collision_display.clone()),
+                ("legacy-b".to_string(), collision_display.clone()),
+                ("distinct".to_string(), unaffected_display.clone()),
+            ],
+            "collision migration preserved legacy rows",
+        )?;
+        inspect.execute(
+            "UPDATE worktree_registrations SET last_root = ?1 WHERE alias = 'legacy-b'",
+            [repaired_display.as_str()],
+        )?;
+        drop(inspect);
+
+        let retried = AtlasStore::open_for_project(&database, &control)?;
+        let legacy_a = retried.worktree_registration(&WorktreeAlias::parse("legacy-a")?)?;
+        let legacy_b = retried.worktree_registration(&WorktreeAlias::parse("legacy-b")?)?;
+        let distinct = retried.worktree_registration(&WorktreeAlias::parse("distinct")?)?;
+        require_eq(
+            &legacy_a.last_root,
+            &collision_display,
+            "collision migration first row",
+        )?;
+        require_eq(
+            &legacy_b.last_root,
+            &repaired_display,
+            "collision migration repaired row",
+        )?;
+        require_eq(
+            &distinct.last_root,
+            &unaffected_display,
+            "collision migration unaffected row",
+        )?;
+        require(
+            legacy_a.last_root_identity != legacy_b.last_root_identity
+                && legacy_b.last_root_identity != distinct.last_root_identity
+                && legacy_a.last_root_identity != distinct.last_root_identity,
+            "collision migration did not preserve distinct native identities",
+        )?;
+        require_eq(
+            &retried.worktree_registrations(false)?.len(),
+            &3,
+            "collision migration retry registration count",
+        )?;
+        require_eq(
+            &retried.connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'index' AND name IN (
+                     'idx_worktree_registrations_active_native_administrative_directory',
+                     'idx_worktree_registrations_active_native_root'
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            &2,
+            "collision migration native indexes after retry",
+        )?;
+        for (identity, index, column) in [
+            (
+                legacy_a.git_administrative_directory_identity,
+                "idx_worktree_registrations_active_native_administrative_directory",
+                "git_administrative_directory_identity",
+            ),
+            (
+                legacy_a.last_root_identity,
+                "idx_worktree_registrations_active_native_root",
+                "last_root_identity",
+            ),
+        ] {
+            let query = format!(
+                "EXPLAIN QUERY PLAN
+                 SELECT registration_id FROM worktree_registrations
+                       INDEXED BY {index}
+                 WHERE state = 'active' AND {column} = ?1"
+            );
+            let plan = retried
+                .connection
+                .prepare(&query)?
+                .query_map(params![identity.encode()?], |row| row.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?;
+            require(
+                plan.iter().any(|detail| detail.contains(index)),
+                &format!("retry query plan omitted {index}: {plan:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn hot_registry_and_aggregate_lookups_use_owning_indexes() -> Result<(), Box<dyn Error>> {
         let connection = Connection::open_in_memory()?;
         crate::schema::initialize(&connection, None)?;

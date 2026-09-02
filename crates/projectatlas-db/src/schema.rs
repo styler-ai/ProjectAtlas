@@ -2441,7 +2441,49 @@ fn migrate_21_to_22(connection: &Connection) -> DbResult<()> {
 fn migrate_22_to_23(connection: &Connection) -> DbResult<()> {
     add_worktree_native_identity_columns(connection)?;
     backfill_worktree_native_identities(connection)?;
+    reject_worktree_native_identity_collisions(connection)?;
     connection.execute_batch(WORKTREE_NATIVE_IDENTITY_INDEX_SCHEMA_SQL)?;
+    Ok(())
+}
+
+/// Reject legacy active rows that would collide in the native identity indexes.
+///
+/// The old display projections could erase distinctions between native paths,
+/// so migration must not choose a survivor or merge rows. The first collision
+/// is selected by schema-owned field order and ascending registration IDs to
+/// keep the typed diagnostic stable across retries and SQLite row layouts.
+fn reject_worktree_native_identity_collisions(connection: &Connection) -> DbResult<()> {
+    const NATIVE_IDENTITY_FIELDS: [(&str, &str); 2] = [
+        (
+            "git_administrative_directory_identity",
+            "git_administrative_directory_identity",
+        ),
+        ("last_root_identity", "last_root_identity"),
+    ];
+
+    for (field, column) in NATIVE_IDENTITY_FIELDS {
+        let query = format!(
+            "SELECT MIN(registration_id), MAX(registration_id)\n\
+             FROM worktree_registrations\n\
+             WHERE state = 'active'\n\
+             GROUP BY {column}\n\
+             HAVING COUNT(*) > 1\n\
+             ORDER BY MIN(registration_id)\n\
+             LIMIT 1"
+        );
+        let collision = connection
+            .query_row(&query, [], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .optional()?;
+        if let Some((first_registration_id, second_registration_id)) = collision {
+            return Err(DbError::WorktreeRegistrationMigrationConflict {
+                field,
+                first_registration_id,
+                second_registration_id,
+            });
+        }
+    }
     Ok(())
 }
 
