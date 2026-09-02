@@ -4133,7 +4133,7 @@
   },
   "harness_identity": {
     "path": "docs/benchmarks/harness/reverse_caller.py",
-    "sha256": "1c009bbb1197655f8248fa6d39d836c21a4d1ae2e80d35be952326c5bad2227e"
+    "sha256": "ba0df185959cd711b1f6eb482e23064993fb0b15c0205408f572362023c4874f"
   },
   "issue": 342,
   "multi_binding_alias": {
