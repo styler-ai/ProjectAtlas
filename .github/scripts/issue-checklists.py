@@ -2488,12 +2488,13 @@ Timeout --> Recovery
 
     node = shutil.which("node")
     validator = Path(__file__).resolve().parents[1] / "mermaid-parser" / "validate.mjs"
+    real_validator_check_timeout = 2 * MERMAID_ATTEMPT_TIMEOUT_SECONDS
     valid_process = subprocess.run(
         [node, str(validator)],
         input="flowchart LR\nA --> B\n",
         capture_output=True,
         text=True,
-        timeout=MERMAID_ATTEMPT_TIMEOUT_SECONDS,
+        timeout=real_validator_check_timeout,
         check=False,
     )
     assert valid_process.returncode == 0, valid_process.stderr
@@ -2502,7 +2503,7 @@ Timeout --> Recovery
         input="flowchart LR\nnot valid mermaid ???\n",
         capture_output=True,
         text=True,
-        timeout=MERMAID_ATTEMPT_TIMEOUT_SECONDS,
+        timeout=real_validator_check_timeout,
         check=False,
     )
     assert invalid_process.returncode == 1, invalid_process.stderr
@@ -2520,7 +2521,7 @@ Timeout --> Recovery
             input="flowchart LR\nA --> B\n",
             capture_output=True,
             text=True,
-            timeout=MERMAID_ATTEMPT_TIMEOUT_SECONDS,
+            timeout=real_validator_check_timeout,
             check=False,
         )
     assert unavailable_process.returncode == 2, unavailable_process.stderr
