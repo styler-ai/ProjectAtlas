@@ -1,16 +1,16 @@
 {
   "artifact_kind": "compact-review-evidence",
   "baseline": {
-    "binary_sha256": "3ad87dbe9d2e691672aee85222dfe9c1ed4d691733c41a616ff27d1e702d5eb5",
+    "binary_sha256": "cc2d71802b85ef42a546cc029c91f845fd56cff2bcc6418e9d98f4f2998330e2",
     "fixtures": {
       "duplicate-alias": {
         "aggregate": {
           "allocation_bytes": 37834.0,
           "allocation_calls": 518.5,
-          "cpu_ms": 148.4375,
-          "peak_rss_bytes": 24135680.0,
+          "cpu_ms": 62.5,
+          "peak_rss_bytes": 13662208.0,
           "stdout_bytes": 1697.0,
-          "wall_ms": 207.43614999810234
+          "wall_ms": 121.74799997592345
         },
         "query_plan_evidence": {
           "by_family": {
@@ -190,9 +190,9 @@
               "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 46.875,
             "limit": 1,
-            "peak_rss_bytes": 24141824,
+            "peak_rss_bytes": 13635584,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -201,7 +201,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 208.71889998670667
+            "wall_ms": 109.37740001827478
           },
           {
             "allocation_metrics": {
@@ -212,9 +212,9 @@
               "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
-            "cpu_ms": 125.0,
+            "cpu_ms": 93.75,
             "limit": 1,
-            "peak_rss_bytes": 24502272,
+            "peak_rss_bytes": 13742080,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -223,7 +223,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 209.90700006950647
+            "wall_ms": 117.92380001861602
           },
           {
             "allocation_metrics": {
@@ -234,9 +234,9 @@
               "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 109.375,
             "limit": 1,
-            "peak_rss_bytes": 24129536,
+            "peak_rss_bytes": 13660160,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -245,7 +245,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 214.0411000000313
+            "wall_ms": 122.09999992046505
           },
           {
             "allocation_metrics": {
@@ -256,9 +256,9 @@
               "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 24100864,
+            "peak_rss_bytes": 13795328,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -267,7 +267,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 213.3575000334531
+            "wall_ms": 130.33219997305423
           },
           {
             "allocation_metrics": {
@@ -278,9 +278,9 @@
               "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 46.875,
             "limit": 500,
-            "peak_rss_bytes": 24150016,
+            "peak_rss_bytes": 13697024,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -289,7 +289,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 205.96569997724146
+            "wall_ms": 121.14639999344945
           },
           {
             "allocation_metrics": {
@@ -300,9 +300,9 @@
               "reallocation_bytes": 7403,
               "reallocation_calls": 77
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 24100864,
+            "peak_rss_bytes": 13819904,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -311,7 +311,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 201.63449994288385
+            "wall_ms": 242.6170000107959
           },
           {
             "allocation_metrics": {
@@ -322,9 +322,9 @@
               "reallocation_bytes": 8269,
               "reallocation_calls": 77
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 24313856,
+            "peak_rss_bytes": 13664256,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -333,7 +333,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 202.9284000163898
+            "wall_ms": 126.96299992967397
           },
           {
             "allocation_metrics": {
@@ -344,9 +344,9 @@
               "reallocation_bytes": 8269,
               "reallocation_calls": 77
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 24055808,
+            "peak_rss_bytes": 13619200,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -355,7 +355,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 203.6874999757856
+            "wall_ms": 121.39600003138185
           },
           {
             "allocation_metrics": {
@@ -366,9 +366,9 @@
               "reallocation_bytes": 8269,
               "reallocation_calls": 77
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 31.25,
             "limit": 500,
-            "peak_rss_bytes": 24072192,
+            "peak_rss_bytes": 13680640,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -377,7 +377,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 203.79000005777925
+            "wall_ms": 119.46169997099787
           },
           {
             "allocation_metrics": {
@@ -388,9 +388,9 @@
               "reallocation_bytes": 11201,
               "reallocation_calls": 109
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 24211456,
+            "peak_rss_bytes": 13529088,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -399,7 +399,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 206.153400009498
+            "wall_ms": 122.80729995109141
           },
           {
             "allocation_metrics": {
@@ -410,9 +410,9 @@
               "reallocation_bytes": 11201,
               "reallocation_calls": 109
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 24100864,
+            "peak_rss_bytes": 13549568,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -421,7 +421,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 223.80399995017797
+            "wall_ms": 126.93029991351068
           },
           {
             "allocation_metrics": {
@@ -432,9 +432,9 @@
               "reallocation_bytes": 11201,
               "reallocation_calls": 109
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 46.875,
             "limit": 500,
-            "peak_rss_bytes": 24207360,
+            "peak_rss_bytes": 13590528,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -443,7 +443,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 210.69880004506558
+            "wall_ms": 120.20519992802292
           }
         ],
         "targets": [
@@ -477,10 +477,10 @@
         "aggregate": {
           "allocation_bytes": 1085127.0,
           "allocation_calls": 16516.0,
-          "cpu_ms": 382.8125,
-          "peak_rss_bytes": 26212352.0,
+          "cpu_ms": 296.875,
+          "peak_rss_bytes": 15282176.0,
           "stdout_bytes": 2612.0,
-          "wall_ms": 254.28455002838746
+          "wall_ms": 145.5374999786727
         },
         "query_plan_evidence": {
           "by_family": {
@@ -661,9 +661,9 @@
               "reallocation_bytes": 308813,
               "reallocation_calls": 2585
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 125.0,
             "limit": 1,
-            "peak_rss_bytes": 26398720,
+            "peak_rss_bytes": 15335424,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -672,7 +672,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 243.45849989913404
+            "wall_ms": 146.00970002356917
           },
           {
             "allocation_metrics": {
@@ -683,9 +683,9 @@
               "reallocation_bytes": 308813,
               "reallocation_calls": 2585
             },
-            "cpu_ms": 218.75,
+            "cpu_ms": 343.75,
             "limit": 1,
-            "peak_rss_bytes": 26259456,
+            "peak_rss_bytes": 15286272,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -694,7 +694,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 249.13740006741136
+            "wall_ms": 142.81150000169873
           },
           {
             "allocation_metrics": {
@@ -705,9 +705,9 @@
               "reallocation_bytes": 308813,
               "reallocation_calls": 2585
             },
-            "cpu_ms": 312.5,
+            "cpu_ms": 343.75,
             "limit": 1,
-            "peak_rss_bytes": 26177536,
+            "peak_rss_bytes": 15065088,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -716,7 +716,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 246.6920999577269
+            "wall_ms": 145.06529993377626
           },
           {
             "allocation_metrics": {
@@ -727,9 +727,9 @@
               "reallocation_bytes": 308813,
               "reallocation_calls": 2585
             },
-            "cpu_ms": 390.625,
+            "cpu_ms": 296.875,
             "limit": 500,
-            "peak_rss_bytes": 26365952,
+            "peak_rss_bytes": 15437824,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -738,7 +738,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 251.76330003887415
+            "wall_ms": 146.82290004566312
           },
           {
             "allocation_metrics": {
@@ -749,9 +749,9 @@
               "reallocation_bytes": 308813,
               "reallocation_calls": 2585
             },
-            "cpu_ms": 390.625,
+            "cpu_ms": 296.875,
             "limit": 500,
-            "peak_rss_bytes": 25927680,
+            "peak_rss_bytes": 15360000,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -760,7 +760,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 263.911500107497
+            "wall_ms": 149.17729992885143
           },
           {
             "allocation_metrics": {
@@ -771,9 +771,9 @@
               "reallocation_bytes": 308813,
               "reallocation_calls": 2585
             },
-            "cpu_ms": 406.25,
+            "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 26275840,
+            "peak_rss_bytes": 15171584,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -782,7 +782,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 244.5469000376761
+            "wall_ms": 154.24790000542998
           },
           {
             "allocation_metrics": {
@@ -793,9 +793,9 @@
               "reallocation_bytes": 398335,
               "reallocation_calls": 2366
             },
-            "cpu_ms": 437.5,
+            "cpu_ms": 296.875,
             "limit": 500,
-            "peak_rss_bytes": 26042368,
+            "peak_rss_bytes": 15249408,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -804,7 +804,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 254.73150005564094
+            "wall_ms": 143.4566000243649
           },
           {
             "allocation_metrics": {
@@ -815,9 +815,9 @@
               "reallocation_bytes": 398335,
               "reallocation_calls": 2366
             },
-            "cpu_ms": 375.0,
+            "cpu_ms": 296.875,
             "limit": 500,
-            "peak_rss_bytes": 26161152,
+            "peak_rss_bytes": 15568896,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -826,7 +826,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 256.8520000204444
+            "wall_ms": 141.56140002887696
           },
           {
             "allocation_metrics": {
@@ -836,76 +836,32 @@
               "deallocation_calls": 15486,
               "reallocation_bytes": 398335,
               "reallocation_calls": 2366
-            },
-            "cpu_ms": 375.0,
-            "limit": 500,
-            "peak_rss_bytes": 26247168,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 493.67720005102456
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1350938,
-              "allocation_calls": 18446,
-              "deallocation_bytes": 1373616,
-              "deallocation_calls": 16910,
-              "reallocation_bytes": 546478,
-              "reallocation_calls": 4993
-            },
-            "cpu_ms": 421.875,
-            "limit": 500,
-            "peak_rss_bytes": 26423296,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2630,
-            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 257.3937999550253
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1350938,
-              "allocation_calls": 18446,
-              "deallocation_bytes": 1373616,
-              "deallocation_calls": 16910,
-              "reallocation_bytes": 546478,
-              "reallocation_calls": 4993
-            },
-            "cpu_ms": 390.625,
-            "limit": 500,
-            "peak_rss_bytes": 26042368,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2630,
-            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 256.69820001348853
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 1350938,
-              "allocation_calls": 18446,
-              "deallocation_bytes": 1373616,
-              "deallocation_calls": 16910,
-              "reallocation_bytes": 546478,
-              "reallocation_calls": 4993
             },
             "cpu_ms": 218.75,
             "limit": 500,
-            "peak_rss_bytes": 26120192,
+            "peak_rss_bytes": 15155200,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 149.14110000245273
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1350938,
+              "allocation_calls": 18446,
+              "deallocation_bytes": 1373616,
+              "deallocation_calls": 16910,
+              "reallocation_bytes": 546478,
+              "reallocation_calls": 4993
+            },
+            "cpu_ms": 328.125,
+            "limit": 500,
+            "peak_rss_bytes": 15278080,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -914,7 +870,51 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 253.83760000113398
+            "wall_ms": 141.0469999536872
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1350938,
+              "allocation_calls": 18446,
+              "deallocation_bytes": 1373616,
+              "deallocation_calls": 16910,
+              "reallocation_bytes": 546478,
+              "reallocation_calls": 4993
+            },
+            "cpu_ms": 140.625,
+            "limit": 500,
+            "peak_rss_bytes": 15392768,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2630,
+            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 143.95619998686016
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 1350938,
+              "allocation_calls": 18446,
+              "deallocation_bytes": 1373616,
+              "deallocation_calls": 16910,
+              "reallocation_bytes": 546478,
+              "reallocation_calls": 4993
+            },
+            "cpu_ms": 62.5,
+            "limit": 500,
+            "peak_rss_bytes": 15216640,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2630,
+            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 146.30240004044026
           }
         ],
         "targets": [
@@ -948,10 +948,10 @@
         "aggregate": {
           "allocation_bytes": 3754350.0,
           "allocation_calls": 61113.5,
-          "cpu_ms": 242.1875,
-          "peak_rss_bytes": 26796032.0,
+          "cpu_ms": 109.375,
+          "peak_rss_bytes": 16084992.0,
           "stdout_bytes": 82730.0,
-          "wall_ms": 288.62705000210553
+          "wall_ms": 136.75315002910793
         },
         "query_plan_evidence": {
           "by_family": {
@@ -1132,9 +1132,9 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 250.0,
+            "cpu_ms": 46.875,
             "limit": 1,
-            "peak_rss_bytes": 24289280,
+            "peak_rss_bytes": 13946880,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1143,7 +1143,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 197.66029994934797
+            "wall_ms": 117.13140003848821
           },
           {
             "allocation_metrics": {
@@ -1154,9 +1154,9 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 250.0,
+            "cpu_ms": 46.875,
             "limit": 1,
-            "peak_rss_bytes": 24535040,
+            "peak_rss_bytes": 13869056,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1165,7 +1165,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 202.29090005159378
+            "wall_ms": 125.210199970752
           },
           {
             "allocation_metrics": {
@@ -1176,9 +1176,9 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 62.5,
             "limit": 1,
-            "peak_rss_bytes": 24330240,
+            "peak_rss_bytes": 13774848,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1187,7 +1187,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 199.3184998864308
+            "wall_ms": 118.15550003666431
           },
           {
             "allocation_metrics": {
@@ -1198,9 +1198,9 @@
               "reallocation_bytes": 1505936,
               "reallocation_calls": 18600
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 140.625,
             "limit": 500,
-            "peak_rss_bytes": 26963968,
+            "peak_rss_bytes": 16179200,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1209,7 +1209,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 298.4269999433309
+            "wall_ms": 137.1989999897778
           },
           {
             "allocation_metrics": {
@@ -1220,9 +1220,9 @@
               "reallocation_bytes": 1505936,
               "reallocation_calls": 18600
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 156.25,
             "limit": 500,
-            "peak_rss_bytes": 26783744,
+            "peak_rss_bytes": 16285696,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1231,7 +1231,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 291.2217000266537
+            "wall_ms": 135.74459997471422
           },
           {
             "allocation_metrics": {
@@ -1242,9 +1242,9 @@
               "reallocation_bytes": 1505936,
               "reallocation_calls": 18600
             },
-            "cpu_ms": 281.25,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 26861568,
+            "peak_rss_bytes": 16379904,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1253,7 +1253,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 298.4593999572098
+            "wall_ms": 142.60030002333224
           },
           {
             "allocation_metrics": {
@@ -1264,9 +1264,9 @@
               "reallocation_bytes": 1527895,
               "reallocation_calls": 18642
             },
-            "cpu_ms": 265.625,
+            "cpu_ms": 125.0,
             "limit": 500,
-            "peak_rss_bytes": 26759168,
+            "peak_rss_bytes": 15892480,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1275,7 +1275,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 286.03239997755736
+            "wall_ms": 133.9925000211224
           },
           {
             "allocation_metrics": {
@@ -1286,9 +1286,9 @@
               "reallocation_bytes": 1527895,
               "reallocation_calls": 18642
             },
-            "cpu_ms": 265.625,
+            "cpu_ms": 140.625,
             "limit": 500,
-            "peak_rss_bytes": 26492928,
+            "peak_rss_bytes": 15990784,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1297,7 +1297,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 279.7798999818042
+            "wall_ms": 136.30730006843805
           },
           {
             "allocation_metrics": {
@@ -1308,9 +1308,9 @@
               "reallocation_bytes": 1527895,
               "reallocation_calls": 18642
             },
-            "cpu_ms": 250.0,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 26808320,
+            "peak_rss_bytes": 15880192,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1319,7 +1319,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 281.7183000734076
+            "wall_ms": 138.84479994885623
           },
           {
             "allocation_metrics": {
@@ -1330,9 +1330,9 @@
               "reallocation_bytes": 2189378,
               "reallocation_calls": 31153
             },
-            "cpu_ms": 218.75,
+            "cpu_ms": 125.0,
             "limit": 500,
-            "peak_rss_bytes": 27283456,
+            "peak_rss_bytes": 16506880,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1341,7 +1341,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 297.1333999885246
+            "wall_ms": 145.61859995592386
           },
           {
             "allocation_metrics": {
@@ -1352,9 +1352,9 @@
               "reallocation_bytes": 2189378,
               "reallocation_calls": 31153
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 78.125,
             "limit": 500,
-            "peak_rss_bytes": 27271168,
+            "peak_rss_bytes": 16691200,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1363,7 +1363,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 294.19939999934286
+            "wall_ms": 146.41110005322844
           },
           {
             "allocation_metrics": {
@@ -1374,9 +1374,9 @@
               "reallocation_bytes": 2189378,
               "reallocation_calls": 31153
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 125.0,
             "limit": 500,
-            "peak_rss_bytes": 27602944,
+            "peak_rss_bytes": 16838656,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1385,7 +1385,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 297.2580000059679
+            "wall_ms": 151.89099998679012
           }
         ],
         "targets": [
@@ -1419,10 +1419,10 @@
         "aggregate": {
           "allocation_bytes": 37667640.0,
           "allocation_calls": 806330.5,
-          "cpu_ms": 859.375,
-          "peak_rss_bytes": 26669056.0,
+          "cpu_ms": 210.9375,
+          "peak_rss_bytes": 15534080.0,
           "stdout_bytes": 37929.0,
-          "wall_ms": 923.5057500191033
+          "wall_ms": 241.08810001052916
         },
         "query_plan_evidence": {
           "by_family": {
@@ -1603,9 +1603,9 @@
               "reallocation_bytes": 149849,
               "reallocation_calls": 1262
             },
-            "cpu_ms": 250.0,
+            "cpu_ms": 93.75,
             "limit": 1,
-            "peak_rss_bytes": 25284608,
+            "peak_rss_bytes": 14770176,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1614,7 +1614,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 248.48049995489419
+            "wall_ms": 123.9187999162823
           },
           {
             "allocation_metrics": {
@@ -1625,9 +1625,9 @@
               "reallocation_bytes": 149849,
               "reallocation_calls": 1262
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 109.375,
             "limit": 1,
-            "peak_rss_bytes": 25616384,
+            "peak_rss_bytes": 14520320,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1636,7 +1636,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 253.5264000762254
+            "wall_ms": 131.8757999688387
           },
           {
             "allocation_metrics": {
@@ -1646,85 +1646,107 @@
               "deallocation_calls": 7208,
               "reallocation_bytes": 149849,
               "reallocation_calls": 1262
+            },
+            "cpu_ms": 62.5,
+            "limit": 1,
+            "peak_rss_bytes": 14454784,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 132.64089997392148
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 41483968,
+              "allocation_calls": 841854,
+              "deallocation_bytes": 45816424,
+              "deallocation_calls": 838941,
+              "reallocation_bytes": 9743927,
+              "reallocation_calls": 214506
+            },
+            "cpu_ms": 296.875,
+            "limit": 500,
+            "peak_rss_bytes": 22081536,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 256.9786999374628
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 41483968,
+              "allocation_calls": 841854,
+              "deallocation_bytes": 45816424,
+              "deallocation_calls": 838941,
+              "reallocation_bytes": 9743927,
+              "reallocation_calls": 214506
+            },
+            "cpu_ms": 468.75,
+            "limit": 500,
+            "peak_rss_bytes": 21934080,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 257.2251999517903
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 41483968,
+              "allocation_calls": 841854,
+              "deallocation_bytes": 45816424,
+              "deallocation_calls": 838941,
+              "reallocation_bytes": 9743927,
+              "reallocation_calls": 214506
+            },
+            "cpu_ms": 218.75,
+            "limit": 500,
+            "peak_rss_bytes": 21917696,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 256.1991000548005
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 33851312,
+              "allocation_calls": 770807,
+              "deallocation_bytes": 36837098,
+              "deallocation_calls": 767894,
+              "reallocation_bytes": 11220589,
+              "reallocation_calls": 232236
             },
             "cpu_ms": 187.5,
-            "limit": 1,
-            "peak_rss_bytes": 25440256,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 250.59690000489354
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 41483968,
-              "allocation_calls": 841854,
-              "deallocation_bytes": 45816424,
-              "deallocation_calls": 838941,
-              "reallocation_bytes": 9743927,
-              "reallocation_calls": 214506
-            },
-            "cpu_ms": 875.0,
             "limit": 500,
-            "peak_rss_bytes": 32342016,
+            "peak_rss_bytes": 15556608,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
+            "stdout_bytes": 39741,
+            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
+            "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 935.494799981825
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 41483968,
-              "allocation_calls": 841854,
-              "deallocation_bytes": 45816424,
-              "deallocation_calls": 838941,
-              "reallocation_bytes": 9743927,
-              "reallocation_calls": 214506
-            },
-            "cpu_ms": 1015.625,
-            "limit": 500,
-            "peak_rss_bytes": 32305152,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 928.1342000467703
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 41483968,
-              "allocation_calls": 841854,
-              "deallocation_bytes": 45816424,
-              "deallocation_calls": 838941,
-              "reallocation_bytes": 9743927,
-              "reallocation_calls": 214506
-            },
-            "cpu_ms": 1062.5,
-            "limit": 500,
-            "peak_rss_bytes": 32202752,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 1136.032999958843
+            "wall_ms": 223.88179996050894
           },
           {
             "allocation_metrics": {
@@ -1735,9 +1757,9 @@
               "reallocation_bytes": 11220589,
               "reallocation_calls": 232236
             },
-            "cpu_ms": 781.25,
+            "cpu_ms": 375.0,
             "limit": 500,
-            "peak_rss_bytes": 26456064,
+            "peak_rss_bytes": 15433728,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1746,7 +1768,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 838.6140000075102
+            "wall_ms": 222.79570007231086
           },
           {
             "allocation_metrics": {
@@ -1757,9 +1779,9 @@
               "reallocation_bytes": 11220589,
               "reallocation_calls": 232236
             },
-            "cpu_ms": 843.75,
+            "cpu_ms": 187.5,
             "limit": 500,
-            "peak_rss_bytes": 26607616,
+            "peak_rss_bytes": 15511552,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1768,29 +1790,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 918.8772999914363
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 33851312,
-              "allocation_calls": 770807,
-              "deallocation_bytes": 36837098,
-              "deallocation_calls": 767894,
-              "reallocation_bytes": 11220589,
-              "reallocation_calls": 232236
-            },
-            "cpu_ms": 765.625,
-            "limit": 500,
-            "peak_rss_bytes": 26648576,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 39741,
-            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 833.199999993667
+            "wall_ms": 225.9770999662578
           },
           {
             "allocation_metrics": {
@@ -1801,9 +1801,9 @@
               "reallocation_bytes": 22668611,
               "reallocation_calls": 514024
             },
-            "cpu_ms": 1109.375,
+            "cpu_ms": 218.75,
             "limit": 500,
-            "peak_rss_bytes": 26759168,
+            "peak_rss_bytes": 15446016,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1812,7 +1812,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 1458.3447000477463
+            "wall_ms": 299.23759994562715
           },
           {
             "allocation_metrics": {
@@ -1823,9 +1823,9 @@
               "reallocation_bytes": 22668611,
               "reallocation_calls": 514024
             },
-            "cpu_ms": 1125.0,
+            "cpu_ms": 203.125,
             "limit": 500,
-            "peak_rss_bytes": 26689536,
+            "peak_rss_bytes": 15556608,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1834,7 +1834,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 1153.4327000845224
+            "wall_ms": 291.89240001142025
           },
           {
             "allocation_metrics": {
@@ -1845,9 +1845,9 @@
               "reallocation_bytes": 22668611,
               "reallocation_calls": 514024
             },
-            "cpu_ms": 1359.375,
+            "cpu_ms": 234.375,
             "limit": 500,
-            "peak_rss_bytes": 26759168,
+            "peak_rss_bytes": 15585280,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1856,7 +1856,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 1231.6350999753922
+            "wall_ms": 296.80050001479685
           }
         ],
         "targets": [
@@ -1890,10 +1890,10 @@
         "aggregate": {
           "allocation_bytes": 69454.0,
           "allocation_calls": 1045.0,
-          "cpu_ms": 171.875,
-          "peak_rss_bytes": 24199168.0,
+          "cpu_ms": 85.9375,
+          "peak_rss_bytes": 13701120.0,
           "stdout_bytes": 2540.0,
-          "wall_ms": 208.09334999648854
+          "wall_ms": 132.64584995340556
         },
         "query_plan_evidence": {
           "by_family": {
@@ -2074,9 +2074,9 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 93.75,
             "limit": 1,
-            "peak_rss_bytes": 24064000,
+            "peak_rss_bytes": 13660160,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2085,7 +2085,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 193.95620003342628
+            "wall_ms": 114.92969992104918
           },
           {
             "allocation_metrics": {
@@ -2096,9 +2096,9 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 46.875,
             "limit": 1,
-            "peak_rss_bytes": 24256512,
+            "peak_rss_bytes": 13832192,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2107,7 +2107,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 223.34389993920922
+            "wall_ms": 164.00890005752444
           },
           {
             "allocation_metrics": {
@@ -2118,9 +2118,9 @@
               "reallocation_bytes": 4881,
               "reallocation_calls": 56
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 93.75,
             "limit": 1,
-            "peak_rss_bytes": 24203264,
+            "peak_rss_bytes": 13688832,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2129,7 +2129,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 216.1248999182135
+            "wall_ms": 162.44740004185587
           },
           {
             "allocation_metrics": {
@@ -2140,9 +2140,9 @@
               "reallocation_bytes": 16077,
               "reallocation_calls": 205
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 24723456,
+            "peak_rss_bytes": 13684736,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2151,7 +2151,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 215.52960004191846
+            "wall_ms": 161.90700000151992
           },
           {
             "allocation_metrics": {
@@ -2162,9 +2162,9 @@
               "reallocation_bytes": 16077,
               "reallocation_calls": 205
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 78.125,
             "limit": 500,
-            "peak_rss_bytes": 24371200,
+            "peak_rss_bytes": 13651968,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2173,7 +2173,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 215.62269993592054
+            "wall_ms": 167.853599996306
           },
           {
             "allocation_metrics": {
@@ -2184,9 +2184,9 @@
               "reallocation_bytes": 16077,
               "reallocation_calls": 205
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 24178688,
+            "peak_rss_bytes": 13676544,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2195,7 +2195,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 220.4715000698343
+            "wall_ms": 159.21469999011606
           },
           {
             "allocation_metrics": {
@@ -2206,9 +2206,9 @@
               "reallocation_bytes": 16695,
               "reallocation_calls": 203
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 46.875,
             "limit": 500,
-            "peak_rss_bytes": 24076288,
+            "peak_rss_bytes": 13565952,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2217,7 +2217,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 209.0324000455439
+            "wall_ms": 127.12189997546375
           },
           {
             "allocation_metrics": {
@@ -2228,9 +2228,9 @@
               "reallocation_bytes": 16695,
               "reallocation_calls": 203
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 24346624,
+            "peak_rss_bytes": 13783040,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2239,7 +2239,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 198.2340000104159
+            "wall_ms": 123.69419995229691
           },
           {
             "allocation_metrics": {
@@ -2250,9 +2250,9 @@
               "reallocation_bytes": 16695,
               "reallocation_calls": 203
             },
-            "cpu_ms": 203.125,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 24162304,
+            "peak_rss_bytes": 13713408,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2261,7 +2261,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 198.1833999743685
+            "wall_ms": 133.07049998547882
           },
           {
             "allocation_metrics": {
@@ -2272,9 +2272,9 @@
               "reallocation_bytes": 25962,
               "reallocation_calls": 364
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 46.875,
             "limit": 500,
-            "peak_rss_bytes": 24051712,
+            "peak_rss_bytes": 13787136,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2283,7 +2283,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 206.25660009682178
+            "wall_ms": 132.2211999213323
           },
           {
             "allocation_metrics": {
@@ -2294,9 +2294,9 @@
               "reallocation_bytes": 25962,
               "reallocation_calls": 364
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 24195072,
+            "peak_rss_bytes": 13750272,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2305,7 +2305,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 207.15429994743317
+            "wall_ms": 132.21449998673052
           },
           {
             "allocation_metrics": {
@@ -2316,9 +2316,9 @@
               "reallocation_bytes": 25962,
               "reallocation_calls": 364
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 78.125,
             "limit": 500,
-            "peak_rss_bytes": 24629248,
+            "peak_rss_bytes": 13832192,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2327,7 +2327,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 206.6083000972867
+            "wall_ms": 126.77919992711395
           }
         ],
         "targets": [
@@ -2359,6 +2359,7 @@
       }
     }
   },
+  "build_profile": "release",
   "cancellation": {
     "baseline": {
       "case": "mcp-summary-cancellation",
@@ -2402,7 +2403,7 @@
     }
   },
   "candidate": {
-    "binary_sha256": "699b4b1a4966bd32c624080d781d48cde5e48f5eae39e46b4787a9af37117d1d",
+    "binary_sha256": "446d80945b0c7c4a4cac015ba3ea01dde1f6515dceac4c497dcbddc5dcc710dc",
     "candidate_patch": {
       "path": "docs/benchmarks/reverse-caller-candidate.patch",
       "sha256": "e4779fc73c4f149c7a1b27822aac4f47a7b731a8e06bc123e13d7622576d78ca"
@@ -2412,10 +2413,10 @@
         "aggregate": {
           "allocation_bytes": 37632.0,
           "allocation_calls": 514.5,
-          "cpu_ms": 164.0625,
-          "peak_rss_bytes": 24203264.0,
+          "cpu_ms": 70.3125,
+          "peak_rss_bytes": 13807616.0,
           "stdout_bytes": 1697.0,
-          "wall_ms": 223.44345005694777
+          "wall_ms": 124.52645000303164
         },
         "query_plan_evidence": {
           "by_family": {
@@ -2595,9 +2596,9 @@
               "reallocation_bytes": 7115,
               "reallocation_calls": 73
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 62.5,
             "limit": 1,
-            "peak_rss_bytes": 24023040,
+            "peak_rss_bytes": 13688832,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2606,7 +2607,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 202.9264000011608
+            "wall_ms": 114.26870001014322
           },
           {
             "allocation_metrics": {
@@ -2617,9 +2618,9 @@
               "reallocation_bytes": 7115,
               "reallocation_calls": 73
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 46.875,
             "limit": 1,
-            "peak_rss_bytes": 24145920,
+            "peak_rss_bytes": 13709312,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2628,7 +2629,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 215.19880008418113
+            "wall_ms": 118.85400000028312
           },
           {
             "allocation_metrics": {
@@ -2639,9 +2640,9 @@
               "reallocation_bytes": 7115,
               "reallocation_calls": 73
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 78.125,
             "limit": 1,
-            "peak_rss_bytes": 24395776,
+            "peak_rss_bytes": 13840384,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2650,7 +2651,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 225.73889989871532
+            "wall_ms": 122.62170005124062
           },
           {
             "allocation_metrics": {
@@ -2661,9 +2662,9 @@
               "reallocation_bytes": 7115,
               "reallocation_calls": 73
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 46.875,
             "limit": 500,
-            "peak_rss_bytes": 24367104,
+            "peak_rss_bytes": 13811712,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2672,7 +2673,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 228.33519999403507
+            "wall_ms": 128.5325000062585
           },
           {
             "allocation_metrics": {
@@ -2683,9 +2684,9 @@
               "reallocation_bytes": 7115,
               "reallocation_calls": 73
             },
-            "cpu_ms": 218.75,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 24178688,
+            "peak_rss_bytes": 13840384,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2694,7 +2695,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 212.42540003731847
+            "wall_ms": 123.34869999904186
           },
           {
             "allocation_metrics": {
@@ -2705,9 +2706,9 @@
               "reallocation_bytes": 7115,
               "reallocation_calls": 73
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 78.125,
             "limit": 500,
-            "peak_rss_bytes": 24100864,
+            "peak_rss_bytes": 13959168,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2716,7 +2717,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 212.63959992211312
+            "wall_ms": 126.57069996930659
           },
           {
             "allocation_metrics": {
@@ -2727,9 +2728,9 @@
               "reallocation_bytes": 7021,
               "reallocation_calls": 73
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 24227840,
+            "peak_rss_bytes": 13611008,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2738,7 +2739,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 206.9962000241503
+            "wall_ms": 132.85540009383112
           },
           {
             "allocation_metrics": {
@@ -2749,9 +2750,9 @@
               "reallocation_bytes": 7021,
               "reallocation_calls": 73
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 24080384,
+            "peak_rss_bytes": 13828096,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2760,7 +2761,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 229.2266000295058
+            "wall_ms": 125.70420000702143
           },
           {
             "allocation_metrics": {
@@ -2771,9 +2772,9 @@
               "reallocation_bytes": 7021,
               "reallocation_calls": 73
             },
-            "cpu_ms": 203.125,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 24399872,
+            "peak_rss_bytes": 13721600,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2782,7 +2783,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 252.07399995997548
+            "wall_ms": 125.74829999357462
           },
           {
             "allocation_metrics": {
@@ -2793,9 +2794,9 @@
               "reallocation_bytes": 9953,
               "reallocation_calls": 105
             },
-            "cpu_ms": 234.375,
+            "cpu_ms": 31.25,
             "limit": 500,
-            "peak_rss_bytes": 24289280,
+            "peak_rss_bytes": 13803520,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2804,7 +2805,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 239.60089997854084
+            "wall_ms": 123.09729994740337
           },
           {
             "allocation_metrics": {
@@ -2815,9 +2816,9 @@
               "reallocation_bytes": 9953,
               "reallocation_calls": 105
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 24272896,
+            "peak_rss_bytes": 13967360,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2826,7 +2827,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 223.87940005864948
+            "wall_ms": 127.97150004189461
           },
           {
             "allocation_metrics": {
@@ -2837,9 +2838,9 @@
               "reallocation_bytes": 9953,
               "reallocation_calls": 105
             },
-            "cpu_ms": 140.625,
+            "cpu_ms": 46.875,
             "limit": 500,
-            "peak_rss_bytes": 24035328,
+            "peak_rss_bytes": 13496320,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2848,7 +2849,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 223.00750005524606
+            "wall_ms": 120.41710002813488
           }
         ],
         "targets": [
@@ -2882,10 +2883,10 @@
         "aggregate": {
           "allocation_bytes": 1071687.0,
           "allocation_calls": 16037.0,
-          "cpu_ms": 375.0,
-          "peak_rss_bytes": 26228736.0,
+          "cpu_ms": 289.0625,
+          "peak_rss_bytes": 15253504.0,
           "stdout_bytes": 2612.0,
-          "wall_ms": 258.94465000601485
+          "wall_ms": 146.79859997704625
         },
         "query_plan_evidence": {
           "by_family": {
@@ -3066,9 +3067,9 @@
               "reallocation_bytes": 274253,
               "reallocation_calls": 2105
             },
-            "cpu_ms": 421.875,
+            "cpu_ms": 296.875,
             "limit": 1,
-            "peak_rss_bytes": 26132480,
+            "peak_rss_bytes": 15499264,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3077,7 +3078,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 289.4064000574872
+            "wall_ms": 135.15590003225952
           },
           {
             "allocation_metrics": {
@@ -3088,9 +3089,9 @@
               "reallocation_bytes": 274253,
               "reallocation_calls": 2105
             },
-            "cpu_ms": 390.625,
+            "cpu_ms": 328.125,
             "limit": 1,
-            "peak_rss_bytes": 26378240,
+            "peak_rss_bytes": 14979072,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3099,7 +3100,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 275.19489999394864
+            "wall_ms": 145.47779993154109
           },
           {
             "allocation_metrics": {
@@ -3110,9 +3111,9 @@
               "reallocation_bytes": 274253,
               "reallocation_calls": 2105
             },
-            "cpu_ms": 359.375,
+            "cpu_ms": 46.875,
             "limit": 1,
-            "peak_rss_bytes": 26284032,
+            "peak_rss_bytes": 15556608,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3121,7 +3122,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 264.17859992943704
+            "wall_ms": 141.9304000446573
           },
           {
             "allocation_metrics": {
@@ -3132,9 +3133,9 @@
               "reallocation_bytes": 274253,
               "reallocation_calls": 2105
             },
-            "cpu_ms": 437.5,
+            "cpu_ms": 312.5,
             "limit": 500,
-            "peak_rss_bytes": 26173440,
+            "peak_rss_bytes": 15142912,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3143,7 +3144,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 251.5887999907136
+            "wall_ms": 138.48500000312924
           },
           {
             "allocation_metrics": {
@@ -3154,9 +3155,9 @@
               "reallocation_bytes": 274253,
               "reallocation_calls": 2105
             },
-            "cpu_ms": 343.75,
+            "cpu_ms": 281.25,
             "limit": 500,
-            "peak_rss_bytes": 25894912,
+            "peak_rss_bytes": 15306752,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3165,7 +3166,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 242.6028000190854
+            "wall_ms": 140.68930002395064
           },
           {
             "allocation_metrics": {
@@ -3176,9 +3177,9 @@
               "reallocation_bytes": 274253,
               "reallocation_calls": 2105
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 312.5,
             "limit": 500,
-            "peak_rss_bytes": 26009600,
+            "peak_rss_bytes": 15224832,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3187,7 +3188,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 241.89850001130253
+            "wall_ms": 160.00540007371455
           },
           {
             "allocation_metrics": {
@@ -3198,9 +3199,9 @@
               "reallocation_bytes": 248575,
               "reallocation_calls": 1886
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 218.75,
             "limit": 500,
-            "peak_rss_bytes": 26148864,
+            "peak_rss_bytes": 15425536,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3209,7 +3210,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 249.05199999921024
+            "wall_ms": 151.37939993292093
           },
           {
             "allocation_metrics": {
@@ -3220,9 +3221,9 @@
               "reallocation_bytes": 248575,
               "reallocation_calls": 1886
             },
-            "cpu_ms": 375.0,
+            "cpu_ms": 281.25,
             "limit": 500,
-            "peak_rss_bytes": 26284032,
+            "peak_rss_bytes": 15486976,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3231,7 +3232,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 255.6112000020221
+            "wall_ms": 148.43579998705536
           },
           {
             "allocation_metrics": {
@@ -3242,9 +3243,9 @@
               "reallocation_bytes": 248575,
               "reallocation_calls": 1886
             },
-            "cpu_ms": 375.0,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 26357760,
+            "peak_rss_bytes": 15208448,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3253,7 +3254,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 260.939099942334
+            "wall_ms": 142.11290003731847
           },
           {
             "allocation_metrics": {
@@ -3264,9 +3265,9 @@
               "reallocation_bytes": 396718,
               "reallocation_calls": 4513
             },
-            "cpu_ms": 375.0,
+            "cpu_ms": 328.125,
             "limit": 500,
-            "peak_rss_bytes": 26341376,
+            "peak_rss_bytes": 15167488,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3275,7 +3276,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 258.07620002888143
+            "wall_ms": 160.53480003029108
           },
           {
             "allocation_metrics": {
@@ -3286,9 +3287,9 @@
               "reallocation_bytes": 396718,
               "reallocation_calls": 4513
             },
-            "cpu_ms": 437.5,
+            "cpu_ms": 296.875,
             "limit": 500,
-            "peak_rss_bytes": 25968640,
+            "peak_rss_bytes": 15245312,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3297,7 +3298,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 259.8130999831483
+            "wall_ms": 150.97169997170568
           },
           {
             "allocation_metrics": {
@@ -3308,9 +3309,9 @@
               "reallocation_bytes": 396718,
               "reallocation_calls": 4513
             },
-            "cpu_ms": 515.625,
+            "cpu_ms": 250.0,
             "limit": 500,
-            "peak_rss_bytes": 26320896,
+            "peak_rss_bytes": 15261696,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3319,7 +3320,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 264.5425000227988
+            "wall_ms": 148.11940002255142
           }
         ],
         "targets": [
@@ -3353,10 +3354,10 @@
         "aggregate": {
           "allocation_bytes": 3684114.0,
           "allocation_calls": 59996.0,
-          "cpu_ms": 257.8125,
-          "peak_rss_bytes": 26798080.0,
+          "cpu_ms": 109.375,
+          "peak_rss_bytes": 16125952.0,
           "stdout_bytes": 82730.0,
-          "wall_ms": 286.4611999830231
+          "wall_ms": 143.87685002293438
         },
         "query_plan_evidence": {
           "by_family": {
@@ -3537,9 +3538,9 @@
               "reallocation_bytes": 4737,
               "reallocation_calls": 54
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 78.125,
             "limit": 1,
-            "peak_rss_bytes": 24403968,
+            "peak_rss_bytes": 13946880,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3548,7 +3549,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 194.22900001518428
+            "wall_ms": 124.43020008504391
           },
           {
             "allocation_metrics": {
@@ -3558,186 +3559,230 @@
               "deallocation_calls": 409,
               "reallocation_bytes": 4737,
               "reallocation_calls": 54
+            },
+            "cpu_ms": 125.0,
+            "limit": 1,
+            "peak_rss_bytes": 13926400,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 122.94339993968606
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 34673,
+              "allocation_calls": 466,
+              "deallocation_bytes": 30801,
+              "deallocation_calls": 409,
+              "reallocation_bytes": 4737,
+              "reallocation_calls": 54
+            },
+            "cpu_ms": 125.0,
+            "limit": 1,
+            "peak_rss_bytes": 13905920,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 121.4422999182716
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3951396,
+              "allocation_calls": 61756,
+              "deallocation_bytes": 4277089,
+              "deallocation_calls": 56595,
+              "reallocation_bytes": 1482824,
+              "reallocation_calls": 18279
+            },
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 16265216,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 150.081800064072
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3951396,
+              "allocation_calls": 61756,
+              "deallocation_bytes": 4277089,
+              "deallocation_calls": 56595,
+              "reallocation_bytes": 1482824,
+              "reallocation_calls": 18279
+            },
+            "cpu_ms": 62.5,
+            "limit": 500,
+            "peak_rss_bytes": 16187392,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 138.5948999086395
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3951396,
+              "allocation_calls": 61756,
+              "deallocation_bytes": 4277089,
+              "deallocation_calls": 56595,
+              "reallocation_bytes": 1482824,
+              "reallocation_calls": 18279
+            },
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 16240640,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 180.4503999883309
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3416832,
+              "allocation_calls": 58236,
+              "deallocation_bytes": 3775749,
+              "deallocation_calls": 53713,
+              "reallocation_bytes": 1427743,
+              "reallocation_calls": 18321
+            },
+            "cpu_ms": 109.375,
+            "limit": 500,
+            "peak_rss_bytes": 16023552,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 144.48699995409697
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3416832,
+              "allocation_calls": 58236,
+              "deallocation_bytes": 3775749,
+              "deallocation_calls": 53713,
+              "reallocation_bytes": 1427743,
+              "reallocation_calls": 18321
+            },
+            "cpu_ms": 125.0,
+            "limit": 500,
+            "peak_rss_bytes": 16064512,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 143.26670009177178
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 3416832,
+              "allocation_calls": 58236,
+              "deallocation_bytes": 3775749,
+              "deallocation_calls": 53713,
+              "reallocation_bytes": 1427743,
+              "reallocation_calls": 18321
+            },
+            "cpu_ms": 109.375,
+            "limit": 500,
+            "peak_rss_bytes": 15982592,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 140.66270005423576
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 5362234,
+              "allocation_calls": 74589,
+              "deallocation_bytes": 5548893,
+              "deallocation_calls": 65255,
+              "reallocation_bytes": 2089226,
+              "reallocation_calls": 30832
+            },
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 16846848,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 148.15359993372113
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 5362234,
+              "allocation_calls": 74589,
+              "deallocation_bytes": 5548893,
+              "deallocation_calls": 65255,
+              "reallocation_bytes": 2089226,
+              "reallocation_calls": 30832
+            },
+            "cpu_ms": 125.0,
+            "limit": 500,
+            "peak_rss_bytes": 16306176,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 148.96939997561276
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 5362234,
+              "allocation_calls": 74589,
+              "deallocation_bytes": 5548893,
+              "deallocation_calls": 65255,
+              "reallocation_bytes": 2089226,
+              "reallocation_calls": 30832
             },
             "cpu_ms": 140.625,
-            "limit": 1,
-            "peak_rss_bytes": 23826432,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 202.5238999631256
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 34673,
-              "allocation_calls": 466,
-              "deallocation_bytes": 30801,
-              "deallocation_calls": 409,
-              "reallocation_bytes": 4737,
-              "reallocation_calls": 54
-            },
-            "cpu_ms": 171.875,
-            "limit": 1,
-            "peak_rss_bytes": 24088576,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 212.2211999958381
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3951396,
-              "allocation_calls": 61756,
-              "deallocation_bytes": 4277089,
-              "deallocation_calls": 56595,
-              "reallocation_bytes": 1482824,
-              "reallocation_calls": 18279
-            },
-            "cpu_ms": 203.125,
             "limit": 500,
-            "peak_rss_bytes": 26959872,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 284.0637000044808
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3951396,
-              "allocation_calls": 61756,
-              "deallocation_bytes": 4277089,
-              "deallocation_calls": 56595,
-              "reallocation_bytes": 1482824,
-              "reallocation_calls": 18279
-            },
-            "cpu_ms": 250.0,
-            "limit": 500,
-            "peak_rss_bytes": 26783744,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 283.5122999968007
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3951396,
-              "allocation_calls": 61756,
-              "deallocation_bytes": 4277089,
-              "deallocation_calls": 56595,
-              "reallocation_bytes": 1482824,
-              "reallocation_calls": 18279
-            },
-            "cpu_ms": 265.625,
-            "limit": 500,
-            "peak_rss_bytes": 26812416,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 281.41010005492717
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3416832,
-              "allocation_calls": 58236,
-              "deallocation_bytes": 3775749,
-              "deallocation_calls": 53713,
-              "reallocation_bytes": 1427743,
-              "reallocation_calls": 18321
-            },
-            "cpu_ms": 296.875,
-            "limit": 500,
-            "peak_rss_bytes": 26451968,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 323.2514999108389
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3416832,
-              "allocation_calls": 58236,
-              "deallocation_bytes": 3775749,
-              "deallocation_calls": 53713,
-              "reallocation_bytes": 1427743,
-              "reallocation_calls": 18321
-            },
-            "cpu_ms": 250.0,
-            "limit": 500,
-            "peak_rss_bytes": 26804224,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 288.85869996156543
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 3416832,
-              "allocation_calls": 58236,
-              "deallocation_bytes": 3775749,
-              "deallocation_calls": 53713,
-              "reallocation_bytes": 1427743,
-              "reallocation_calls": 18321
-            },
-            "cpu_ms": 281.25,
-            "limit": 500,
-            "peak_rss_bytes": 26791936,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 305.8140999637544
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 5362234,
-              "allocation_calls": 74589,
-              "deallocation_bytes": 5548893,
-              "deallocation_calls": 65255,
-              "reallocation_bytes": 2089226,
-              "reallocation_calls": 30832
-            },
-            "cpu_ms": 281.25,
-            "limit": 500,
-            "peak_rss_bytes": 27406336,
+            "peak_rss_bytes": 16756736,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3746,51 +3791,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 334.37579998280853
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 5362234,
-              "allocation_calls": 74589,
-              "deallocation_bytes": 5548893,
-              "deallocation_calls": 65255,
-              "reallocation_bytes": 2089226,
-              "reallocation_calls": 30832
-            },
-            "cpu_ms": 281.25,
-            "limit": 500,
-            "peak_rss_bytes": 27500544,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 307.2106000036001
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 5362234,
-              "allocation_calls": 74589,
-              "deallocation_bytes": 5548893,
-              "deallocation_calls": 65255,
-              "reallocation_bytes": 2089226,
-              "reallocation_calls": 30832
-            },
-            "cpu_ms": 265.625,
-            "limit": 500,
-            "peak_rss_bytes": 27234304,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 311.27780000679195
+            "wall_ms": 148.49100005812943
           }
         ],
         "targets": [
@@ -3824,10 +3825,10 @@
         "aggregate": {
           "allocation_bytes": 34503720.0,
           "allocation_calls": 756111.5,
-          "cpu_ms": 1156.25,
-          "peak_rss_bytes": 26703872.0,
+          "cpu_ms": 296.875,
+          "peak_rss_bytes": 15507456.0,
           "stdout_bytes": 37929.0,
-          "wall_ms": 1599.789950007107
+          "wall_ms": 236.97575001278892
         },
         "query_plan_evidence": {
           "by_family": {
@@ -4008,9 +4009,9 @@
               "reallocation_bytes": 132569,
               "reallocation_calls": 1022
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 281.25,
             "limit": 1,
-            "peak_rss_bytes": 25346048,
+            "peak_rss_bytes": 14770176,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4019,7 +4020,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 248.64200002048165
+            "wall_ms": 128.25980002526194
           },
           {
             "allocation_metrics": {
@@ -4030,9 +4031,9 @@
               "reallocation_bytes": 132569,
               "reallocation_calls": 1022
             },
-            "cpu_ms": 343.75,
+            "cpu_ms": 312.5,
             "limit": 1,
-            "peak_rss_bytes": 25542656,
+            "peak_rss_bytes": 14589952,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4041,7 +4042,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 233.01519989036024
+            "wall_ms": 132.34340003691614
           },
           {
             "allocation_metrics": {
@@ -4051,19 +4052,63 @@
               "deallocation_calls": 6969,
               "reallocation_bytes": 132569,
               "reallocation_calls": 1022
+            },
+            "cpu_ms": 78.125,
+            "limit": 1,
+            "peak_rss_bytes": 14598144,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 218.57169992290437
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 40302688,
+              "allocation_calls": 798775,
+              "deallocation_bytes": 44751304,
+              "deallocation_calls": 795862,
+              "reallocation_bytes": 8698487,
+              "reallocation_calls": 199986
+            },
+            "cpu_ms": 453.125,
+            "limit": 500,
+            "peak_rss_bytes": 21884928,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 247.7841000072658
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 40302688,
+              "allocation_calls": 798775,
+              "deallocation_bytes": 44751304,
+              "deallocation_calls": 795862,
+              "reallocation_bytes": 8698487,
+              "reallocation_calls": 199986
             },
             "cpu_ms": 406.25,
-            "limit": 1,
-            "peak_rss_bytes": 25493504,
+            "limit": 500,
+            "peak_rss_bytes": 21737472,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 274.2532000411302
+            "wall_ms": 248.1764000840485
           },
           {
             "allocation_metrics": {
@@ -4074,9 +4119,9 @@
               "reallocation_bytes": 8698487,
               "reallocation_calls": 199986
             },
-            "cpu_ms": 1546.875,
+            "cpu_ms": 375.0,
             "limit": 500,
-            "peak_rss_bytes": 32411648,
+            "peak_rss_bytes": 21884928,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4085,51 +4130,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 2236.65729991626
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 40302688,
-              "allocation_calls": 798775,
-              "deallocation_bytes": 44751304,
-              "deallocation_calls": 795862,
-              "reallocation_bytes": 8698487,
-              "reallocation_calls": 199986
-            },
-            "cpu_ms": 1421.875,
-            "limit": 500,
-            "peak_rss_bytes": 32419840,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 3068.710400024429
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 40302688,
-              "allocation_calls": 798775,
-              "deallocation_bytes": 44751304,
-              "deallocation_calls": 795862,
-              "reallocation_bytes": 8698487,
-              "reallocation_calls": 199986
-            },
-            "cpu_ms": 1296.875,
-            "limit": 500,
-            "peak_rss_bytes": 32153600,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 2683.9336999692023
+            "wall_ms": 248.79420001525432
           },
           {
             "allocation_metrics": {
@@ -4140,9 +4141,9 @@
               "reallocation_bytes": 6690349,
               "reallocation_calls": 217716
             },
-            "cpu_ms": 1109.375,
+            "cpu_ms": 359.375,
             "limit": 500,
-            "peak_rss_bytes": 26615808,
+            "peak_rss_bytes": 15417344,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4151,7 +4152,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 2162.49710007105
+            "wall_ms": 213.2026000181213
           },
           {
             "allocation_metrics": {
@@ -4162,9 +4163,9 @@
               "reallocation_bytes": 6690349,
               "reallocation_calls": 217716
             },
-            "cpu_ms": 1156.25,
+            "cpu_ms": 359.375,
             "limit": 500,
-            "peak_rss_bytes": 26710016,
+            "peak_rss_bytes": 15437824,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4173,7 +4174,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 1726.5414000721648
+            "wall_ms": 226.16740001831204
           },
           {
             "allocation_metrics": {
@@ -4184,9 +4185,9 @@
               "reallocation_bytes": 6690349,
               "reallocation_calls": 217716
             },
-            "cpu_ms": 1156.25,
+            "cpu_ms": 171.875,
             "limit": 500,
-            "peak_rss_bytes": 26689536,
+            "peak_rss_bytes": 15433728,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4195,7 +4196,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 1397.183099994436
+            "wall_ms": 219.70889996737242
           },
           {
             "allocation_metrics": {
@@ -4206,9 +4207,9 @@
               "reallocation_bytes": 18138371,
               "reallocation_calls": 499504
             },
-            "cpu_ms": 1453.125,
+            "cpu_ms": 265.625,
             "limit": 500,
-            "peak_rss_bytes": 27074560,
+            "peak_rss_bytes": 15577088,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4217,7 +4218,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 2092.2168999677524
+            "wall_ms": 298.2213000068441
           },
           {
             "allocation_metrics": {
@@ -4228,9 +4229,9 @@
               "reallocation_bytes": 18138371,
               "reallocation_calls": 499504
             },
-            "cpu_ms": 1484.375,
+            "cpu_ms": 265.625,
             "limit": 500,
-            "peak_rss_bytes": 26697728,
+            "peak_rss_bytes": 15904768,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4239,7 +4240,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 1473.0384999420494
+            "wall_ms": 302.20599996391684
           },
           {
             "allocation_metrics": {
@@ -4250,9 +4251,9 @@
               "reallocation_bytes": 18138371,
               "reallocation_calls": 499504
             },
-            "cpu_ms": 1093.75,
+            "cpu_ms": 218.75,
             "limit": 500,
-            "peak_rss_bytes": 26804224,
+            "peak_rss_bytes": 15777792,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4261,7 +4262,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 1190.5867999885231
+            "wall_ms": 288.5147000197321
           }
         ],
         "targets": [
@@ -4295,10 +4296,10 @@
         "aggregate": {
           "allocation_bytes": 68738.0,
           "allocation_calls": 1033.5,
-          "cpu_ms": 171.875,
-          "peak_rss_bytes": 24233984.0,
+          "cpu_ms": 78.125,
+          "peak_rss_bytes": 13832192.0,
           "stdout_bytes": 2540.0,
-          "wall_ms": 211.30485000321642
+          "wall_ms": 126.10515003325418
         },
         "query_plan_evidence": {
           "by_family": {
@@ -4479,9 +4480,9 @@
               "reallocation_bytes": 4737,
               "reallocation_calls": 54
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 78.125,
             "limit": 1,
-            "peak_rss_bytes": 24379392,
+            "peak_rss_bytes": 13860864,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4490,7 +4491,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 205.8812000323087
+            "wall_ms": 117.96509998384863
           },
           {
             "allocation_metrics": {
@@ -4501,9 +4502,9 @@
               "reallocation_bytes": 4737,
               "reallocation_calls": 54
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 46.875,
             "limit": 1,
-            "peak_rss_bytes": 24182784,
+            "peak_rss_bytes": 13824000,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4512,7 +4513,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 213.51160004269332
+            "wall_ms": 121.35739997029305
           },
           {
             "allocation_metrics": {
@@ -4523,9 +4524,9 @@
               "reallocation_bytes": 4737,
               "reallocation_calls": 54
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 78.125,
             "limit": 1,
-            "peak_rss_bytes": 24223744,
+            "peak_rss_bytes": 13803520,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4534,7 +4535,51 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 212.1173000195995
+            "wall_ms": 123.00080002751201
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 70511,
+              "allocation_calls": 1049,
+              "deallocation_bytes": 68454,
+              "deallocation_calls": 944,
+              "reallocation_bytes": 15717,
+              "reallocation_calls": 200
+            },
+            "cpu_ms": 46.875,
+            "limit": 500,
+            "peak_rss_bytes": 13627392,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 126.51940004434437
+          },
+          {
+            "allocation_metrics": {
+              "allocation_bytes": 70511,
+              "allocation_calls": 1049,
+              "deallocation_bytes": 68454,
+              "deallocation_calls": 944,
+              "reallocation_bytes": 15717,
+              "reallocation_calls": 200
+            },
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 13950976,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 135.5811000103131
           },
           {
             "allocation_metrics": {
@@ -4547,7 +4592,7 @@
             },
             "cpu_ms": 140.625,
             "limit": 500,
-            "peak_rss_bytes": 24428544,
+            "peak_rss_bytes": 13840384,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4556,51 +4601,7 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 242.16480005998164
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 70511,
-              "allocation_calls": 1049,
-              "deallocation_bytes": 68454,
-              "deallocation_calls": 944,
-              "reallocation_bytes": 15717,
-              "reallocation_calls": 200
-            },
-            "cpu_ms": 156.25,
-            "limit": 500,
-            "peak_rss_bytes": 24371200,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 218.50379998795688
-          },
-          {
-            "allocation_metrics": {
-              "allocation_bytes": 70511,
-              "allocation_calls": 1049,
-              "deallocation_bytes": 68454,
-              "deallocation_calls": 944,
-              "reallocation_bytes": 15717,
-              "reallocation_calls": 200
-            },
-            "cpu_ms": 187.5,
-            "limit": 500,
-            "peak_rss_bytes": 24276992,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 212.48860005289316
+            "wall_ms": 121.69240007642657
           },
           {
             "allocation_metrics": {
@@ -4611,9 +4612,9 @@
               "reallocation_bytes": 15135,
               "reallocation_calls": 198
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 31.25,
             "limit": 500,
-            "peak_rss_bytes": 24084480,
+            "peak_rss_bytes": 13877248,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4622,7 +4623,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 207.9100999981165
+            "wall_ms": 122.73569998797029
           },
           {
             "allocation_metrics": {
@@ -4633,9 +4634,9 @@
               "reallocation_bytes": 15135,
               "reallocation_calls": 198
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 24244224,
+            "peak_rss_bytes": 13750272,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4644,7 +4645,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 216.2728999974206
+            "wall_ms": 125.69090002216399
           },
           {
             "allocation_metrics": {
@@ -4655,9 +4656,9 @@
               "reallocation_bytes": 15135,
               "reallocation_calls": 198
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 24285184,
+            "peak_rss_bytes": 13692928,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4666,7 +4667,7 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 210.49239998683333
+            "wall_ms": 474.6612999588251
           },
           {
             "allocation_metrics": {
@@ -4677,9 +4678,9 @@
               "reallocation_bytes": 24402,
               "reallocation_calls": 359
             },
-            "cpu_ms": 187.5,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 24104960,
+            "peak_rss_bytes": 13893632,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4688,7 +4689,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 209.46279994677752
+            "wall_ms": 130.85239997599274
           },
           {
             "allocation_metrics": {
@@ -4699,9 +4700,9 @@
               "reallocation_bytes": 24402,
               "reallocation_calls": 359
             },
-            "cpu_ms": 171.875,
+            "cpu_ms": 78.125,
             "limit": 500,
-            "peak_rss_bytes": 24104960,
+            "peak_rss_bytes": 13668352,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4710,7 +4711,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 207.78739999514073
+            "wall_ms": 130.53300010506064
           },
           {
             "allocation_metrics": {
@@ -4721,9 +4722,9 @@
               "reallocation_bytes": 24402,
               "reallocation_calls": 359
             },
-            "cpu_ms": 156.25,
+            "cpu_ms": 125.0,
             "limit": 500,
-            "peak_rss_bytes": 23977984,
+            "peak_rss_bytes": 13905920,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4732,7 +4733,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 207.61010004207492
+            "wall_ms": 138.24459991883487
           }
         ],
         "targets": [
@@ -4782,11 +4783,11 @@
       "small_max_regression_fraction": 0.05
     },
     "wall_change_fraction": {
-      "duplicate-alias": 0.07716735997554847,
-      "high-import": 0.018326319774863077,
-      "high-symbol": -0.007503974485643765,
-      "representative-large": 0.7323010170472837,
-      "small": 0.0154329775880972
+      "duplicate-alias": 0.022821319673897323,
+      "high-import": 0.00866512066346022,
+      "high-symbol": 0.05209167022704902,
+      "representative-large": -0.01705745740897472,
+      "small": -0.04930949534002708
     }
   },
   "failure_cases": {
@@ -4801,9 +4802,9 @@
           "reallocation_calls": 170
         },
         "case": "corrupt-relation",
-        "cpu_ms": 125.0,
+        "cpu_ms": 78.125,
         "diagnostic": "error: sqlite error: Invalid column type Text at index: 4, name: line\n",
-        "peak_rss_bytes": 22327296,
+        "peak_rss_bytes": 12242944,
         "plan_provenance": "projectatlas-db::AtlasStore::connection",
         "query_engine": {
           "compile_options": [
@@ -4870,7 +4871,7 @@
         "target": "src/rust_target.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 176.059800083749
+        "wall_ms": 97.27590007241815
       },
       "candidate": {
         "allocation_metrics": {
@@ -4882,9 +4883,9 @@
           "reallocation_calls": 165
         },
         "case": "corrupt-relation",
-        "cpu_ms": 140.625,
+        "cpu_ms": 78.125,
         "diagnostic": "error: sqlite error: Invalid column type Text at index: 4, name: line\n",
-        "peak_rss_bytes": 22515712,
+        "peak_rss_bytes": 12288000,
         "plan_provenance": "projectatlas-db::AtlasStore::connection",
         "query_engine": {
           "compile_options": [
@@ -4951,16 +4952,16 @@
         "target": "src/rust_target.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 182.29000002611428
+        "wall_ms": 97.11269999388605
       }
     },
     "missing-summary": {
       "baseline": {
         "allocation_metrics": null,
         "case": "missing-summary",
-        "cpu_ms": 171.875,
+        "cpu_ms": 78.125,
         "diagnostic": "error: invalid input: file \"src/missing.rs\" is not indexed\n",
-        "peak_rss_bytes": 20692992,
+        "peak_rss_bytes": 11866112,
         "plan_provenance": null,
         "query_engine": null,
         "returncode": 1,
@@ -4971,14 +4972,14 @@
         "target": "src/missing.rs",
         "timed": false,
         "trace_observed": false,
-        "wall_ms": 192.72039993666112
+        "wall_ms": 102.66500001307577
       },
       "candidate": {
         "allocation_metrics": null,
         "case": "missing-summary",
-        "cpu_ms": 156.25,
+        "cpu_ms": 93.75,
         "diagnostic": "error: invalid input: file \"src/missing.rs\" is not indexed\n",
-        "peak_rss_bytes": 20697088,
+        "peak_rss_bytes": 12013568,
         "plan_provenance": null,
         "query_engine": null,
         "returncode": 1,
@@ -4989,7 +4990,7 @@
         "target": "src/missing.rs",
         "timed": false,
         "trace_observed": false,
-        "wall_ms": 183.84029995650053
+        "wall_ms": 97.09610010031611
       }
     },
     "stale-source": {
@@ -5003,7 +5004,7 @@
           "reallocation_calls": 96
         },
         "case": "stale-source",
-        "cpu_ms": 234.375,
+        "cpu_ms": 140.625,
         "decoded_summary": {
           "file_path": "src/rust_target.rs",
           "functions": [
@@ -5031,7 +5032,7 @@
           "symbol_count": 2,
           "truncated": false
         },
-        "peak_rss_bytes": 29122560,
+        "peak_rss_bytes": 15794176,
         "plan_provenance": "projectatlas-db::AtlasStore::connection",
         "query_engine": {
           "compile_options": [
@@ -5098,7 +5099,7 @@
         "target": "src/rust_target.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 362.54679993726313
+        "wall_ms": 207.89859991054982
       },
       "candidate": {
         "allocation_metrics": {
@@ -5110,7 +5111,7 @@
           "reallocation_calls": 93
         },
         "case": "stale-source",
-        "cpu_ms": 296.875,
+        "cpu_ms": 109.375,
         "decoded_summary": {
           "file_path": "src/rust_target.rs",
           "functions": [
@@ -5138,7 +5139,7 @@
           "symbol_count": 2,
           "truncated": false
         },
-        "peak_rss_bytes": 29442048,
+        "peak_rss_bytes": 16252928,
         "plan_provenance": "projectatlas-db::AtlasStore::connection",
         "query_engine": {
           "compile_options": [
@@ -5205,13 +5206,13 @@
         "target": "src/rust_target.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 353.0827999347821
+        "wall_ms": 194.71800001338124
       }
     }
   },
   "harness_identity": {
     "path": "docs/benchmarks/harness/reverse_caller.py",
-    "sha256": "ac2c8eab81bc46928e95ba713e3df5264f0085204ed3991326fd098e909023a0"
+    "sha256": "e47960210f83cce8fdfe87216299ebb0d13987751af355119add176e8a6c1b6f"
   },
   "issue": 342,
   "multi_binding_alias": {
@@ -5225,7 +5226,7 @@
         "reallocation_calls": 91
       },
       "case": "python-multi-binding-same-local-alias",
-      "cpu_ms": 156.25,
+      "cpu_ms": 93.75,
       "decoded_summary": {
         "file_path": "src/package/py_target.py",
         "functions": [
@@ -5248,7 +5249,7 @@
         "truncated": true
       },
       "limit": 1,
-      "peak_rss_bytes": 24350720,
+      "peak_rss_bytes": 13672448,
       "plan_provenance": "projectatlas-db::AtlasStore::connection",
       "query_engine": {
         "compile_options": [
@@ -5315,7 +5316,7 @@
       "target": "src/package/py_target.py",
       "timed": false,
       "trace_observed": true,
-      "wall_ms": 209.86370008904487
+      "wall_ms": 119.47149992920458
     },
     "candidate": {
       "allocation_metrics": {
@@ -5327,7 +5328,7 @@
         "reallocation_calls": 89
       },
       "case": "python-multi-binding-same-local-alias",
-      "cpu_ms": 187.5,
+      "cpu_ms": 93.75,
       "decoded_summary": {
         "file_path": "src/package/py_target.py",
         "functions": [
@@ -5350,7 +5351,7 @@
         "truncated": true
       },
       "limit": 1,
-      "peak_rss_bytes": 24195072,
+      "peak_rss_bytes": 13635584,
       "plan_provenance": "projectatlas-db::AtlasStore::connection",
       "query_engine": {
         "compile_options": [
@@ -5417,18 +5418,18 @@
       "target": "src/package/py_target.py",
       "timed": false,
       "trace_observed": true,
-      "wall_ms": 237.76290006935596
+      "wall_ms": 123.535200022161
     }
   },
   "repeats": 3,
   "repository_revision": "0243d5c6da0e66210abbe1c95b2815d651a77c2d",
   "reproduction": {
     "note": "Full raw streams remain in ignored local output and are recoverable by rerunning the existing harness; this tracked file contains only bounded review evidence.",
-    "raw_trace_bytes": 14258354,
+    "raw_trace_bytes": 14258345,
     "raw_trace_ignored": true,
-    "raw_trace_path": "target/benchmarks/reverse-caller/amend-v6-full-results.json",
+    "raw_trace_path": "target/benchmarks/reverse-caller/0243d5c6da0e66210abbe1c95b2815d651a77c2d-full-results.json",
     "raw_trace_schema": "projectatlas.reverse-caller-performance.v6",
-    "raw_trace_sha256": "e10d429e7cc82b9bb7667d72b55e5055ef78228e4bd81669e7cb2fb0acb76dda"
+    "raw_trace_sha256": "a2a70832ebfcd3c4d9bb95f5992526031d3be82b609dcb614e11dd1bac68ed0d"
   },
   "schema": "projectatlas.reverse-caller-performance.v6"
 }

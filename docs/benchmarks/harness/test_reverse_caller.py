@@ -16,16 +16,46 @@ from reverse_caller import (
     compact_process_evidence,
     compact_query_plan_evidence,
     compact_review_evidence,
+    canonical_raw_output_path,
     process_environment,
     require_clean_process_exit,
     require_definitive_cancellation,
     require_successful_ping,
     run_summary,
     run_summary_evidence,
+    validate_raw_output,
+    validate_release_binary,
 )
 
 
 class ReverseCallerHarnessTests(unittest.TestCase):
+    def test_benchmark_binaries_require_release_profile(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+            root = Path(directory)
+            debug = root / "debug" / "projectatlas.exe"
+            release = root / "release" / "projectatlas.exe"
+            debug.parent.mkdir()
+            release.parent.mkdir()
+            debug.write_bytes(b"debug")
+            release.write_bytes(b"release")
+
+            with self.assertRaisesRegex(ValueError, "release-profile"):
+                validate_release_binary(debug, "baseline binary")
+            self.assertEqual(
+                validate_release_binary(release, "candidate binary"),
+                release.resolve(),
+            )
+
+    def test_raw_output_must_match_revision_derived_rerun_path(self) -> None:
+        revision = "a" * 40
+        canonical = canonical_raw_output_path(revision)
+        self.assertEqual(validate_raw_output(canonical, revision), canonical)
+        with self.assertRaisesRegex(ValueError, "canonical revision-derived"):
+            validate_raw_output(
+                ROOT / "target/benchmarks/reverse-caller/amend-v6-full-results.json",
+                revision,
+            )
+
     def test_timed_environment_cannot_enable_trace_observer(self) -> None:
         with patch.dict(
             os.environ,
@@ -179,6 +209,7 @@ class ReverseCallerHarnessTests(unittest.TestCase):
             "issue": 342,
             "repository_revision": "c" * 40,
             "repeats": 1,
+            "build_profile": "release",
             "baseline": {"binary_sha256": "d" * 64, "fixtures": {"small": fixture}},
             "candidate": {
                 "binary_sha256": "e" * 64,
@@ -198,7 +229,12 @@ class ReverseCallerHarnessTests(unittest.TestCase):
 
         serialized = json.dumps(compact)
         self.assertEqual(compact["artifact_kind"], "compact-review-evidence")
+        self.assertEqual(compact["build_profile"], "release")
         self.assertEqual(compact["reproduction"]["raw_trace_bytes"], 3)
+        self.assertEqual(
+            compact["reproduction"]["raw_trace_path"],
+            raw.relative_to(ROOT).as_posix(),
+        )
         self.assertNotIn("stdout_base64", serialized)
         self.assertNotIn("stderr_base64", serialized)
         self.assertNotIn("stdout_text", serialized)

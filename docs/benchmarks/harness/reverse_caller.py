@@ -41,6 +41,9 @@ SHAPES = {
     "representative-large": (120, 120),
 }
 LANGUAGES = ("rust", "typescript", "python")
+RELEASE_PROFILE_DIRECTORY = "release"
+RELEASE_BINARY_STEM = "projectatlas"
+RAW_OUTPUT_DIRECTORY = Path("target/benchmarks/reverse-caller")
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -1244,6 +1247,7 @@ def compact_review_evidence(
         "issue": result["issue"],
         "repository_revision": result["repository_revision"],
         "repeats": result["repeats"],
+        "build_profile": result["build_profile"],
         "harness_identity": {
             "path": "docs/benchmarks/harness/reverse_caller.py",
             "sha256": sha256_file(ROOT / "docs/benchmarks/harness/reverse_caller.py"),
@@ -1302,6 +1306,41 @@ def validate_input(path: Path, label: str) -> Path:
     resolved = path.resolve()
     if not resolved.is_file():
         raise ValueError(f"missing {label}: {path}")
+    return resolved
+
+
+def validate_release_binary(path: Path, label: str) -> Path:
+    """Require the real release-profile ProjectAtlas executable."""
+
+    resolved = validate_input(path, label)
+    if (
+        resolved.parent.name.casefold() != RELEASE_PROFILE_DIRECTORY
+        or resolved.stem.casefold() != RELEASE_BINARY_STEM
+    ):
+        raise ValueError(
+            f"{label} must be the release-profile {RELEASE_BINARY_STEM} executable"
+        )
+    return resolved
+
+
+def canonical_raw_output_path(repository_revision: str) -> Path:
+    """Return the revision-derived raw result path from the rerun contract."""
+
+    return (
+        ROOT / RAW_OUTPUT_DIRECTORY / f"{repository_revision}-full-results.json"
+    ).resolve()
+
+
+def validate_raw_output(path: Path, repository_revision: str) -> Path:
+    """Require the revision-derived raw output used by the rerun command."""
+
+    resolved = path.resolve()
+    expected = canonical_raw_output_path(repository_revision)
+    if resolved != expected:
+        raise ValueError(
+            "--output must be the canonical revision-derived raw result path: "
+            f"{expected.relative_to(ROOT).as_posix()}"
+        )
     return resolved
 
 
@@ -1375,10 +1414,14 @@ def main() -> None:
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
-    baseline_binary = validate_input(args.baseline_binary, "baseline binary")
-    candidate_binary = validate_input(args.candidate_binary, "candidate binary")
+    repository_revision = git_revision()
+    try:
+        baseline_binary = validate_release_binary(args.baseline_binary, "baseline binary")
+        candidate_binary = validate_release_binary(args.candidate_binary, "candidate binary")
+        output = validate_raw_output(args.output, repository_revision)
+    except ValueError as error:
+        parser.error(str(error))
     candidate_patch = validate_input(args.candidate_patch, "candidate patch")
-    output = args.output.resolve()
     if not output.is_relative_to(ROOT):
         parser.error("--output must remain inside the repository")
     compact_output = args.compact_output.resolve() if args.compact_output else None
@@ -1453,7 +1496,8 @@ def main() -> None:
     result = {
         "schema": "projectatlas.reverse-caller-performance.v6",
         "issue": 342,
-        "repository_revision": git_revision(),
+        "repository_revision": repository_revision,
+        "build_profile": "release",
         "repeats": args.repeats,
         "baseline": {
             "binary_sha256": sha256_file(baseline_binary),
