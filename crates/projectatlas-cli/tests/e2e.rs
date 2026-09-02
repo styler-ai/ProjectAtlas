@@ -10231,6 +10231,15 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
     )?;
     git_success(
         &fixture_repo,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "follow-up candidate (#549)",
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
         &["update-ref", "refs/remotes/origin/main", &base],
     )?;
     fs::create_dir(&fake_path)?;
@@ -10238,7 +10247,30 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
-  *" --owner-from-commits "*) printf '%s\n' 549 ;;
+  *" --owner-from-commits "*)
+    awk '
+      {
+        matches = 0
+        remainder = $0
+        while (match(remainder, /\(#[1-9][0-9]*\)/)) {
+          matches++
+          owner = substr(remainder, RSTART + 2, RLENGTH - 3)
+          remainder = substr(remainder, RSTART + RLENGTH)
+        }
+        if (matches != 1) {
+          invalid = 1
+          next
+        }
+        if (resolved == "") resolved = owner
+        else if (resolved != owner) invalid = 1
+      }
+      END {
+        if (invalid || NR == 0 || resolved == "") exit 1
+        print resolved
+      }
+    '
+    exit $?
+    ;;
 esac
 exit 0
 "#;
@@ -10429,6 +10461,36 @@ exit 0
         ))
         .into());
     }
+    git_success(&fixture_repo, &["checkout", "-b", "unowned-candidate"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "unowned follow-up"],
+    )?;
+    let unowned_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()?;
+    if !unowned_head_output.status.success() {
+        return Err(io::Error::other("fixture unowned candidate commit lookup failed").into());
+    }
+    let unowned_head = String::from_utf8(unowned_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (unowned_status, unowned_log) = run_hook(
+        &format!(
+            "refs/heads/unowned-candidate {unowned_head} refs/heads/unowned-candidate 2222222222222222222222222222222222222222\n"
+        ),
+        false,
+    )?;
+    if unowned_status
+        || !unowned_log.contains("--owner-from-commits")
+        || !final_issueops(&unowned_log).is_empty()
+    {
+        return Err(io::Error::other(format!(
+            "referenced and unreferenced candidate commits did not fail before scoped IssueOps dispatch:\n{unowned_log}"
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["checkout", "feature"])?;
     let (index_failure_status, index_failure_log) = run_hook(
         &format!(
             "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"

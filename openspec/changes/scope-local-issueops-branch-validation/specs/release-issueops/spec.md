@@ -19,11 +19,11 @@ ProjectAtlas SHALL validate one local candidate issue against its live GitHub ch
 ProjectAtlas SHALL require exactly one mapped open owning issue and a readable accepted base for local candidate validation.
 
 #### Scenario: One owner is resolved
-- **WHEN** every post-base commit subject references the same owning issue with the repository's `(#NNN)` convention
+- **WHEN** every post-base commit subject, including merge commits, contains exactly one well-formed `(#NNN)` reference to the same owning issue
 - **THEN** pre-push validates that issue through the local candidate route
 
 #### Scenario: Ownership is absent or ambiguous
-- **WHEN** post-base commits contain no issue reference or references to more than one issue
+- **WHEN** post-base commits contain empty or blank subjects, an unreferenced or malformed subject, multiple references in one subject, or references to more than one issue
 - **THEN** pre-push fails before checklist comparison
 
 #### Scenario: Owner or base is invalid

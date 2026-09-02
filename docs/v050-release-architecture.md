@@ -21,7 +21,7 @@ flowchart LR
     CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
     CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes; no assume-unchanged or skip-worktree flags"]
     CandidateClean --> Candidate[Local candidate branch]
-    Candidate --> CandidateOwner["One owner from (#NNN) commit subjects"]
+    Candidate --> CandidateOwner["Each post-base subject has one same-owner (#NNN) reference"]
     Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract
     Base --> Contract

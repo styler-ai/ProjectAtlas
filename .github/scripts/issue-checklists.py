@@ -128,6 +128,7 @@ ISSUE_REFERENCE_RE = re.compile(
     r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)"
 )
 COMMIT_ISSUE_REFERENCE_RE = re.compile(r"\(#([1-9][0-9]*)\)")
+COMMIT_ISSUE_MARKER_RE = re.compile(r"\(#([^)]*)\)")
 ISSUE_STATE_QUERY = """
 query($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
@@ -736,18 +737,22 @@ def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
 def candidate_owner_issue_from_subjects(subjects: str) -> int:
     """Resolve one owner from commit subjects using the required ``(#NNN)`` form."""
 
-    candidates = sorted(
-        {
-            int(match.group(1))
-            for match in COMMIT_ISSUE_REFERENCE_RE.finditer(subjects)
-        }
-    )
-    if len(candidates) != 1:
+    owners: list[int] = []
+    for subject in subjects.splitlines():
+        markers = COMMIT_ISSUE_MARKER_RE.findall(subject)
+        references = COMMIT_ISSUE_REFERENCE_RE.findall(subject)
+        if len(markers) != 1 or len(references) != 1 or markers[0] != references[0]:
+            raise SystemExit(
+                "candidate branch commits must reference exactly one owning issue "
+                "with one well-formed (#NNN) marker per subject"
+            )
+        owners.append(int(references[0]))
+    if len(owners) == 0 or len(set(owners)) != 1:
         raise SystemExit(
             "candidate branch commits must reference exactly one owning issue "
-            f"with (#NNN); found {len(candidates)} candidates"
+            f"with (#NNN); found {len(set(owners))} candidates"
         )
-    return candidates[0]
+    return owners[0]
 
 
 def issue_state_payloads(repo: str) -> list[dict[str, object]]:
@@ -2198,7 +2203,16 @@ Mitigations:
     assert candidate_owner_issue_from_subjects(
         "Implement candidate (#517)\nFollow-up candidate (#517)"
     ) == 517
-    for subjects in ("", "Implement candidate (#517)\nAlso candidate (#518)"):
+    for subjects in (
+        "",
+        " ",
+        "Implement candidate",
+        "Implement candidate (#517)\nFollow-up candidate",
+        "Implement candidate (#517)\n\nFollow-up candidate (#517)",
+        "Implement candidate (#517) (#517)",
+        "Implement candidate (#517) (#bad)",
+        "Implement candidate (#517)\nAlso candidate (#518)",
+    ):
         try:
             candidate_owner_issue_from_subjects(subjects)
         except SystemExit as error:
