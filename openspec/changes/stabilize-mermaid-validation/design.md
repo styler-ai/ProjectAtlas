@@ -1,6 +1,6 @@
 ## Context
 
-`.github/scripts/issue-checklists.py` validates each linked Mermaid block with the repository-locked Node parser. `mermaid_syntax_is_valid` currently returns `False` both for parser rejection and `subprocess.TimeoutExpired`, so the architecture-link caller reports a busy-host timeout as invalid source syntax.
+`.github/scripts/issue-checklists.py` validates each linked Mermaid block with the repository-locked Node parser. `mermaid_syntax_is_valid` currently returns `False` both for parser rejection and `subprocess.TimeoutExpired`, so the architecture-link caller reports a busy-host timeout as invalid source syntax. The Node validator also exits with status 1 for both a Mermaid parse rejection and an uncaught dependency, DOM-bootstrap, or initialization failure, so the Python caller cannot distinguish invalid syntax from unavailable execution without a stronger process contract.
 
 The change stays inside this existing Python IssueOps boundary. It does not affect the Rust runtime, SQLite state, published CLI/MCP contracts, or the linked architecture itself.
 
@@ -23,9 +23,9 @@ The change stays inside this existing Python IssueOps boundary. It does not affe
 
 ### Use one closed standard-library outcome at the existing parser function
 
-Replace the lossy boolean parser result with one small `Enum` owned by `issue-checklists.py`. An uncached one-attempt runner remains the only subprocess owner; the bounded validator performs the timeout-only retry and caches only its final result. This is the minimum split that both launches a real second attempt and prevents timeout, invalid syntax, and unavailable execution from collapsing into one value.
+Give the locked Node validator three stable exit results: 0 for accepted syntax, 1 only for a Mermaid syntax rejection, and 2 for dependency, DOM-bootstrap, or Mermaid-initialization failure. Its bootstrap and initialization run inside the unavailable-error boundary rather than as uncaught top-level work. Replace the lossy Python boolean with one small `Enum` owned by `issue-checklists.py`; the uncached one-attempt runner maps exit 0 to valid, exit 1 to invalid, exit 2 or another startup/execution failure to unavailable, and `TimeoutExpired` to timed out. It does not classify stderr text. The bounded validator performs the timeout-only retry and caches only its final result. This is the minimum split that both launches a real second attempt and prevents timeout, invalid syntax, and unavailable execution from collapsing into one value.
 
-Alternative rejected: exceptions or several booleans would spread classification across callers and make impossible combinations representable.
+Alternative rejected: stderr heuristics are brittle, while exceptions or several booleans would spread classification across callers and make impossible combinations representable.
 
 ### Retry only the first timeout
 
@@ -39,7 +39,7 @@ The architecture-link validator still accepts a target when any non-empty fenced
 
 ### Test the result boundary directly
 
-Focused self-tests inject parser outcomes and count attempts. They cover timeout recovery, terminal timeout, invalid syntax without retry, unavailable execution without retry, exact attempt bounds, target-specific diagnostics, and the unchanged planned-issue and milestone checks. No wall-clock sleep or real timeout is needed for causal unit proof; the existing locked-parser tests retain integration coverage.
+Focused self-tests inject parser outcomes and count attempts. They cover timeout recovery, terminal timeout, invalid syntax without retry, unavailable execution without retry, exact attempt bounds, target-specific diagnostics, and the unchanged planned-issue and milestone checks. A real locked-validator integration check also distinguishes an invalid diagram from a controlled dependency/bootstrap failure by process result, so the Python mapping is not proven only by a mocked return code. No wall-clock sleep or real timeout is needed for causal unit proof.
 
 ## Risks / Trade-offs
 

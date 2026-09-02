@@ -21,7 +21,7 @@ None.
 
 ## Impact
 
-- Affects `.github/scripts/issue-checklists.py` and its existing self-tests.
+- Affects `.github/scripts/issue-checklists.py`, `.github/mermaid-parser/validate.mjs`, and their existing tests.
 - Keeps the repository-locked Node/Mermaid parser, fixed timeout, and current issue/architecture contract.
 - Adds no dependency, daemon, pool, configurable retry policy, generic subprocess framework, Rust behavior, database behavior, or public ProjectAtlas runtime surface.
 - Planned for implementation in `v0.5.0-00` through issue #544.
