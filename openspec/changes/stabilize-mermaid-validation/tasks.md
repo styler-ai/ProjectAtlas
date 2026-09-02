@@ -9,5 +9,5 @@
 
 ## 3. Proof and reconciliation
 
-- [x] 3.1 Cover first-timeout recovery with two actual uncached runner calls, terminal timeout, aggregate validation-run budget exhaustion without another process launch, invalid syntax and unavailable/broken execution with one call and no retry, bounded attempt count, target-specific diagnostics, unchanged planned-issue and milestone validation, and a real locked-validator process check that distinguishes syntax rejection from a controlled dependency/bootstrap failure.
+- [ ] 3.1 Cover first-timeout recovery with two actual uncached runner calls, terminal timeout, aggregate validation-run budget exhaustion without another process launch, invalid syntax and unavailable/broken execution with one call and no retry, bounded attempt count, target-specific diagnostics, unchanged planned-issue and milestone validation, and a real locked-validator process check that distinguishes syntax rejection from a controlled dependency/bootstrap failure.
 - [x] 3.2 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
