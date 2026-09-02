@@ -235,6 +235,7 @@ const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
 const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS";
 #[cfg(any(unix, windows))]
 const REAL_HOST_READER_TIMEOUT: Duration = Duration::from_millis(250);
+const REQUIRE_REAL_HOST_READERS_ENV: &str = "PROJECTATLAS_REQUIRE_REAL_HOST_READERS";
 // Parallel workspace test binaries can delay the owned child identity write;
 // retain a bounded capture window without making cleanup depend on scheduling.
 #[cfg(windows)]
@@ -11159,6 +11160,7 @@ fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(
         ("Claude Code", "claude", claude.as_deref()),
         ("OpenCode", "opencode", opencode.as_deref()),
     ];
+    ensure_required_real_host_readers(&hosts, required_real_host_readers_enabled())?;
     let availability = hosts
         .iter()
         .map(|(_, name, executable)| {
@@ -11346,6 +11348,26 @@ impl NativeHostAvailability {
     }
 }
 
+fn required_real_host_readers_enabled() -> bool {
+    std::env::var(REQUIRE_REAL_HOST_READERS_ENV).as_deref() == Ok("1")
+}
+
+fn ensure_required_real_host_readers(
+    hosts: &[(&str, &str, Option<&Path>)],
+    required: bool,
+) -> Result<(), Box<dyn Error>> {
+    if !required {
+        return Ok(());
+    }
+    for &(label, harness, executable) in hosts {
+        require(
+            executable.is_some(),
+            format!("required real host reader is not installed: host={label} harness={harness}"),
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 enum NativeHostStatus {
     Connected {
@@ -11457,6 +11479,63 @@ fn missing_real_host_is_reported_without_native_acceptance() -> Result<(), Box<d
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn required_real_host_readers_reject_missing_discovery() -> Result<(), Box<dyn Error>> {
+    let installed = Path::new("installed-host");
+    let inventories = [
+        (
+            "both hosts missing",
+            [
+                ("Claude Code", "claude", None),
+                ("OpenCode", "opencode", None),
+            ],
+        ),
+        (
+            "Claude Code missing",
+            [
+                ("Claude Code", "claude", None),
+                ("OpenCode", "opencode", Some(installed)),
+            ],
+        ),
+    ];
+    for (description, hosts) in inventories {
+        if ensure_required_real_host_readers(&hosts, true).is_ok() {
+            return Err(io::Error::other(format!(
+                "required real host reader mode accepted {description}"
+            ))
+            .into());
+        }
+    }
+    let installed_hosts = [
+        ("Claude Code", "claude", Some(installed)),
+        ("OpenCode", "opencode", Some(installed)),
+    ];
+    require(
+        ensure_required_real_host_readers(&installed_hosts, true).is_ok(),
+        "required real host reader mode rejected complete discovery".to_owned(),
+    )?;
+    require(
+        ensure_required_real_host_readers(&inventories[0].1, false).is_ok(),
+        "ordinary real host reader mode did not preserve typed-skip admission".to_owned(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> {
+    let workflow = fs::read_to_string(workspace_root()?.join(".github/workflows/ci.yml"))?;
+    let step = workflow_job_step(&workflow, "e2e-smoke", "Real installed host reader proof")?;
+    require(
+        step["env"][REQUIRE_REAL_HOST_READERS_ENV].as_str() == Some("1"),
+        "real installed host reader proof must enable required-reader mode".to_owned(),
+    )?;
+    require(
+        workflow.matches(REQUIRE_REAL_HOST_READERS_ENV).count() == 1,
+        "required-reader mode must be scoped only to the installed-host proof step".to_owned(),
+    )?;
     Ok(())
 }
 

@@ -167,6 +167,8 @@ jobs:
       - name: Real installed host reader proof
         timeout-minutes: 15
         shell: bash
+        env:
+          PROJECTATLAS_REQUIRE_REAL_HOST_READERS: "1"
         run: cargo test --locked -p projectatlas-cli --all-features --test e2e installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture
 
       - name: macOS all-features warning gate
