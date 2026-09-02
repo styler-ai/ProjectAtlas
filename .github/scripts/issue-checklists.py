@@ -425,9 +425,15 @@ def _run_mermaid_parser(diagram: str) -> MermaidValidationOutcome:
     mermaid_package = validator.parent / "node_modules" / "mermaid" / "package.json"
     if node is None or not mermaid_package.is_file():
         return MermaidValidationOutcome.UNAVAILABLE
+    return _run_mermaid_process([node, str(validator)], diagram)
+
+
+def _run_mermaid_process(command: list[str], diagram: str) -> MermaidValidationOutcome:
+    """Run one bounded Mermaid process and preserve its failure class."""
+
     try:
         result = subprocess.run(
-            [node, str(validator)],
+            command,
             input=f"{diagram}\n",
             check=False,
             capture_output=True,
@@ -2486,27 +2492,14 @@ Timeout --> Recovery
         globals()["_run_mermaid_parser"] = default_mermaid_runner
         mermaid_syntax_is_valid.cache_clear()
 
+    globals()["_run_mermaid_parser"] = saved_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
     node = shutil.which("node")
     validator = Path(__file__).resolve().parents[1] / "mermaid-parser" / "validate.mjs"
-    real_validator_check_timeout = 2 * MERMAID_ATTEMPT_TIMEOUT_SECONDS
-    valid_process = subprocess.run(
-        [node, str(validator)],
-        input="flowchart LR\nA --> B\n",
-        capture_output=True,
-        text=True,
-        timeout=real_validator_check_timeout,
-        check=False,
-    )
-    assert valid_process.returncode == 0, valid_process.stderr
-    invalid_process = subprocess.run(
-        [node, str(validator)],
-        input="flowchart LR\nnot valid mermaid ???\n",
-        capture_output=True,
-        text=True,
-        timeout=real_validator_check_timeout,
-        check=False,
-    )
-    assert invalid_process.returncode == 1, invalid_process.stderr
+    valid_outcome = _run_mermaid_parser("flowchart LR\nA --> B\n")
+    assert valid_outcome is MermaidValidationOutcome.VALID, valid_outcome.value
+    invalid_outcome = _run_mermaid_parser("this is not mermaid\n")
+    assert invalid_outcome is MermaidValidationOutcome.INVALID, invalid_outcome.value
     with tempfile.TemporaryDirectory() as temporary:
         loader = Path(temporary) / "fail-mermaid-loader.mjs"
         loader.write_text(
@@ -2516,15 +2509,27 @@ Timeout --> Recovery
             "}\n",
             encoding="utf-8",
         )
-        unavailable_process = subprocess.run(
+        assert node is not None
+        unavailable_outcome = _run_mermaid_process(
             [node, "--experimental-loader", loader.as_uri(), str(validator)],
-            input="flowchart LR\nA --> B\n",
-            capture_output=True,
-            text=True,
-            timeout=real_validator_check_timeout,
-            check=False,
+            "flowchart LR\nA --> B\n",
         )
-    assert unavailable_process.returncode == 2, unavailable_process.stderr
+    assert (
+        unavailable_outcome is MermaidValidationOutcome.UNAVAILABLE
+    ), unavailable_outcome.value
+
+    saved_subprocess_run = subprocess.run
+    try:
+        def timeout_subprocess_run(*_args: object, **_kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(
+                "mermaid", MERMAID_ATTEMPT_TIMEOUT_SECONDS
+            )
+
+        subprocess.run = timeout_subprocess_run
+        timeout_outcome = _run_mermaid_parser("flowchart LR\nA --> B\n")
+    finally:
+        subprocess.run = saved_subprocess_run
+    assert timeout_outcome is MermaidValidationOutcome.TIMED_OUT
     globals()["_run_mermaid_parser"] = default_mermaid_runner
     mermaid_syntax_is_valid.cache_clear()
 
