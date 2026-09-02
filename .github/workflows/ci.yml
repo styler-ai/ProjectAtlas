@@ -159,6 +159,12 @@ jobs:
           python3 .github/scripts/verify-rust-toolchain.py --self-test
           python3 .github/scripts/verify-rust-toolchain.py --install
 
+      - name: Built-in PHP parser platform regression
+        timeout-minutes: 10
+        run: |
+          cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
+          cargo test --locked -p projectatlas-cli --test e2e composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
+
       - name: macOS all-features warning gate
         if: runner.os == 'macOS'
         timeout-minutes: 15
