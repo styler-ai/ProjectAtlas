@@ -4915,6 +4915,9 @@ fn php_call_lookup<'a>(
     if scope.eq_ignore_ascii_case("parent") {
         return None;
     }
+    if scope.contains('\\') && !scope.starts_with('\\') {
+        return None;
+    }
     let scope_without_root = scope.strip_prefix('\\').unwrap_or(scope);
     let (scope, namespace) = match scope_without_root.rsplit_once('\\') {
         Some((namespace, scope)) if !namespace.is_empty() && !scope.is_empty() => {
@@ -10557,6 +10560,11 @@ namespace Other\Domain;
 class QualifiedService {
     public static function boot(): void {}
 }
+function relative_run(): void {
+    Atlas\Domain\QualifiedService::boot();
+    Alias\QualifiedService::boot();
+    namespace\QualifiedService::boot();
+}
 namespace TopLevel;
 function top_level_helper(): void {}
 top_level_helper();
@@ -10645,6 +10653,21 @@ top_level_helper();
             ),
             "unqualified PHP class scope must preserve ambiguity",
         )?;
+        for target in [
+            "Atlas\\Domain\\QualifiedService::boot",
+            "Alias\\QualifiedService::boot",
+            "namespace\\QualifiedService::boot",
+        ] {
+            require(
+                matches!(
+                    staged_call(target, "relative_run")
+                        .map(projectatlas_core::graph::LogicalRelation::resolution),
+                    Some(RelationResolution::Unresolved { reference })
+                        if reference.as_str() == target
+                ),
+                &format!("non-leading qualified PHP scope must remain unresolved: {target}"),
+            )?;
+        }
         require(
             matches!(
                 staged_call("top_level_helper", "TopLevel")
