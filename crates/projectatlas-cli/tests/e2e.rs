@@ -15256,6 +15256,7 @@ fn windows_installer_obsolete_mcp_handoff_requires_trusted_authenticode_cmdlet()
     fs::write(
         &script,
         r#"$ErrorActionPreference = "Stop"
+$env:PSModulePath = [System.IO.Path]::Combine($PSHOME, "Modules")
 $installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
 $functionNames = @(
     "Test-ProjectAtlasAuthenticodeCodexSignature",
@@ -15288,11 +15289,17 @@ function Get-AuthenticodeSignature {
     throw "Malicious signature probe was called."
 }
 $codexPath = [System.IO.Path]::GetFullPath($env:PROJECTATLAS_TEST_CODEX)
-if ($null -ne (Get-ProjectAtlasCodexImageIdentity $codexPath) `
-    -or $script:maliciousLookupCalled `
-    -or $script:maliciousSignatureCalled `
-    -or $script:imageHashCalls -ne 1) {
-    throw "Unsigned Codex or malicious unqualified command shadow was trusted."
+if ($null -ne (Get-ProjectAtlasCodexImageIdentity $codexPath)) {
+    throw "Unsigned Codex image was trusted."
+}
+if ($script:maliciousLookupCalled) {
+    throw "Unqualified Get-Command shadow was invoked."
+}
+if ($script:maliciousSignatureCalled) {
+    throw "Unqualified Get-AuthenticodeSignature shadow was invoked."
+}
+if ($script:imageHashCalls -ne 2) {
+    throw "Unsigned Codex image digest call count was $script:imageHashCalls instead of one pre-signature and one post-signature digest."
 }
 
 $script:identityMode = "valid"
@@ -15321,14 +15328,16 @@ if (-not (Test-ProjectAtlasAuthenticodeCodexSignature (New-ProjectAtlasTestSigna
     throw "Valid OpenAI Authenticode signature facts were rejected."
 }
 $validSignature = New-ProjectAtlasTestSignature
-if (-not (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("a" * 64)) `
-    -or (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("b" * 64))) {
-    throw "Stable Codex digest binding accepted a pre/post-signature mismatch."
+if (-not (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("a" * 64))) {
+    throw "Matching pre/post Codex image digests were rejected."
+}
+if (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("b" * 64)) {
+    throw "Mismatched pre/post Codex image digests were trusted."
 }
 foreach ($mode in @("wrong_signer", "wrong_status", "wrong_type")) {
     $script:identityMode = $mode
     if (Test-ProjectAtlasAuthenticodeCodexSignature (New-ProjectAtlasTestSignature)) {
-        throw "Invalid Codex signature facts were accepted: $mode"
+        throw "Invalid Codex signature $mode facts were accepted."
     }
 }
 Write-Output "trusted_authenticode_cmdlet_only"
@@ -15339,7 +15348,16 @@ Write-Output "trusted_authenticode_cmdlet_only"
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.ps1");
-    let output = StdCommand::new("powershell")
+    let system_root = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    );
+    let powershell_path = system_root
+        .join(WINDOWS_SYSTEM32_DIR)
+        .join(WINDOWS_POWERSHELL_DIR)
+        .join(WINDOWS_POWERSHELL_VERSION_DIR)
+        .join(WINDOWS_POWERSHELL_EXECUTABLE);
+    let output = StdCommand::new(powershell_path)
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
