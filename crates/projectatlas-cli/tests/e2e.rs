@@ -196,6 +196,12 @@ const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 // The exact child-stop helper allows its owned process up to this wait budget to exit.
 const CODEX_OWNER_CHILD_STOP_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(windows)]
+// One exact-identity fallback is allowed when the stop helper itself stalls before killing.
+const CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+// A direct exact-identity stop keeps a known child from surviving two stalled helpers.
+const CODEX_OWNER_CHILD_STOP_FINAL_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
 // Keep the complete cleanup envelope truthful when one bounded phase is delayed by suite load.
 const CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
 #[cfg(windows)]
@@ -342,6 +348,7 @@ public static class Program
                 while (!child.WaitForExit(25))
                 {
                     if (publicationMode != "timeout-ignore-stop"
+                        && publicationMode != "ignore-stop"
                         && File.Exists(identityPath + ".stop"))
                     {
                         child.Kill();
@@ -40470,6 +40477,8 @@ fn codex_owner_cleanup_deadline(started: Instant) -> Instant {
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
         + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
         + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
 }
 
@@ -40479,6 +40488,8 @@ fn codex_owner_cleanup_capture_deadline(cleanup_deadline: Instant) -> Instant {
     let capture_budget = cleanup_deadline
         .saturating_duration_since(now)
         .saturating_sub(CODEX_OWNER_CHILD_STOP_BUDGET)
+        .saturating_sub(CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET)
+        .saturating_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET)
         .min(CODEX_OWNER_FAILURE_CLEANUP_BUDGET);
     now + capture_budget
 }
@@ -40492,6 +40503,7 @@ fn cleanup_codex_owner_processes_after_spawn_failure(
     cleanup_deadline: Instant,
     identity_capture_delay: Option<Duration>,
     child_stop_delay: Option<Duration>,
+    fail_helper_spawns: bool,
 ) -> Result<(), Box<dyn Error>> {
     let retained_identity_file = codex_owner_retained_identity_path(child_identity_file);
     let capture_deadline = codex_owner_cleanup_capture_deadline(cleanup_deadline);
@@ -40521,15 +40533,22 @@ fn cleanup_codex_owner_processes_after_spawn_failure(
         }
     };
     let child_cleanup_result = match child_identity {
-        Some(identity) => {
-            stop_windows_fixture_process_until(&identity, cleanup_deadline, child_stop_delay, None)
-        }
+        Some(identity) => stop_windows_fixture_process_until_with_fallback_test_delay(
+            &identity,
+            cleanup_deadline,
+            child_stop_delay,
+            None,
+            None,
+            fail_helper_spawns,
+        ),
         None => match read_codex_owner_identity_record(&retained_identity_file) {
-            Ok(identity) => stop_windows_fixture_process_until(
+            Ok(identity) => stop_windows_fixture_process_until_with_fallback_test_delay(
                 &identity,
                 cleanup_deadline,
                 child_stop_delay,
                 None,
+                None,
+                fail_helper_spawns,
             ),
             Err(error) => Err(io::Error::other(format!(
                 "no retained child identity was available after capture failure ({}): {error}",
@@ -40580,6 +40599,7 @@ fn codex_owner_observation_failure(
         cleanup_deadline,
         None,
         None,
+        false,
     ) {
         Ok(()) => Ok(()),
         Err(cleanup_error) => Err(io::Error::other(format!(
@@ -40602,6 +40622,7 @@ fn stop_codex_owner_after_spawn_failure(
         None,
         None,
         None,
+        false,
     )
 }
 
@@ -40613,6 +40634,7 @@ fn stop_codex_owner_after_spawn_failure_with_test_delays(
     identity_capture_delay: Option<Duration>,
     child_stop_delay: Option<Duration>,
     owner_observation_delay: Option<Duration>,
+    fail_helper_spawns: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut stop_file = child_identity_file.as_os_str().to_os_string();
     stop_file.push(".stop");
@@ -40676,6 +40698,7 @@ fn stop_codex_owner_after_spawn_failure_with_test_delays(
         cleanup_deadline,
         identity_capture_delay,
         child_stop_delay,
+        fail_helper_spawns,
     )
 }
 
@@ -41142,8 +41165,11 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
     )?;
     // Inject only the observation decision while exercising the same child-first cleanup path;
     // the production caller retains the actual observation error in its spawn diagnostic.
-    let observation_cleanup_deadline =
-        Instant::now() + CODEX_OWNER_FAILURE_CLEANUP_BUDGET + CODEX_OWNER_CHILD_STOP_BUDGET;
+    let observation_cleanup_deadline = Instant::now()
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
     let observation_cleanup_result = codex_owner_observation_failure(
         &mut observation_parent,
         &observation_identity_file,
@@ -41183,6 +41209,7 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         None,
         None,
         Some(CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY),
+        false,
     );
     let late_observation_text = late_observation_result
         .as_ref()
@@ -41263,6 +41290,8 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
         + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
         + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
         + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     if boundary_elapsed < CODEX_OWNER_READINESS_TIMEOUT
@@ -41313,6 +41342,8 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
         + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
         + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
         + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     let text = error.to_string();
@@ -41364,12 +41395,12 @@ struct WindowsProcessIdentity {
 fn capture_windows_process_identity(
     process_id: u32,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
-    capture_windows_process_identity_with_timeout(
-        process_id,
-        CODEX_OWNER_FAILURE_CLEANUP_BUDGET,
-        None,
-        None,
-    )
+    windows_native_process::capture_exact(process_id).map_err(|error| {
+        io::Error::other(format!(
+            "failed to capture exact Windows fixture process identity {process_id}: {error}"
+        ))
+        .into()
+    })
 }
 
 #[cfg(windows)]
@@ -41389,7 +41420,36 @@ fn capture_windows_process_identity_with_timeout(
     let deadline = started
         .checked_add(timeout)
         .ok_or_else(|| io::Error::other("Windows fixture identity capture deadline overflow"))?;
-    capture_windows_process_identity_until(process_id, deadline, test_delay, observation_delay)
+    let mut capture = spawn_windows_process_identity_capture(process_id, test_delay)?;
+    if observation_delay.is_some() {
+        // Release the intentional observer delay only after the small capture
+        // process has exited, so host scheduling cannot masquerade as a late
+        // completion.
+        if let Err(error) = synchronize_prompt_exit_before_delayed_observation(
+            &mut capture,
+            "Windows fixture identity capture",
+            None,
+        ) {
+            let kill_result = capture.kill();
+            let wait_result = capture.wait();
+            return Err(io::Error::other(format!(
+                "Windows fixture identity capture did not complete before delayed observation: {error}; cleanup kill={kill_result:?} wait={wait_result:?}"
+            ))
+            .into());
+        }
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            io::Error::other("Windows fixture identity capture deadline overflow")
+        })?;
+        return capture_windows_process_identity_from_child(
+            process_id,
+            capture,
+            deadline,
+            observation_delay,
+        );
+    }
+    let capture =
+        reject_windows_identity_capture_started_after_deadline(process_id, capture, deadline)?;
+    capture_windows_process_identity_from_child(process_id, capture, deadline, None)
 }
 
 #[cfg(windows)]
@@ -41405,6 +41465,38 @@ fn capture_windows_process_identity_until(
         ))
         .into());
     }
+    let capture = spawn_windows_process_identity_capture(process_id, test_delay)?;
+    let capture =
+        reject_windows_identity_capture_started_after_deadline(process_id, capture, deadline)?;
+    capture_windows_process_identity_from_child(process_id, capture, deadline, observation_delay)
+}
+
+#[cfg(windows)]
+fn reject_windows_identity_capture_started_after_deadline(
+    process_id: u32,
+    mut capture: Child,
+    deadline: Instant,
+) -> Result<Child, Box<dyn Error>> {
+    if Instant::now() >= deadline {
+        let cleanup_result = terminate_windows_identity_capture(
+            &mut capture,
+            deadline
+                .checked_add(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE)
+                .unwrap_or(deadline),
+        );
+        return Err(io::Error::other(format!(
+            "Windows fixture identity capture process {process_id} started after the readiness deadline; cleanup={cleanup_result:?}"
+        ))
+        .into());
+    }
+    Ok(capture)
+}
+
+#[cfg(windows)]
+fn spawn_windows_process_identity_capture(
+    process_id: u32,
+    test_delay: Option<Duration>,
+) -> Result<Child, Box<dyn Error>> {
     let mut command = StdCommand::new("powershell");
     command
         .arg("-NoProfile")
@@ -41422,16 +41514,55 @@ fn capture_windows_process_identity_until(
             delay.as_millis().to_string(),
         );
     }
-    let mut capture = command.spawn()?;
-    let started = Instant::now();
-    if Instant::now() >= deadline {
-        let kill_result = capture.kill();
-        let wait_result = capture.wait();
-        return Err(io::Error::other(format!(
-            "Windows fixture identity capture process {process_id} started after the readiness deadline; cleanup kill={kill_result:?} wait={wait_result:?}"
-        ))
-        .into());
+    Ok(command.spawn()?)
+}
+
+#[cfg(windows)]
+fn terminate_windows_identity_capture(capture: &mut Child, deadline: Instant) -> io::Result<()> {
+    let process_id = capture.id();
+    let kill_error = match capture.kill() {
+        Ok(()) => None,
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => None,
+        Err(error) => Some(error),
+    };
+    loop {
+        match capture.try_wait() {
+            Ok(Some(_status)) => {
+                return kill_error.map_or(Ok(()), |error| {
+                    Err(io::Error::other(format!(
+                        "could not terminate identity capture process {process_id}: {error}"
+                    )))
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "identity capture process {process_id} was not reaped by its bounded cleanup deadline"
+                    ),
+                ));
+            }
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "could not observe identity capture process {process_id} after termination: {error}"
+                )));
+            }
+        }
     }
+}
+
+#[cfg(windows)]
+fn capture_windows_process_identity_from_child(
+    process_id: u32,
+    mut capture: Child,
+    deadline: Instant,
+    observation_delay: Option<Duration>,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    let started = Instant::now();
     if let Some(delay) = observation_delay {
         thread::sleep(delay);
     }
@@ -41450,16 +41581,15 @@ fn capture_windows_process_identity_until(
                 break output;
             }
             Ok(None) if Instant::now() >= deadline => {
-                let kill_result = capture.kill();
-                let wait_result = capture.wait();
+                let cleanup_result = terminate_windows_identity_capture(
+                    &mut capture,
+                    deadline
+                        .checked_add(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE)
+                        .unwrap_or(deadline),
+                );
                 let mut cleanup = Vec::new();
-                if let Err(error) = kill_result
-                    && error.kind() != io::ErrorKind::InvalidInput
-                {
-                    cleanup.push(format!("could not terminate identity capture: {error}"));
-                }
-                if let Err(error) = wait_result {
-                    cleanup.push(format!("could not reap identity capture: {error}"));
+                if let Err(error) = cleanup_result {
+                    cleanup.push(format!("identity capture cleanup failed: {error}"));
                 }
                 let cleanup_detail = if cleanup.is_empty() {
                     String::new()
@@ -41475,24 +41605,27 @@ fn capture_windows_process_identity_until(
             Ok(None) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    let kill_result = capture.kill();
-                    let wait_result = capture.wait();
+                    let cleanup_result = terminate_windows_identity_capture(
+                        &mut capture,
+                        deadline
+                            .checked_add(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE)
+                            .unwrap_or(deadline),
+                    );
                     return Err(io::Error::other(format!(
-                        "timed out capturing Windows fixture process identity {process_id} at the readiness deadline; cleanup kill={kill_result:?} wait={wait_result:?}"
+                        "timed out capturing Windows fixture process identity {process_id} at the readiness deadline; cleanup={cleanup_result:?}"
                     ))
                     .into());
                 }
                 thread::sleep(remaining.min(Duration::from_millis(25)));
             }
             Err(error) => {
-                let kill_result = capture.kill();
-                let wait_result = capture.wait();
-                let cleanup_detail = match (kill_result, wait_result) {
-                    (Ok(()), Ok(_)) => String::new(),
-                    (kill, wait) => {
-                        format!("; identity-capture cleanup kill={kill:?} wait={wait:?}")
-                    }
-                };
+                let cleanup_result = terminate_windows_identity_capture(
+                    &mut capture,
+                    Instant::now()
+                        .checked_add(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE)
+                        .unwrap_or_else(Instant::now),
+                );
+                let cleanup_detail = format!("; identity-capture cleanup={cleanup_result:?}");
                 return Err(io::Error::other(format!(
                     "failed to observe Windows fixture identity capture {process_id}: {error}{cleanup_detail}"
                 ))
@@ -41551,29 +41684,34 @@ fn windows_process_is_alive(identity: &WindowsProcessIdentity) -> Result<bool, B
 
 #[cfg(windows)]
 fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now() + CODEX_OWNER_CHILD_STOP_BUDGET;
+    let deadline = Instant::now()
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
     stop_windows_fixture_process_until(identity, deadline, None, None)
 }
 
 #[cfg(windows)]
-fn stop_windows_fixture_process_until(
+const WINDOWS_FIXTURE_STOP_SCRIPT: &str = "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { if ($env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) }; $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result";
+
+#[cfg(windows)]
+fn spawn_windows_fixture_stop_helper(
     identity: &WindowsProcessIdentity,
-    deadline: Instant,
     test_delay: Option<Duration>,
-    observation_delay: Option<Duration>,
-) -> Result<(), Box<dyn Error>> {
+    fail_spawn: bool,
+) -> Result<Child, Box<dyn Error>> {
+    if fail_spawn {
+        return Err(
+            io::Error::other("test-injected Windows fixture stop-helper spawn failure").into(),
+        );
+    }
     let mut command = StdCommand::new("powershell");
     command
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
-        .arg(
-            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { $process.Kill(); if ($env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) }; if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result",
-        )
-        .env(
-            "PROJECTATLAS_FIXTURE_PID",
-            identity.process_id.to_string(),
-        )
+        .arg(WINDOWS_FIXTURE_STOP_SCRIPT)
+        .env("PROJECTATLAS_FIXTURE_PID", identity.process_id.to_string())
         .env(
             "PROJECTATLAS_FIXTURE_CREATION",
             identity.creation_file_time_utc.to_string(),
@@ -41584,41 +41722,41 @@ fn stop_windows_fixture_process_until(
     if let Some(delay) = test_delay {
         command.env(CODEX_OWNER_STOP_DELAY_ENV, delay.as_millis().to_string());
     }
-    let mut stop = command.spawn()?;
+    Ok(command.spawn()?)
+}
+
+#[cfg(windows)]
+fn force_stop_windows_fixture_process(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+    test_delay: Option<Duration>,
+    fail_spawn: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut stop = spawn_windows_fixture_stop_helper(identity, test_delay, fail_spawn)?;
     let started = Instant::now();
-    if let Some(delay) = observation_delay {
-        thread::sleep(delay);
-    }
-    let status = loop {
+    loop {
         match stop.try_wait() {
+            Ok(Some(status)) if status.success() && Instant::now() < deadline => return Ok(()),
+            Ok(Some(status)) if status.success() => {
+                return Err(io::Error::other(format!(
+                    "exact child cleanup fallback completed after deadline for Windows fixture process {} (observed after {:?})",
+                    identity.process_id,
+                    started.elapsed()
+                ))
+                .into());
+            }
             Ok(Some(status)) => {
-                let observed_elapsed = started.elapsed();
-                if Instant::now() >= deadline {
-                    let wait_result = stop.wait();
-                    let reap_detail = wait_result
-                        .err()
-                        .map(|error| format!("; late stop-helper reap failed: {error}"))
-                        .unwrap_or_default();
-                    return Err(io::Error::other(format!(
-                        "timed out stopping Windows fixture process {} after {:?}; stop helper completed after deadline (observed after {observed_elapsed:?}){reap_detail}",
-                        identity.process_id,
-                        observed_elapsed
-                    ))
-                    .into());
-                }
-                break status;
+                return Err(io::Error::other(format!(
+                    "exact child cleanup fallback refused Windows fixture process {} with status {status}",
+                    identity.process_id
+                ))
+                .into());
             }
             Ok(None) if Instant::now() >= deadline => {
                 let kill_result = stop.kill();
                 let wait_result = stop.wait();
-                let cleanup_detail = match (kill_result, wait_result) {
-                    (Ok(()), Ok(_)) => String::new(),
-                    (kill, wait) => {
-                        format!("; stop-helper cleanup kill={kill:?} wait={wait:?}")
-                    }
-                };
                 return Err(io::Error::other(format!(
-                    "timed out stopping Windows fixture process {} after {:?}{cleanup_detail}",
+                    "exact child cleanup fallback timed out for Windows fixture process {} after {:?}; helper cleanup kill={kill_result:?} wait={wait_result:?}",
                     identity.process_id,
                     started.elapsed()
                 ))
@@ -41632,19 +41770,453 @@ fn stop_windows_fixture_process_until(
                 let kill_result = stop.kill();
                 let wait_result = stop.wait();
                 return Err(io::Error::other(format!(
-                    "failed to observe Windows fixture stop helper for {}: {error}; cleanup kill={kill_result:?} wait={wait_result:?}",
+                    "exact child cleanup fallback could not observe Windows fixture process {}: {error}; helper cleanup kill={kill_result:?} wait={wait_result:?}",
                     identity.process_id
                 ))
                 .into());
             }
         }
-    };
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "refused to stop Windows fixture process {} without its exact captured identity",
+    }
+}
+
+#[cfg(windows)]
+/// Provides the bounded, helper-free exact-process cleanup fallback.
+#[allow(unsafe_code)]
+mod windows_native_process {
+    use super::WindowsProcessIdentity;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    const WAIT_FAILED: u32 = u32::MAX;
+    const MAX_PROCESS_PATH: usize = 32_768;
+
+    type Handle = *mut std::ffi::c_void;
+
+    #[repr(C)]
+    struct FileTime {
+        low_date_time: u32,
+        high_date_time: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CloseHandle(handle: Handle) -> i32;
+        fn GetExitCodeProcess(handle: Handle, exit_code: *mut u32) -> i32;
+        fn GetProcessTimes(
+            handle: Handle,
+            creation_time: *mut FileTime,
+            exit_time: *mut FileTime,
+            kernel_time: *mut FileTime,
+            user_time: *mut FileTime,
+        ) -> i32;
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn QueryFullProcessImageNameW(
+            handle: Handle,
+            flags: u32,
+            executable_path: *mut u16,
+            path_length: *mut u32,
+        ) -> i32;
+        fn TerminateProcess(handle: Handle, exit_code: u32) -> i32;
+        fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    }
+
+    /// Owns one exact process handle and closes it on every return path.
+    struct ProcessHandle(Handle);
+
+    impl ProcessHandle {
+        fn open(process_id: u32) -> io::Result<Self> {
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                    0,
+                    process_id,
+                )
+            };
+            if handle.is_null() {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER) {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, error));
+                }
+                return Err(error);
+            }
+            Ok(Self(handle))
+        }
+    }
+
+    impl Drop for ProcessHandle {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// Captures one process identity without starting a helper process.
+    pub(super) fn capture_exact(process_id: u32) -> io::Result<WindowsProcessIdentity> {
+        let handle = match ProcessHandle::open(process_id) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(error),
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "native exact process identity could not open Windows fixture process {process_id}: {error}"
+                )));
+            }
+        };
+        let (creation_file_time_utc, executable_path) = query_identity(handle.0)?;
+        Ok(WindowsProcessIdentity {
+            process_id,
+            creation_file_time_utc,
+            executable_path,
+        })
+    }
+
+    /// Stops only a process whose retained identity still matches, without spawning a helper.
+    pub(super) fn stop_exact(
+        identity: &WindowsProcessIdentity,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "native exact child cleanup deadline expired for Windows fixture process {}",
+                    identity.process_id
+                ),
+            ));
+        }
+        let handle = match ProcessHandle::open(identity.process_id) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "native exact child cleanup could not open Windows fixture process {}: {error}",
+                    identity.process_id
+                )));
+            }
+        };
+        verify_identity(handle.0, identity)?;
+        if process_exit_code(handle.0)? != STILL_ACTIVE {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "native exact child cleanup deadline expired before terminating Windows fixture process {}",
+                    identity.process_id
+                ),
+            ));
+        }
+        let terminated = unsafe { TerminateProcess(handle.0, 1) } != 0;
+        if !terminated {
+            let error = io::Error::last_os_error();
+            if process_exit_code(handle.0).is_ok_and(|exit_code| exit_code != STILL_ACTIVE) {
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "native exact child cleanup could not terminate Windows fixture process {}: {error}",
+                identity.process_id
+            )));
+        }
+        let timeout = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(u128::from(u32::MAX)) as u32;
+        let wait_result = unsafe { WaitForSingleObject(handle.0, timeout) };
+        let observed_at = Instant::now();
+        match wait_result {
+            WAIT_OBJECT_0 if observed_at < deadline => Ok(()),
+            WAIT_OBJECT_0 => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "native exact child cleanup observed Windows fixture process {} after its deadline",
+                    identity.process_id
+                ),
+            )),
+            WAIT_TIMEOUT => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "native exact child cleanup timed out waiting for Windows fixture process {}",
+                    identity.process_id
+                ),
+            )),
+            WAIT_FAILED => Err(io::Error::other(format!(
+                "native exact child cleanup could not wait for Windows fixture process {}: {}",
+                identity.process_id,
+                io::Error::last_os_error()
+            ))),
+            result => Err(io::Error::other(format!(
+                "native exact child cleanup returned unexpected wait status {result} for Windows fixture process {}",
+                identity.process_id
+            ))),
+        }
+    }
+
+    fn process_exit_code(handle: Handle) -> io::Result<u32> {
+        let mut exit_code = 0;
+        if unsafe { GetExitCodeProcess(handle, &raw mut exit_code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(exit_code)
+    }
+
+    fn verify_identity(handle: Handle, expected: &WindowsProcessIdentity) -> io::Result<()> {
+        let (actual_creation_time, actual_path) = query_identity(handle)?;
+        let actual_path = fs::canonicalize(actual_path)?;
+        let expected_path = fs::canonicalize(&expected.executable_path)?;
+        let actual_path = actual_path.to_str().ok_or_else(|| {
+            io::Error::other("native exact child cleanup received a non-UTF-8 executable path")
+        })?;
+        let expected_path = expected_path.to_str().ok_or_else(|| {
+            io::Error::other("native exact child cleanup retained a non-UTF-8 executable path")
+        })?;
+        if actual_creation_time != expected.creation_file_time_utc
+            || !actual_path.eq_ignore_ascii_case(expected_path)
+        {
+            return Err(io::Error::other(format!(
+                "native exact child cleanup refused Windows fixture process {} because its creation time or executable path did not match",
+                expected.process_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn query_identity(handle: Handle) -> io::Result<(i64, PathBuf)> {
+        let mut creation_time = FileTime {
+            low_date_time: 0,
+            high_date_time: 0,
+        };
+        let mut exit_time = FileTime {
+            low_date_time: 0,
+            high_date_time: 0,
+        };
+        let mut kernel_time = FileTime {
+            low_date_time: 0,
+            high_date_time: 0,
+        };
+        let mut user_time = FileTime {
+            low_date_time: 0,
+            high_date_time: 0,
+        };
+        if unsafe {
+            GetProcessTimes(
+                handle,
+                &raw mut creation_time,
+                &raw mut exit_time,
+                &raw mut kernel_time,
+                &raw mut user_time,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let actual_creation_time = (u64::from(creation_time.high_date_time) << 32
+            | u64::from(creation_time.low_date_time)) as i64;
+        let mut path = vec![0; MAX_PROCESS_PATH];
+        let mut path_length = path.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &raw mut path_length) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        path.truncate(path_length as usize);
+        Ok((
+            actual_creation_time,
+            PathBuf::from(OsString::from_wide(&path)),
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn stop_windows_fixture_process_native(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+) -> Result<(), Box<dyn Error>> {
+    match windows_native_process::stop_exact(identity, deadline) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "native exact child cleanup failed for Windows fixture process {}: {error}",
             identity.process_id
         ))
-        .into());
+        .into()),
+    }
+}
+
+#[cfg(windows)]
+fn windows_fixture_stop_failure_with_fallback(
+    identity: &WindowsProcessIdentity,
+    detail: impl std::fmt::Display,
+    fallback_deadline: Instant,
+    final_deadline: Instant,
+    fallback_test_delay: Option<Duration>,
+    fail_helper_spawn: bool,
+) -> Box<dyn Error> {
+    let fallback_result = force_stop_windows_fixture_process(
+        identity,
+        fallback_deadline,
+        fallback_test_delay,
+        fail_helper_spawn,
+    );
+    let fallback_succeeded = fallback_result.is_ok();
+    let fallback_detail = match fallback_result.as_ref() {
+        Ok(()) => "exact child cleanup fallback completed".to_string(),
+        Err(error) => format!("exact child cleanup fallback failed: {error}"),
+    };
+    let final_detail = if fallback_succeeded {
+        "exact child cleanup final stop skipped after fallback success".to_string()
+    } else {
+        match stop_windows_fixture_process_native(identity, final_deadline) {
+            Ok(()) => "exact child cleanup final stop completed".to_string(),
+            Err(error) => format!("exact child cleanup final stop failed: {error}"),
+        }
+    };
+    io::Error::other(format!("{detail}; {fallback_detail}; {final_detail}")).into()
+}
+
+#[cfg(windows)]
+fn stop_windows_fixture_process_until(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+    test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+) -> Result<(), Box<dyn Error>> {
+    stop_windows_fixture_process_until_with_fallback_test_delay(
+        identity,
+        deadline,
+        test_delay,
+        observation_delay,
+        None,
+        false,
+    )
+}
+
+#[cfg(windows)]
+fn stop_windows_fixture_process_until_with_fallback_test_delay(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+    test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+    fallback_test_delay: Option<Duration>,
+    fail_helper_spawns: bool,
+) -> Result<(), Box<dyn Error>> {
+    let primary_deadline = deadline
+        .checked_sub(CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET)
+        .and_then(|deadline| deadline.checked_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET))
+        .unwrap_or(deadline);
+    let fallback_deadline = deadline
+        .checked_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET)
+        .unwrap_or(deadline);
+    let mut stop = match spawn_windows_fixture_stop_helper(identity, test_delay, fail_helper_spawns)
+    {
+        Ok(stop) => stop,
+        Err(error) => {
+            return Err(windows_fixture_stop_failure_with_fallback(
+                identity,
+                format!(
+                    "failed to start Windows fixture stop helper for {}: {error}",
+                    identity.process_id
+                ),
+                fallback_deadline,
+                deadline,
+                fallback_test_delay,
+                fail_helper_spawns,
+            ));
+        }
+    };
+    let started = Instant::now();
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
+    let status = loop {
+        match stop.try_wait() {
+            Ok(Some(status)) => {
+                let observed_elapsed = started.elapsed();
+                if Instant::now() >= primary_deadline {
+                    let wait_result = stop.wait();
+                    let reap_detail = wait_result
+                        .err()
+                        .map(|error| format!("; late stop-helper reap failed: {error}"))
+                        .unwrap_or_default();
+                    return Err(windows_fixture_stop_failure_with_fallback(
+                        identity,
+                        format!(
+                            "timed out stopping Windows fixture process {} after {:?}; stop helper completed after deadline (observed after {observed_elapsed:?}){reap_detail}",
+                            identity.process_id, observed_elapsed
+                        ),
+                        fallback_deadline,
+                        deadline,
+                        fallback_test_delay,
+                        fail_helper_spawns,
+                    ));
+                }
+                break status;
+            }
+            Ok(None) if Instant::now() >= primary_deadline => {
+                let kill_result = stop.kill();
+                let wait_result = stop.wait();
+                let cleanup_detail = match (kill_result, wait_result) {
+                    (Ok(()), Ok(_)) => String::new(),
+                    (kill, wait) => {
+                        format!("; stop-helper cleanup kill={kill:?} wait={wait:?}")
+                    }
+                };
+                return Err(windows_fixture_stop_failure_with_fallback(
+                    identity,
+                    format!(
+                        "timed out stopping Windows fixture process {} after {:?}{cleanup_detail}",
+                        identity.process_id,
+                        started.elapsed()
+                    ),
+                    fallback_deadline,
+                    deadline,
+                    fallback_test_delay,
+                    fail_helper_spawns,
+                ));
+            }
+            Ok(None) => {
+                let remaining = primary_deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => {
+                let kill_result = stop.kill();
+                let wait_result = stop.wait();
+                return Err(windows_fixture_stop_failure_with_fallback(
+                    identity,
+                    format!(
+                        "failed to observe Windows fixture stop helper for {}: {error}; cleanup kill={kill_result:?} wait={wait_result:?}",
+                        identity.process_id
+                    ),
+                    fallback_deadline,
+                    deadline,
+                    fallback_test_delay,
+                    fail_helper_spawns,
+                ));
+            }
+        }
+    };
+    if !status.success() {
+        return Err(windows_fixture_stop_failure_with_fallback(
+            identity,
+            format!(
+                "refused to stop Windows fixture process {} without its exact captured identity",
+                identity.process_id
+            ),
+            fallback_deadline,
+            deadline,
+            fallback_test_delay,
+            fail_helper_spawns,
+        ));
     }
     Ok(())
 }
@@ -41763,7 +42335,10 @@ fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn
         }
     };
     let started = Instant::now();
-    let deadline = started + CODEX_OWNER_CHILD_STOP_BUDGET;
+    let deadline = started
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
     let result = stop_windows_fixture_process_until(
         &identity,
         deadline,
@@ -41771,8 +42346,8 @@ fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn
         None,
     );
     let elapsed = started.elapsed();
-    let child_alive = windows_process_is_alive(&identity)?;
-    let wait_result = if child_alive {
+    let child_alive_before_cleanup = windows_process_is_alive(&identity)?;
+    let wait_result = if child_alive_before_cleanup {
         let kill_result = process.kill();
         let wait_result = process.wait();
         if let Err(error) = kill_result
@@ -41784,17 +42359,607 @@ fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn
     } else {
         process.wait()
     };
+    wait_result?;
+    let child_alive_after_cleanup = windows_process_is_alive(&identity)?;
+    let result_text = result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
     if result.is_ok()
-        || child_alive
-        || elapsed > CODEX_OWNER_CHILD_STOP_BUDGET + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+        || !result_text.contains("exact child cleanup fallback completed")
+        || child_alive_after_cleanup
+        || elapsed
+            > CODEX_OWNER_CHILD_STOP_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
     {
         return Err(io::Error::other(format!(
-            "stalled Windows fixture stop helper was not bounded or left its child alive: elapsed={elapsed:?} timeout={CODEX_OWNER_CHILD_STOP_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} child_alive={child_alive} result={result:?}"
+            "stalled Windows fixture stop helper was not bounded or left its child alive: elapsed={elapsed:?} timeout={CODEX_OWNER_CHILD_STOP_BUDGET:?} fallback={CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} child_alive_before_cleanup={child_alive_before_cleanup} child_alive_after_cleanup={child_alive_after_cleanup} result={result:?}"
         ))
         .into());
     }
-    wait_result?;
     Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_total_cleanup_deadline_is_bounded() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let started = Instant::now();
+    let deadline = started
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+    let result = stop_windows_fixture_process_until_with_fallback_test_delay(
+        &identity,
+        deadline,
+        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        None,
+        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        false,
+    );
+    let elapsed = started.elapsed();
+    let child_alive_after_cleanup = windows_process_is_alive(&identity)?;
+    process.wait()?;
+    let result_text = result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let helper_budget = CODEX_OWNER_CHILD_STOP_BUDGET + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET;
+    let total_budget = helper_budget + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+    let lower_bound = helper_budget.saturating_sub(CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE);
+    let upper_bound = total_budget + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+    if result.is_ok()
+        || child_alive_after_cleanup
+        || !result_text.contains("timed out stopping Windows fixture process")
+        || !result_text.contains("exact child cleanup fallback timed out")
+        || !result_text.contains("exact child cleanup final stop completed")
+        || elapsed < lower_bound
+        || elapsed > upper_bound
+    {
+        return Err(io::Error::other(format!(
+            "stalled Windows fixture cleanup exceeded its absolute deadline or skipped a bounded phase: elapsed={elapsed:?} lower_bound={lower_bound:?} upper_bound={upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} result={result:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_primary_spawn_failure_cleans_exact_child()
+-> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let mut sentinel = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let sentinel_identity = match capture_windows_process_identity(sentinel.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            drop(sentinel.kill());
+            drop(sentinel.wait());
+            return Err(error);
+        }
+    };
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        let started = Instant::now();
+        let deadline = started
+            + CODEX_OWNER_CHILD_STOP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+        let result = stop_windows_fixture_process_until_with_fallback_test_delay(
+            &identity, deadline, None, None, None, true,
+        );
+        let elapsed = started.elapsed();
+        let exact_child_alive_before_cleanup = windows_process_is_alive(&identity)?;
+        let mut mismatched_sentinel_identity = sentinel_identity.clone();
+        mismatched_sentinel_identity.creation_file_time_utc += 1;
+        let mismatch_result = stop_windows_fixture_process_until_with_fallback_test_delay(
+            &mismatched_sentinel_identity,
+            Instant::now() + CODEX_OWNER_CHILD_STOP_BUDGET,
+            None,
+            None,
+            None,
+            true,
+        );
+        let sentinel_alive_after_mismatch = windows_process_is_alive(&sentinel_identity)?;
+        let result_text = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let mismatch_text = mismatch_result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let total_budget = CODEX_OWNER_CHILD_STOP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+        let upper_bound = total_budget + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+        if result.is_ok()
+            || result_text
+                .matches("test-injected Windows fixture stop-helper spawn failure")
+                .count()
+                < 2
+            || !result_text.contains("exact child cleanup fallback failed")
+            || !result_text.contains("exact child cleanup final stop completed")
+            || exact_child_alive_before_cleanup
+            || mismatch_result.is_ok()
+            || !mismatch_text.contains("native exact child cleanup failed")
+            || !mismatch_text.contains("creation time or executable path did not match")
+            || !sentinel_alive_after_mismatch
+            || elapsed > upper_bound
+        {
+            return Err(io::Error::other(format!(
+                "primary stop-helper spawn failure did not preserve bounded exact cleanup: elapsed={elapsed:?} upper_bound={upper_bound:?} exact_child_alive_before_cleanup={exact_child_alive_before_cleanup} sentinel_alive_after_mismatch={sentinel_alive_after_mismatch} mismatch_result={mismatch_result:?} result={result:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+    let exact_cleanup_result = if windows_process_is_alive(&identity)? {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            Err(error)
+        } else {
+            wait_result
+        }
+    } else {
+        process.wait()
+    };
+    let sentinel_cleanup_result = if windows_process_is_alive(&sentinel_identity)? {
+        let cleanup_result = stop_windows_fixture_process(&sentinel_identity);
+        let wait_result = sentinel.wait();
+        cleanup_result.and(wait_result.map_err(Into::into))
+    } else {
+        sentinel.wait().map_err(Into::into)
+    };
+    exact_cleanup_result?;
+    sentinel_cleanup_result?;
+    test_result
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_codex_owner_native_cleanup_retires_child_when_helpers_fail() -> Result<(), Box<dyn Error>>
+{
+    windows_codex_owner_native_cleanup_with_injected_failure(
+        WindowsNativeCleanupInjectedFailure::None,
+    )
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_codex_owner_native_cleanup_retires_child_when_sentinel_spawn_fails()
+-> Result<(), Box<dyn Error>> {
+    windows_codex_owner_native_cleanup_with_injected_failure(
+        WindowsNativeCleanupInjectedFailure::SentinelSpawn,
+    )
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_codex_owner_native_cleanup_retires_processes_when_owner_identity_capture_fails()
+-> Result<(), Box<dyn Error>> {
+    windows_codex_owner_native_cleanup_with_injected_failure(
+        WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture,
+    )
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_codex_owner_native_cleanup_retires_processes_when_sentinel_identity_capture_fails()
+-> Result<(), Box<dyn Error>> {
+    windows_codex_owner_native_cleanup_with_injected_failure(
+        WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture,
+    )
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsNativeCleanupInjectedFailure {
+    None,
+    OwnerIdentityCapture,
+    SentinelSpawn,
+    SentinelIdentityCapture,
+}
+
+#[cfg(windows)]
+fn windows_codex_owner_native_cleanup_with_injected_failure(
+    injected_failure: WindowsNativeCleanupInjectedFailure,
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
+    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    let db = temp.path().join("projectatlas.db");
+    let identity_file = temp.path().join("uncooperative-owner.pid");
+    compile_obsolete_projectatlas_fixture(&runtime)?;
+    compile_codex_mcp_owner_fixture(&codex_fixture)?;
+
+    let (mut owner, child_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        None,
+        &identity_file,
+        None,
+        Some("ignore-stop"),
+    )?;
+    let injected_owner_identity = if injected_failure
+        == WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture
+    {
+        match capture_windows_process_identity(owner.id()) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
+                return Err(io::Error::other(format!(
+                    "failed to prepare the injected owner identity-capture failure: {error}; child-first owner cleanup={cleanup_result:?}"
+                ))
+                .into());
+            }
+        }
+    } else {
+        None
+    };
+    let owner_identity = match if injected_owner_identity.is_some() {
+        Err(io::Error::other("test-injected Windows owner identity capture failure").into())
+    } else {
+        capture_windows_process_identity(owner.id())
+    } {
+        Ok(identity) => identity,
+        Err(error) => {
+            let cleanup_started = Instant::now();
+            let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
+            if injected_failure == WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture {
+                let expected_owner_identity =
+                    injected_owner_identity.as_ref().ok_or_else(|| {
+                        io::Error::other(
+                            "injected owner capture failure omitted its exact test identity",
+                        )
+                    })?;
+                let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
+                let owner_alive_after_cleanup = windows_process_is_alive(expected_owner_identity)?;
+                let cleanup_elapsed = cleanup_started.elapsed();
+                let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                    + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+                    + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+                let safety_child_cleanup = if child_alive_after_cleanup {
+                    stop_windows_fixture_process(&child_identity)
+                } else {
+                    Ok(())
+                };
+                let safety_owner_cleanup = if owner_alive_after_cleanup {
+                    stop_windows_fixture_process(expected_owner_identity)
+                } else {
+                    Ok(())
+                };
+                if !error
+                    .to_string()
+                    .contains("test-injected Windows owner identity capture failure")
+                    || cleanup_result.is_err()
+                    || child_alive_after_cleanup
+                    || owner_alive_after_cleanup
+                    || cleanup_elapsed > cleanup_upper_bound
+                {
+                    return Err(io::Error::other(format!(
+                        "forced owner identity-capture failure did not preserve bounded child-first cleanup: elapsed={cleanup_elapsed:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} cleanup={cleanup_result:?} safety_child_cleanup={safety_child_cleanup:?} safety_owner_cleanup={safety_owner_cleanup:?}"
+                    ))
+                    .into());
+                }
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "failed to capture uncooperative Codex owner identity: {error}; child-first owner cleanup={cleanup_result:?}"
+            ))
+            .into());
+        }
+    };
+
+    let mut sentinel = match if injected_failure
+        == WindowsNativeCleanupInjectedFailure::SentinelSpawn
+    {
+        Err(io::Error::other(
+            "test-injected mismatched Windows sentinel spawn failure",
+        ))
+    } else {
+        StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg("Start-Sleep -Seconds 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    } {
+        Ok(sentinel) => sentinel,
+        Err(error) => {
+            // Force this setup-failure arm in one test without relying on host resource exhaustion.
+            let cleanup_started = Instant::now();
+            let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
+            let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
+            let owner_alive_after_cleanup = windows_process_is_alive(&owner_identity)?;
+            let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                + CODEX_OWNER_CHILD_STOP_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+                + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+            if injected_failure == WindowsNativeCleanupInjectedFailure::SentinelSpawn {
+                if !error
+                    .to_string()
+                    .contains("test-injected mismatched Windows sentinel spawn failure")
+                    || cleanup_result.is_err()
+                    || child_alive_after_cleanup
+                    || owner_alive_after_cleanup
+                    || cleanup_started.elapsed() > cleanup_upper_bound
+                {
+                    return Err(io::Error::other(format!(
+                        "forced mismatched sentinel spawn failure did not preserve bounded child-first owner cleanup: elapsed={:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} cleanup={cleanup_result:?}",
+                        cleanup_started.elapsed()
+                    ))
+                    .into());
+                }
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "failed to start mismatched Windows sentinel: {error}; child-first owner cleanup={cleanup_result:?}"
+            ))
+            .into());
+        }
+    };
+    let injected_sentinel_identity = if injected_failure
+        == WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture
+    {
+        match capture_windows_process_identity(sentinel.id()) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                let owner_cleanup = cleanup_codex_owner_processes(owner, &child_identity);
+                let sentinel_kill = sentinel.kill();
+                let sentinel_wait = sentinel.wait();
+                return Err(io::Error::other(format!(
+                    "failed to prepare the injected sentinel identity-capture failure: {error}; child-first owner cleanup={owner_cleanup:?}; sentinel cleanup kill={sentinel_kill:?} wait={sentinel_wait:?}"
+                ))
+                .into());
+            }
+        }
+    } else {
+        None
+    };
+    let sentinel_identity = match if injected_sentinel_identity.is_some() {
+        Err(io::Error::other("test-injected Windows sentinel identity capture failure").into())
+    } else {
+        capture_windows_process_identity(sentinel.id())
+    } {
+        Ok(identity) => identity,
+        Err(error) => {
+            let cleanup_started = Instant::now();
+            let owner_cleanup = cleanup_codex_owner_processes(owner, &child_identity);
+            let sentinel_kill = sentinel.kill();
+            let sentinel_wait = sentinel.wait();
+            if injected_failure == WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture {
+                let expected_sentinel_identity =
+                    injected_sentinel_identity.as_ref().ok_or_else(|| {
+                        io::Error::other(
+                            "injected sentinel capture failure omitted its exact test identity",
+                        )
+                    })?;
+                let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
+                let owner_alive_after_cleanup = windows_process_is_alive(&owner_identity)?;
+                let sentinel_alive_after_cleanup =
+                    windows_process_is_alive(expected_sentinel_identity)?;
+                let cleanup_elapsed = cleanup_started.elapsed();
+                let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                    + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+                    + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+                let safety_child_cleanup = if child_alive_after_cleanup {
+                    stop_windows_fixture_process(&child_identity)
+                } else {
+                    Ok(())
+                };
+                let safety_owner_cleanup = if owner_alive_after_cleanup {
+                    stop_windows_fixture_process(&owner_identity)
+                } else {
+                    Ok(())
+                };
+                let safety_sentinel_cleanup = if sentinel_alive_after_cleanup {
+                    stop_windows_fixture_process(expected_sentinel_identity)
+                } else {
+                    Ok(())
+                };
+                if !error
+                    .to_string()
+                    .contains("test-injected Windows sentinel identity capture failure")
+                    || owner_cleanup.is_err()
+                    || sentinel_kill.is_err()
+                    || sentinel_wait.is_err()
+                    || child_alive_after_cleanup
+                    || owner_alive_after_cleanup
+                    || sentinel_alive_after_cleanup
+                    || cleanup_elapsed > cleanup_upper_bound
+                {
+                    return Err(io::Error::other(format!(
+                        "forced sentinel identity-capture failure did not preserve bounded child-first owner and sentinel cleanup: elapsed={cleanup_elapsed:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} sentinel_alive_after_cleanup={sentinel_alive_after_cleanup} owner_cleanup={owner_cleanup:?} sentinel_kill={sentinel_kill:?} sentinel_wait={sentinel_wait:?} safety_child_cleanup={safety_child_cleanup:?} safety_owner_cleanup={safety_owner_cleanup:?} safety_sentinel_cleanup={safety_sentinel_cleanup:?}"
+                    ))
+                    .into());
+                }
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "failed to capture mismatched Windows sentinel identity: {error}; child-first owner cleanup={owner_cleanup:?}; sentinel cleanup kill={sentinel_kill:?} wait={sentinel_wait:?}"
+            ))
+            .into());
+        }
+    };
+
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        if !windows_process_is_alive(&child_identity)? || owner.try_wait()?.is_some() {
+            return Err(io::Error::other(
+                "uncooperative Codex owner did not retain a live exact child before cleanup",
+            )
+            .into());
+        }
+        let started = Instant::now();
+        let result = stop_codex_owner_after_spawn_failure_with_test_delays(
+            &mut owner,
+            &identity_file,
+            &runtime,
+            None,
+            None,
+            None,
+            true,
+        );
+        let elapsed = started.elapsed();
+        let owner_reaped = owner.try_wait()?.is_some();
+        let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
+        let result_text = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let mut mismatched_sentinel_identity = sentinel_identity.clone();
+        mismatched_sentinel_identity.creation_file_time_utc += 1;
+        let mismatch_started = Instant::now();
+        let mismatch_result = stop_windows_fixture_process_until_with_fallback_test_delay(
+            &mismatched_sentinel_identity,
+            mismatch_started
+                + CODEX_OWNER_CHILD_STOP_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET,
+            None,
+            None,
+            None,
+            true,
+        );
+        let mismatch_elapsed = mismatch_started.elapsed();
+        let sentinel_alive_after_mismatch = windows_process_is_alive(&sentinel_identity)?;
+        let total_budget = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+            + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+            + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+        let mismatch_budget = CODEX_OWNER_CHILD_STOP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+            + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+        if result.is_ok()
+            || !result_text.contains("owner fixture did not stop within five seconds")
+            || result_text
+                .matches("test-injected Windows fixture stop-helper spawn failure")
+                .count()
+                < 2
+            || !result_text.contains("exact child cleanup fallback failed")
+            || !result_text.contains("exact child cleanup final stop completed")
+            || !owner_reaped
+            || child_alive_after_cleanup
+            || elapsed < CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+            || elapsed > total_budget
+            || mismatch_result.is_ok()
+            || !mismatch_result.as_ref().err().is_some_and(|error| {
+                error
+                    .to_string()
+                    .contains("native exact child cleanup failed")
+            })
+            || !mismatch_result.as_ref().err().is_some_and(|error| {
+                error
+                    .to_string()
+                    .contains("creation time or executable path did not match")
+            })
+            || !sentinel_alive_after_mismatch
+            || mismatch_elapsed > mismatch_budget
+        {
+            return Err(io::Error::other(format!(
+                "uncooperative Codex owner did not preserve native child-first cleanup: elapsed={elapsed:?} total_budget={total_budget:?} owner_reaped={owner_reaped} child_alive_after_cleanup={child_alive_after_cleanup} sentinel_alive_after_mismatch={sentinel_alive_after_mismatch} mismatch_elapsed={mismatch_elapsed:?} mismatch_budget={mismatch_budget:?} result={result:?} mismatch_result={mismatch_result:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+
+    let owner_cleanup_result = if owner.try_wait()?.is_none() {
+        let kill_result = owner.kill();
+        let wait_result = owner.wait();
+        if let Err(error) = kill_result
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            Err(error)
+        } else {
+            wait_result
+        }
+    } else {
+        owner.wait()
+    };
+    let child_cleanup_result = if windows_process_is_alive(&child_identity)? {
+        stop_windows_fixture_process(&child_identity)
+    } else {
+        Ok(())
+    };
+    let sentinel_cleanup_result = if windows_process_is_alive(&sentinel_identity)? {
+        let cleanup_result = stop_windows_fixture_process(&sentinel_identity);
+        let wait_result = sentinel.wait();
+        cleanup_result.and(wait_result.map_err(Into::into))
+    } else {
+        sentinel.wait().map_err(Into::into)
+    };
+    owner_cleanup_result?;
+    child_cleanup_result?;
+    sentinel_cleanup_result?;
+    test_result
 }
 
 #[test]
@@ -41887,6 +43052,8 @@ fn windows_fixture_identity_observed_after_readiness_is_rejected() -> Result<(),
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
         + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
         + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
         + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
         + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
     let readiness_elapsed = text
