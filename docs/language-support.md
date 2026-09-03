@@ -2,11 +2,11 @@
 
 This document is generated from the versioned Rust language capability registry. Do not edit the capability table or totals by hand. Canonical rows count once; aliases and extensions never increase a capability total.
 
-Registry version: `4`. Accepted capability-set version: `12`. Detection policy version: `1`. Registry digest: `bae01db588d8e6c8666bb1afd66ffcbffb3022c23c68df52f9822c291f9d895c`. Accepted-set digest: `bae01db588d8e6c8666bb1afd66ffcbffb3022c23c68df52f9822c291f9d895c`. Semantic-provider digest: `b26c4aa768ebe3bb185d5929350d2f41c6b1b2f93630080248dec7eb6ec00e82`.
+Registry version: `4`. Accepted capability-set version: `13`. Detection policy version: `1`. Registry digest: `63ccc321601fcc207a7540163abb9cff9547d41e43b8b696073e22707db4a3d1`. Accepted-set digest: `63ccc321601fcc207a7540163abb9cff9547d41e43b8b696073e22707db4a3d1`. Semantic-provider digest: `b26c4aa768ebe3bb185d5929350d2f41c6b1b2f93630080248dec7eb6ec00e82`.
 
 Optional catalog input: `tree-sitter-language-pack@1.13.2` revision `6258abac30304283763a0d2dc8a48cb87fbcf438` under `MIT` metadata license. This catalog identity is not a grammar-license or runtime-support claim.
 
-The registry contains **271** canonical rows: **63** default-core rows and **208** optional-pack candidates. Detection is supported for 271 rows. Parsing is supported for 30, fallback for 241, and unavailable for 0. Symbols are supported for 21, fallback for 241, and unavailable for 9. Semantic resolution and benchmark coverage are reported independently.
+The registry contains **271** canonical rows: **63** default-core rows and **208** optional-pack candidates. Detection is supported for 271 rows. Parsing is supported for 31, fallback for 240, and unavailable for 0. Symbols are supported for 22, fallback for 240, and unavailable for 9. Semantic resolution and benchmark coverage are reported independently.
 
 Rows marked `broad-parser` are detected and, when explicitly admitted to the scan policy, remain usable through the conservative default-core fallback while the optional pack is absent. Catalog recognition alone does not add these extensions to the default scan surface. The pinned catalog is provenance for detection metadata only. A row becomes grammar-backed parsed support only after its exact grammar binary, subtree license, ABI/export, fixtures, and every accepted optional-pack target pass the separate acceptance gates. The v0.4 optional-pack targets are Linux x86-64 and Windows x86-64; macOS keeps the full built-in surface and reports `unsupported_containment` for optional-pack activation. Built-in owners always retain precedence.
 
@@ -62,7 +62,7 @@ Broad candidate rows are admitted only when the pinned catalog supplies a stable
 | `graphql` | `source` | `gql` | `.gql` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.5` | `MIT` |
 | `config` | `configuration_data` | — | `.ini`, `.cfg`, `.conf`, `.properties`, `.env`, `.gitignore`, `.dockerignore`, `.editorconfig` | unavailable | supported | unavailable | unavailable | — | unavailable | — | `projectatlas@0.4.5` | `MIT` |
 | `ruby` | `source` | `rb` | `.rb`, shebang `ruby` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.5` | `MIT` |
-| `php` | `source` | — | `.php` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.5` | `MIT` |
+| `php` | `source` | — | `.php` | tree-sitter-php@0.24.2 | supported | supported | unavailable | — | unavailable | — | `tree-sitter-php@0.24.2` | `MIT` |
 | `swift` | `source` | — | `.swift` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.5` | `MIT` |
 | `scala` | `source` | — | `.scala` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.5` | `MIT` |
 | `shell` | `source` | `sh` | `.sh`, `.bash`, `.zsh`, shebang `sh`, shebang `bash`, shebang `dash`, shebang `ash`, shebang `zsh`, shebang `ksh`, shebang `mksh`, shebang `fish` | projectatlas:fallback | fallback | fallback | unavailable | — | unavailable | — | `projectatlas@0.4.5` | `MIT` |
@@ -288,7 +288,7 @@ Broad candidate rows are admitted only when the pinned catalog supplies a stable
 
 ## Language & Ecosystem Support
 
-Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `beeec910b11bfecfda27fed007a68c2198d70ffcdc2c4e01b8ff9a50e1af0fe3`.
+Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `b53d64409e76db105141efc90272978349f1c7cf39022d44bbd771e73024acba`.
 
 `Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. Final v0.4 MCP navigation revalidation retained every runtime candidate at its achieved detected/parsed/symbol/semantic/benchmarked tier: none has the complete schema-bound capability and agent-navigation evidence required for promotion.
 

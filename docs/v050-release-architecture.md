@@ -229,7 +229,7 @@ rows and valid graph rows at the previous complete generation.
 ```mermaid
 flowchart LR
     php[.php bytes] --> registry[Language capability registry]
-    registry --> grammar[Pinned built-in tree-sitter-php]
+    registry --> grammar[Pinned built-in tree-sitter-php 0.24.2]
     grammar --> mapping[PHP node-to-symbol mapping]
     mapping --> exact[Exact symbols, parents, spans, provenance]
     mapping --> relations[Conservative namespace, import, include, call relations]

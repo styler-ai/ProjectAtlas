@@ -44504,3 +44504,468 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
 
     Ok(())
 }
+
+#[test]
+fn composer_shaped_php_cli_mcp_and_incremental_refresh_agree() -> Result<(), Box<dyn Error>> {
+    const PHP_NAMESPACE_DIR: &str = "Atlas";
+    const COMPOSER_VENDOR_DIR: &str = "vendor";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME).join(PHP_NAMESPACE_DIR))?;
+    fs::create_dir_all(repo.join(COMPOSER_VENDOR_DIR))?;
+    fs::write(
+        repo.join("composer.json"),
+        r#"{
+  "name": "atlas/composer-fixture",
+  "autoload": {"psr-4": {"Atlas\\": "src/"}}
+}
+"#,
+    )?;
+    fs::write(
+        repo.join(COMPOSER_VENDOR_DIR).join("autoload.php"),
+        "<?php\n",
+    )?;
+    fs::write(
+        repo.join(COMPOSER_VENDOR_DIR).join("bootstrap.php"),
+        "<?php\n",
+    )?;
+    fs::write(repo.join(COMPOSER_VENDOR_DIR).join("config.php"), "<?php\n")?;
+    let source = r#"<?php
+namespace Atlas\Package;
+
+use Vendor\{Boot\Kernel as RuntimeKernel, Support\Logger};
+use Vendor\Contracts\Service as ServiceContract;
+
+require ('vendor\\bootstrap.php');
+include_once ("vendor/config.php");
+require BOOTSTRAP;
+include_once($dynamicConfig);
+require "config/${name}.php";
+
+final class Service implements ServiceContract {
+    public function boot(): void {
+        self::prepare();
+        parent::boot();
+        static::finish();
+        RuntimeKernel::start();
+        $object->save();
+        $object?->save();
+    }
+
+    private static function prepare(): void {}
+}
+
+function helper(): void {}
+function save(): void {}
+"#;
+    let source_path = repo
+        .join(SRC_DIR_NAME)
+        .join(PHP_NAMESPACE_DIR)
+        .join("Service.php");
+    fs::write(&source_path, source)?;
+    let db = temp.path().join("composer-php.db");
+    let executable = mcp_contract_executable();
+
+    let scan = Command::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args(["scan", "."])
+        .output()?;
+    if !scan.status.success() {
+        return Err(io::Error::other(format!(
+            "Composer-shaped PHP CLI scan failed: {}",
+            String::from_utf8_lossy(&scan.stderr)
+        ))
+        .into());
+    }
+    let scan: Value = serde_json::from_slice(&scan.stdout)?;
+    require_json_usize_at_least(&scan, &["overview", "files"], 5)?;
+    require_json_usize_at_least(&scan, &["symbols", "parsed"], 1)?;
+
+    let assert_summary = |summary: &Value| -> Result<(), Box<dyn Error>> {
+        require_json_string(
+            summary,
+            &["file_summary", "file_path"],
+            "src/Atlas/Service.php",
+        )?;
+        require_json_string(summary, &["file_summary", "language"], "php")?;
+        require_json_string(
+            summary,
+            &["file_summary", "parser_kind"],
+            "fallback-symbol-graph",
+        )?;
+        require_json_string(summary, &["file_summary", "summary_status"], "fallback")?;
+        require_json_string(
+            summary,
+            &["file_summary", "coverage", "parser"],
+            "tree-sitter",
+        )?;
+        require_json_usize_at_least(
+            summary,
+            &["file_summary", "coverage", "states", "partial"],
+            1,
+        )?;
+        require_json_usize_at_least(summary, &["file_summary", "coverage", "omitted"], 1)?;
+        let file_summary = json_at(summary, &["file_summary"])?;
+        let imports = json_at(file_summary, &["imports"])?
+            .as_array()
+            .ok_or_else(|| io::Error::other("PHP summary imports were not an array"))?;
+        for target in [
+            "Vendor\\Boot\\Kernel",
+            "Vendor\\Support\\Logger",
+            "Vendor\\Contracts\\Service",
+            "vendor\\bootstrap.php",
+            "vendor/config.php",
+        ] {
+            if !imports.iter().any(|value| value.as_str() == Some(target)) {
+                return Err(io::Error::other(format!(
+                    "PHP summary omitted exact import target {target}: {imports:?}"
+                ))
+                .into());
+            }
+        }
+        for rejected in ["BOOTSTRAP", "$dynamicConfig", "config/", "${name}"] {
+            if imports.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|candidate| candidate.contains(rejected))
+            }) {
+                return Err(io::Error::other(format!(
+                    "PHP summary published rejected import target {rejected}: {imports:?}"
+                ))
+                .into());
+            }
+        }
+        let classes = json_at(file_summary, &["classes"])?
+            .as_array()
+            .ok_or_else(|| io::Error::other("PHP summary classes were not an array"))?;
+        let service = classes
+            .iter()
+            .find(|symbol| symbol.get("name").and_then(Value::as_str) == Some("Service"))
+            .ok_or_else(|| io::Error::other("PHP summary omitted Service class"))?;
+        if service.get("exported").and_then(Value::as_bool) != Some(true) {
+            return Err(
+                io::Error::other(format!("PHP Service class was not exported: {service}")).into(),
+            );
+        }
+        let methods = json_at(file_summary, &["methods"])?
+            .as_array()
+            .ok_or_else(|| io::Error::other("PHP summary methods were not an array"))?;
+        let boot = methods
+            .iter()
+            .find(|symbol| symbol.get("name").and_then(Value::as_str) == Some("boot"))
+            .ok_or_else(|| io::Error::other("PHP summary omitted boot method"))?;
+        require_json_string_from_value(boot, "parent", "Service")?;
+        require_json_contains_from_value(boot, "signature", "public function boot")?;
+        let calls = json_at(file_summary, &["calls"])?
+            .as_array()
+            .ok_or_else(|| io::Error::other("PHP summary calls were not an array"))?;
+        for target in [
+            "self::prepare",
+            "parent::boot",
+            "static::finish",
+            "RuntimeKernel::start",
+        ] {
+            if !calls.iter().any(|call| {
+                call.get("target").and_then(Value::as_str) == Some(target)
+                    && call.get("source").and_then(Value::as_str) == Some("boot")
+            }) {
+                return Err(io::Error::other(format!(
+                    "PHP summary omitted exact call {target}: {calls:?}"
+                ))
+                .into());
+            }
+        }
+        if calls
+            .iter()
+            .any(|call| call.get("target").and_then(Value::as_str) == Some("save"))
+        {
+            return Err(io::Error::other(format!(
+                "PHP summary published dynamic member call as save: {calls:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    };
+
+    let cli_summary = json_summary_command(&repo, &db, "src/Atlas/Service.php")?;
+    assert_summary(&json!({"file_summary": cli_summary}))?;
+
+    let run_cli_relations = || -> Result<Value, Box<dyn Error>> {
+        let output = Command::new(&executable)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .arg("--format")
+            .arg("json")
+            .arg("--db")
+            .arg(&db)
+            .args([
+                "symbols",
+                "relations",
+                "--file",
+                "src/Atlas/Service.php",
+                "--limit",
+                "100",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "Composer-shaped PHP CLI relations failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let rows: Value = serde_json::from_slice(&output.stdout)?;
+        Ok(json!({"symbol_relations": rows}))
+    };
+    let assert_relations = |relations: &Value, refreshed: bool| -> Result<(), Box<dyn Error>> {
+        let rows = json_at(relations, &["symbol_relations"])?
+            .as_array()
+            .ok_or_else(|| io::Error::other("PHP relations were not an array"))?;
+        let first_call = if refreshed {
+            "self::refresh"
+        } else {
+            "self::prepare"
+        };
+        for (kind, source, target) in [
+            ("imports", "<module>", "Vendor\\Boot\\Kernel"),
+            ("imports", "<module>", "vendor\\bootstrap.php"),
+            ("calls", "boot", first_call),
+            ("calls", "boot", "parent::boot"),
+            ("calls", "boot", "static::finish"),
+            ("calls", "boot", "RuntimeKernel::start"),
+        ] {
+            let row = rows.iter().find(|row| {
+                row.get("kind").and_then(Value::as_str) == Some(kind)
+                    && row
+                        .get("source")
+                        .or_else(|| row.get("source_name"))
+                        .and_then(Value::as_str)
+                        == Some(source)
+                    && row
+                        .get("target")
+                        .or_else(|| row.get("target_name"))
+                        .and_then(Value::as_str)
+                        == Some(target)
+            });
+            let row = row.ok_or_else(|| {
+                io::Error::other(format!(
+                    "PHP relations omitted {kind} {source}->{target}: {rows:?}"
+                ))
+            })?;
+            require_json_string_from_value(row, "path", "src/Atlas/Service.php")?;
+            let expected_context = if kind == "calls" {
+                format!("{target}()")
+            } else {
+                target.to_string()
+            };
+            require_json_string_from_value(row, "context", &expected_context)?;
+            if row.get("line").and_then(Value::as_u64).unwrap_or_default() == 0 {
+                return Err(io::Error::other(format!(
+                    "PHP relation {kind} {source}->{target} omitted source line: {row}"
+                ))
+                .into());
+            }
+        }
+        for rejected in ["BOOTSTRAP", "$dynamicConfig", "config/", "${name}"] {
+            if rows.iter().any(|row| {
+                row.get("kind").and_then(Value::as_str) == Some("imports")
+                    && row
+                        .get("target")
+                        .or_else(|| row.get("target_name"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|target| target.contains(rejected))
+            }) {
+                return Err(io::Error::other(format!(
+                    "PHP relations published rejected import {rejected}: {rows:?}"
+                ))
+                .into());
+            }
+        }
+        if rows.iter().any(|row| {
+            row.get("kind").and_then(Value::as_str) == Some("calls")
+                && row
+                    .get("target")
+                    .or_else(|| row.get("target_name"))
+                    .and_then(Value::as_str)
+                    == Some("save")
+        }) {
+            return Err(io::Error::other(format!(
+                "PHP relations published dynamic member call as save: {rows:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    };
+    let cli_relations = run_cli_relations()?;
+    assert_relations(&cli_relations, false)?;
+
+    let cli_slice = Command::new(&executable)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "symbols",
+            "slice",
+            "src/Atlas/Service.php",
+            "boot",
+            "--symbol-parent",
+            "Service",
+            "--symbol-kind",
+            "method",
+        ])
+        .output()?;
+    if !cli_slice.status.success() {
+        return Err(io::Error::other(format!(
+            "Composer-shaped PHP CLI slice failed: {}",
+            String::from_utf8_lossy(&cli_slice.stderr)
+        ))
+        .into());
+    }
+    let cli_slice: Value = serde_json::from_slice(&cli_slice.stdout)?;
+    let cli_slice = json!({"slice": cli_slice});
+    require_json_string(&cli_slice, &["slice", "path"], "src/Atlas/Service.php")?;
+    require_json_contains(&cli_slice, &["slice", "content"], "self::prepare()")?;
+    require_json_contains(&cli_slice, &["slice", "content"], "static::finish()")?;
+
+    let mut mcp = McpContractSession::spawn(&executable, &repo, &db)?;
+    let operation = (|| -> Result<(), Box<dyn Error>> {
+        let initialized_summary: Value = toon_format::decode_default(&mcp.call_tool(
+            "atlas_file_summary",
+            &json!({"file": "src/Atlas/Service.php", "limit": 20}),
+        )?)?;
+        assert_summary(&initialized_summary)?;
+        let mcp_relations: Value = toon_format::decode_default(&mcp.call_tool(
+            "atlas_symbol_relations",
+            &json!({"file": "src/Atlas/Service.php", "limit": 100}),
+        )?)?;
+        assert_relations(&mcp_relations, false)?;
+        let mcp_slice: Value = toon_format::decode_default(&mcp.call_tool(
+            "atlas_slice",
+            &json!({
+                "file": "src/Atlas/Service.php",
+                "symbol": "boot",
+                "symbol_parent": "Service",
+                "symbol_kind": "method",
+                "output_bytes": 16_384
+            }),
+        )?)?;
+        require_json_string(&mcp_slice, &["slice", "path"], "src/Atlas/Service.php")?;
+        require_json_contains(&mcp_slice, &["slice", "content"], "self::prepare()")?;
+        require_json_contains(&mcp_slice, &["slice", "content"], "static::finish()")?;
+
+        let refreshed_source = source
+            .replace("self::prepare()", "self::refresh()")
+            .replace(
+                "function helper(): void {}",
+                "function refreshed(): void {}",
+            );
+        fs::write(&source_path, refreshed_source)?;
+        let refresh_report = run_watch_once_report(&repo, &db)?;
+        if !refresh_report.contains("watch:") || !refresh_report.contains("parsed:") {
+            return Err(io::Error::other(format!(
+                "PHP incremental refresh did not report a bounded watch pass: {refresh_report}"
+            ))
+            .into());
+        }
+        let refreshed_summary = json_summary_command(&repo, &db, "src/Atlas/Service.php")?;
+        assert_summary_after_refresh(&json!({"file_summary": refreshed_summary}))?;
+        let refreshed_cli_relations = run_cli_relations()?;
+        assert_relations(&refreshed_cli_relations, true)?;
+        let refreshed_mcp_summary: Value = toon_format::decode_default(&mcp.call_tool(
+            "atlas_file_summary",
+            &json!({"file": "src/Atlas/Service.php", "limit": 20}),
+        )?)?;
+        assert_summary_after_refresh(&refreshed_mcp_summary)?;
+        let refreshed_mcp_relations: Value = toon_format::decode_default(&mcp.call_tool(
+            "atlas_symbol_relations",
+            &json!({"file": "src/Atlas/Service.php", "limit": 100}),
+        )?)?;
+        assert_relations(&refreshed_mcp_relations, true)?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation, || mcp.shutdown())?;
+    Ok(())
+}
+
+/// Require one exact nested string from an already selected JSON object.
+fn require_json_string_from_value(
+    value: &Value,
+    key: &str,
+    expected: &str,
+) -> Result<(), Box<dyn Error>> {
+    if value.get(key).and_then(Value::as_str) == Some(expected) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "expected {key:?} to equal {expected:?}, found {value}"
+        ))
+        .into())
+    }
+}
+
+/// Require one summary to contain only the newly refreshed function fact.
+fn assert_summary_after_refresh(summary: &Value) -> Result<(), Box<dyn Error>> {
+    let file_summary = json_at(summary, &["file_summary"])?;
+    let functions = json_at(file_summary, &["functions"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("refreshed PHP functions were not an array"))?;
+    if functions
+        .iter()
+        .any(|symbol| symbol.get("name").and_then(Value::as_str) == Some("helper"))
+        || !functions
+            .iter()
+            .any(|symbol| symbol.get("name").and_then(Value::as_str) == Some("refreshed"))
+    {
+        return Err(io::Error::other(format!(
+            "PHP incremental refresh retained stale or omitted new function: {functions:?}"
+        ))
+        .into());
+    }
+    let calls = json_at(file_summary, &["calls"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("refreshed PHP calls were not an array"))?;
+    if calls
+        .iter()
+        .any(|call| call.get("target").and_then(Value::as_str) == Some("self::prepare"))
+        || !calls.iter().any(|call| {
+            call.get("target").and_then(Value::as_str) == Some("self::refresh")
+                && call.get("source").and_then(Value::as_str) == Some("boot")
+        })
+    {
+        return Err(io::Error::other(format!(
+            "PHP incremental refresh retained stale or omitted new call: {calls:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Require one exact summary string to contain a substring.
+fn require_json_contains_from_value(
+    value: &Value,
+    key: &str,
+    expected: &str,
+) -> Result<(), Box<dyn Error>> {
+    let actual = value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other(format!("missing string field {key:?} in {value}")))?;
+    if actual.contains(expected) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "expected {key:?} to contain {expected:?}, found {actual:?}"
+        ))
+        .into())
+    }
+}
