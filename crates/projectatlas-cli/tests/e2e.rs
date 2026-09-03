@@ -348,6 +348,7 @@ public static class Program
                 while (!child.WaitForExit(25))
                 {
                     if (publicationMode != "timeout-ignore-stop"
+                        && publicationMode != "ignore-stop"
                         && File.Exists(identityPath + ".stop"))
                     {
                         child.Kill();
@@ -42623,48 +42624,15 @@ fn windows_codex_owner_native_cleanup_with_injected_failure(
     compile_obsolete_projectatlas_fixture(&runtime)?;
     compile_codex_mcp_owner_fixture(&codex_fixture)?;
 
-    let mut owner = StdCommand::new(&codex_fixture)
-        .arg(&identity_file)
-        .arg(&runtime)
-        .arg(&db)
-        .env(CODEX_OWNER_PUBLICATION_MODE_ENV, "timeout-ignore-stop")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let retained_identity_file = codex_owner_retained_identity_path(&identity_file);
-    let retained_deadline = Instant::now() + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
-    while !retained_identity_file.is_file() {
-        if let Some(status) = owner.try_wait()? {
-            let wait_result = owner.wait();
-            return Err(io::Error::other(format!(
-                "uncooperative Codex owner exited before retaining its child identity: {status}; reap={wait_result:?}"
-            ))
-            .into());
-        }
-        if Instant::now() >= retained_deadline {
-            let kill_result = owner.kill();
-            let wait_result = owner.wait();
-            return Err(io::Error::other(
-                format!(
-                    "uncooperative Codex owner did not retain its child identity within the bounded startup budget; cleanup kill={kill_result:?} wait={wait_result:?}"
-                ),
-            )
-            .into());
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    let child_identity = match read_codex_owner_identity_record(&retained_identity_file) {
-        Ok(identity) => identity,
-        Err(error) => {
-            let kill_result = owner.kill();
-            let wait_result = owner.wait();
-            return Err(io::Error::other(format!(
-                "uncooperative Codex owner published an unreadable retained child identity: {error}; cleanup kill={kill_result:?} wait={wait_result:?}"
-            ))
-            .into());
-        }
-    };
+    let (mut owner, child_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        None,
+        &identity_file,
+        None,
+        Some("ignore-stop"),
+    )?;
     let injected_owner_identity = if injected_failure
         == WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture
     {
