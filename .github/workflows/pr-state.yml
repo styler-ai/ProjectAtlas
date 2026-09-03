@@ -1,0 +1,68 @@
+# Purpose: Validate pull-request issue linkage and milestone without rebuilding source.
+
+name: PR state
+
+on:
+  pull_request:
+    branches: [main, dev]
+    types: [opened, reopened, synchronize, edited, milestoned, demilestoned]
+
+concurrency:
+  group: projectatlas-pr-state-${{ github.event.pull_request.number }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  pr-state:
+    name: pr-state
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate issue reference and milestone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          pr_payload="$RUNNER_TEMP/projectatlas-pr.json"
+          issue_payload="$RUNNER_TEMP/projectatlas-issue.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$pr_payload"
+          binding="$(python3 -c '
+          import json, os, re, sys
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          repo = os.environ["GITHUB_REPOSITORY"]
+          pattern = re.compile(r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)")
+          numbers = set()
+          text = "{}\n{}".format(payload.get("title", ""), payload.get("body", ""))
+          for reference in pattern.findall(text):
+              if "#" in reference and not reference.startswith(("#", "GH-")) and reference.rsplit("#", 1)[0].casefold() != repo.casefold():
+                  continue
+              numbers.add(int(reference[3:] if reference.startswith("GH-") else reference.rsplit("#", 1)[-1]))
+          if len(numbers) != 1:
+              raise SystemExit(f"pull request must reference exactly one owning issue; found {len(numbers)} candidates")
+          milestone = payload.get("milestone") or {}
+          number = milestone.get("number")
+          if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+              raise SystemExit("pull request must be assigned to a milestone")
+          print(numbers.pop(), number)
+          ' "$pr_payload")"
+          read -r owner_issue pr_milestone <<< "$binding"
+          gh api "repos/$GITHUB_REPOSITORY/issues/$owner_issue" > "$issue_payload"
+          issue_binding="$(python3 -c '
+          import json, sys
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          if "pull_request" in payload or payload.get("state") != "open":
+              raise SystemExit("pull request owner must be an open issue")
+          milestone = payload.get("milestone") or {}
+          number = milestone.get("number")
+          if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+              raise SystemExit("owning issue must be assigned to a milestone")
+          print(number)
+          ' "$issue_payload")"
+          if [[ "$pr_milestone" != "$issue_binding" ]]; then
+            echo "Pull request milestone must match owning issue #$owner_issue." >&2
+            exit 1
+          fi

@@ -1,32 +1,15 @@
 #!/bin/sh
-# Purpose: Run the full local ProjectAtlas check suite before pushing.
+# Purpose: Run only the local ProjectAtlas proof affected by the exact push.
 
-set -e
+set -eu
 
 # Git exports repository-local state to hooks; test fixtures must rediscover their own roots.
 for git_variable in $(git rev-parse --local-env-vars); do
   unset "$git_variable"
 done
+export GIT_NO_REPLACE_OBJECTS=1
 
-python3 .github/scripts/verify-rust-toolchain.py
-cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-python3 docs/benchmarks/harness/mcp_composition.py --self-test
-python3 .github/scripts/verify-manual-benchmark-policy.py
-python3 .github/scripts/verify-published-benchmark-locks.py
-cargo fmt --all --check
-cargo check --workspace --all-targets --all-features --locked
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo deny --locked --all-features check -D warnings
-npm ci --ignore-scripts --prefix .github/mermaid-parser
-npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
-cargo test --workspace --all-features --locked
-cargo test --doc --workspace --all-features --locked
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
-python3 .github/scripts/issue-checklists.py --self-test
-python3 .github/scripts/test-optional-parser-proof-inputs.py
-command -v gh >/dev/null 2>&1
-repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-push_scope="$(
+if ! push_record="$(
   awk '
     NF != 4 { invalid=1; next }
     {
@@ -35,68 +18,193 @@ push_scope="$(
         seen=1
         updates += 1
         local_oid = $2
-        if ($3 == "refs/heads/main") main=1
+        remote_ref = $3
+        remote_oid = $4
       }
     }
     END {
       if (!seen || invalid || updates != 1) exit 1
-      if (main) print "global"
-      else print "candidate:" local_oid
+      print remote_ref "|" local_oid "|" remote_oid
     }
   '
-)"
-if [ "$push_scope" = "global" ]; then
-  python3 .github/scripts/issue-checklists.py \
-    --repo "$repo" --root . --issue-map openspec/issue-map.json
-elif [ "${push_scope#candidate:}" != "$push_scope" ]; then
-  candidate_local_oid="${push_scope#candidate:}"
-  export GIT_NO_REPLACE_OBJECTS=1
-  if ! current_head="$(git rev-parse --verify 'HEAD^{commit}')" ||
-    [ -z "$current_head" ]; then
-    echo "candidate branch checked-out HEAD is unreadable" >&2
-    exit 1
-  fi
-  if [ "$candidate_local_oid" != "$current_head" ]; then
-    echo "candidate branch local object does not match checked-out HEAD" >&2
-    exit 1
-  fi
-  if ! worktree_status="$(git status --porcelain=v1 --untracked-files=all)"; then
-    echo "candidate branch worktree status is unreadable" >&2
-    exit 1
-  fi
-  if [ -n "$worktree_status" ]; then
-    echo "candidate branch worktree must be clean before scoped validation" >&2
-    exit 1
-  fi
-  if ! index_state="$(git ls-files -v)"; then
-    echo "candidate branch tracked index state is unreadable" >&2
-    exit 1
-  fi
-  if printf '%s\n' "$index_state" | awk '
-    substr($0, 1, 1) == "S" || substr($0, 1, 1) ~ /^[[:lower:]]$/ { hidden=1 }
-    END { exit hidden ? 0 : 1 }
-  '; then
-    echo "candidate branch index hides tracked state" >&2
-    exit 1
-  fi
-  if ! accepted_base="$(git merge-base origin/main HEAD)" || [ -z "$accepted_base" ]; then
-    echo "candidate branch accepted origin/main base is unreadable" >&2
-    exit 1
-  fi
-  if ! owner_issue="$(
-    git log --format=%s "$accepted_base..HEAD" |
-      python3 .github/scripts/issue-checklists.py --owner-from-commits
-  )"; then
-    echo "candidate branch owner resolution failed" >&2
-    exit 1
-  fi
-  python3 .github/scripts/issue-checklists.py \
-    --repo "$repo" --root . --issue-map openspec/issue-map.json \
-    --candidate-issue "$owner_issue" --candidate-local-oid "$candidate_local_oid" \
-    --base "$accepted_base"
-else
-  echo "pre-push validation scope is invalid" >&2
+)"; then
+  echo "pre-push requires exactly one non-deletion branch update" >&2
   exit 1
 fi
-cargo run --locked -p projectatlas-cli -- --format json scan .
-cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low
+IFS='|' read -r remote_ref candidate_local_oid remote_oid <<EOF
+$push_record
+EOF
+
+if ! current_head="$(git rev-parse --verify 'HEAD^{commit}')" ||
+  [ -z "$current_head" ] ||
+  [ "$candidate_local_oid" != "$current_head" ]; then
+  echo "pushed local object must match the checked-out HEAD" >&2
+  exit 1
+fi
+if ! worktree_status="$(git status --porcelain=v1 --untracked-files=all)" ||
+  [ -n "$worktree_status" ]; then
+  echo "candidate branch worktree must be clean before scoped validation" >&2
+  exit 1
+fi
+if ! index_state="$(git ls-files -v)"; then
+  echo "tracked index state is unreadable" >&2
+  exit 1
+fi
+if printf '%s\n' "$index_state" | awk '
+  substr($0, 1, 1) == "S" || substr($0, 1, 1) ~ /^[[:lower:]]$/ { hidden=1 }
+  END { exit hidden ? 0 : 1 }
+'; then
+  echo "tracked index state is hidden" >&2
+  exit 1
+fi
+
+if [ "$remote_ref" = "refs/heads/main" ] && [ "$remote_oid" != "0000000000000000000000000000000000000000" ]; then
+  accepted_base="$remote_oid"
+  force_full="--force-full"
+  issue_scope="global"
+else
+  if ! accepted_base="$(git merge-base origin/main HEAD)" || [ -z "$accepted_base" ]; then
+    echo "accepted origin/main base is unreadable" >&2
+    exit 1
+  fi
+  force_full=""
+  issue_scope="candidate"
+fi
+
+python3 .github/scripts/affected-ci-proof.py --self-test
+plan_json="$(
+  python3 .github/scripts/affected-ci-proof.py plan \
+    --base "$accepted_base" \
+    --head "$current_head" \
+    --event pre_push \
+    $force_full
+)"
+repository_contracts="$(
+  PLAN="$plan_json" python3 -c 'import json,os; print(*json.loads(os.environ["PLAN"])["repository_contracts"])'
+)"
+rust_packages="$(
+  PLAN="$plan_json" python3 -c 'import json,os; print(*json.loads(os.environ["PLAN"])["rust_packages"])'
+)"
+test_targets="$(
+  PLAN="$plan_json" python3 -c 'import json,os; print(*json.loads(os.environ["PLAN"])["test_targets"])'
+)"
+test_only="$(
+  PLAN="$plan_json" python3 -c 'import json,os; print(str(json.loads(os.environ["PLAN"])["test_only"]).lower())'
+)"
+mode="$(
+  PLAN="$plan_json" python3 -c 'import json,os; print(json.loads(os.environ["PLAN"])["mode"])'
+)"
+rust_required="$(
+  PLAN="$plan_json" python3 -c 'import json,os; print(str(json.loads(os.environ["PLAN"])["jobs"]["rust"]).lower())'
+)"
+
+has_repository_contract() {
+  case " $repository_contracts " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if has_repository_contract issueops || has_repository_contract mermaid; then
+  if ! npm ls --depth=0 --prefix .github/mermaid-parser >/dev/null 2>&1; then
+    npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+  fi
+fi
+if has_repository_contract dependency-audit; then
+  npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+fi
+
+command -v gh >/dev/null 2>&1
+repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+if has_repository_contract issueops; then
+  python3 .github/scripts/issue-checklists.py --self-test
+  if [ "$issue_scope" = "global" ]; then
+    python3 .github/scripts/issue-checklists.py \
+      --repo "$repo" --root . --issue-map openspec/issue-map.json
+  else
+    if ! owner_issue="$(
+      git log --format=%s "$accepted_base..HEAD" |
+        python3 .github/scripts/issue-checklists.py --owner-from-commits
+    )"; then
+      echo "candidate branch owner resolution failed" >&2
+      exit 1
+    fi
+    python3 .github/scripts/issue-checklists.py \
+      --repo "$repo" --root . --issue-map openspec/issue-map.json \
+      --candidate-issue "$owner_issue" --candidate-local-oid "$candidate_local_oid" \
+      --base "$accepted_base"
+  fi
+fi
+
+if has_repository_contract benchmark-policy; then
+  python3 docs/benchmarks/harness/mcp_composition.py --self-test
+  python3 .github/scripts/verify-manual-benchmark-policy.py
+  python3 .github/scripts/verify-published-benchmark-locks.py
+fi
+if has_repository_contract optional-parser-inputs; then
+  python3 .github/scripts/test-optional-parser-proof-inputs.py
+fi
+if [ "$rust_required" = "true" ]; then
+  python3 .github/scripts/verify-rust-toolchain.py
+fi
+if has_repository_contract source-policy; then
+  cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
+fi
+if has_repository_contract cargo-dependency; then
+  cargo deny --locked --all-features check -D warnings
+fi
+
+set --
+for package in $rust_packages; do
+  case "$package" in
+    projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-lints|projectatlas-service|projectatlas-symbols|projectatlas-cli)
+      set -- "$@" -p "$package"
+      ;;
+    *)
+      echo "planner emitted unknown Rust package: $package" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -n "$rust_packages$test_targets" ]; then
+  for target in $test_targets; do
+    case "$target" in
+      e2e_delivery|e2e_lifecycle|e2e_maintenance|e2e_navigation|e2e_worktrees|installer_trust_boundaries|language_runtime_compatibility|lint_diagnostics|optional_parser_worker_failure|optional_parser_worker_platform|parser_launch_authority|parser_supervisor_adversarial) ;;
+      *)
+        echo "planner emitted unknown Rust test target: $target" >&2
+        exit 1
+        ;;
+    esac
+  done
+  cargo fmt --all --check
+  if [ "$test_only" = "true" ]; then
+    for target in $test_targets; do
+      cargo check --locked -p projectatlas-cli --all-features --test "$target"
+      cargo clippy --locked -p projectatlas-cli --all-features --test "$target" -- -D warnings
+      cargo test --locked -p projectatlas-cli --all-features --test "$target"
+    done
+  else
+    if [ "$mode" = "full" ]; then
+      cargo check "$@" --all-targets --all-features --locked
+      cargo clippy "$@" --all-targets --all-features --locked -- -D warnings
+      cargo test "$@" --all-features --locked
+    else
+      cargo check "$@" --lib --bins --examples --all-features --locked
+      cargo clippy "$@" --lib --bins --examples --all-features --locked -- -D warnings
+      cargo test "$@" --lib --bins --all-features --locked
+      for target in $test_targets; do
+        cargo check --locked -p projectatlas-cli --all-features --test "$target"
+        cargo clippy --locked -p projectatlas-cli --all-features --test "$target" -- -D warnings
+        cargo test --locked -p projectatlas-cli --all-features --test "$target"
+      done
+    fi
+    cargo test --doc "$@" --all-features --locked
+    RUSTDOCFLAGS="-D warnings" cargo doc "$@" --no-deps --all-features --locked
+  fi
+fi
+
+if has_repository_contract source-policy; then
+  cargo run --locked -p projectatlas-cli -- --format json scan .
+  cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low
+fi

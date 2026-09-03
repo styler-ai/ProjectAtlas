@@ -3291,7 +3291,9 @@ applies only when a newer pull-request source run supersedes an older source
 run for the same pull-request number; all other event, governance, and delivery
 owners use isolated namespaces with cancellation disabled. The complete
 installed-product matrix remains an integrated release-candidate boundary on
-all four supported runner targets.
+all four supported runner targets. Ordinary OS-sensitive proof uses Linux,
+Windows, and one macOS runner; both macOS architectures run only when parser,
+toolchain, or package behavior is architecture-sensitive.
 
 ```mermaid
 flowchart TB

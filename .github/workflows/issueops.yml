@@ -10,6 +10,10 @@ on:
         required: true
         type: number
 
+concurrency:
+  group: projectatlas-issueops-${{ github.run_id }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   issues: read

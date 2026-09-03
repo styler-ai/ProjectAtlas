@@ -3451,6 +3451,9 @@ Timeout --> Recovery
     else:
         raise AssertionError("overlapping owner ranges were accepted")
     assert first_task_difference(expected, expected[:-1]) == "task count differs: expected 2, found 1"
+    assert "task 1 differs" in first_task_difference(expected, [(False, "Changed text"), expected[1]])
+    assert "task 1 differs" in first_task_difference(expected, list(reversed(expected)))
+    assert "task 1 differs" in first_task_difference(expected, [(False, expected[0][1]), expected[1]])
     with tempfile.TemporaryDirectory() as temporary:
         branch_root = Path(temporary)
         branch_tasks = "- [x] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n"

@@ -3044,10 +3044,20 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
     let ci = fs::read_to_string(workflows.join("ci.yml"))?;
+    let pr_state = fs::read_to_string(workflows.join("pr-state.yml"))?;
+    let planner = fs::read_to_string(github.join("scripts").join("affected-ci-proof.py"))?;
     let docs_workflow = fs::read_to_string(workflows.join(DOCS_WORKFLOW_FILE_NAME))?;
+    let auto_release_workflow = fs::read_to_string(workflows.join("03-auto-release.yml"))?;
     let optional_parser_workflow = fs::read_to_string(workflows.join("optional-parser-pack.yml"))?;
     let release = fs::read_to_string(workflows.join("release.yml"))?;
     let issueops_workflow = fs::read_to_string(workflows.join("issueops.yml"))?;
+    if github
+        .join("scripts")
+        .join("codex-pr-review-gate.py")
+        .exists()
+    {
+        return Err(io::Error::other("superseded Codex-only review poller still exists").into());
+    }
     let hook = fs::read_to_string(
         workspace_root
             .join(GITHOOKS_DIR_NAME)
@@ -3108,7 +3118,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     for (name, workflow) in [
-        ("CI", ci.as_str()),
         ("release", release.as_str()),
         ("IssueOps", issueops_workflow.as_str()),
     ] {
@@ -3124,7 +3133,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
-    for (name, workflow) in [("release", release.as_str()), ("pre-push", hook.as_str())] {
+    for (name, workflow) in [("release", release.as_str())] {
         let first_cargo_test = workflow
             .find("cargo test")
             .ok_or_else(|| io::Error::other(format!("{name} omitted cargo tests")))?;
@@ -3138,6 +3147,19 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             if gate_position > first_cargo_test {
                 return Err(io::Error::other(format!(
                     "{name} Mermaid gate {gate:?} must precede its first cargo test"
+                ))
+                .into());
+            }
+        }
+    }
+    for (name, owner) in [("CI", ci.as_str()), ("pre-push", hook.as_str())] {
+        for command in [
+            "npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+        ] {
+            if !owner.contains(command) {
+                return Err(io::Error::other(format!(
+                    "{name} omitted affected Mermaid dependency gate {command:?}"
                 ))
                 .into());
             }
@@ -3243,20 +3265,27 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     let normalized_hook = hook.replace("\r\n", "\n");
     for required in [
-        "push_scope=\"$(\n  awk '",
+        "if ! push_record=\"$(",
         "NF != 4",
         "if ($2 ~ /^0+$/ || $3 !~",
         "if (!seen || invalid || updates != 1) exit 1",
         "updates += 1",
         "local_oid = $2",
-        "else print \"candidate:\" local_oid",
+        "print remote_ref \"|\" local_oid \"|\" remote_oid",
+        "IFS='|' read -r remote_ref candidate_local_oid remote_oid",
         "refs/heads/main",
-        "if [ \"$push_scope\" = \"global\" ]; then",
-        "elif [ \"${push_scope#candidate:}\" != \"$push_scope\" ]; then",
-        "candidate_local_oid=\"${push_scope#candidate:}\"",
         "git rev-parse --verify 'HEAD^{commit}'",
-        "candidate branch local object does not match checked-out HEAD",
+        "pushed local object must match the checked-out HEAD",
+        "git status --porcelain=v1 --untracked-files=all",
+        "git ls-files -v",
         "git merge-base origin/main HEAD",
+        "affected-ci-proof.py --self-test",
+        "affected-ci-proof.py plan",
+        "--base \"$accepted_base\"",
+        "--head \"$current_head\"",
+        "--event pre_push",
+        "npm ls --depth=0 --prefix .github/mermaid-parser",
+        "has_repository_contract dependency-audit",
         "git log --format=%s",
         "--owner-from-commits",
         "--candidate-issue \"$owner_issue\"",
@@ -3271,7 +3300,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     let main_route = normalized_hook
-        .find("if [ \"$push_scope\" = \"global\" ]; then")
+        .find("if [ \"$remote_ref\" = \"refs/heads/main\" ]")
         .ok_or_else(|| io::Error::other("pre-push hook omitted main route"))?;
     let global_route = normalized_hook
         .find("--repo \"$repo\" --root . --issue-map openspec/issue-map.json")
@@ -3282,6 +3311,18 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if !(main_route < global_route && global_route < candidate_route) {
         return Err(io::Error::other(
             "pre-push hook must keep global and candidate IssueOps routes in their target scopes",
+        )
+        .into());
+    }
+    let planner_position = normalized_hook
+        .find("affected-ci-proof.py plan")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted affected planner"))?;
+    let first_expensive_position = normalized_hook
+        .find("npm ls --depth=0")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted dependency reuse check"))?;
+    if planner_position > first_expensive_position {
+        return Err(io::Error::other(
+            "pre-push hook must bind its affected plan before dependency or build work",
         )
         .into());
     }
@@ -3380,39 +3421,101 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
 
     for required in [
-        "cargo fmt --all --check",
-        "cargo check --workspace --all-targets --all-features --locked",
-        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
-        "cargo test --workspace --all-features --locked",
-        "cargo test --doc --workspace --all-features --locked",
-        "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --locked",
-        "cargo deny --locked --all-features check -D warnings",
-        "npm ci --ignore-scripts --prefix .github/mermaid-parser",
-        "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
-        "issue-checklists.py --self-test",
-        "test-optional-parser-proof-inputs.py",
+        "affected-ci-proof.py plan",
+        "cargo check \"$@\" --all-targets --all-features --locked",
+        "cargo check \"$@\" --lib --bins --examples --all-features --locked",
+        "cargo test \"$@\" --lib --bins --all-features --locked",
+        "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
+        "npm ls --depth=0 --prefix .github/mermaid-parser",
+        "has_repository_contract cargo-dependency",
+        "has_repository_contract source-policy",
     ] {
-        if !hook.contains(required) || !workflow_docs.contains(required) {
+        if !hook.contains(required) {
             return Err(io::Error::other(format!(
-                "hook and workflow docs must share ordinary gate {required:?}"
+                "pre-push hook omitted affected proof gate {required:?}"
             ))
             .into());
         }
     }
     for required in [
+        "exact clean candidate",
+        "affected-ci-proof.py",
+        "only the repository, Rust package",
+        "Unknown paths and changes to shared proof authorities",
+        "Run the complete local suite only",
+    ] {
+        if !workflow_docs.contains(required) {
+            return Err(io::Error::other(format!(
+                "workflow guidance omitted affected proof boundary {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "types: [opened, reopened, synchronize]",
+        "merge_group:",
+        "schedule:",
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        "python3 .github/scripts/affected-ci-proof.py --self-test",
+        "python3 .github/scripts/affected-ci-proof.py plan",
+        "if: needs.plan.outputs.repository == 'true'",
+        "if: needs.plan.outputs.rust == 'true'",
+        "matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}",
         "cargo fmt --all --check",
-        "cargo check --workspace --all-targets --all-features --locked",
-        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
-        "cargo test --workspace --all-features --locked",
-        "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
-        "cargo test --doc --workspace --all-features --locked",
+        "cargo check --locked -p projectatlas-cli --all-features --test \"$target\"",
+        "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
+        "cargo check \"${package_args[@]}\" --all-targets --all-features --locked",
+        "cargo check \"${package_args[@]}\" --lib --bins --examples --all-features --locked",
+        "cargo test \"${package_args[@]}\" --lib --bins --all-features --locked",
+        "cargo test \"${package_args[@]}\" --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
+        "if: always()",
+        "needs: [plan, repository, rust, e2e-smoke]",
+        "affected-ci-proof.py aggregate",
+        "--event \"$EVENT_NAME\"",
     ] {
         if !ci.contains(required) {
             return Err(io::Error::other(format!(
                 "ordinary CI is missing blocking gate {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "pull request must reference exactly one owning issue",
+        "pull request owner must be an open issue",
+        "Pull request milestone must match owning issue",
+    ] {
+        if !pr_state.contains(required) {
+            return Err(io::Error::other(format!(
+                "pr-state omitted ownership boundary {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "MAX_DIFF_BYTES",
+        "MAX_PATHS",
+        "GIT_NO_REPLACE_OBJECTS",
+        "[\"cargo\", \"metadata\"",
+        "Cargo workspace package inventory drifted",
+        "shared core changed",
+        "shared CLI test support changed",
+        "unknown or incompletely owned path",
+        "dependency-audit",
+        "cargo-dependency",
+        "selected {name} job concluded",
+        "omitted {name} job concluded",
+        "proof plan binding is stale",
+        "binding.get(\"event\")",
+        "ordinary change requires mapped issue-state consistency",
+        "affected CI proof self-test passed",
+    ] {
+        if !planner.contains(required) {
+            return Err(io::Error::other(format!(
+                "affected CI planner omitted fail-closed contract {required:?}"
             ))
             .into());
         }
@@ -3458,13 +3561,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if ci.matches("- name: Issue checklist self-test").count() != 1 {
         return Err(io::Error::other("CI must run the IssueOps self-test exactly once").into());
     }
-    if checklist_self_test_step.contains("\n        if:") {
-        return Err(io::Error::other("CI IssueOps self-test must be unconditional").into());
+    if !checklist_self_test_step.contains(
+        "if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'issueops')",
+    ) {
+        return Err(io::Error::other("CI IssueOps self-test must follow the affected plan").into());
     }
-    for required in [
-        issueops_self_test_command,
-        "test-optional-parser-proof-inputs.py",
-    ] {
+    for required in [issueops_self_test_command] {
         if !checklist_self_test_step.contains(required) {
             return Err(io::Error::other(format!(
                 "CI IssueOps self-test omitted gate {required:?}"
@@ -3494,31 +3596,36 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if mermaid_setup_position > first_cargo_test {
         return Err(io::Error::other("CI Mermaid setup must precede its first cargo test").into());
     }
-    if mermaid_setup_step.contains("\n        if:") {
-        return Err(io::Error::other("CI Mermaid setup must be unconditional").into());
+    if !mermaid_setup_step
+        .contains("if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'mermaid')")
+    {
+        return Err(io::Error::other("CI Mermaid setup must follow the affected plan").into());
     }
-    for event in [
-        "pull_request_review:",
-        "pull_request_review_comment:",
-        "workflow_dispatch:",
-    ] {
-        if !ci.contains(event) {
+    for event in ["pull_request_review:", "pull_request_review_comment:"] {
+        if ci.contains(event) || pr_state.contains(event) {
             return Err(io::Error::other(format!(
-                "CI must retain review-event coverage for {event:?}"
+                "review activity must not launch source or metadata workflow {event:?}"
             ))
             .into());
         }
     }
-    for gate in [
-        "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+    if !mermaid_setup_step
+        .contains("npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser")
+    {
+        return Err(io::Error::other("CI Mermaid setup must avoid an implicit audit").into());
+    }
+    let dependency_audit_step = ci
+        .split("- name: Audit Mermaid dependencies")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("CI dependency-audit step is missing"))?;
+    for required in [
+        "contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'dependency-audit')",
         "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
     ] {
-        if !mermaid_setup_step.contains(gate) {
-            return Err(io::Error::other(format!("CI Mermaid setup omitted gate {gate:?}")).into());
-        }
-        if checklist_step.contains(gate) {
+        if !dependency_audit_step.contains(required) {
             return Err(io::Error::other(format!(
-                "CI IssueOps step must not own Mermaid setup gate {gate:?}"
+                "CI dependency audit omitted affected gate {required:?}"
             ))
             .into());
         }
@@ -3537,7 +3644,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     for required in [
-        "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+        "PR_BASE_SHA: ${{ needs.plan.outputs.base }}",
         "if [ \"$GITHUB_EVENT_NAME\" = \"pull_request\" ]; then",
         "git fetch --no-tags --depth=1 origin \"$PR_BASE_SHA\"",
         "--pull-request \"$PR_NUMBER\"",
@@ -3547,6 +3654,58 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !checklist_step.contains(required) {
             return Err(io::Error::other(format!(
                 "pull-request IssueOps step is missing branch-aware gate {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "types: [opened, reopened, synchronize, edited, milestoned, demilestoned]",
+        "group: projectatlas-pr-state-${{ github.event.pull_request.number }}-${{ github.run_id }}",
+        "cancel-in-progress: false",
+        "name: pr-state",
+        "Validate issue reference and milestone",
+        "gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"",
+    ] {
+        if !pr_state.contains(required) {
+            return Err(io::Error::other(format!(
+                "PR-state workflow omitted live metadata contract {required:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in ["actions/checkout", "cargo ", "codex-pr-review-gate.py"] {
+        if pr_state.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "PR-state workflow retained unrelated source work {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for (name, workflow, group) in [
+        (
+            "IssueOps",
+            issueops_workflow.as_str(),
+            "projectatlas-issueops-${{ github.run_id }}",
+        ),
+        (
+            "publish",
+            auto_release_workflow.as_str(),
+            "projectatlas-publish-${{ github.run_id }}",
+        ),
+        (
+            "deploy",
+            docs_workflow.as_str(),
+            "projectatlas-deploy-${{ github.run_id }}",
+        ),
+        (
+            "release",
+            release.as_str(),
+            "projectatlas-release-${{ inputs.version }}",
+        ),
+    ] {
+        if !workflow.contains(group) || !workflow.contains("cancel-in-progress: false") {
+            return Err(io::Error::other(format!(
+                "{name} workflow omitted its non-cancelling namespace"
             ))
             .into());
         }
@@ -4190,6 +4349,11 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
+  *"affected-ci-proof.py plan "*)
+    printf '%s\n' '{"mode":"narrow","repository_contracts":["issueops","mermaid"],"rust_packages":[],"test_targets":[],"test_only":false,"jobs":{"rust":false}}'
+    exit 0
+    ;;
+  *" -c "*) exec python "$@" ;;
   *" --owner-from-commits "*)
     awk '
       {
@@ -4336,7 +4500,9 @@ exit 0
         .into());
     }
     let (main_status, main_target) = run_hook(
-        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+        &format!(
+            "refs/heads/fix/549 {current_head} refs/heads/main 2222222222222222222222222222222222222222\n"
+        ),
         false,
     )?;
     let main_calls = final_issueops(&main_target);
@@ -4717,6 +4883,11 @@ Mitigations:
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
+  *"affected-ci-proof.py plan "*)
+    printf '%s\n' '{"mode":"narrow","repository_contracts":["issueops","mermaid"],"rust_packages":[],"test_targets":[],"test_only":false,"jobs":{"rust":false}}'
+    exit 0
+    ;;
+  *" -c "*) exec python "$@" ;;
   *" --owner-from-commits "*) exec python "$@" ;;
   *" --candidate-issue "*) exec python -c '
 import os
@@ -5396,6 +5567,11 @@ fn pre_push_candidate_rejects_dirty_worktree_before_issueops() -> Result<(), Box
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
+  *"affected-ci-proof.py plan "*)
+    printf '%s\n' '{"mode":"narrow","repository_contracts":["issueops","mermaid"],"rust_packages":[],"test_targets":[],"test_only":false,"jobs":{"rust":false}}'
+    exit 0
+    ;;
+  *" -c "*) exec python "$@" ;;
   *" --owner-from-commits "*) printf '%s\n' 549 ;;
 esac
 exit 0
@@ -5514,22 +5690,30 @@ exit 0
 fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
     let ci = fs::read_to_string(workspace_root.join(".github/workflows/ci.yml"))?;
+    let planner = fs::read_to_string(workspace_root.join(".github/scripts/affected-ci-proof.py"))?;
     let e2e_smoke = workflow_job_block(&ci, "e2e-smoke")?;
     for required in [
-        "label: macos-x64\n            os: macos-15-intel",
-        "label: macos-arm64\n            os: macos-14",
+        r#""macos-x64": "macos-15-intel""#,
+        r#""macos-arm64": "macos-14""#,
     ] {
-        if !e2e_smoke.contains(required) {
+        if !planner.contains(required) {
             return Err(io::Error::other(format!(
-                "e2e-smoke macOS matrix omitted required runner row {required:?}"
+                "affected planner omitted required macOS runner row {required:?}"
             ))
             .into());
         }
     }
+    if !e2e_smoke.contains("matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}") {
+        return Err(io::Error::other("e2e-smoke omitted its affected platform matrix").into());
+    }
 
     let step = workflow_job_step(&ci, "e2e-smoke", "macOS all-features warning gate")?;
     for (field, actual, expected) in [
-        ("if", step["if"].as_str(), Some("runner.os == 'macOS'")),
+        (
+            "if",
+            step["if"].as_str(),
+            Some("runner.os == 'macOS' && contains(matrix.contracts, 'mac-quality')"),
+        ),
         ("shell", step["shell"].as_str(), Some("bash")),
     ] {
         if actual != expected {
@@ -5564,7 +5748,7 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         (
             "if",
             platform_regression["if"].as_str(),
-            Some("runner.os == 'macOS'"),
+            Some("runner.os == 'macOS' && contains(matrix.contracts, 'parser')"),
         ),
         ("shell", platform_regression["shell"].as_str(), Some("bash")),
         (
