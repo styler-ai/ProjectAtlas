@@ -1154,6 +1154,19 @@ def planned_issue_failures(
     return failures
 
 
+@lru_cache(maxsize=1)
+def git_object_id_length() -> int | None:
+    """Return the repository's native hexadecimal object ID length."""
+
+    try:
+        object_format = run(["git", "rev-parse", "--show-object-format"])
+    except (OSError, SystemExit, subprocess.SubprocessError):
+        return None
+    if not isinstance(object_format, str):
+        return None
+    return {"sha1": 40, "sha256": 64}.get(object_format.strip())
+
+
 def candidate_tree_blob_oid(candidate_tree_ref: str, path: str) -> str | None:
     """Return one exact regular-file blob from the selected candidate tree."""
 
@@ -1167,7 +1180,8 @@ def candidate_tree_blob_oid(candidate_tree_ref: str, path: str) -> str | None:
         )
     except (OSError, SystemExit, UnicodeEncodeError, ValueError, subprocess.SubprocessError):
         return None
-    if not isinstance(output, bytes):
+    object_id_length = git_object_id_length()
+    if not isinstance(output, bytes) or object_id_length is None:
         return None
     records = output.split(b"\0")
     if len(records) != 2 or records[1] != b"":
@@ -1180,7 +1194,7 @@ def candidate_tree_blob_oid(candidate_tree_ref: str, path: str) -> str | None:
         and len(fields) == 3
         and fields[0] in {b"100644", b"100755"}
         and fields[1] == b"blob"
-        and len(fields[2]) == 40
+        and len(fields[2]) == object_id_length
         and all(byte in b"0123456789abcdefABCDEF" for byte in fields[2])
     ):
         return None
@@ -1211,6 +1225,9 @@ def candidate_tree_change_names(
         ) from error
     if not isinstance(output, bytes):
         raise SystemExit("candidate branch OpenSpec changes returned non-binary tree data")
+    object_id_length = git_object_id_length()
+    if object_id_length is None:
+        raise SystemExit("candidate branch Git object format is unsupported or unreadable")
     records = output.split(b"\0")
     if not records or records[-1] != b"":
         raise SystemExit("candidate branch OpenSpec changes returned malformed tree data")
@@ -1222,7 +1239,7 @@ def candidate_tree_change_names(
         if (
             separator != b"\t"
             or len(fields) != 3
-            or len(fields[2]) != 40
+            or len(fields[2]) != object_id_length
             or fields[1] not in {b"blob", b"tree", b"commit"}
             or not all(byte in b"0123456789abcdefABCDEF" for byte in fields[2])
             or not fields[0]

@@ -23,6 +23,10 @@ ProjectAtlas SHALL validate one local candidate issue against its live GitHub ch
 - **WHEN** local Git replacement refs substitute the submitted candidate commit, a descendant tree, a candidate blob, or accepted-base object
 - **THEN** candidate validation disables replacement resolution and reads the original submitted object IDs
 
+#### Scenario: Candidate repository uses SHA-256 objects
+- **WHEN** candidate validation runs in a repository whose native Git object format is SHA-256
+- **THEN** candidate tree entries are validated with 64-character object IDs and retain the same submitted-blob authority and fail-closed checks as SHA-1 repositories
+
 ### Requirement: Candidate ownership and base authority fail closed
 ProjectAtlas SHALL require exactly one mapped open owning issue and a readable accepted base for local candidate validation.
 

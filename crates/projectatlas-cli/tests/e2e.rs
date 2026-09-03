@@ -10703,7 +10703,10 @@ Mitigations:
             "body": issue_body,
         }))?,
     )?;
-    git_success(&fixture_repo, &["init", "--initial-branch=main"])?;
+    git_success(
+        &fixture_repo,
+        &["init", "--object-format=sha256", "--initial-branch=main"],
+    )?;
     git_success(
         &fixture_repo,
         &["config", "user.email", "test@example.invalid"],
