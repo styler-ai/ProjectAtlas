@@ -140,10 +140,10 @@
 
 ## 21. CLI E2E suite contract split (#487)
 
-- [ ] 21.1 Produce and accept a complete test-to-domain move map for every `e2e.rs` test/helper/platform gate using `e2e_lifecycle.rs`, `e2e_delivery.rs`, `e2e_navigation.rs`, `e2e_worktrees.rs`, `e2e_maintenance.rs`, and existing separate suites; identify exact shared-support users and merge any proposed binary whose inventory proves no cohesive boundary rather than preserving symmetry.
-- [ ] 21.2 Move one coherent domain at a time, extracting only multiply-owned process/repository/JSON/platform/package support, preserving durable test names and ignored/platform attributes, and keeping each intermediate integration binary runnable.
-- [ ] 21.3 Compare pre/post test inventory and CI command selection and prove no test, assertion, ignored contract, platform gate, timeout, cleanup, process isolation, packaged-product path, or release selection was dropped or silently weakened; run each binary plus workspace/all-feature gates on affected platforms.
-- [ ] 21.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 21.1 Produce and accept a complete test-to-domain move map for every `e2e.rs` test/helper/platform gate using `e2e_lifecycle.rs`, `e2e_delivery.rs`, `e2e_navigation.rs`, `e2e_worktrees.rs`, `e2e_maintenance.rs`, and existing separate suites; identify exact shared-support users and merge any proposed binary whose inventory proves no cohesive boundary rather than preserving symmetry.
+- [x] 21.2 Move one coherent domain at a time, extracting only multiply-owned process/repository/JSON/platform/package support, preserving durable test names and ignored/platform attributes, and keeping each intermediate integration binary runnable.
+- [x] 21.3 Compare pre/post test inventory and CI command selection and prove no test, assertion, ignored contract, platform gate, timeout, cleanup, process isolation, packaged-product path, or release selection was dropped or silently weakened; run each binary plus workspace/all-feature gates on affected platforms.
+- [x] 21.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 22. Production module responsibility decision (#488)
 
