@@ -9,5 +9,5 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Prove the focused test under PowerShell and `cmd.exe`, its serialized installer subgroup, and the normal parallel full E2E/workspace gate without retries or global serialization; obtain hosted Windows proof and retain non-Windows compatibility.
+- [x] 3.1 Prove the focused test under PowerShell and `cmd.exe`, its serialized installer subgroup, and the normal parallel full E2E/workspace gate without retries or global serialization; obtain hosted Windows proof and retain non-Windows compatibility.
 - [x] 3.2 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
