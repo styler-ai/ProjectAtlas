@@ -3282,10 +3282,11 @@ rejection.
 Normal pull requests route only the proof contracts that can detect defects in
 the exact change. One closed planner combines the Cargo reverse-dependency graph
 with declared CLI, MCP, integration, and platform ownership; ambiguity selects
-the complete normal-PR proof. Live review-state changes stay independent from
-source verification, selected jobs run concurrently, and one fail-closed
-aggregate is the stable source-proof context. Pull-request readiness is the
-explicit AND of current `pr-state` and current `verify`. Automatic cancellation
+the complete normal-PR proof. Live review-thread state is owned by GitHub's
+native required-conversation-resolution rule, selected jobs run concurrently,
+and one fail-closed aggregate is the stable source-proof context. Pull-request
+readiness is the explicit AND of current `pr-state`, current `verify`, and
+resolved review conversations. Automatic cancellation
 applies only when a newer pull-request source run supersedes an older source
 run for the same pull-request number; all other event, governance, and delivery
 owners use isolated namespaces with cancellation disabled. The complete
@@ -3297,15 +3298,17 @@ flowchart TB
     subgraph PR[Pull request]
         direction LR
         Change[Source change] --> Plan[Closed proof-contract planner]
-        Review[Review or metadata change] --> State[Required PR-state gate]
+        Metadata[Issue reference or milestone change] --> State[Required PR-state gate]
+        Review[Review conversation state] --> Conversation[Native required<br/>conversation resolution]
         Plan --> Known{Narrow plan proven?}
         Known -->|No| Full[Complete normal-PR proof]
         Known -->|Yes| Selected[Selected quality, test-domain,<br/>and platform jobs]
         Full --> Verify[Required verify aggregate]
         Selected --> Verify
-        State --> Gate{{AND: current PR-state<br/>plus current verify}}
+        State --> Gate{{AND: current PR-state,<br/>current verify, and<br/>resolved conversations}}
         Verify --> Gate
-        Gate -->|Both green| Ready[PR ready]
+        Conversation --> Gate
+        Gate -->|All satisfied| Ready[PR ready]
         Gate -->|Otherwise| Blocked[PR blocked]
     end
 

@@ -4,10 +4,10 @@ ProjectAtlas currently spends roughly 29-47 minutes of pull-request wall time an
 
 ## What Changes
 
-- Separate live pull-request metadata and review-thread validation from code verification so review activity never recompiles or reruns tests for an unchanged source tree.
+- Separate live pull-request metadata from code verification and use GitHub's native required-conversation-resolution rule for review threads, so review activity never recompiles or reruns tests for an unchanged source tree and thread resolution cannot leave a stale workflow result.
 - Allow automatic cancellation only when a newer `pull_request` source-verification run supersedes an older source-verification run for the same pull-request number; isolate every other event and workflow namespace from cancellation.
 - Add one Python-standard-library planner that reads the exact change set, derives Rust reverse dependencies from one `cargo metadata` result, adds only declared non-Cargo contract edges, and explains both selected and omitted proof contracts.
-- Run selected Rust, integration, and platform proof concurrently behind one fail-closed required aggregate; unknown, shared, workflow, toolchain, lockfile, schema, planner, or contract-map changes select the complete normal-PR proof.
+- Run only selected Rust, integration, and platform proof in local pre-push and concurrently in hosted CI behind one fail-closed required aggregate; unknown, shared, workflow, toolchain, lockfile, schema, planner, or contract-map changes select the complete normal-PR proof.
 - Require planned-issue IssueOps to compare the live implementation-task text, order, and checked state literally with the mapped `tasks.md`, including equal-count drift.
 - Preserve the complete four-platform installed-product matrix at the integrated release-candidate boundary, with the whole boundary restarted after a confirmed defect is fixed.
 - Measure wall time and raw runner-minutes before and after for docs-only, leaf-crate, CLI test-domain, shared-core, and platform-sensitive changes; retain only routing that produces a significant improvement without losing causal proof.

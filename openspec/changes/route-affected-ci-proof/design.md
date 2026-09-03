@@ -55,13 +55,14 @@ installed-product four-platform matrix remains a release-candidate boundary.
 
 ### 1. Separate live pull-request state from source verification
 
-A small `pr-state` workflow SHALL own the live issue-reference, milestone, and
-review-thread gates. It runs on the pull-request and review events that can
-change those answers. Review and review-comment events SHALL NOT start Rust or
-platform jobs for an unchanged source tree. Its concurrency namespace is
-separate from source CI and automatic cancellation is disabled, so a review
-event cannot cancel useful compilation, tests, another state check, or an
-IssueOps run.
+A small `pr-state` workflow SHALL own the live issue-reference and milestone
+gates. GitHub's native required-conversation-resolution branch rule SHALL own
+live review-thread state because Actions has no thread-resolution trigger and a
+workflow result could therefore become stale. Review and review-comment events
+SHALL NOT start `pr-state`, Rust, or platform jobs for an unchanged source tree.
+The `pr-state` concurrency namespace is separate from source CI and automatic
+cancellation is disabled, so metadata activity cannot cancel useful
+compilation, tests, another state check, or an IssueOps run.
 
 The existing code workflow remains the source-verification owner and runs for
 pull-request source changes, protected-branch pushes, merge-group candidates
@@ -104,6 +105,13 @@ and produce bounded JSON plus a human-readable Actions summary. It invokes
 results with a checked-in, closed mapping from paths to non-Cargo proof
 contracts. The planner returns proof-contract identifiers and job booleans,
 not arbitrary shell commands.
+
+The local pre-push hook consumes the same plan for the exact clean candidate
+head and accepted `origin/main` base before running expensive proof. It maps the
+fixed contract IDs to existing commands locally, just as hosted static jobs do,
+so a documentation or owning-test change does not pay for unrelated workspace
+or platform-neutral proof. Invalid push input or a plan that cannot be bound to
+that candidate fails closed; it never guesses a narrower local command set.
 
 The mapping uses the existing owners: repository policy, Rust compile/lint/doc
 quality, crate unit and integration tests, the CLI E2E domains established by
@@ -169,13 +177,15 @@ required `verify` job runs with `if: always()` and succeeds only when the plan
 is valid and fresh, every selected job succeeded, and every omitted job was
 explicitly marked not applicable by that plan. A selected job that is missing,
 skipped, cancelled, or failed makes the aggregate fail. The independent
-`pr-state` context is the second stable required context.
+`pr-state` is the second stable required context. Native required conversation
+resolution is the independent live review-thread condition.
 
 Pull-request readiness is an explicit logical AND: the current `pr-state` and
 the current `verify` for the same pull-request source input must both exist and
-succeed. Either context being absent, stale, skipped, cancelled, or failed
-keeps the pull request blocked. Neither context can satisfy or replace the
-other.
+succeed, and GitHub must report every review conversation resolved. Either
+context being absent, stale, skipped, cancelled, or failed, or any unresolved
+conversation, keeps the pull request blocked. None can satisfy or replace
+another.
 
 This stable aggregate avoids a required-context name per possible plan. The
 existing four `e2e-smoke` job names remain present during migration, and the
@@ -250,6 +260,10 @@ representation is sufficient; no second task store, hash, or receipt is added.
   deterministic namespaces, disable cancellation everywhere except newer
   source verification for the same pull-request number, and cover overlapping
   events deterministically and in hosted Actions.
+- **Thread resolution could leave a stale workflow result.** -> Use GitHub's
+  native required-conversation-resolution rule instead of polling or an
+  Actions event that does not exist; verify both resolve and reopen behavior
+  during the controlled branch-protection transition.
 - **Parallel execution spends runner time when an early quality check fails.**
   -> Prefer lower merge latency for valid changes, cancel superseded source
   runs, and measure runner-minutes; do not add speculative stage barriers.
@@ -258,9 +272,9 @@ representation is sufficient; no second task store, hash, or receipt is added.
   and record unavoidable queue limitations without weakening proof.
 - **Branch-protection migration could create a merge gap.** -> Make the
   implementation PR fail closed and emit all current contexts, merge the code,
-  then replace the four platform requirements with `pr-state` plus `verify` in
-  one controlled transition and immediately exercise both narrow and fallback
-  plans.
+  then enable required conversation resolution and replace the four platform
+  requirements with `pr-state` plus `verify` in one controlled transition and
+  immediately exercise both narrow and fallback plans.
 - **The planner becomes another build system.** -> Keep fixed contract IDs,
   standard-library parsing, one Cargo metadata graph, no command generation,
   and no plugin interface.
@@ -273,21 +287,23 @@ representation is sufficient; no second task store, hash, or receipt is added.
 1. Inventory each existing `ci.yml` step and assign it to one closed proof
    contract; unresolved ownership remains full fallback.
 2. Add the planner, bounded report, and self-tests before wiring omission.
-3. Move live issue/reference/review checks to the separate `pr-state` workflow.
+3. Move live issue/reference checks to the separate `pr-state` workflow and use
+   native required conversation resolution for review threads.
 4. Give each event and workflow owner its separate cancellation namespace;
    enable cancellation only for an older PR source run superseded by a newer
    source run for the same pull-request number.
 5. Refactor source CI into planner, static concurrent jobs, and final `verify`
    aggregate while forcing the implementation pull request to full fallback.
 6. Prove positive, negative, failure, compatibility, bot, rename/delete, stale
-   binding, readiness-AND, same-PR cancellation, and cross-owner isolation
+   binding, three-input readiness, same-PR cancellation, and cross-owner isolation
    locally and in hosted Actions.
 7. Extend planned-issue IssueOps self-tests with equal-count task-text and order
    drift before relying on the issue/task mirror for handoff.
 8. After the implementation is merged, change branch protection from the four
-   platform contexts to `pr-state` and `verify`; immediately exercise a narrow
-   known plan and an unknown-input fallback. Roll back by restoring the former
-   required contexts and making every plan select complete proof.
+   platform contexts to `pr-state` and `verify` while enabling required
+   conversation resolution; immediately exercise thread resolve/reopen, a
+   narrow known plan, and an unknown-input fallback. Roll back by restoring the
+   former required contexts and making every plan select complete proof.
 9. Measure all five before/after classes. Remove any narrowing rule that does
    not meet materiality or causal-coverage requirements.
 10. Confirm the next integrated release candidate still runs the complete

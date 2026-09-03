@@ -53,20 +53,39 @@ The planner SHALL publish a bounded Actions summary that identifies every select
 - **WHEN** a run completes
 - **THEN** the summary helps reviewers understand routing while required job conclusions and behavior tests remain the acceptance authority
 
+### Requirement: Local pre-push uses the same affected plan
+The local pre-push hook SHALL bind the same closed proof plan to the exact clean candidate head and accepted base before running expensive proof, and SHALL execute only the fixed local commands that own selected contracts.
+
+#### Scenario: Narrow candidate is pushed
+- **WHEN** an exact clean candidate contains only a known documentation, independent leaf-crate, or CLI test-domain change
+- **THEN** pre-push runs its IssueOps and selected owning proof without compiling or testing unrelated crates or domains
+
+#### Scenario: Local plan cannot be trusted
+- **WHEN** the pushed ref input, candidate identity, accepted base, metadata, or ownership mapping is invalid, stale, ambiguous, or unknown
+- **THEN** pre-push fails or selects complete local proof and never guesses a narrower command set
+
 ### Requirement: Live PR state does not repeat unchanged source proof
-Issue-reference, milestone, and review-thread validation SHALL run in a lightweight required `pr-state` workflow whose review-event executions do not launch Rust compilation, Rust tests, or platform E2E jobs for an unchanged source tree. Automatic cancellation SHALL be disabled for `pr-state`.
+Issue-reference and milestone validation SHALL run in a lightweight required `pr-state` workflow. GitHub native required conversation resolution SHALL own live review-thread state so resolving or reopening a thread cannot leave a stale workflow conclusion. Review and review-comment activity SHALL NOT launch `pr-state`, Rust compilation, Rust tests, or platform E2E jobs for an unchanged source tree. Automatic cancellation SHALL be disabled for `pr-state`.
 
 #### Scenario: Review or review-comment changes
 - **WHEN** a review is submitted, edited, or dismissed or a review comment is created, edited, or deleted without a source change
-- **THEN** `pr-state` refreshes the live gate and no source-verification or platform job starts
+- **THEN** native conversation resolution owns thread blockage and no `pr-state`, source-verification, or platform job starts
 
 #### Scenario: Source and review events overlap
 - **WHEN** source CI is running while a review event arrives
-- **THEN** separate concurrency ownership prevents either run from cancelling the other
+- **THEN** the native review condition cannot launch or cancel source CI
 
 #### Scenario: PR metadata invalidates readiness
-- **WHEN** the owning issue reference, milestone, or required review-thread state is invalid
+- **WHEN** the owning issue reference or milestone is invalid
 - **THEN** `pr-state` fails independently of any previously successful source proof
+
+#### Scenario: Review thread is reopened
+- **WHEN** any pull-request review conversation is reopened after prior source and metadata proof succeeded
+- **THEN** native required conversation resolution blocks the pull request immediately without rerunning source proof
+
+#### Scenario: Review thread is resolved
+- **WHEN** the last unresolved pull-request review conversation is resolved
+- **THEN** the native branch rule refreshes readiness without requiring a workflow rerun
 
 ### Requirement: Cancellation is limited to superseded same-PR source verification
 Automatic workflow cancellation SHALL apply only when a newer `pull_request` source-verification run supersedes an older `pull_request` source-verification run for the same pull-request number. Pull-request source verification, `pr-state`, push, merge-group, workflow-dispatch, schedule, IssueOps, release, publish, and deploy owners SHALL use separate deterministic concurrency namespaces, and automatic cancellation SHALL be disabled for every namespace except same-number pull-request source verification.
@@ -106,13 +125,13 @@ Static quality, Rust test-domain, and platform jobs SHALL run concurrently when 
 - **WHEN** the valid current plan marks a static job not applicable
 - **THEN** that skipped job is acceptable only through the final aggregate and is not itself a required branch-protection context
 
-#### Scenario: Both current required contexts succeed
-- **WHEN** the current `pr-state` and current `verify` for the same pull-request source input both exist and succeed
-- **THEN** their explicit logical AND permits source-and-state readiness
+#### Scenario: All current readiness inputs succeed
+- **WHEN** the current `pr-state` and current `verify` for the same pull-request source input both exist and succeed and every review conversation is resolved
+- **THEN** their explicit logical AND with native conversation resolution permits readiness
 
-#### Scenario: One required context is not current and successful
-- **WHEN** either `pr-state` or `verify` is absent, stale, skipped, cancelled, or failed
-- **THEN** the pull request remains blocked and the other context cannot replace it
+#### Scenario: One readiness input is not current and successful
+- **WHEN** either `pr-state` or `verify` is absent, stale, skipped, cancelled, or failed, or a review conversation is unresolved
+- **THEN** the pull request remains blocked and the other inputs cannot replace it
 
 ### Requirement: Platform proof follows affected behavior
 Ordinary pull-request CI SHALL run each platform job only when that operating system or architecture can add defect-detection value for an affected contract, while retaining complete proof for ambiguous and shared changes.
