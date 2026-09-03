@@ -10446,6 +10446,19 @@ exit 0
         ))
         .into());
     }
+    let (zero_main_status, zero_main_log) = run_hook(
+        "refs/heads/main 0000000000000000000000000000000000000000 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    if zero_main_status
+        || !final_issueops(&zero_main_log).is_empty()
+        || zero_main_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "main deletion did not fail before IssueOps dispatch:\n{zero_main_log}"
+        ))
+        .into());
+    }
     let (candidate_status, candidate_target) = run_hook(
         &format!(
             "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"

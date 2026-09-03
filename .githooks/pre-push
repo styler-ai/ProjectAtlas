@@ -30,7 +30,7 @@ push_scope="$(
   awk '
     NF != 4 { invalid=1; next }
     {
-      if ($3 !~ /^refs\/heads\/[^[:space:]]+$/) invalid=1
+      if ($2 ~ /^0+$/ || $3 !~ /^refs\/heads\/[^[:space:]]+$/) invalid=1
       else {
         seen=1
         updates += 1
@@ -51,11 +51,6 @@ if [ "$push_scope" = "global" ]; then
 elif [ "${push_scope#candidate:}" != "$push_scope" ]; then
   candidate_local_oid="${push_scope#candidate:}"
   export GIT_NO_REPLACE_OBJECTS=1
-  if [ -z "$candidate_local_oid" ] ||
-    [ "$candidate_local_oid" = "0000000000000000000000000000000000000000" ]; then
-    echo "candidate branch local object is missing or a deletion" >&2
-    exit 1
-  fi
   if ! current_head="$(git rev-parse --verify 'HEAD^{commit}')" ||
     [ -z "$current_head" ]; then
     echo "candidate branch checked-out HEAD is unreadable" >&2

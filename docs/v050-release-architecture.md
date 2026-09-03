@@ -17,7 +17,7 @@ flowchart LR
     PR --> Base[Unrelated open slices against accepted PR base]
     Push[Git pre-push ref-update records] --> MainTarget["Exactly one refs/heads/main target"]
     Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
-    Push --> InvalidTarget["Zero, multiple, malformed, or unsupported targets"]
+    Push --> InvalidTarget["Zero or multiple records; deletions; malformed or unsupported targets"]
     MainTarget --> Global[Global live-state validation]
     CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
     CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes; no hidden flags; issue map, mapped tasks, and linked docs are regular candidate-tree files read from their blobs with replacement refs disabled"]
