@@ -6,7 +6,8 @@ param(
     [string]$ProjectAtlasVersion,
     [string]$ReleaseBaseUrl = "https://github.com/styler-ai/ProjectAtlas/releases/download",
     [string]$RuntimePath,
-    [switch]$ReleaseBinaryOnly
+    [switch]$ReleaseBinaryOnly,
+    [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -1853,6 +1854,10 @@ function Get-KnownProjectAtlasShimPaths {
             (Join-Path $npmBin "projectatlas")
         )
     }
+    if ($env:LOCALAPPDATA) {
+        $localAppDataBin = Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin"
+        $paths += Join-Path $localAppDataBin "projectatlas.exe"
+    }
     return @($paths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
@@ -2042,6 +2047,1006 @@ function Confirm-ProjectAtlasBareCommandResolution {
     }
     $commandVersion = Get-ProjectAtlasRuntimeVersion $commandPath
     Write-Warning "Active process still resolves bare 'projectatlas' to $commandPath version '$commandVersion', not the verified runtime $VerifiedPath. Generated MCP configs use the absolute runtime; restart Codex or the shell, put $(Split-Path -Parent $VerifiedPath) first on PATH, or remove the obsolete shim before relying on bare projectatlas."
+}
+
+function Get-ProjectAtlasAtlasForwarderPath {
+    param(
+        [string]$VerifiedPath
+    )
+    return Join-Path (Split-Path -Parent $VerifiedPath) "atlas.cmd"
+}
+
+function Get-ProjectAtlasAtlasForwarderProvenancePath {
+    param(
+        [string]$ForwarderPath
+    )
+    return Join-Path (Split-Path -Parent $ForwarderPath) ".atlas-forwarder.provenance"
+}
+
+function Get-ProjectAtlasAtlasForwarderStateRoot {
+    $basePath = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $env:LOCALAPPDATA
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        $env:USERPROFILE
+    }
+    else {
+        throw "ProjectAtlas atlas forwarder installer state requires LOCALAPPDATA or USERPROFILE."
+    }
+    return Join-Path $basePath "ProjectAtlas\state"
+}
+
+function Get-ProjectAtlasAtlasForwarderStatePath {
+    param(
+        [string]$ForwarderPath
+    )
+    $canonicalForwarderPath = Get-NormalizedPathEntry $ForwarderPath
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($canonicalForwarderPath.ToLowerInvariant())
+    $digest = Get-ProjectAtlasSha256FromBytes $bytes
+    return Join-Path (Get-ProjectAtlasAtlasForwarderStateRoot) ("atlas-forwarder-$digest.state")
+}
+
+function Get-ProjectAtlasAtlasForwarderLifecycleLockKey {
+    param(
+        [string]$ForwarderPath
+    )
+    $canonicalForwarderPath = Get-NormalizedPathEntry $ForwarderPath
+    $lockIdentity = $canonicalForwarderPath.ToLowerInvariant()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($lockIdentity)
+    return [pscustomobject]@{
+        ForwarderPath = $canonicalForwarderPath
+        SortKey = $lockIdentity
+        Digest = Get-ProjectAtlasSha256FromBytes $bytes
+    }
+}
+
+function Enter-ProjectAtlasAtlasForwarderLifecycleLockKey {
+    param(
+        [object]$LockKey,
+        [long]$TimeoutMilliseconds = 30000
+    )
+    $mutex = $null
+    try {
+        $mutex = [System.Threading.Mutex]::new(
+            $false,
+            "Global\ProjectAtlas-AtlasForwarderLifecycle-$($LockKey.Digest)"
+        )
+        $acquired = $false
+        try {
+            $acquired = $mutex.WaitOne([System.TimeSpan]::FromMilliseconds($TimeoutMilliseconds))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            throw "ProjectAtlas atlas forwarder lifecycle is busy; another installer owns the bounded lock for $($LockKey.ForwarderPath)."
+        }
+        return [pscustomobject]@{
+            Mutex = $mutex
+            ForwarderPath = $LockKey.ForwarderPath
+            SortKey = $LockKey.SortKey
+        }
+    }
+    catch {
+        if ($mutex) {
+            $mutex.Dispose()
+        }
+        throw
+    }
+}
+
+function Enter-ProjectAtlasAtlasForwarderLifecycleLock {
+    param(
+        [string]$ForwarderPath
+    )
+    Enter-ProjectAtlasAtlasForwarderLifecycleLockKey (
+        Get-ProjectAtlasAtlasForwarderLifecycleLockKey $ForwarderPath) 30000
+}
+
+function Enter-ProjectAtlasAtlasForwarderLifecycleLockSet {
+    param(
+        [string]$DestinationPath,
+        [string]$SourcePath
+    )
+    $timeoutMilliseconds = 30000L
+    if ($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS -match '^\d+$') {
+        try {
+            $timeoutMilliseconds = [long]$env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS
+        }
+        catch {
+            $timeoutMilliseconds = 30000L
+        }
+        if ($timeoutMilliseconds -gt 30000L) {
+            $timeoutMilliseconds = 30000L
+        }
+    }
+    $deadline = [System.Diagnostics.Stopwatch]::GetTimestamp() `
+        + [long](([double][System.Diagnostics.Stopwatch]::Frequency * $timeoutMilliseconds) / 1000.0)
+    $keys = @(
+        Get-ProjectAtlasAtlasForwarderLifecycleLockKey $DestinationPath
+    )
+    if (-not [string]::IsNullOrWhiteSpace($SourcePath)) {
+        $sourceKey = Get-ProjectAtlasAtlasForwarderLifecycleLockKey $SourcePath
+        if ($sourceKey.SortKey -cne $keys[0].SortKey) {
+            $keys += $sourceKey
+        }
+    }
+    if ($keys.Count -eq 2 -and [string]::CompareOrdinal($keys[0].SortKey, $keys[1].SortKey) -gt 0) {
+        $temporaryKey = $keys[0]
+        $keys[0] = $keys[1]
+        $keys[1] = $temporaryKey
+    }
+    $locks = [System.Collections.Generic.List[object]]::new()
+    try {
+        foreach ($key in $keys) {
+            $remainingTicks = $deadline - [System.Diagnostics.Stopwatch]::GetTimestamp()
+            $remainingMilliseconds = [long][Math]::Ceiling(
+                ($remainingTicks * 1000.0) / [System.Diagnostics.Stopwatch]::Frequency)
+            if ($remainingMilliseconds -le 0) {
+                throw "ProjectAtlas atlas forwarder lifecycle lock deadline expired before acquiring $($key.ForwarderPath)."
+            }
+            $lock = Enter-ProjectAtlasAtlasForwarderLifecycleLockKey $key $remainingMilliseconds
+            $locks.Add($lock) | Out-Null
+        }
+        return [pscustomobject]@{
+            Locks = $locks
+        }
+    }
+    catch {
+        $originalError = $_
+        $cleanupErrors = @()
+        for ($index = $locks.Count - 1; $index -ge 0; $index--) {
+            try {
+                Exit-ProjectAtlasAtlasForwarderLifecycleLock $locks[$index]
+            }
+            catch {
+                $cleanupErrors += $_.Exception.Message
+            }
+        }
+        if ($cleanupErrors.Count -gt 0) {
+            throw "$($originalError.Exception.Message) ProjectAtlas atlas forwarder lifecycle lock cleanup failed: $($cleanupErrors -join '; ')"
+        }
+        throw $originalError
+    }
+}
+
+function Exit-ProjectAtlasAtlasForwarderLifecycleLock {
+    param(
+        [object]$Lock
+    )
+    if (-not $Lock -or -not $Lock.Mutex) {
+        return
+    }
+    try {
+        $Lock.Mutex.ReleaseMutex()
+    }
+    finally {
+        $Lock.Mutex.Dispose()
+    }
+}
+
+function Exit-ProjectAtlasAtlasForwarderLifecycleLockSet {
+    param(
+        [object]$LockSet
+    )
+    if (-not $LockSet -or -not $LockSet.Locks) {
+        return
+    }
+    $cleanupErrors = @()
+    for ($index = $LockSet.Locks.Count - 1; $index -ge 0; $index--) {
+        try {
+            Exit-ProjectAtlasAtlasForwarderLifecycleLock $LockSet.Locks[$index]
+        }
+        catch {
+            $cleanupErrors += $_.Exception.Message
+        }
+    }
+    if ($cleanupErrors.Count -gt 0) {
+        throw "ProjectAtlas atlas forwarder lifecycle lock cleanup failed: $($cleanupErrors -join '; ')"
+    }
+}
+
+function New-ProjectAtlasAtlasForwarderCapability {
+    $bytes = New-Object byte[] 32
+    $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($bytes)
+        return ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $random.Dispose()
+    }
+}
+
+function Get-ProjectAtlasAtlasForwarderStateContent {
+    param(
+        [string]$ForwarderPath,
+        [string]$VerifiedPath,
+        [string]$Capability
+    )
+    $canonicalForwarderPath = Get-NormalizedPathEntry $ForwarderPath
+    $canonicalVerifiedPath = Get-NormalizedPathEntry $VerifiedPath
+    return "# ProjectAtlas atlas forwarder installer state v1`r`nforwarder: $canonicalForwarderPath`r`nruntime: $canonicalVerifiedPath`r`ncapability: $Capability`r`n"
+}
+
+function Get-ProjectAtlasAtlasForwarderCapability {
+    param(
+        [string]$ForwarderPath,
+        [string]$VerifiedPath
+    )
+    $statePath = Get-ProjectAtlasAtlasForwarderStatePath $ForwarderPath
+    try {
+        Assert-ProjectAtlasDirectFilePath $statePath "ProjectAtlas atlas forwarder installer state"
+        $item = Get-Item -Force -LiteralPath $statePath -ErrorAction SilentlyContinue
+        if (-not $item -or ($item.PSObject.Properties.Name -contains "LinkType" `
+                -and [string]::Equals($item.LinkType, "HardLink", [System.StringComparison]::OrdinalIgnoreCase))) {
+            return $null
+        }
+        $content = [System.IO.File]::ReadAllText($statePath)
+        $expectedForwarder = Get-NormalizedPathEntry $ForwarderPath
+        $expectedRuntime = Get-NormalizedPathEntry $VerifiedPath
+        $match = [regex]::Match(
+            $content,
+            '(?m)^# ProjectAtlas atlas forwarder installer state v1\r?\nforwarder: ([^\r\n]+)\r?\nruntime: ([^\r\n]+)\r?\ncapability: ([0-9a-f]{64})\r?\n$')
+        if (-not $match.Success `
+            -or $match.Groups[1].Value -ine $expectedForwarder `
+            -or $match.Groups[2].Value -ine $expectedRuntime) {
+            return $null
+        }
+        return $match.Groups[3].Value.ToLowerInvariant()
+    }
+    catch {
+        return $null
+    }
+}
+
+function Ensure-ProjectAtlasAtlasForwarderState {
+    param(
+        [string]$ForwarderPath,
+        [string]$VerifiedPath
+    )
+    $statePath = Get-ProjectAtlasAtlasForwarderStatePath $ForwarderPath
+    $existingState = Test-Path -LiteralPath $statePath
+    if ($existingState) {
+        $capability = Get-ProjectAtlasAtlasForwarderCapability $ForwarderPath $VerifiedPath
+        if ([string]::IsNullOrWhiteSpace($capability)) {
+            throw "ProjectAtlas atlas forwarder installer state is missing, mismatched, or linked: $statePath"
+        }
+        if (Test-ProjectAtlasManagedAtlasForwarder $ForwarderPath $VerifiedPath) {
+            return $false
+        }
+        try {
+            Remove-ProjectAtlasAtlasForwarderState $ForwarderPath $VerifiedPath
+        }
+        catch {
+            throw "ProjectAtlas atlas forwarder installer state is retained without a managed forwarder; refusing to reuse: $statePath. $($_.Exception.Message)"
+        }
+    }
+    $stateRoot = Get-ProjectAtlasAtlasForwarderStateRoot
+    Assert-ProjectAtlasDirectPath $stateRoot "ProjectAtlas atlas forwarder installer state root"
+    New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+    Assert-ProjectAtlasDirectPath $stateRoot "ProjectAtlas atlas forwarder installer state root"
+    $capability = New-ProjectAtlasAtlasForwarderCapability
+    $temporary = Join-Path $stateRoot (".atlas-forwarder-state-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+    try {
+        [System.IO.File]::WriteAllText(
+            $temporary,
+            (Get-ProjectAtlasAtlasForwarderStateContent $ForwarderPath $VerifiedPath $capability),
+            $utf8NoBom)
+        Publish-ProjectAtlasFileNoClobber $temporary $statePath
+        return $true
+    }
+    catch {
+        if (Test-Path -LiteralPath $statePath) {
+            $existingCapability = Get-ProjectAtlasAtlasForwarderCapability $ForwarderPath $VerifiedPath
+            if (-not [string]::IsNullOrWhiteSpace($existingCapability)) {
+                return $false
+            }
+        }
+        throw
+    }
+    finally {
+        if ([System.IO.File]::Exists($temporary)) {
+            [System.IO.File]::Delete($temporary)
+        }
+    }
+}
+
+function Get-ProjectAtlasAtlasForwarderProvenanceContent {
+    param(
+        [string]$ForwarderPath,
+        [string]$VerifiedPath
+    )
+    $canonicalForwarderPath = Get-NormalizedPathEntry $ForwarderPath
+    $canonicalVerifiedPath = Get-NormalizedPathEntry $VerifiedPath
+    return "# ProjectAtlas atlas forwarder provenance v1`r`nforwarder: $canonicalForwarderPath`r`nruntime: $canonicalVerifiedPath`r`n"
+}
+
+function Test-ProjectAtlasAtlasForwarderProvenance {
+    param(
+        [string]$ProvenancePath,
+        [string]$ForwarderPath,
+        [string]$VerifiedPath
+    )
+    try {
+        if ([string]::IsNullOrWhiteSpace((Get-ProjectAtlasAtlasForwarderCapability $ForwarderPath $VerifiedPath))) {
+            return $false
+        }
+        Assert-ProjectAtlasDirectFilePath $ProvenancePath "ProjectAtlas atlas forwarder provenance"
+        $item = Get-Item -Force -LiteralPath $ProvenancePath -ErrorAction SilentlyContinue
+        if (-not $item -or ($item.PSObject.Properties.Name -contains "LinkType" `
+                -and [string]::Equals($item.LinkType, "HardLink", [System.StringComparison]::OrdinalIgnoreCase))) {
+            return $false
+        }
+        return [System.IO.File]::ReadAllText($ProvenancePath) -ceq (Get-ProjectAtlasAtlasForwarderProvenanceContent $ForwarderPath $VerifiedPath)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-ProjectAtlasAtlasForwarderPair {
+    param(
+        [string]$ForwarderPath,
+        [string]$ProvenancePath,
+        [string]$VerifiedPath
+    )
+    if ([string]::IsNullOrWhiteSpace((Get-ProjectAtlasAtlasForwarderCapability $ForwarderPath $VerifiedPath))) {
+        return $false
+    }
+    try {
+        Assert-ProjectAtlasDirectFilePath $ForwarderPath "ProjectAtlas atlas forwarder"
+        Assert-ProjectAtlasDirectFilePath $ProvenancePath "ProjectAtlas atlas forwarder provenance"
+        $forwarderContent = [System.IO.File]::ReadAllText($ForwarderPath)
+        $provenanceContent = [System.IO.File]::ReadAllText($ProvenancePath)
+        return ($forwarderContent -ceq (Get-ProjectAtlasAtlasForwarderContent $VerifiedPath) `
+            -or $forwarderContent -ceq (Get-ProjectAtlasLegacyAtlasForwarderContent $VerifiedPath)) `
+            -and $provenanceContent -ceq (Get-ProjectAtlasAtlasForwarderProvenanceContent $ForwarderPath $VerifiedPath)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Remove-ProjectAtlasPublishedAtlasForwarderProvenance {
+    param(
+        [string]$ProvenancePath,
+        [string]$ForwarderPath,
+        [string]$VerifiedPath
+    )
+    if (-not (Test-ProjectAtlasAtlasForwarderProvenance $ProvenancePath $ForwarderPath $VerifiedPath)) {
+        return
+    }
+    $quarantinePath = New-ProjectAtlasAtlasForwarderQuarantinePath $ProvenancePath
+    $moved = $false
+    try {
+        Move-Item -LiteralPath $ProvenancePath -Destination $quarantinePath
+        $moved = $true
+        $expected = Get-ProjectAtlasAtlasForwarderProvenanceContent $ForwarderPath $VerifiedPath
+        if ([System.IO.File]::ReadAllText($quarantinePath) -cne $expected `
+            -or (Test-Path -LiteralPath $ProvenancePath)) {
+            throw "ProjectAtlas atlas forwarder provenance changed during cleanup: $ProvenancePath"
+        }
+        Remove-Item -LiteralPath $quarantinePath -Force
+    }
+    catch {
+        if ($moved -and (Test-Path -LiteralPath $quarantinePath)) {
+            if (-not (Restore-ProjectAtlasAtlasForwarderQuarantine $quarantinePath $ProvenancePath)) {
+                throw "ProjectAtlas atlas forwarder provenance cleanup failed and could not be restored: $ProvenancePath"
+            }
+        }
+        throw
+    }
+}
+
+function Get-ProjectAtlasManagedAtlasForwarderTarget {
+    param(
+        [string]$FilePath
+    )
+    $item = Get-Item -Force -LiteralPath $FilePath -ErrorAction SilentlyContinue
+    if (-not $item -or -not ($item -is [System.IO.FileInfo]) `
+        -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        return $null
+    }
+    if ($item.PSObject.Properties.Name -contains "LinkType" `
+        -and [string]::Equals($item.LinkType, "HardLink", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    try {
+        $actualContent = [System.IO.File]::ReadAllText($FilePath)
+        $targetMatch = [regex]::Match($actualContent, '(?m)^rem target: ([^\r\n]+)\r?$')
+        if (-not $targetMatch.Success) {
+            return $null
+        }
+        $target = Get-NormalizedPathEntry $targetMatch.Groups[1].Value
+        if (-not (Test-ProjectAtlasRuntime $target $null)) {
+            return $null
+        }
+        $expectedForwarder = Get-ProjectAtlasAtlasForwarderPath $target
+        if ((Get-NormalizedPathEntry $FilePath) -ine (Get-NormalizedPathEntry $expectedForwarder)) {
+            return $null
+        }
+        $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $FilePath
+        if (-not (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $FilePath $target)) {
+            return $null
+        }
+        if ($actualContent -cne (Get-ProjectAtlasAtlasForwarderContent $target) `
+            -and $actualContent -cne (Get-ProjectAtlasLegacyAtlasForwarderContent $target)) {
+            return $null
+        }
+        return $target
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-ProjectAtlasManagedAtlasForwarder {
+    param(
+        [string]$FilePath,
+        [string]$VerifiedPath
+    )
+    if ([string]::IsNullOrWhiteSpace($VerifiedPath)) {
+        return $false
+    }
+    $target = Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath
+    return $target -and (Get-NormalizedPathEntry $target) -ieq (Get-NormalizedPathEntry $VerifiedPath)
+}
+
+function Test-ProjectAtlasOwnedAtlasForwarder {
+    param(
+        [string]$FilePath
+    )
+    return [bool](Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath)
+}
+
+function New-ProjectAtlasAtlasForwarderQuarantinePath {
+    param(
+        [string]$FilePath
+    )
+    $directory = Split-Path -Parent $FilePath
+    do {
+        $candidate = Join-Path $directory (".atlas-forwarder-retire-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    } while (Test-Path -LiteralPath $candidate)
+    return $candidate
+}
+
+function Invoke-ProjectAtlasAtlasForwarderRetirementRace {
+    param(
+        [string]$Path,
+        [string]$RaceEnvironmentVariable,
+        [string]$Content
+    )
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($RaceEnvironmentVariable))) {
+        return
+    }
+    $racePath = [Environment]::GetEnvironmentVariable($RaceEnvironmentVariable)
+    if ((Get-NormalizedPathEntry $racePath) -ine (Get-NormalizedPathEntry $Path) `
+        -or (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Restore-ProjectAtlasAtlasForwarderQuarantine {
+    param(
+        [string]$QuarantinePath,
+        [string]$DestinationPath
+    )
+    if (-not (Test-Path -LiteralPath $QuarantinePath)) {
+        return
+    }
+    if (Test-Path -LiteralPath $DestinationPath) {
+        return $false
+    }
+    Move-Item -LiteralPath $QuarantinePath -Destination $DestinationPath
+    return $true
+}
+
+function Remove-ProjectAtlasAtlasForwarderState {
+    param(
+        [string]$ForwarderPath,
+        [string]$VerifiedPath
+    )
+    $statePath = Get-ProjectAtlasAtlasForwarderStatePath $ForwarderPath
+    if (-not (Test-Path -LiteralPath $statePath)) {
+        return
+    }
+    $capability = Get-ProjectAtlasAtlasForwarderCapability $ForwarderPath $VerifiedPath
+    if ([string]::IsNullOrWhiteSpace($capability)) {
+        throw "ProjectAtlas atlas forwarder installer state changed during retirement: $statePath"
+    }
+    $quarantinePath = New-ProjectAtlasAtlasForwarderQuarantinePath $statePath
+    try {
+        Move-Item -LiteralPath $statePath -Destination $quarantinePath
+        $expected = Get-ProjectAtlasAtlasForwarderStateContent $ForwarderPath $VerifiedPath $capability
+        if ([System.IO.File]::ReadAllText($quarantinePath) -cne $expected) {
+            if (-not (Restore-ProjectAtlasAtlasForwarderQuarantine $quarantinePath $statePath)) {
+                throw "ProjectAtlas atlas forwarder installer state changed during retirement and could not be restored: $statePath"
+            }
+            throw "ProjectAtlas atlas forwarder installer state changed during retirement: $statePath"
+        }
+        Invoke-ProjectAtlasAtlasForwarderStateRetirementFailure
+        Remove-Item -LiteralPath $quarantinePath -Force
+    }
+    catch {
+        if (Test-Path -LiteralPath $quarantinePath) {
+            if (-not (Restore-ProjectAtlasAtlasForwarderQuarantine $quarantinePath $statePath)) {
+                throw "ProjectAtlas atlas forwarder installer state cleanup failed and could not be restored: $statePath"
+            }
+        }
+        throw
+    }
+}
+
+function Move-ProjectAtlasManagedAtlasForwarderLocked {
+    param(
+        [string]$FilePath,
+        [string]$VerifiedPath,
+        [switch]$AllowSameTarget
+    )
+    $target = Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath
+    if (-not $target -or ((-not $AllowSameTarget) -and (Get-NormalizedPathEntry $target) -ieq (Get-NormalizedPathEntry $VerifiedPath))) {
+        return $false
+    }
+    $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $FilePath
+    if (-not (Test-ProjectAtlasAtlasForwarderPair $FilePath $provenancePath $target)) {
+        return $false
+    }
+    $forwarderQuarantine = New-ProjectAtlasAtlasForwarderQuarantinePath $FilePath
+    $provenanceQuarantine = New-ProjectAtlasAtlasForwarderQuarantinePath $provenancePath
+    $forwarderMoved = $false
+    $provenanceMoved = $false
+    try {
+        Move-Item -LiteralPath $FilePath -Destination $forwarderQuarantine
+        $forwarderMoved = $true
+        Invoke-ProjectAtlasAtlasForwarderRetirementRace `
+            $FilePath `
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH" `
+            "# foreign forwarder retirement race`r`n"
+        Move-Item -LiteralPath $provenancePath -Destination $provenanceQuarantine
+        $provenanceMoved = $true
+        Invoke-ProjectAtlasAtlasForwarderRetirementRace `
+            $provenancePath `
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RETIRE_RACE_PATH" `
+            "# foreign provenance retirement race`r`n"
+        $forwarderContent = [System.IO.File]::ReadAllText($forwarderQuarantine)
+        $provenanceContent = [System.IO.File]::ReadAllText($provenanceQuarantine)
+        if ($forwarderContent -cne (Get-ProjectAtlasAtlasForwarderContent $target) `
+            -and $forwarderContent -cne (Get-ProjectAtlasLegacyAtlasForwarderContent $target)) {
+            throw "ProjectAtlas atlas forwarder changed during retirement: $FilePath"
+        }
+        if ($provenanceContent -cne (Get-ProjectAtlasAtlasForwarderProvenanceContent $FilePath $target)) {
+            throw "ProjectAtlas atlas forwarder provenance changed during retirement: $provenancePath"
+        }
+        if (Test-Path -LiteralPath $FilePath) {
+            throw "ProjectAtlas atlas forwarder was replaced during retirement: $FilePath"
+        }
+        if (Test-Path -LiteralPath $provenancePath) {
+            throw "ProjectAtlas atlas forwarder provenance was replaced during retirement: $provenancePath"
+        }
+        Remove-ProjectAtlasAtlasForwarderState $FilePath $target
+        Remove-Item -LiteralPath $forwarderQuarantine -Force
+        Remove-Item -LiteralPath $provenanceQuarantine -Force
+        Write-Output "Migrated ProjectAtlas atlas forwarder: $FilePath -> $(Get-ProjectAtlasAtlasForwarderPath $VerifiedPath)"
+        return $true
+    }
+    catch {
+        if ($provenanceMoved) {
+            Restore-ProjectAtlasAtlasForwarderQuarantine $provenanceQuarantine $provenancePath | Out-Null
+        }
+        if ($forwarderMoved) {
+            Restore-ProjectAtlasAtlasForwarderQuarantine $forwarderQuarantine $FilePath | Out-Null
+        }
+        throw
+    }
+}
+
+function Get-ProjectAtlasAtlasForwarderContent {
+    param(
+        [string]$VerifiedPath
+    )
+    $canonicalVerifiedPath = Get-NormalizedPathEntry $VerifiedPath
+    $targetForBatch = $canonicalVerifiedPath.Replace("%", "%%")
+    return "@echo off`r`nsetlocal DisableDelayedExpansion`r`nrem ProjectAtlas managed atlas forwarder.`r`nrem target: $canonicalVerifiedPath`r`n`"$targetForBatch`" %*`r`nset `"exit_code=%ERRORLEVEL%`"`r`nendlocal & exit /b %exit_code%`r`n"
+}
+
+function Get-ProjectAtlasLegacyAtlasForwarderContent {
+    param(
+        [string]$VerifiedPath
+    )
+    $canonicalVerifiedPath = Get-NormalizedPathEntry $VerifiedPath
+    $targetForBatch = $canonicalVerifiedPath.Replace("%", "%%")
+    return "@echo off`r`nrem ProjectAtlas managed atlas forwarder.`r`nrem target: $canonicalVerifiedPath`r`n`"$targetForBatch`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+}
+
+function Publish-ProjectAtlasFileNoClobber {
+    param(
+        [string]$SourcePath,
+        [string]$DestinationPath
+    )
+    Assert-ProjectAtlasDirectFilePath $SourcePath "ProjectAtlas staged file"
+    $source = $null
+    $destination = $null
+    try {
+        $source = [System.IO.File]::OpenRead($SourcePath)
+        $destination = [System.IO.File]::Open(
+            $DestinationPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None)
+        $source.CopyTo($destination)
+        $destination.Flush($true)
+    }
+    finally {
+        if ($destination) {
+            $destination.Dispose()
+        }
+        if ($source) {
+            $source.Dispose()
+        }
+    }
+    Assert-ProjectAtlasDirectFilePath $DestinationPath "ProjectAtlas published file"
+}
+
+function Invoke-ProjectAtlasAtlasForwarderPublicationRace {
+    param(
+        [string]$ForwarderPath
+    )
+    if ([string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH)) {
+        return
+    }
+    if ((Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH) -ine (Get-NormalizedPathEntry $ForwarderPath)) {
+        return
+    }
+    if (Test-Path -LiteralPath $ForwarderPath) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        $ForwarderPath,
+        "# foreign publication race collision`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Invoke-ProjectAtlasAtlasForwarderProvenancePublicationRace {
+    param(
+        [string]$ProvenancePath
+    )
+    if ([string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH)) {
+        return
+    }
+    if ((Get-NormalizedPathEntry $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH) -ine (Get-NormalizedPathEntry $ProvenancePath)) {
+        return
+    }
+    if (Test-Path -LiteralPath $ProvenancePath) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        $ProvenancePath,
+        "# foreign provenance publication race collision`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Invoke-ProjectAtlasAtlasForwarderStateRetirementFailure {
+    if ([string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE)) {
+        return
+    }
+    throw "ProjectAtlas atlas forwarder installer state retirement was intentionally failed for lifecycle proof."
+}
+
+function Invoke-ProjectAtlasAtlasForwarderStatePublicationPause {
+    $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_PUBLISHED_GATE
+    if ([string]::IsNullOrWhiteSpace($gate)) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        "$gate.ready",
+        "ready`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    while (Test-Path -LiteralPath $gate) {
+        Start-Sleep -Milliseconds 50
+    }
+}
+
+function Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause {
+    $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_DISCOVERY_GATE
+    if ([string]::IsNullOrWhiteSpace($gate)) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        "$gate.ready",
+        "ready`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    while (Test-Path -LiteralPath $gate) {
+        Start-Sleep -Milliseconds 50
+    }
+}
+
+function Invoke-ProjectAtlasAtlasForwarderLockAttemptSignal {
+    $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ATTEMPT_GATE
+    if ([string]::IsNullOrWhiteSpace($gate)) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        "$gate.ready",
+        "ready`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause {
+    $gate = $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ACQUIRED_GATE
+    if ([string]::IsNullOrWhiteSpace($gate)) {
+        return
+    }
+    [System.IO.File]::WriteAllText(
+        "$gate.ready",
+        "ready`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    while (Test-Path -LiteralPath $gate) {
+        Start-Sleep -Milliseconds 50
+    }
+}
+
+function Assert-ProjectAtlasAtlasForwarderCollisionFree {
+    param(
+        [string]$VerifiedPath
+    )
+    $forwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
+    $forwarderNormalized = Get-NormalizedPathEntry $forwarder
+    foreach ($candidate in @(
+            $forwarder,
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.exe"),
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.bat"),
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.ps1"),
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.com")
+        )) {
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+        if ((Get-NormalizedPathEntry $candidate) -ieq $forwarderNormalized `
+            -and (Test-ProjectAtlasManagedAtlasForwarder $candidate $VerifiedPath)) {
+            continue
+        }
+        throw "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $candidate"
+    }
+    $command = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) {
+        $commandPath = if ($command.Path) { $command.Path } elseif ($command.Source) { $command.Source } else { $null }
+        if ([string]::IsNullOrWhiteSpace($commandPath) -or (Get-NormalizedPathEntry $commandPath) -ine $forwarderNormalized) {
+            $observed = if ($commandPath) { $commandPath } else { $command.Name }
+            if ([string]::IsNullOrWhiteSpace($commandPath) -or -not (Test-ProjectAtlasOwnedAtlasForwarder $commandPath)) {
+                throw "ProjectAtlas atlas command collision on effective PATH; refusing to shadow or overwrite: $observed"
+            }
+        }
+    }
+    return $forwarder
+}
+
+function Write-ProjectAtlasAtlasForwarder {
+    param(
+        [string]$VerifiedPath
+    )
+    $forwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
+    $previousCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+    $previousCandidate = if ($previousCommand) {
+        if ($previousCommand.Path) { $previousCommand.Path } else { $previousCommand.Source }
+    }
+    $previousCandidateIdentity = $null
+    $previousOwnedAtDiscovery = $false
+    $previousIdentity = $null
+    if ($previousCandidate `
+        -and (Get-NormalizedPathEntry $previousCandidate) -ine (Get-NormalizedPathEntry $forwarder)) {
+        $previousCandidateIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $previousCandidate).SortKey
+        if (Test-ProjectAtlasOwnedAtlasForwarder $previousCandidate) {
+            $previousOwnedAtDiscovery = $true
+            $previousIdentity = $previousCandidateIdentity
+        }
+    }
+    else {
+        $previousCandidate = $null
+    }
+    Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause
+    Invoke-ProjectAtlasAtlasForwarderLockAttemptSignal
+    $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLockSet $forwarder $previousCandidate
+    try {
+        Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause
+        $previousPath = $null
+        $currentCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        $currentPath = if ($currentCommand) {
+            if ($currentCommand.Path) { $currentCommand.Path } else { $currentCommand.Source }
+        }
+        if ($previousCandidate) {
+            if ($currentPath `
+                -and (Get-NormalizedPathEntry $currentPath) -ine $previousCandidateIdentity) {
+                throw "ProjectAtlas effective atlas command changed while acquiring its lifecycle locks; refusing to publish: $currentPath"
+            }
+            if ($currentPath) {
+                $currentIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $currentPath).SortKey
+                if (Test-ProjectAtlasOwnedAtlasForwarder $currentPath) {
+                    $previousPath = $currentPath
+                    $previousIdentity = $currentIdentity
+                }
+                elseif ($previousOwnedAtDiscovery) {
+                    $previousPath = $previousCandidate
+                }
+            }
+            elseif ($previousOwnedAtDiscovery) {
+                $previousPath = $previousCandidate
+            }
+        }
+        elseif ($currentPath `
+            -and (Get-NormalizedPathEntry $currentPath) -ine (Get-NormalizedPathEntry $forwarder)) {
+            throw "ProjectAtlas effective atlas command appeared while acquiring its lifecycle locks; refusing to publish: $currentPath"
+        }
+        Write-ProjectAtlasAtlasForwarderLocked $VerifiedPath $previousPath $previousIdentity
+    }
+    finally {
+        Exit-ProjectAtlasAtlasForwarderLifecycleLockSet $lifecycleLock
+    }
+}
+
+function Write-ProjectAtlasAtlasForwarderLocked {
+    param(
+        [string]$VerifiedPath,
+        [string]$PreviousPath,
+        [string]$PreviousIdentity
+    )
+    if ($PreviousPath) {
+        $currentPreviousIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $PreviousPath).SortKey
+        if ($currentPreviousIdentity -cne $PreviousIdentity `
+            -or -not (Test-ProjectAtlasOwnedAtlasForwarder $PreviousPath)) {
+            throw "ProjectAtlas atlas forwarder migration source changed or is no longer managed: $PreviousPath"
+        }
+    }
+    $forwarder = Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath
+    $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $forwarder
+    $runtimeDirectory = Split-Path -Parent $VerifiedPath
+    $temporary = Join-Path $runtimeDirectory (".atlas-forwarder-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $temporaryProvenance = Join-Path $runtimeDirectory (".atlas-forwarder-provenance-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $content = Get-ProjectAtlasAtlasForwarderContent $VerifiedPath
+    $provenanceContent = Get-ProjectAtlasAtlasForwarderProvenanceContent $forwarder $VerifiedPath
+    $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+    $statePath = Get-ProjectAtlasAtlasForwarderStatePath $forwarder
+    $statePublished = $false
+    $provenancePublished = $false
+    $forwarderPublished = $false
+    try {
+        [System.IO.File]::WriteAllText($temporary, $content, $utf8NoBom)
+        [System.IO.File]::WriteAllText($temporaryProvenance, $provenanceContent, $utf8NoBom)
+        Assert-ProjectAtlasDirectFilePath $temporary "ProjectAtlas atlas forwarder staging file"
+        Assert-ProjectAtlasDirectFilePath $temporaryProvenance "ProjectAtlas atlas forwarder provenance staging file"
+        if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_STAGE_FAILURE)) {
+            throw "ProjectAtlas atlas forwarder staging was intentionally failed for lifecycle proof."
+        }
+        $statePublished = Ensure-ProjectAtlasAtlasForwarderState $forwarder $VerifiedPath
+        if ($statePublished) {
+            Invoke-ProjectAtlasAtlasForwarderStatePublicationPause
+        }
+        if (Test-Path -LiteralPath $provenancePath) {
+            if (-not (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath)) {
+                throw "ProjectAtlas atlas forwarder provenance collision; refusing to overwrite: $provenancePath"
+            }
+        }
+        else {
+            Invoke-ProjectAtlasAtlasForwarderProvenancePublicationRace $provenancePath
+            try {
+                Publish-ProjectAtlasFileNoClobber $temporaryProvenance $provenancePath
+            }
+            catch {
+                throw "ProjectAtlas atlas forwarder provenance publication collided; refusing to overwrite: $provenancePath. $($_.Exception.Message)"
+            }
+            $provenancePublished = $true
+        }
+        Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath | Out-Null
+        if (-not (Test-Path -LiteralPath $forwarder)) {
+            Invoke-ProjectAtlasAtlasForwarderPublicationRace $forwarder
+            try {
+                Publish-ProjectAtlasFileNoClobber $temporary $forwarder
+            }
+            catch {
+                throw "ProjectAtlas atlas forwarder publication collided; refusing to overwrite: $forwarder. $($_.Exception.Message)"
+            }
+            $forwarderPublished = $true
+        }
+        if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath)) {
+            throw "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder"
+        }
+        if ($PreviousPath) {
+            if (-not (Move-ProjectAtlasManagedAtlasForwarderLocked $PreviousPath $VerifiedPath)) {
+                throw "ProjectAtlas atlas forwarder migration failed after publishing the replacement: $PreviousPath"
+            }
+        }
+    }
+    catch {
+        $originalError = $_
+        $cleanupErrors = @()
+        if ($provenancePublished -and -not $forwarderPublished `
+            -and (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath)) {
+            try {
+                Remove-ProjectAtlasPublishedAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath
+            }
+            catch {
+                $cleanupErrors += $_.Exception.Message
+            }
+        }
+        if ($statePublished -and -not $forwarderPublished `
+            -and (Test-Path -LiteralPath $statePath)) {
+            try {
+                Remove-ProjectAtlasAtlasForwarderState $forwarder $VerifiedPath
+            }
+            catch {
+                $cleanupErrors += $_.Exception.Message
+            }
+        }
+        if ($cleanupErrors.Count -gt 0) {
+            throw "$($originalError.Exception.Message) ProjectAtlas atlas forwarder cleanup failed: $($cleanupErrors -join '; ')"
+        }
+        throw $originalError
+    }
+    finally {
+        if ([System.IO.File]::Exists($temporary)) {
+            [System.IO.File]::Delete($temporary)
+        }
+        if ([System.IO.File]::Exists($temporaryProvenance)) {
+            [System.IO.File]::Delete($temporaryProvenance)
+        }
+    }
+    Write-Output "ProjectAtlas atlas forwarder installed and verified: $forwarder -> $VerifiedPath"
+    return $forwarder
+}
+
+function Remove-ProjectAtlasAtlasForwarders {
+    param(
+        [string]$RuntimePath
+    )
+    $candidates = @()
+    if ($RuntimePath) {
+        $candidates += Get-ProjectAtlasAtlasForwarderPath $RuntimePath
+    }
+    else {
+        foreach ($knownPath in (Get-KnownProjectAtlasShimPaths)) {
+            $candidates += Join-Path (Split-Path -Parent $knownPath) "atlas.cmd"
+        }
+        $command = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($command) {
+            $commandPath = if ($command.Path) { $command.Path } else { $command.Source }
+            if ($commandPath) {
+                $candidates += Join-Path (Split-Path -Parent $commandPath) "atlas.cmd"
+            }
+        }
+    }
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        $normalized = Get-NormalizedPathEntry $candidate
+        if ($seen.ContainsKey($normalized)) {
+            continue
+        }
+        $seen[$normalized] = $true
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+        $verifiedPath = if ($RuntimePath) {
+            $RuntimePath
+        }
+        else {
+            $candidate -replace "\\atlas\.cmd$", "\\projectatlas.exe"
+        }
+        $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLock $candidate
+        try {
+            if (-not (Test-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath)) {
+                throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
+            }
+            Assert-ProjectAtlasDirectFilePath $candidate "ProjectAtlas atlas forwarder"
+            if (-not (Move-ProjectAtlasManagedAtlasForwarderLocked $candidate $verifiedPath -AllowSameTarget)) {
+                throw "ProjectAtlas atlas uninstall could not retire the owned forwarder safely: $candidate"
+            }
+        }
+        finally {
+            Exit-ProjectAtlasAtlasForwarderLifecycleLock $lifecycleLock
+        }
+        Write-Output "ProjectAtlas atlas forwarder removed: $candidate"
+    }
 }
 
 function Sync-ProjectAtlasRuntimeToLocalAppData {
@@ -3777,6 +4782,15 @@ function Install-ReleaseBinary {
     }
 }
 
+if (-not $RuntimePath -and $env:PROJECTATLAS_RUNTIME_PATH) {
+    $RuntimePath = $env:PROJECTATLAS_RUNTIME_PATH
+}
+
+if ($Uninstall) {
+    Remove-ProjectAtlasAtlasForwarders $RuntimePath
+    exit 0
+}
+
 if (-not $ProjectRoot) {
     $ProjectRoot = Resolve-DefaultProjectRoot
 }
@@ -3788,10 +4802,6 @@ if (-not $ProjectAtlasVersion) {
     else {
         $ProjectAtlasVersion = Resolve-PluginReleaseVersion
     }
-}
-
-if (-not $RuntimePath -and $env:PROJECTATLAS_RUNTIME_PATH) {
-    $RuntimePath = $env:PROJECTATLAS_RUNTIME_PATH
 }
 
 $releaseBinaryOnly = $ReleaseBinaryOnly -or (Test-Truthy $env:PROJECTATLAS_RELEASE_BINARY_ONLY)
@@ -3808,6 +4818,7 @@ if ($RuntimePath) {
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
+    Write-ProjectAtlasAtlasForwarder $projectAtlas | Out-Null
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
@@ -3843,6 +4854,7 @@ else {
     if (-not $projectAtlas) {
         throw "A ProjectAtlas runtime matching $ProjectAtlasVersion was not found. Install Rust/Cargo or provide the matching ProjectAtlas release binary on PATH."
     }
+    Write-ProjectAtlasAtlasForwarder $projectAtlas | Out-Null
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
 
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas

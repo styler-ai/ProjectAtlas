@@ -448,16 +448,33 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  installer[Installer] --> collision{Existing atlas command?}
+  installer[Installer] --> identity[Canonical verified runtime identity]
+  identity --> locks[Discover destination plus effective candidate; acquire at most two canonical locks ascending under one deadline; reclassify while held; release reverse]
+  locks --> collision{Existing atlas command?}
   collision -->|unmanaged| reject[Typed collision; no overwrite]
-  collision -->|managed| shim[Atomic managed shim install]
-  shim --> discover[PATH discovery]
+  collision -->|owned current| stage[Stage shim and provenance]
+  collision -->|owned prior target| stage
+  collision -->|absent| stage
+  stage --> state[Publish private capability state]
+  state --> provenance{Publish provenance no-clobber succeeds?}
+  provenance -->|no| state_cleanup[Quarantine and verify newly owned state]
+  state_cleanup -->|retired| reject_publication[Fail; preserve foreign provenance and unrelated bytes]
+  state_cleanup -->|retirement fails| retained[Retain exact state; report cleanup failure]
+  retained --> refuse[Later install refuses state without a managed pair]
+  refuse --> recover[Explicit safe retirement/removal enables recovery]
+  provenance -->|yes| forwarder{Publish shim no-clobber succeeds?}
+  forwarder -->|no| pair_cleanup[Retire only newly owned provenance and state]
+  pair_cleanup -->|retired| reject_publication
+  pair_cleanup -->|state retirement fails| retained
+  forwarder -->|yes| shim[Publish verified managed shim]
+  shim --> migrate[Quarantine and verify prior owned pair before identity-safe retirement]
+  migrate --> discover[PATH discovery; preserve concurrent foreign replacements]
   discover --> aliases[atlas top-level command aliases]
   aliases --> canonical[Canonical projectatlas command handlers]
   aliases --> resolve[atlas health resolve]
   aliases --> legacy[atlas health-check remains compatible]
   shim --> uninstall[Managed uninstall/repair]
-  uninstall --> clean[Remove only managed artifact]
+  uninstall --> clean[Remove only managed pair and private state]
 ```
 
 ## v0.5.0 candidate, readback, remediation, and stable promotion

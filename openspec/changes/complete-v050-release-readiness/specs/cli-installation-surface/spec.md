@@ -49,6 +49,14 @@ The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS t
 - **WHEN** another executable already owns the intended `atlas` location or effective PATH
 - **THEN** installation reports the exact collision and does not shadow or overwrite it without explicit collision resolution
 
+#### Scenario: Provenance-bound ownership
+- **WHEN** a candidate forwarder has the public marker, exact generated body, and valid runtime target but its independent installer provenance or private random capability state is missing, mismatched, reparse-linked, or hard-linked
+- **THEN** installation and uninstall classify it as unmanaged and leave the forwarder, provenance, and unrelated state untouched
+
+#### Scenario: Staged no-clobber publication
+- **WHEN** an update stages a replacement, a foreign destination appears after the final collision check, or staging fails before publication
+- **THEN** publication never force-replaces the destination, and a prior owned forwarder plus provenance remains usable until a fully verified replacement is published; retirement quarantines and verifies each old artifact before deletion and preserves a concurrent foreign replacement
+
 ### Requirement: Health reporting and administration remain unambiguous
 `atlas health [report flags]` SHALL run the read-only health report, `atlas health resolve ...` SHALL retain the existing administrative route, and `health-check` SHALL remain a compatibility alias.
 

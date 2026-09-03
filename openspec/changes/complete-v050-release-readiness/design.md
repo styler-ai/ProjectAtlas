@@ -67,7 +67,7 @@ Issue-event repair derives reverse direct-blocker adjacency solely from the decl
 
 #390 verifies installer-generated Claude Code/OpenCode configuration through actual host readers in isolated homes/config roots, including MCP initialization and exact source-evidence readback. It never automates authentication or mutates unrelated global state.
 
-#491 installs one collision-safe `atlas` forwarder to the same runtime while preserving `projectatlas`. `atlas health [report flags]` is the read-only report; `atlas health resolve ...` retains administration; `health-check` remains a compatibility alias.
+#491 installs one collision-safe `atlas` forwarder to the same runtime while preserving `projectatlas`. Ownership is bound to an independent installer-created provenance record containing the canonical forwarder/runtime pair plus a random capability held in the installer state directory; public forwarder text alone is never sufficient. Replacement files are staged and verified, published with platform-native no-clobber creation, and prior owned pairs are retired by same-directory quarantine, byte verification, and identity-safe deletion so a concurrent foreign replacement is preserved. `atlas health [report flags]` is the read-only report; `atlas health resolve ...` retains administration; `health-check` remains a compatibility alias.
 
 ### Maintenance follows proven responsibility
 
