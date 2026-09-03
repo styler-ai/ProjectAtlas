@@ -381,7 +381,16 @@ flowchart TB
     poll -->|published before same deadline| validate{Exact identity valid before same deadline?}
     validate -->|no| fail
     validate -->|yes| installer[Run existing installer handoff assertions]
-    installer --> cleanup[Owned parent and child cleanup]
+    installer --> cleanup[Attempt exact child stop]
+    fail --> cleanup
+    cleanup -->|stop helper stalls or fails| fallback[One bounded exact-identity cleanup fallback]
+    fallback -->|child stopped or already gone| reap[Kill and reap owned parent]
+    fallback -->|fallback stalls or fails| final[One bounded helper-free native exact-identity stop]
+    final -->|child stopped or already gone| reap
+    final -->|cleanup cannot prove ownership or stop child| reap
+    reap -->|all cleanup complete| done[Owned cleanup complete]
+    reap -->|any cleanup failure| diagnostic[Fail closed with cleanup diagnostic]
+    cleanup -->|child stopped| reap
 ```
 
 ## Production module ownership decision

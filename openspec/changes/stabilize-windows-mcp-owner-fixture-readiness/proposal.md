@@ -22,7 +22,7 @@ None.
 ## Impact
 
 - Affects only the Windows CLI integration-test fixture owner and its focused architecture/test proof.
-- Unblocks the strict pre-push workspace gate for #476 and the final delivery-test owner in #487.
+- Unblocks the final delivery-test owner in #487.
 - Adds no dependency, product configuration, public payload, installer/MCP behavior, schema, database path, or production timeout change.
 - Ready for implementation in v0.5.0 after the specification and architecture view are accepted.
 
