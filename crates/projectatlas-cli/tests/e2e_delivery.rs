@@ -1,8 +1,11 @@
 //! Purpose: Validate installer, release, packaged, and plugin delivery contracts.
 #![allow(unused_imports)]
 
+#[path = "support/source_contract.rs"]
+mod frozen_source_contract;
 mod support;
 use assert_cmd::Command;
+use frozen_source_contract::CLI_E2E_SOURCE_SHA256;
 use predicates::prelude::*;
 #[cfg(feature = "optional-parser-supervisor")]
 use projectatlas_cli::optional_parser_lifecycle::OPTIONAL_PARSER_PACK_SELECTION_POLICY_PATH;
@@ -934,6 +937,18 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
         ))
         .into());
     }
+    let frozen_source_contract = CLI_E2E_SOURCE_SHA256
+        .iter()
+        .copied()
+        .collect::<BTreeMap<_, _>>();
+    if frozen_source_contract
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != CLI_E2E_SOURCE_PATHS.iter().copied().collect()
+    {
+        return Err(io::Error::other("frozen CLI E2E source files drifted").into());
+    }
     let facet_counts = [
         (
             "environment_mutations",
@@ -1057,6 +1072,15 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
             .ok_or_else(|| {
                 io::Error::other(format!("missing source digest for {relative_path}"))
             })?;
+        let frozen_digest = frozen_source_contract.get(relative_path).ok_or_else(|| {
+            io::Error::other(format!("missing frozen source digest for {relative_path}"))
+        })?;
+        if expected_digest != frozen_digest {
+            return Err(io::Error::other(format!(
+                "CLI E2E frozen source digest drifted for {relative_path}"
+            ))
+            .into());
+        }
         let observed_digest = sha256_text(&normalize_cli_e2e_text(&source));
         if observed_digest != *expected_digest {
             return Err(io::Error::other(format!(
@@ -1512,12 +1536,18 @@ fn cli_e2e_inventory_contract_rejects_source_and_selector_drift() -> Result<(), 
     if weakened_source == delivery_source {
         return Err(io::Error::other("assertion tamper fixture did not change source").into());
     }
-    fs::write(&delivery_path, weakened_source)?;
+    fs::write(&delivery_path, &weakened_source)?;
+    let inventory_path = fixture.path().join(CLI_E2E_INVENTORY_FILE);
+    let mut inventory: Value = serde_json::from_str(&fs::read_to_string(&inventory_path)?)?;
+    inventory["source_contract"]["files"][CLI_E2E_SOURCE_PATHS[0]] =
+        json!(sha256_text(&normalize_cli_e2e_text(&weakened_source)));
+    fs::write(&inventory_path, serde_json::to_string_pretty(&inventory)?)?;
     require_cli_e2e_contract_rejection(
         assert_cli_e2e_inventory_contract(fixture.path()),
-        "source-content/assertion/facet digest drift",
+        "frozen source digest drift",
     )?;
     fs::write(&delivery_path, &delivery_source)?;
+    fs::copy(workspace_root.join(CLI_E2E_INVENTORY_FILE), &inventory_path)?;
 
     let facet_source = delivery_source.replacen(
         ".env(\"PROJECTATLAS_NO_TELEMETRY\", \"1\")",
