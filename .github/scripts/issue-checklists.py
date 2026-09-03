@@ -185,14 +185,14 @@ class MermaidValidationBudget:
         )
 
 
-def run(args: list[str]) -> str:
+def run(args: list[str], *, raw_output: bool = False) -> str | bytes:
     """Run one fixed command without a shell."""
 
     process = subprocess.run(
         args,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
+        text=not raw_output,
+        encoding=None if raw_output else "utf-8",
         timeout=120,
         check=False,
     )
@@ -1121,19 +1121,30 @@ def candidate_tree_contains_regular_file(candidate_tree_ref: str, path: str) -> 
     """Require one exact regular-file entry before reading its worktree copy."""
 
     try:
-        entries = run(["git", "ls-tree", candidate_tree_ref, "--", path]).splitlines()
-    except SystemExit:
+        path_bytes = path.encode("utf-8")
+        if b"\0" in path_bytes:
+            return False
+        output = run(
+            ["git", "ls-tree", "-z", candidate_tree_ref, "--", path],
+            raw_output=True,
+        )
+    except (OSError, SystemExit, UnicodeEncodeError, ValueError, subprocess.SubprocessError):
         return False
-    if len(entries) != 1:
+    if not isinstance(output, bytes):
         return False
-    metadata, separator, entry_path = entries[0].partition("\t")
+    records = output.split(b"\0")
+    if len(records) != 2 or records[1] != b"":
+        return False
+    metadata, separator, entry_path = records[0].partition(b"\t")
     fields = metadata.split()
     return (
-        separator == "\t"
-        and entry_path == path
+        separator == b"\t"
+        and entry_path == path_bytes
         and len(fields) == 3
-        and fields[0] in {"100644", "100755"}
-        and fields[1] == "blob"
+        and fields[0] in {b"100644", b"100755"}
+        and fields[1] == b"blob"
+        and len(fields[2]) == 40
+        and all(byte in b"0123456789abcdefABCDEF" for byte in fields[2])
     )
 
 
@@ -2732,12 +2743,14 @@ Timeout --> Recovery
         )
         assert architecture_diagram_link_failures(link, "owner/repo", architecture_root) == []
         saved_run = globals()["run"]
-        tree_output: dict[str, str | None] = {
-            "value": "100644 blob 0123456789012345678901234567890123456789\t"
-            "docs/architecture.md\n"
+        tree_output: dict[str, bytes | None] = {
+            "value": (
+                b"100644 blob 0123456789012345678901234567890123456789\t"
+                b"docs/architecture.md\0"
+            )
         }
 
-        def tree_run(args: list[str]) -> str:
+        def tree_run(args: list[str], *, raw_output: bool = False) -> str | bytes:
             if len(args) > 1 and args[1] == "ls-tree":
                 output = tree_output["value"]
                 if output is None:
@@ -2756,10 +2769,33 @@ Timeout --> Recovery
                 )
                 == []
             )
+            unicode_link = (
+                "[Target](https://github.com/owner/repo/blob/main/docs/"
+                "caf%C3%A9.md#user-content-target-view)"
+            )
+            (docs / "café.md").write_text(
+                "## Target View\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+                encoding="utf-8",
+            )
+            tree_output["value"] = (
+                b"100644 blob 0123456789012345678901234567890123456789\t"
+                b"docs/caf\xc3\xa9.md\0"
+            )
+            assert (
+                architecture_diagram_link_failures(
+                    unicode_link,
+                    "owner/repo",
+                    architecture_root,
+                    candidate_tree_ref="candidate",
+                )
+                == []
+            )
             for output in (
-                "120000 blob 0123456789012345678901234567890123456789\t"
-                "docs/architecture.md\n",
-                "malformed tree entry\n",
+                (
+                    b"120000 blob 0123456789012345678901234567890123456789\t"
+                    b"docs/architecture.md\0"
+                ),
+                b"malformed tree entry\0",
             ):
                 tree_output["value"] = output
                 assert any(
