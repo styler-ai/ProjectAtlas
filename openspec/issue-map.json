@@ -28,7 +28,7 @@
         "489": { "blocked_by": [] },
         "490": { "blocked_by": [339, 342, 358, 384, 464, 465, 489] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549] },
+        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555] },
         "495": { "blocked_by": [] },
         "517": { "blocked_by": [] },
         "518": { "blocked_by": [547] },
@@ -37,7 +37,8 @@
         "533": { "blocked_by": [] },
         "544": { "blocked_by": [] },
         "547": { "blocked_by": [] },
-        "549": { "blocked_by": [] }
+        "549": { "blocked_by": [] },
+        "555": { "blocked_by": [487] }
       }
     },
     "v0.6.0-00": {
@@ -190,6 +191,7 @@
     "bound-token-dashboard-to-viewport": 462,
     "reuse-release-proof-by-inputs": 366,
     "reuse-unchanged-ci-build-layers": 341,
+    "route-affected-ci-proof": 555,
     "show-agent-efficiency-dashboard": 340,
     "scope-local-issueops-branch-validation": 549,
     "serialize-lint-reports": 472,

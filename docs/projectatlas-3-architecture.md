@@ -3277,6 +3277,61 @@ normalization with keyed lookups, and use persisted import/call relations for
 deterministic import-alias `called_by` summaries while preserving ambiguity
 rejection.
 
+### Affected CI proof routing and release backstop
+
+Normal pull requests route only the proof contracts that can detect defects in
+the exact change. One closed planner combines the Cargo reverse-dependency graph
+with declared CLI, MCP, integration, and platform ownership; ambiguity selects
+the complete normal-PR proof. Live review-state changes stay independent from
+source verification, selected jobs run concurrently, and one fail-closed
+aggregate is the stable source-proof context. Pull-request readiness is the
+explicit AND of current `pr-state` and current `verify`. Automatic cancellation
+applies only when a newer pull-request source run supersedes an older source
+run for the same pull-request number; all other event, governance, and delivery
+owners use isolated namespaces with cancellation disabled. The complete
+installed-product matrix remains an integrated release-candidate boundary on
+all four supported runner targets.
+
+```mermaid
+flowchart TB
+    subgraph PR[Pull request]
+        direction LR
+        Change[Source change] --> Plan[Closed proof-contract planner]
+        Review[Review or metadata change] --> State[Required PR-state gate]
+        Plan --> Known{Narrow plan proven?}
+        Known -->|No| Full[Complete normal-PR proof]
+        Known -->|Yes| Selected[Selected quality, test-domain,<br/>and platform jobs]
+        Full --> Verify[Required verify aggregate]
+        Selected --> Verify
+        State --> Gate{{AND: current PR-state<br/>plus current verify}}
+        Verify --> Gate
+        Gate -->|Both green| Ready[PR ready]
+        Gate -->|Otherwise| Blocked[PR blocked]
+    end
+
+    Ready --> Main[Protected-branch affected proof]
+    Main --> Candidate[Integrated release candidate]
+
+    subgraph Cancellation[Cancellation isolation]
+        direction LR
+        Newer[Newer pull-request source run] -->|Same PR number; cancels only| Older[Older pull-request source run]
+        Others[Push, merge group, dispatch, schedule,<br/>PR-state, IssueOps, release, publish, deploy] --> Isolated[Separate namespaces;<br/>automatic cancellation disabled]
+    end
+
+    subgraph Release[Release acceptance]
+        direction LR
+        Candidate --> Matrix[Complete installed-product proof:<br/>Linux, Windows, macOS Intel, macOS ARM]
+        Matrix -->|Defect| Fix[Owning issue fix]
+        Fix --> Candidate
+        Matrix -->|Green| Accept[Candidate accepted]
+    end
+```
+
+The planner reports why each proof contract was selected or omitted, but the
+report is diagnostic rather than an evidence ledger. Internal event identity
+prevents stale-result reuse; behavior tests, measured latency and runner cost,
+review, and green required contexts are the public acceptance boundary.
+
 ## Quality Gates
 
 Rust gates:

@@ -1,0 +1,25 @@
+## 1. Specification and Measurement Contract
+
+- [x] 1.1 Specify the affected-proof ownership boundary, explicit current-`pr-state` AND current-`verify` readiness gate, same-PR source-run cancellation isolation, stable required contexts, fail-closed and release backstops, literal issue-task mirroring, platform rules, non-goals, compatibility behavior, and owning architecture view.
+- [x] 1.2 Specify the seven-run baseline, five representative change classes, wall-time and raw-runner-minute method, 10-minute target, 15-minute ceiling, and 30-percent-plus-30-second materiality rule without weakening causal proof.
+
+## 2. Contract Inventory and Fail-Closed Planner
+
+- [ ] 2.1 Inventory every current standard-CI and release-CI step, assign it to one repository, Rust target/test-domain, cross-contract, operating-system, architecture, or installed-product owner, and keep every ambiguous or shared step in complete fallback.
+- [ ] 2.2 Implement one Python-standard-library planner that parses the bounded NUL-safe base-to-head name-status diff, derives Rust reverse dependencies from one `cargo metadata` result, unions declared non-Cargo owners, binds the plan to current event inputs, and emits only fixed contract IDs and job booleans.
+- [ ] 2.3 Make the planner report every selected and omitted contract with its causal rule, and make unknown paths, shared authorities, renames/deletions, malformed or stale inputs, metadata errors, and workflow/toolchain/lockfile/manifest/schema/planner changes select complete normal-PR proof.
+- [ ] 2.4 Add deterministic planner and aggregate self-tests for documentation-only, leaf-crate, CLI-domain, shared-core, platform-sensitive, rename/delete, unknown, metadata failure, bounded-output, stale-binding, human/bot parity, explicit readiness-AND behavior, and selected-job missing/skipped/cancelled/failed cases.
+
+## 3. Workflow Routing and Backstops
+
+- [ ] 3.1 Move issue-reference, milestone, and review-thread validation into a lightweight required `pr-state` workflow with cancellation disabled, and prove review or review-comment events cannot launch, cancel, or satisfy source compilation, Rust tests, platform E2E, or `verify`.
+- [ ] 3.2 Refactor source CI into planning plus static concurrent repository-quality, Rust test-domain, and affected-platform jobs behind an always-run fail-closed `verify` aggregate, while the implementation pull request still emits every currently required context.
+- [ ] 3.3 Give pull-request source verification, `pr-state`, push, merge-group, workflow-dispatch, schedule, IssueOps, release, publish, and deploy runs separate concurrency namespaces; allow cancellation only when a newer `pull_request` source-verification run supersedes an older one for the same pull-request number, run protected-branch affected proof, add complete scheduled/manual normal-proof drift checks, fail ambiguous merge-group planning closed, and preserve the complete installed-product Linux/Windows/macOS-Intel/macOS-ARM release-candidate boundary and its whole-boundary retry after a fix.
+
+## 4. Verification and Controlled Activation
+
+- [ ] 4.1 Update the owning workflow-policy E2E contract and architecture documentation to cover selected and omitted contracts, explicit readiness-AND behavior, deterministic same-PR source cancellation, isolation of every non-PR-source namespace, positive, negative, failure, compatibility, operating-system/architecture ownership, and release-backstop behavior while retaining the explicit normal-CI rejection of mutation, coverage, and nextest campaigns.
+- [ ] 4.2 Run `python .github/scripts/issue-checklists.py --self-test`, the planner self-tests, `cargo fmt --all --check`, the owning workflow-policy E2E target, and the complete fail-closed normal-PR proof with explicit timeouts.
+- [ ] 4.3 Stage branch protection without a merge gap, replace the four platform requirements only after `pr-state` and `verify` are live, and read back hosted narrow-plan, unknown-input fallback, selected-job failure, explicit readiness-AND, same-PR supersession, cross-PR and non-PR-source cancellation isolation, review-only, protected-branch, and complete release-candidate behavior.
+- [ ] 4.4 Measure the five before/after change classes, report both required-check wall time and raw runner-minutes, retain claimed routing only when it improves the named metric by at least 30 percent and 30 seconds without losing causal proof, and record any unavoidable reason a representative run exceeds the 10-minute target or 15-minute ceiling.
+- [ ] 4.5 Extend planned-issue IssueOps comparison and its self-test so the live `Implementation Tasks` must literally match mapped `tasks.md` text, order, and checked state, and equal-count text or order drift fails before implementation handoff.
