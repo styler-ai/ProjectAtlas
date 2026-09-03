@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -4521,6 +4522,7 @@ def main() -> None:
         raise SystemExit("--base requires --pull-request or --candidate-issue")
     failures: list[str] = []
     if args.candidate_issue is not None:
+        os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
         candidate_change_names = candidate_tree_change_names(
             args.candidate_local_oid, root, args.issue_map
         )

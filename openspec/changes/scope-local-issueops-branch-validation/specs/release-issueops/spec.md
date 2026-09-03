@@ -19,6 +19,10 @@ ProjectAtlas SHALL validate one local candidate issue against its live GitHub ch
 - **WHEN** a candidate's tracked issue-map, mapped task, or linked architecture document has clean worktree bytes that differ from its submitted tree blob while ordinary Git status remains clean
 - **THEN** candidate validation uses the submitted blob bytes and does not approve or parse the smudged worktree content
 
+#### Scenario: Candidate replacement refs cannot redirect submitted objects
+- **WHEN** local Git replacement refs substitute the submitted candidate commit, a descendant tree, a candidate blob, or accepted-base object
+- **THEN** candidate validation disables replacement resolution and reads the original submitted object IDs
+
 ### Requirement: Candidate ownership and base authority fail closed
 ProjectAtlas SHALL require exactly one mapped open owning issue and a readable accepted base for local candidate validation.
 

@@ -11175,6 +11175,167 @@ exit 0
         .into());
     }
 
+    let replacement_index = temp.path().join("replacement-index");
+    let replacement_read_tree = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args(["read-tree", &filtered_head])
+        .output()?;
+    if !replacement_read_tree.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not read candidate tree: {}{}",
+            String::from_utf8_lossy(&replacement_read_tree.stdout),
+            String::from_utf8_lossy(&replacement_read_tree.stderr),
+        ))
+        .into());
+    }
+    let replacement_cacheinfo = format!("120000,{linked_blob},{LINKED_DOCUMENT_RELATIVE_PATH}");
+    let replacement_update_index = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &replacement_cacheinfo,
+        ])
+        .output()?;
+    if !replacement_update_index.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write symlink entry: {}{}",
+            String::from_utf8_lossy(&replacement_update_index.stdout),
+            String::from_utf8_lossy(&replacement_update_index.stderr),
+        ))
+        .into());
+    }
+    let replacement_tree_output = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args(["write-tree"])
+        .output()?;
+    if !replacement_tree_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write tree: {}{}",
+            String::from_utf8_lossy(&replacement_tree_output.stdout),
+            String::from_utf8_lossy(&replacement_tree_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_tree = String::from_utf8(replacement_tree_output.stdout)?
+        .trim()
+        .to_owned();
+    let mut replacement_commit_command = git_command_for_root(&fixture_repo);
+    replacement_commit_command
+        .args(["commit-tree", &replacement_tree, "-p", &base])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut replacement_commit = replacement_commit_command.spawn()?;
+    replacement_commit
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("replacement-tree commit stdin was not piped"))?
+        .write_all(b"replacement tree (#549)\n")?;
+    let replacement_commit_output = replacement_commit.wait_with_output()?;
+    if !replacement_commit_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write commit: {}{}",
+            String::from_utf8_lossy(&replacement_commit_output.stdout),
+            String::from_utf8_lossy(&replacement_commit_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_commit_oid = String::from_utf8(replacement_commit_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &["replace", &filtered_head, &replacement_commit_oid],
+    )?;
+    let replaced_tree_output = git_command_for_root(&fixture_repo)
+        .args([
+            "ls-tree",
+            &filtered_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    let original_tree_output = git_command_for_root(&fixture_repo)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args([
+            "ls-tree",
+            &filtered_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    if !replaced_tree_output.status.success()
+        || !String::from_utf8_lossy(&replaced_tree_output.stdout).starts_with("120000 blob ")
+        || !original_tree_output.status.success()
+        || !String::from_utf8_lossy(&original_tree_output.stdout).starts_with("100644 blob ")
+    {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture did not distinguish replacement from submitted tree:\nreplaced={}original={}",
+            String::from_utf8_lossy(&replaced_tree_output.stdout),
+            String::from_utf8_lossy(&original_tree_output.stdout),
+        ))
+        .into());
+    }
+    let (replacement_tree_status, replacement_tree_stderr, replacement_tree_dispatch) =
+        run_candidate_hook(&filtered_head)?;
+    if !replacement_tree_status || !replacement_tree_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not ignore a replacement commit tree:\nstderr={replacement_tree_stderr}\ndispatch={replacement_tree_dispatch}",
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["replace", "-d", &filtered_head])?;
+
+    let replacement_document = temp.path().join("replacement-invalid.md");
+    fs::write(
+        &replacement_document,
+        "## Issue task authority\n\nnot-mermaid replacement bytes\n",
+    )?;
+    let replacement_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w"])
+        .arg(&replacement_document)
+        .output()?;
+    if !replacement_blob_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-blob fixture could not write blob: {}{}",
+            String::from_utf8_lossy(&replacement_blob_output.stdout),
+            String::from_utf8_lossy(&replacement_blob_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_blob = String::from_utf8(replacement_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(&fixture_repo, &["replace", &linked_blob, &replacement_blob])?;
+    let replaced_blob_output = git_command_for_root(&fixture_repo)
+        .args(["cat-file", "blob", &linked_blob])
+        .output()?;
+    let original_blob_output = git_command_for_root(&fixture_repo)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args(["cat-file", "blob", &linked_blob])
+        .output()?;
+    if !replaced_blob_output.status.success()
+        || !String::from_utf8_lossy(&replaced_blob_output.stdout).contains("not-mermaid")
+        || !original_blob_output.status.success()
+        || String::from_utf8_lossy(&original_blob_output.stdout).contains("not-mermaid")
+    {
+        return Err(io::Error::other(
+            "replacement-blob fixture did not distinguish replacement from submitted blob",
+        )
+        .into());
+    }
+    let (replacement_blob_status, replacement_blob_stderr, replacement_blob_dispatch) =
+        run_candidate_hook(&filtered_head)?;
+    if !replacement_blob_status || !replacement_blob_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not ignore a replacement blob:\nstderr={replacement_blob_stderr}\ndispatch={replacement_blob_dispatch}",
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["replace", "-d", &linked_blob])?;
+
     git_success(
         &fixture_repo,
         &["commit", "--allow-empty", "-m", "candidate (#549) (#547"],

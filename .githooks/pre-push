@@ -51,6 +51,7 @@ if [ "$push_scope" = "global" ]; then
     --repo "$repo" --root . --issue-map openspec/issue-map.json
 elif [ "${push_scope#candidate:}" != "$push_scope" ]; then
   candidate_local_oid="${push_scope#candidate:}"
+  export GIT_NO_REPLACE_OBJECTS=1
   if [ -z "$candidate_local_oid" ] ||
     [ "$candidate_local_oid" = "0000000000000000000000000000000000000000" ]; then
     echo "candidate branch local object is missing or a deletion" >&2
