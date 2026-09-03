@@ -1962,6 +1962,11 @@ def check_pull_request_tasks(
                 )
     mermaid_budget = mermaid_budget or MermaidValidationBudget()
     for change, owners in sorted(issue_map.items()):
+        all_owners_closed = all(
+            issue_states[owner.issue] != "OPEN" for owner in owners
+        )
+        if all_owners_closed and candidate_tree_ref is None:
+            continue
         try:
             path, candidate_tasks = local_tasks(
                 root, change, candidate_tree_ref=candidate_tree_ref
@@ -1969,7 +1974,7 @@ def check_pull_request_tasks(
         except SystemExit as error:
             failures.append(str(error))
             continue
-        if all(issue_states[owner.issue] != "OPEN" for owner in owners):
+        if all_owners_closed:
             continue
         try:
             candidate_slices = owner_slices(path, candidate_tasks, owners)
@@ -3944,6 +3949,16 @@ Timeout --> Recovery
             assert live_reads == [2], "candidate checks must read live state only for the owner"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
 
+            live_payloads[1] = {"state": "CLOSED", "body": issue_contract}
+            change_a_tasks = (
+                branch_root / "openspec" / "changes" / "change-a" / "tasks.md"
+            )
+            change_a_tasks.unlink()
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            ) == []
+            change_a_tasks.write_text(candidate_tasks, encoding="utf-8")
+
             def fake_candidate_tree_file_text(
                 _ref: str, _root: Path, path: str | Path, _label: str
             ) -> str:
@@ -3951,7 +3966,6 @@ Timeout --> Recovery
                     raise SystemExit("closed mapped candidate task blob rejected")
                 return candidate_tasks
 
-            live_payloads[1] = {"state": "CLOSED", "body": issue_contract}
             globals()["candidate_tree_file_text"] = fake_candidate_tree_file_text
             closed_blob_failures = check_candidate_tasks(
                 "owner/repo",
