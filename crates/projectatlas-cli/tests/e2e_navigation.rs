@@ -3596,7 +3596,7 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::write(
         repo.join(GUIDE_MD_PATH),
-        "# Guide\n\nSee [the current source](../src/lib.rs).\n",
+        "# Guide\n\nSee [the invalid source](<../src/missing.rs\u{1}>).\nSee [the current source](../src/lib.rs).\n",
     )?;
     fs::write(
         repo.join("docs/empty.md"),
@@ -3988,6 +3988,57 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
         "source",
     )?;
 
+    let guide_health_output = Command::new(mcp_contract_executable())
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&database)
+        .args([
+            "health-check",
+            "--coverage",
+            "--path-prefix",
+            GUIDE_MD_PATH,
+            "--relation",
+            "documents",
+            "--limit",
+            "10",
+        ])
+        .output()?;
+    if !guide_health_output.status.success() {
+        return Err(io::Error::other(format!(
+            "classified CLI guide coverage failed: {}",
+            String::from_utf8_lossy(&guide_health_output.stderr)
+        ))
+        .into());
+    }
+    let guide_health: Value = serde_json::from_slice(&guide_health_output.stdout)?;
+    require_json_usize(&guide_health, &["returned"], 1)?;
+    let guide_health_row = &guide_health["rows"][0];
+    require_json_string(guide_health_row, &["state"], "complete")?;
+    require_json_usize(guide_health_row, &["covered"], 1)?;
+    require_json_usize(guide_health_row, &["omitted"], 0)?;
+    let guide_rejections = guide_health_row["identity_rejections"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("CLI guide coverage omitted rejection details"))?;
+    require_json_string(&guide_rejections[0], &["path"], GUIDE_MD_PATH)?;
+    require_json_string(&guide_rejections[0], &["parser"], "structural")?;
+    require_json_string(&guide_rejections[0], &["field"], "relation.target")?;
+    require_json_string(&guide_rejections[0], &["reason"], "control-characters")?;
+    require_json_usize(&guide_rejections[0], &["span", "start_line"], 3)?;
+    require_json_usize(&guide_rejections[0], &["span", "start_column"], 4)?;
+    require_json_usize(&guide_rejections[0], &["span", "end_line"], 3)?;
+    require_json_usize(&guide_rejections[0], &["span", "end_column"], 46)?;
+    if guide_rejections.len() != 1
+        || String::from_utf8_lossy(&guide_health_output.stdout).contains("missing.rs")
+    {
+        return Err(io::Error::other(format!(
+            "CLI guide coverage retained invalid Markdown identity: {guide_health}"
+        ))
+        .into());
+    }
+
     fs::write(
         repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn api() {}\n\npub fn current_saved_source() {}\n",
@@ -4164,6 +4215,39 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
             &["symbol_relations", "rows", "0", "source", "classification"],
             "documentation",
         )?;
+
+        let mcp_health: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_health",
+            &serde_json::json!({
+                "project_path": repo.as_path(),
+                "coverage": true,
+                "path_prefix": GUIDE_MD_PATH,
+                "relation": "documents",
+                "limit": 10
+            }),
+        )?)?;
+        require_json_usize(&mcp_health, &["coverage", "returned"], 1)?;
+        let mcp_health_row = &mcp_health["coverage"]["rows"][0];
+        require_json_string(mcp_health_row, &["state"], "complete")?;
+        require_json_usize(mcp_health_row, &["covered"], 1)?;
+        require_json_usize(mcp_health_row, &["omitted"], 0)?;
+        let mcp_rejections = mcp_health_row["identity_rejections"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("MCP guide coverage omitted rejection details"))?;
+        require_json_string(&mcp_rejections[0], &["path"], GUIDE_MD_PATH)?;
+        require_json_string(&mcp_rejections[0], &["parser"], "structural")?;
+        require_json_string(&mcp_rejections[0], &["field"], "relation.target")?;
+        require_json_string(&mcp_rejections[0], &["reason"], "control-characters")?;
+        require_json_usize(&mcp_rejections[0], &["span", "start_line"], 3)?;
+        require_json_usize(&mcp_rejections[0], &["span", "start_column"], 4)?;
+        require_json_usize(&mcp_rejections[0], &["span", "end_line"], 3)?;
+        require_json_usize(&mcp_rejections[0], &["span", "end_column"], 46)?;
+        if mcp_rejections.len() != 1 || serde_json::to_string(&mcp_health)?.contains("missing.rs") {
+            return Err(io::Error::other(format!(
+                "MCP guide coverage retained invalid Markdown identity: {mcp_health}"
+            ))
+            .into());
+        }
 
         let source_summary: Value = toon_format::decode_default(&session.call_tool(
             "atlas_file_summary",

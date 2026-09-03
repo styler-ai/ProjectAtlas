@@ -2879,7 +2879,12 @@ finally {
         .env("PROJECTATLAS_TEST_UNPINNED_RUNTIME", &unpinned_runtime)
         .env("PROJECTATLAS_TEST_STABLE_RUNTIME", &stable_runtime)
         .env("LOCALAPPDATA", &local_app_data)
-        .output()?;
+        .spawn()?;
+    let output = wait_for_plugin_installer_output(
+        output,
+        "fresh Windows PATH probe",
+        Duration::from_secs(30),
+    )?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "fresh Windows PATH probe failed\nstdout:\n{}\nstderr:\n{}",
