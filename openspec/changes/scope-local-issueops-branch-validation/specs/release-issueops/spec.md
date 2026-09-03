@@ -43,7 +43,7 @@ ProjectAtlas SHALL require exactly one mapped open owning issue and a readable a
 - **THEN** candidate validation fails without falling back to global mutable state
 
 ### Requirement: Pre-push scope follows pushed remote refs
-ProjectAtlas SHALL select global checklist validation when any pre-push update targets `refs/heads/main`. Candidate validation SHALL be allowed only when exactly one valid pushed target is a non-main `refs/heads/*` branch whose non-zero local object ID equals the validated checked-out `HEAD`, whose worktree has no tracked, staged, or non-ignored untracked changes, and whose tracked index entries are not marked `assume-unchanged` or `skip-worktree`; multiple non-main, deleted, mismatched, dirty, or hidden-index candidate targets SHALL fail closed before scoped validation.
+ProjectAtlas SHALL select global checklist validation when exactly one valid pre-push update targets `refs/heads/main`. Candidate validation SHALL be allowed only when exactly one valid pushed target is a non-main `refs/heads/*` branch whose non-zero local object ID equals the validated checked-out `HEAD`, whose worktree has no tracked, staged, or non-ignored untracked changes, and whose tracked index entries are not marked `assume-unchanged` or `skip-worktree`; zero, multiple, mixed, deleted, mismatched, dirty, or hidden-index targets SHALL fail closed before scoped validation.
 
 #### Scenario: Feature checkout pushes main
 - **WHEN** a feature checkout pushes an update whose remote ref is `refs/heads/main`
@@ -87,7 +87,7 @@ ProjectAtlas SHALL select global checklist validation when any pre-push update t
 
 #### Scenario: Main and candidate refs are pushed together
 - **WHEN** one pre-push update targets `refs/heads/main` and another targets a non-main branch
-- **THEN** pre-push selects global checklist validation
+- **THEN** pre-push fails closed without validating or publishing either update
 
 #### Scenario: Ref-update input is malformed or unsupported
 - **WHEN** pre-push receives no records, a record without four fields, or a target outside `refs/heads/*`

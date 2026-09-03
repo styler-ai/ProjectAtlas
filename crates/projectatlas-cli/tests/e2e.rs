@@ -10574,14 +10574,16 @@ exit 0
             ],
         )?;
     }
-    let (mixed_status, mixed_targets) = run_hook(
+    let (mixed_status, mixed_log) = run_hook(
         "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
         false,
     )?;
-    let mixed_calls = final_issueops(&mixed_targets);
-    if !mixed_status || mixed_calls.len() != 1 || mixed_calls[0].contains("--candidate-issue") {
+    if mixed_status
+        || !final_issueops(&mixed_log).is_empty()
+        || mixed_log.contains("--owner-from-commits")
+    {
         return Err(io::Error::other(format!(
-            "mixed candidate/main push did not prefer global IssueOps dispatch:\n{mixed_targets}"
+            "mixed candidate/main push did not fail before IssueOps dispatch:\n{mixed_log}"
         ))
         .into());
     }

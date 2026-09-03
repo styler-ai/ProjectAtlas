@@ -39,10 +39,9 @@ push_scope="$(
       }
     }
     END {
-      if (!seen || invalid) exit 1
+      if (!seen || invalid || updates != 1) exit 1
       if (main) print "global"
-      else if (updates == 1) print "candidate:" local_oid
-      else exit 1
+      else print "candidate:" local_oid
     }
   '
 )"
