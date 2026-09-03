@@ -162,6 +162,18 @@ jobs:
           python3 .github/scripts/verify-rust-toolchain.py --self-test
           python3 .github/scripts/verify-rust-toolchain.py --install
 
+      - name: Install exact real host CLIs for native reader proof
+        timeout-minutes: 10
+        shell: bash
+        run: npm install --global @anthropic-ai/claude-code@2.1.201 opencode-ai@1.18.10
+
+      - name: Real installed host reader proof
+        timeout-minutes: 15
+        shell: bash
+        env:
+          PROJECTATLAS_REQUIRE_REAL_HOST_READERS: "1"
+        run: cargo test --locked -p projectatlas-cli --all-features --test e2e installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture
+
       - name: macOS all-features warning gate
         if: runner.os == 'macOS'
         timeout-minutes: 15
