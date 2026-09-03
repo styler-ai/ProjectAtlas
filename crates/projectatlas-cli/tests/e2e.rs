@@ -10600,6 +10600,10 @@ exit 0
 
 #[test]
 fn pre_push_candidate_rejects_ignored_linked_document_outside_tree() -> Result<(), Box<dyn Error>> {
+    const LINKED_DOCUMENT_DIR_NAME: &str = "docs";
+    const LINKED_DOCUMENT_FILE_NAME: &str = "ignored.md";
+    const LINKED_DOCUMENT_RELATIVE_PATH: &str = "docs/ignored.md";
+
     let workspace_root = workspace_root()?;
     let temp = tempfile::tempdir()?;
     let fixture_repo = temp.path().join(TEST_REPO_DIR);
@@ -10736,7 +10740,9 @@ Mitigations:
         "docs/ignored.md\n",
     )?;
     fs::write(
-        fixture_repo.join("docs").join("ignored.md"),
+        fixture_repo
+            .join(LINKED_DOCUMENT_DIR_NAME)
+            .join(LINKED_DOCUMENT_FILE_NAME),
         "## Issue task authority\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
     )?;
     let status_output = git_command_for_root(&fixture_repo)
@@ -10784,7 +10790,7 @@ exit 0
     }
     let current_path = std::env::var_os("PATH").unwrap_or_default();
     let test_path = std::env::join_paths(
-        std::iter::once(fake_path).chain(std::env::split_paths(&current_path)),
+        std::iter::once(fake_path.clone()).chain(std::env::split_paths(&current_path)),
     )?;
     fs::write(&dispatch_log, "")?;
     let shell = if cfg!(windows) {
@@ -10814,12 +10820,122 @@ exit 0
     let dispatch = fs::read_to_string(&dispatch_log)?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if output.status.success()
-        || !stderr.contains("has no tracked Markdown file in candidate tree")
+        || !stderr.contains("has no tracked regular Markdown file in candidate tree")
         || !dispatch.contains("--candidate-issue 549")
     {
         return Err(io::Error::other(format!(
             "ignored linked document was not rejected from the candidate tree:\nstdout={}\nstderr={stderr}\ndispatch={dispatch}",
             String::from_utf8_lossy(&output.stdout),
+        ))
+        .into());
+    }
+
+    let linked_document = fixture_repo
+        .join(LINKED_DOCUMENT_DIR_NAME)
+        .join(LINKED_DOCUMENT_FILE_NAME);
+    fs::write(
+        &linked_document,
+        "## Issue task authority\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+    )?;
+    let blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", LINKED_DOCUMENT_RELATIVE_PATH])
+        .output()?;
+    if !blob_output.status.success() {
+        return Err(io::Error::other("symlink-tree fixture blob lookup failed").into());
+    }
+    let blob = String::from_utf8(blob_output.stdout)?.trim().to_owned();
+    let cacheinfo = format!("120000,{blob},{LINKED_DOCUMENT_RELATIVE_PATH}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate linked document (#549)"],
+    )?;
+    let symlink_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !symlink_head_output.status.success() {
+        return Err(io::Error::other("symlink-tree fixture HEAD lookup failed").into());
+    }
+    let symlink_head = String::from_utf8(symlink_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let tree_output = git_command_for_root(&fixture_repo)
+        .args([
+            "ls-tree",
+            &symlink_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    if !tree_output.status.success()
+        || !String::from_utf8_lossy(&tree_output.stdout).starts_with("120000 blob ")
+    {
+        return Err(io::Error::other(format!(
+            "symlink-tree fixture did not create a mode-120000 entry:\n{}{}",
+            String::from_utf8_lossy(&tree_output.stdout),
+            String::from_utf8_lossy(&tree_output.stderr),
+        ))
+        .into());
+    }
+    let inherited_path = std::env::var_os("PATH")
+        .ok_or_else(|| io::Error::other("symlink-tree fixture requires PATH"))?;
+    let real_git = std::env::split_paths(&inherited_path)
+        .map(|directory| {
+            if cfg!(windows) {
+                directory.join("git.exe")
+            } else {
+                directory.join("git")
+            }
+        })
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| io::Error::other("symlink-tree fixture requires git"))?;
+    let real_git = real_git.to_string_lossy();
+    let git_stub_name = if cfg!(windows) { "git.cmd" } else { "git" };
+    let git_stub = if cfg!(windows) {
+        format!(
+            "@echo off\r\nif /I \"%~1\"==\"status\" exit /b 0\r\n\"{real_git}\" %*\r\nexit /b %ERRORLEVEL%\r\n"
+        )
+    } else {
+        format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = status ]; then exit 0; fi\nexec '{real_git}' \"$@\"\n"
+        )
+    };
+    write_executable_script(&fake_path.join(git_stub_name), &git_stub)?;
+    fs::write(&dispatch_log, "")?;
+    let mut symlink_command = StdCommand::new(&shell);
+    symlink_command
+        .current_dir(&fixture_repo)
+        .arg(&hook)
+        .env("PATH", &test_path)
+        .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+        .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut symlink_child = symlink_command.spawn()?;
+    symlink_child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("symlink-tree hook stdin was not piped"))?
+        .write_all(
+            format!(
+                "refs/heads/feature {symlink_head} refs/heads/feature 2222222222222222222222222222222222222222\n"
+            )
+            .as_bytes(),
+        )?;
+    let symlink_output = symlink_child.wait_with_output()?;
+    let symlink_dispatch = fs::read_to_string(&dispatch_log)?;
+    let symlink_stderr = String::from_utf8_lossy(&symlink_output.stderr);
+    if symlink_output.status.success()
+        || !symlink_stderr.contains("has no tracked regular Markdown file")
+        || !symlink_dispatch.contains("--candidate-issue 549")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 linked document was not rejected before worktree content validation:\nstdout={}\nstderr={symlink_stderr}\ndispatch={symlink_dispatch}",
+            String::from_utf8_lossy(&symlink_output.stdout),
         ))
         .into());
     }

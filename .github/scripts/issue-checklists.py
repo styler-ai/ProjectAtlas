@@ -1117,6 +1117,26 @@ def planned_issue_failures(
     return failures
 
 
+def candidate_tree_contains_regular_file(candidate_tree_ref: str, path: str) -> bool:
+    """Require one exact regular-file entry before reading its worktree copy."""
+
+    try:
+        entries = run(["git", "ls-tree", candidate_tree_ref, "--", path]).splitlines()
+    except SystemExit:
+        return False
+    if len(entries) != 1:
+        return False
+    metadata, separator, entry_path = entries[0].partition("\t")
+    fields = metadata.split()
+    return (
+        separator == "\t"
+        and entry_path == path
+        and len(fields) == 3
+        and fields[0] in {"100644", "100755"}
+        and fields[1] == "blob"
+    )
+
+
 def architecture_diagram_link_failures(
     section: str,
     repo: str,
@@ -1185,20 +1205,11 @@ def architecture_diagram_link_failures(
             continue
         if candidate_tree_ref is not None:
             candidate_tree_path = Path("docs", relative_parts[0]).as_posix()
-            try:
-                tree_type = run(
-                    [
-                        "git",
-                        "cat-file",
-                        "-t",
-                        f"{candidate_tree_ref}:{candidate_tree_path}",
-                    ]
-                ).strip()
-            except SystemExit:
-                tree_type = ""
-            if tree_type != "blob":
+            if not candidate_tree_contains_regular_file(
+                candidate_tree_ref, candidate_tree_path
+            ):
                 failures.append(
-                    f"architecture diagram link {url!r} has no tracked Markdown file "
+                    f"architecture diagram link {url!r} has no tracked regular Markdown file "
                     f"in candidate tree {candidate_tree_ref!r}"
                 )
                 continue
@@ -2720,6 +2731,58 @@ Timeout --> Recovery
             encoding="utf-8",
         )
         assert architecture_diagram_link_failures(link, "owner/repo", architecture_root) == []
+        saved_run = globals()["run"]
+        tree_output: dict[str, str | None] = {
+            "value": "100644 blob 0123456789012345678901234567890123456789\t"
+            "docs/architecture.md\n"
+        }
+
+        def tree_run(args: list[str]) -> str:
+            if len(args) > 1 and args[1] == "ls-tree":
+                output = tree_output["value"]
+                if output is None:
+                    raise SystemExit("synthetic git ls-tree failure")
+                return output
+            return saved_run(args)
+
+        globals()["run"] = tree_run
+        try:
+            assert (
+                architecture_diagram_link_failures(
+                    link,
+                    "owner/repo",
+                    architecture_root,
+                    candidate_tree_ref="candidate",
+                )
+                == []
+            )
+            for output in (
+                "120000 blob 0123456789012345678901234567890123456789\t"
+                "docs/architecture.md\n",
+                "malformed tree entry\n",
+            ):
+                tree_output["value"] = output
+                assert any(
+                    "regular Markdown file" in failure
+                    for failure in architecture_diagram_link_failures(
+                        link,
+                        "owner/repo",
+                        architecture_root,
+                        candidate_tree_ref="candidate",
+                    )
+                )
+            tree_output["value"] = None
+            assert any(
+                "regular Markdown file" in failure
+                for failure in architecture_diagram_link_failures(
+                    link,
+                    "owner/repo",
+                    architecture_root,
+                    candidate_tree_ref="candidate",
+                )
+            )
+        finally:
+            globals()["run"] = saved_run
         shortened_fragment = link.replace("#user-content-", "#")
         assert any(
             "browser-native #user-content-<heading> fragment" in failure
