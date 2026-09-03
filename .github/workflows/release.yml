@@ -242,7 +242,7 @@ jobs:
           mkdir -p contract-artifacts
           mkdir -p contract-artifacts/bin
           for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
-            binary="$(find target/release/deps -maxdepth 1 -type f -name "\${binary_name}-*" -perm -111 -print -quit)"
+            binary="$(find target/release/deps -maxdepth 1 -type f -name "${binary_name}-*" -perm -111 -print -quit)"
             if [[ -z "$binary" ]]; then
               echo "Compiled packaged contract binary was not found: $binary_name" >&2
               exit 1
@@ -253,13 +253,13 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           root="$(cd "$(dirname "$0")" && pwd)"
-          if [[ "\${1:-}" == "--list" ]]; then
+          if [[ "${1:-}" == "--list" ]]; then
             for binary in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
               "$root/bin/$binary" --list
             done
             exit 0
           fi
-          case "\${1:-}" in
+          case "${1:-}" in
             mcp_advertised_tools_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
               binary=e2e_delivery ;;
             mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|installed_candidate_without_git_*|compiler_config_*)
@@ -271,7 +271,7 @@ jobs:
             installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|parser_pack_*|linux_btrfs_*)
               binary=e2e_lifecycle ;;
             *)
-              echo "unknown packaged contract test: \${1:-<missing>}" >&2
+              echo "unknown packaged contract test: ${1:-<missing>}" >&2
               exit 2 ;;
           esac
           exec "$root/bin/$binary" "$@"

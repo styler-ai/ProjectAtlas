@@ -445,6 +445,8 @@ const CLI_E2E_INVENTORY_NORMALIZATION: &str = "UTF-8 source with CRLF and CR nor
 
 const CLI_E2E_SUPPORT_PATH: &str = "crates/projectatlas-cli/tests/support/mod.rs";
 
+const RELEASE_WORKFLOW_PATH: &str = ".github/workflows/release.yml";
+
 const CLI_E2E_BASELINE_COMMIT: &str = "b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb";
 
 const CLI_E2E_BASELINE_SOURCE: &str = "crates/projectatlas-cli/tests/e2e.rs";
@@ -526,7 +528,7 @@ const CLI_E2E_SOURCE_PATHS: &[&str] = &[
 
 const CLI_E2E_WORKFLOW_PATHS: &[&str] = &[
     ".github/workflows/ci.yml",
-    ".github/workflows/release.yml",
+    RELEASE_WORKFLOW_PATH,
     ".github/workflows/optional-parser-pack.yml",
 ];
 
@@ -1386,6 +1388,13 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
         ))
         .into());
     }
+    let release_workflow = fs::read_to_string(workspace_root.join(RELEASE_WORKFLOW_PATH))?;
+    if workflow_job_block(&release_workflow, "package-unix")?.contains(r"\${") {
+        return Err(io::Error::other(
+            "Unix packaged contract runner must not escape Bash parameter expansion",
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -1521,6 +1530,20 @@ fn cli_e2e_inventory_contract_rejects_source_and_selector_drift() -> Result<(), 
     let fixture = tempfile::tempdir()?;
     copy_cli_e2e_contract_fixture(&workspace_root, fixture.path())?;
     assert_cli_e2e_inventory_contract(fixture.path())?;
+
+    let shell_fixture = tempfile::tempdir()?;
+    copy_cli_e2e_contract_fixture(&workspace_root, shell_fixture.path())?;
+    let release_path = shell_fixture.path().join(RELEASE_WORKFLOW_PATH);
+    let release_source = fs::read_to_string(&release_path)?;
+    let escaped_source = release_source.replacen("${binary_name}", r"\${binary_name}", 1);
+    if escaped_source == release_source {
+        return Err(io::Error::other("Unix wrapper tamper fixture did not change workflow").into());
+    }
+    fs::write(release_path, escaped_source)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(shell_fixture.path()),
+        "must not escape Bash parameter expansion",
+    )?;
 
     let legacy_path = fixture.path().join("crates/projectatlas-cli/tests/e2e.rs");
     fs::write(&legacy_path, "#[test]\nfn legacy_monolith() {}\n")?;
