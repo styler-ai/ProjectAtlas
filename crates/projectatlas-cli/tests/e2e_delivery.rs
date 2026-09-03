@@ -75,12 +75,15 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    MCP_CONTRACT_METADATA_CANARY, McpDatabaseSnapshot, assert_planted_community_values,
-    complete_mcp_test_after_shutdown, git_command_for_root, json_at, json_community_values,
-    json_summary_command, mcp_contract_executable, mcp_database_snapshot, mcp_tool_text,
-    require_json_array_len, require_json_bool, require_json_contains, require_json_string,
-    require_json_usize, require_json_usize_at_least, require_json_usize_greater_than,
-    run_mcp_stdio, run_mcp_stdio_with_env, sha256_hex, sqlite_table_digests, workspace_root,
+    MCP_CONTRACT_METADATA_CANARY, McpDatabaseSnapshot, McpStdioCleanupPacket,
+    assert_planted_community_values, complete_mcp_test_after_shutdown, git_command_for_root,
+    json_at, json_community_values, json_summary_command, mcp_contract_executable,
+    mcp_database_snapshot, mcp_tool_text, reap_mcp_stdio_packet, require_json_array_len,
+    require_json_bool, require_json_contains, require_json_string, require_json_usize,
+    require_json_usize_at_least, require_json_usize_greater_than, run_mcp_stdio,
+    run_mcp_stdio_with_env, run_mcp_stdio_with_env_and_test_delay,
+    run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff, sha256_hex, sqlite_table_digests,
+    synchronize_prompt_exit_before_delayed_observation, workspace_root,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -113,6 +116,23 @@ const PRE_PUSH_HOOK_FILE_NAME: &str = "pre-push";
 const PACKAGE_JSON_FILE_NAME: &str = "package.json";
 
 const OPENSPEC_DIR_NAME: &str = "openspec";
+
+const ISSUE_CHECKLISTS_SCRIPT_FILE_NAME: &str = "issue-checklists.py";
+
+const ISSUE_MAP_FILE_NAME: &str = "issue-map.json";
+
+const CHANGE_DIR_NAME: &str = "changes";
+
+const ISSUEOPS_CHANGE_NAME: &str = "scope-local-issueops-branch-validation";
+
+const TASKS_FILE_NAME: &str = "tasks.md";
+
+const ISSUEOPS_TASKS_RELATIVE_PATH: &str =
+    "openspec/changes/scope-local-issueops-branch-validation/tasks.md";
+
+const CANDIDATE_FILE_NAME: &str = "candidate.txt";
+
+const DISPATCH_LOG_FILE_NAME: &str = "dispatch.log";
 
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 
@@ -176,6 +196,88 @@ const FAKE_CODEX_REGISTRY_STALE_FILE_NAME: &str = "codex-registry-stale.json";
 #[cfg(windows)]
 const FAKE_CODEX_REGISTRY_STATE_FILE_NAME: &str = "codex-registry-state.txt";
 
+#[cfg(windows)]
+const CODEX_OWNER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(windows)]
+// The failure path gives the owner this bounded window to observe the stop marker and exit.
+const CODEX_OWNER_FAILURE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+
+#[cfg(windows)]
+// The exact child-stop helper allows its owned process up to this wait budget to exit.
+const CODEX_OWNER_CHILD_STOP_BUDGET: Duration = Duration::from_secs(5);
+
+#[cfg(windows)]
+const CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET: Duration = Duration::from_secs(5);
+
+#[cfg(windows)]
+const CODEX_OWNER_CHILD_STOP_FINAL_BUDGET: Duration = Duration::from_secs(5);
+
+#[cfg(windows)]
+const CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
+
+#[cfg(windows)]
+// Allow normal scheduling variance without allowing a late readiness retry to hide.
+const CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE: Duration = Duration::from_secs(2);
+
+#[cfg(windows)]
+const CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[cfg(windows)]
+const CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY: Duration = Duration::from_secs(6);
+
+#[cfg(windows)]
+const CODEX_OWNER_READINESS_BOUNDARY_PUBLICATION_DELAY: Duration = Duration::from_secs(24);
+
+#[cfg(windows)]
+const CODEX_OWNER_READINESS_BOUNDARY_CAPTURE_DELAY: Duration = Duration::from_secs(8);
+
+#[cfg(windows)]
+// Delay the polling caller, not the child operation, so a completed helper is observed late.
+const CODEX_OWNER_LATE_COMPLETION_TEST_DELAY: Duration = Duration::from_secs(2);
+
+#[cfg(windows)]
+// Delay the outer owner observer past its deadline after the fixture has received stop.
+const CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(6);
+
+#[cfg(windows)]
+// Delay the readiness poll past the deadline after the fixture has published, without
+// changing process-global state, proving the admission guard through the real helper.
+const CODEX_OWNER_OBSERVATION_TEST_DELAY: Duration = Duration::from_secs(31);
+
+#[cfg(windows)]
+const CODEX_OWNER_STOP_HELPER_TEST_DELAY: Duration = Duration::from_secs(6);
+
+#[cfg(windows)]
+// Early owner exit must be observed before readiness expires; this bound allows only
+// the same scheduler margin as the bounded publication contract.
+fn codex_owner_early_exit_max_elapsed() -> Duration {
+    CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+}
+
+#[cfg(windows)]
+const CODEX_OWNER_DELAYED_PUBLICATION: Duration = Duration::from_secs(6);
+
+#[cfg(windows)]
+const CODEX_OWNER_PUBLICATION_DELAY_ENV: &str =
+    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_DELAY_MS";
+
+#[cfg(windows)]
+const CODEX_OWNER_PUBLICATION_MODE_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE";
+
+#[cfg(windows)]
+const CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV: &str =
+    "PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS";
+
+#[cfg(windows)]
+const CODEX_OWNER_STOP_DELAY_ENV: &str = "PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS";
+
+#[cfg(windows)]
+const OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME: &str = "obsolete-projectatlas.cs";
+
+#[cfg(windows)]
+const OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME: &str = "obsolete-projectatlas.exe";
+
 const FAKE_CODEX_SKILL_CONTENT: &str =
     include_str!("../../../plugins/projectatlas/skills/projectatlas/SKILL.md");
 
@@ -235,16 +337,69 @@ public static class Program
             {
                 string identityPath = arguments[0];
                 string temporaryIdentityPath = identityPath + ".tmp";
-                File.WriteAllLines(temporaryIdentityPath, new[]
+                string retainedIdentityPath = identityPath + ".owner";
+                string retainedIdentityTemporaryPath = retainedIdentityPath + ".tmp";
+                // Retain exact fixture ownership even when normal publication is withheld.
+                string retainedIdentityDelay = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_RETAINED_IDENTITY_DELAY_MS"
+                );
+                int retainedIdentityDelayMilliseconds;
+                if (!String.IsNullOrWhiteSpace(retainedIdentityDelay)
+                    && Int32.TryParse(retainedIdentityDelay, out retainedIdentityDelayMilliseconds)
+                    && retainedIdentityDelayMilliseconds > 0)
+                {
+                    Thread.Sleep(retainedIdentityDelayMilliseconds);
+                }
+                string creationTime = child.StartTime.ToUniversalTime()
+                    .ToFileTimeUtc()
+                    .ToString();
+                File.WriteAllLines(retainedIdentityTemporaryPath, new[]
                 {
                     child.Id.ToString(),
-                    child.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(),
+                    creationTime,
                     childPath
                 });
-                File.Move(temporaryIdentityPath, identityPath);
+                File.Move(retainedIdentityTemporaryPath, retainedIdentityPath);
+                string publicationMode = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_MODE"
+                );
+                if (publicationMode == "early-exit")
+                    return 3;
+                string publicationDelay = Environment.GetEnvironmentVariable(
+                    "PROJECTATLAS_TEST_CODEX_OWNER_PUBLICATION_DELAY_MS"
+                );
+                int delayMilliseconds;
+                if (!String.IsNullOrWhiteSpace(publicationDelay)
+                    && Int32.TryParse(publicationDelay, out delayMilliseconds)
+                    && delayMilliseconds > 0)
+                {
+                    Thread.Sleep(delayMilliseconds);
+                }
+                if (publicationMode != "timeout"
+                    && publicationMode != "timeout-ignore-stop")
+                {
+                    if (publicationMode == "malformed")
+                    {
+                        File.WriteAllText(temporaryIdentityPath, "not-an-identity");
+                    }
+                    else
+                    {
+                        if (publicationMode == "mismatched")
+                            creationTime = (Int64.Parse(creationTime) + 1).ToString();
+                        File.WriteAllLines(temporaryIdentityPath, new[]
+                        {
+                            child.Id.ToString(),
+                            creationTime,
+                            childPath
+                        });
+                    }
+                    File.Move(temporaryIdentityPath, identityPath);
+                }
                 while (!child.WaitForExit(25))
                 {
-                    if (File.Exists(identityPath + ".stop"))
+                    if (publicationMode != "timeout-ignore-stop"
+                        && publicationMode != "ignore-stop"
+                        && File.Exists(identityPath + ".stop"))
                     {
                         child.Kill();
                         child.WaitForExit();
@@ -252,6 +407,7 @@ public static class Program
                     }
                 }
                 Thread.Sleep(Timeout.Infinite);
+                return 0;
             }
             finally
             {
@@ -262,11 +418,9 @@ public static class Program
                 }
             }
         }
-        return 0;
     }
 }
 "#;
-
 const PROJECTATLAS_SKILL_DIR: &str = "skills";
 
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
@@ -329,7 +483,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "7d0e2a8d2577df3a96aa7ba495f676940dca104c7c06ed3272dcc3a881a896dc";
+    "70d2e0e9d05f0044304d8e2a198650cee0cb25c399642fdbb41fb8d613cdb661";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -338,16 +492,16 @@ const CLI_E2E_ENVIRONMENT_FACETS_DIGEST: &str =
     "2789e6dc790b730c110127224b2c95c71e63f50a673e964fcb32c756053b04a2";
 
 const CLI_E2E_TIMEOUT_FACETS_DIGEST: &str =
-    "3243ff08732536fdfc4c16022027ae3b21087a3d05dc6d456f4375e1db2b96d3";
+    "e218dd8e0d97b946adf22f6ad9a3e702039a3858d8cb7d7bda59eb8d35e003a4";
 
 const CLI_E2E_CLEANUP_FACETS_DIGEST: &str =
-    "7a0fbb05943f286af21c81d69fece4add167553e22493e117862cfa241d39aa8";
+    "d84ba7d169f1c4ea581aa986edf4466993e81b28a873269a4d559dea6612849e";
 
 const CLI_E2E_ISOLATION_FACETS_DIGEST: &str =
     "a34f40d2d7249dafba32af229a0a068c7ab0ab6c2ffd5128c90c8d65a8c834bf";
 
 const CLI_E2E_PACKAGED_FACETS_DIGEST: &str =
-    "84db4b04a30eac5af863610d296d76d7b8936b478507a2022656349cbde546b0";
+    "0a2d634dad641fa3dded1fcb23fc74abc8ff27bc9027f1bf0e3659f542709a4c";
 
 const CLI_E2E_ATTRIBUTES_FACETS_DIGEST: &str =
     "cdd9b72f5c1ec65285a955a0383a33b7fcac509e38d1889022cb108f41f5423d";
@@ -356,7 +510,8 @@ const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
 
 const CLI_E2E_SUPPORT_SHA256: &str =
-    "6b9120ff8c0403a20712ae19e03f0cbfed306c396f2efd1f458afd1b6fc318b0";
+    "fd0333474bc67c4af22f023c4d78cc6478421d15e99223d72ed3a871c4f41fa0";
+const CLI_E2E_INVENTORY_LIST_SEPARATOR: &str = "\u{1d}";
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
     "crates/projectatlas-cli/tests/e2e_delivery.rs",
@@ -578,9 +733,9 @@ fn inventory_symbol_digest(symbols: &[CliE2eInventorySymbol]) -> String {
         canonical.push('\u{1f}');
         canonical.push_str(&symbol.name);
         canonical.push('\u{1f}');
-        canonical.push_str(&symbol.owners.join("\u{1d}"));
+        canonical.push_str(&symbol.owners.join(CLI_E2E_INVENTORY_LIST_SEPARATOR));
         canonical.push('\u{1f}');
-        canonical.push_str(&symbol.attributes.join("\u{1d}"));
+        canonical.push_str(&symbol.attributes.join(CLI_E2E_INVENTORY_LIST_SEPARATOR));
         canonical.push('\u{1e}');
     }
     sha256_text(&canonical)
@@ -591,7 +746,7 @@ fn inventory_fixture_digest(fixtures: &[CliE2eInventoryFixture]) -> String {
     for fixture in fixtures {
         canonical.push_str(&fixture.name);
         canonical.push('\u{1f}');
-        canonical.push_str(&fixture.owners.join("\u{1d}"));
+        canonical.push_str(&fixture.owners.join(CLI_E2E_INVENTORY_LIST_SEPARATOR));
         canonical.push('\u{1e}');
     }
     sha256_text(&canonical)
@@ -615,7 +770,7 @@ fn inventory_attribute_facets_digest(facets: &[CliE2eInventoryFacetAttributes]) 
         canonical.push('\u{1f}');
         canonical.push_str(&facet.line.to_string());
         canonical.push('\u{1f}');
-        canonical.push_str(&facet.attributes.join("\u{1d}"));
+        canonical.push_str(&facet.attributes.join(CLI_E2E_INVENTORY_LIST_SEPARATOR));
         canonical.push('\u{1e}');
     }
     sha256_text(&canonical)
@@ -2766,12 +2921,29 @@ fn filtered_custom_harness_contract_rejects_timeout_borrowed_from_unnamed_step()
     assert!(assert_filtered_custom_harness_step(&drifted).is_err());
 }
 
+fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
+    let output = git_command_for_root(root).args(arguments).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "git {arguments:?} failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+    .into())
+}
+
 #[test]
 fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
-    let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
+    let issueops = fs::read_to_string(
+        github
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+    )?;
     let mermaid_parser = github.join("mermaid-parser");
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
@@ -2803,15 +2975,30 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let issue_map = fs::read_to_string(
         workspace_root
             .join(OPENSPEC_DIR_NAME)
-            .join("issue-map.json"),
+            .join(ISSUE_MAP_FILE_NAME),
     )?;
     let tasks = fs::read_to_string(
         workspace_root
             .join(OPENSPEC_DIR_NAME)
-            .join("changes")
+            .join(CHANGE_DIR_NAME)
             .join("enforce-rust-test-quality-gates")
-            .join("tasks.md"),
+            .join(TASKS_FILE_NAME),
     )?;
+
+    let issueops_self_test_command = "python3 .github/scripts/issue-checklists.py --self-test";
+    for (name, owner) in [
+        ("pre-push", hook.as_str()),
+        ("CI", ci.as_str()),
+        ("IssueOps", issueops_workflow.as_str()),
+        ("release", release.as_str()),
+    ] {
+        if !owner.contains(issueops_self_test_command) {
+            return Err(io::Error::other(format!(
+                "{name} omitted the explicit IssueOps self-test owner"
+            ))
+            .into());
+        }
+    }
 
     if !mermaid_package.contains(r#""jsdom": "27.4.0""#)
         || !mermaid_package.contains(r#""mermaid": "11.16.1""#)
@@ -2841,6 +3028,25 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
+    for (name, workflow) in [("release", release.as_str()), ("pre-push", hook.as_str())] {
+        let first_cargo_test = workflow
+            .find("cargo test")
+            .ok_or_else(|| io::Error::other(format!("{name} omitted cargo tests")))?;
+        for gate in [
+            "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+        ] {
+            let gate_position = workflow
+                .find(gate)
+                .ok_or_else(|| io::Error::other(format!("{name} omitted Mermaid gate {gate:?}")))?;
+            if gate_position > first_cargo_test {
+                return Err(io::Error::other(format!(
+                    "{name} Mermaid gate {gate:?} must precede its first cargo test"
+                ))
+                .into());
+            }
+        }
+    }
 
     for required in [
         "validate_unique_issue_ownership",
@@ -2854,13 +3060,43 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "mermaid_syntax_is_valid",
         "mermaid-parser",
         "len(meaningful) > 1",
-        "ARCHITECTURE_ACCEPTANCE_TASK",
+        "ACCEPTANCE_REVIEW_TASKS",
         "planned_issue_failures",
         "openspec_readiness_failures",
         "required_markdown_section_failures",
         "planned_issue=args.planned_issue",
         "MITIGATION_RE",
         "issue_contract_failures",
+        "IMPLEMENTATION_TASK_HEADING",
+        "acceptance_task_failures",
+        "acceptance_state_failures",
+        "complexity_label_failures",
+        "check_open_issue_complexity",
+        "ISSUE_STATE_QUERY",
+        "issue_state_payloads",
+        "\"graphql\"",
+        "\"--paginate\"",
+        "\"--slurp\"",
+        "issues(first: 100, after: $endCursor, states: [OPEN, CLOSED])",
+        "pageInfo",
+        "totalCount",
+        "total_count != len(label_nodes)",
+        "isinstance(total_count, int)",
+        "isinstance(total_count, bool)",
+        "GitHub GraphQL issue labels were incomplete",
+        "\"body\" not in ISSUE_STATE_QUERY.lower()",
+        "closed issue body is inert",
+        "must be OPEN",
+        "ISSUE_REFERENCE_RE",
+        "pull_request_owner_issue",
+        "COMMIT_ISSUE_REFERENCE_RE",
+        "candidate_owner_issue_from_subjects",
+        "configured_issue_map_path",
+        "base_issue_map(",
+        "base_local_tasks",
+        "check_pull_request_tasks",
+        "check_candidate_tasks",
+        "issue_map_path=args.issue_map",
     ] {
         if !issueops.contains(required) {
             return Err(io::Error::other(format!(
@@ -2909,6 +3145,56 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
+    let normalized_hook = hook.replace("\r\n", "\n");
+    for required in [
+        "push_scope=\"$(\n  awk '",
+        "NF != 4",
+        "if ($2 ~ /^0+$/ || $3 !~",
+        "if (!seen || invalid || updates != 1) exit 1",
+        "updates += 1",
+        "local_oid = $2",
+        "else print \"candidate:\" local_oid",
+        "refs/heads/main",
+        "if [ \"$push_scope\" = \"global\" ]; then",
+        "elif [ \"${push_scope#candidate:}\" != \"$push_scope\" ]; then",
+        "candidate_local_oid=\"${push_scope#candidate:}\"",
+        "git rev-parse --verify 'HEAD^{commit}'",
+        "candidate branch local object does not match checked-out HEAD",
+        "git merge-base origin/main HEAD",
+        "git log --format=%s",
+        "--owner-from-commits",
+        "--candidate-issue \"$owner_issue\"",
+        "--candidate-local-oid \"$candidate_local_oid\"",
+        "--base \"$accepted_base\"",
+    ] {
+        if !normalized_hook.contains(required) {
+            return Err(io::Error::other(format!(
+                "local pre-push hook is missing candidate/main IssueOps routing {required:?}"
+            ))
+            .into());
+        }
+    }
+    let main_route = normalized_hook
+        .find("if [ \"$push_scope\" = \"global\" ]; then")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted main route"))?;
+    let global_route = normalized_hook
+        .find("--repo \"$repo\" --root . --issue-map openspec/issue-map.json")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted global IssueOps route"))?;
+    let candidate_route = normalized_hook
+        .find("--candidate-issue \"$owner_issue\"")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted candidate IssueOps route"))?;
+    if !(main_route < global_route && global_route < candidate_route) {
+        return Err(io::Error::other(
+            "pre-push hook must keep global and candidate IssueOps routes in their target scopes",
+        )
+        .into());
+    }
+    if normalized_hook.contains("git branch --show-current") {
+        return Err(io::Error::other(
+            "pre-push hook must select validation from pushed remote refs, not checkout state",
+        )
+        .into());
+    }
     for required in [
         "read_declared_channel",
         "RUSTUP_TOOLCHAIN override",
@@ -2930,6 +3216,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     if !issue_map.contains(r#""schema_version": 2"#)
+        || issue_map.contains(r#""legacy_closed_issues": ["#)
         || !issue_map.contains(r#""enforce-rust-test-quality-gates": 309"#)
     {
         return Err(io::Error::other("#309 must be mapped by the schema-2 issue map").into());
@@ -2944,7 +3231,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "label: Acceptance criteria",
         "label: Non-Goals",
         "label: Pre-Mortem",
-        "OpenSpec tasks:",
+        "Implementation tasks:",
+        "label: OpenSpec plan and task checklist",
+        "Maintainers add the mapped OpenSpec change",
     ] {
         for (name, content) in [
             ("bug", bug_issue_template.as_str()),
@@ -2959,11 +3248,31 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
+    for (name, content) in [
+        ("bug", bug_issue_template.as_str()),
+        ("chore", chore_issue_template.as_str()),
+        ("improvement", improvement_issue_template.as_str()),
+    ] {
+        for forbidden in [
+            "id: acceptance_review_tasks",
+            "label: Acceptance and Review Tasks",
+            "## Implementation Tasks",
+        ] {
+            if content.contains(forbidden) {
+                return Err(io::Error::other(format!(
+                    "{name} issue form must not fabricate authoritative task field {forbidden:?}"
+                ))
+                .into());
+            }
+        }
+    }
     for required in [
         "Pre-Mortem",
         "Architecture Diagrams",
         "docs/*.md#user-content-heading` view on `main",
-        "OpenSpec tasks:",
+        "Implementation tasks:",
+        "Acceptance and Review Tasks",
+        "Already closed mapped issues",
         "commit/SHA permalink evidence",
     ] {
         if !workflow_docs.contains(required) {
@@ -3012,46 +3321,26 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    for (test, label, binary) in [
+    for (binary, test, label) in [
         (
+            "e2e_navigation",
             "csharp_symbol_identity_boundary_preserves_full_and_incremental_publication",
             "C# symbol-identity publication",
-            "e2e_navigation",
         ),
         (
+            "e2e_navigation",
             "deep_qualified_symbol_parents_preserve_full_and_incremental_publication",
             "deep qualified-symbol publication",
-            "e2e_navigation",
         ),
         (
+            "e2e_navigation",
             "partial_markdown_limit_persists_without_losing_complete_publication",
             "partial Markdown publication",
-            "e2e_navigation",
         ),
         (
+            "e2e_maintenance",
             "lint_formats_share_typed_cli_and_mcp_report",
             "typed lint serialization",
-            "e2e_maintenance",
-        ),
-        (
-            "classified_document_navigation_agrees_across_cli_and_mcp",
-            "classified document navigation",
-            "e2e_navigation",
-        ),
-        (
-            "conditional_purpose_review_cli_reconciles_source_before_apply",
-            "conditional purpose review",
-            "e2e_maintenance",
-        ),
-        (
-            "persistent_mcp_purpose_review_reconciles_source_before_apply",
-            "persistent purpose review",
-            "e2e_maintenance",
-        ),
-        (
-            "token_tui_cli_respects_selected_terminal_viewport",
-            "token TUI viewport",
-            "e2e_maintenance",
         ),
     ] {
         let contract = format!(
@@ -3065,16 +3354,106 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
+    let checklist_self_test_step = ci
+        .split("- name: Issue checklist self-test")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("ordinary IssueOps self-test step is missing"))?;
+    if ci.matches("- name: Issue checklist self-test").count() != 1 {
+        return Err(io::Error::other("CI must run the IssueOps self-test exactly once").into());
+    }
+    if checklist_self_test_step.contains("\n        if:") {
+        return Err(io::Error::other("CI IssueOps self-test must be unconditional").into());
+    }
+    for required in [
+        issueops_self_test_command,
+        "test-optional-parser-proof-inputs.py",
+    ] {
+        if !checklist_self_test_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "CI IssueOps self-test omitted gate {required:?}"
+            ))
+            .into());
+        }
+    }
     let checklist_step = ci
         .split("- name: Issue checklist check")
         .nth(1)
         .and_then(|tail| tail.split("- name:").next())
         .ok_or_else(|| io::Error::other("ordinary IssueOps step is missing"))?;
+    let mermaid_setup_step = ci
+        .split("- name: Install Mermaid parser")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("CI Mermaid setup step is missing"))?;
+    if ci.matches("- name: Install Mermaid parser").count() != 1 {
+        return Err(io::Error::other("CI must install the Mermaid parser exactly once").into());
+    }
+    let first_cargo_test = ci
+        .find("cargo test")
+        .ok_or_else(|| io::Error::other("CI omitted cargo tests"))?;
+    let mermaid_setup_position = ci
+        .find("- name: Install Mermaid parser")
+        .ok_or_else(|| io::Error::other("CI Mermaid setup step is missing"))?;
+    if mermaid_setup_position > first_cargo_test {
+        return Err(io::Error::other("CI Mermaid setup must precede its first cargo test").into());
+    }
+    if mermaid_setup_step.contains("\n        if:") {
+        return Err(io::Error::other("CI Mermaid setup must be unconditional").into());
+    }
+    for event in [
+        "pull_request_review:",
+        "pull_request_review_comment:",
+        "workflow_dispatch:",
+    ] {
+        if !ci.contains(event) {
+            return Err(io::Error::other(format!(
+                "CI must retain review-event coverage for {event:?}"
+            ))
+            .into());
+        }
+    }
+    for gate in [
+        "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+        "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+    ] {
+        if !mermaid_setup_step.contains(gate) {
+            return Err(io::Error::other(format!("CI Mermaid setup omitted gate {gate:?}")).into());
+        }
+        if checklist_step.contains(gate) {
+            return Err(io::Error::other(format!(
+                "CI IssueOps step must not own Mermaid setup gate {gate:?}"
+            ))
+            .into());
+        }
+    }
+    if checklist_step.contains(issueops_self_test_command)
+        || checklist_step.contains("test-optional-parser-proof-inputs.py")
+    {
+        return Err(
+            io::Error::other("CI mutable IssueOps check must not relaunch the self-test").into(),
+        );
+    }
     if checklist_step.contains("--milestone") {
         return Err(io::Error::other(
             "ordinary pull requests must not require full milestone completion",
         )
         .into());
+    }
+    for required in [
+        "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+        "if [ \"$GITHUB_EVENT_NAME\" = \"pull_request\" ]; then",
+        "git fetch --no-tags --depth=1 origin \"$PR_BASE_SHA\"",
+        "--pull-request \"$PR_NUMBER\"",
+        "--base \"$PR_BASE_SHA\"",
+        "else",
+    ] {
+        if !checklist_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "pull-request IssueOps step is missing branch-aware gate {required:?}"
+            ))
+            .into());
+        }
     }
     if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
@@ -3106,7 +3485,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "types: [opened, edited, reopened, labeled, unlabeled, milestoned]",
+        "types: [opened, edited, reopened, labeled, unlabeled, milestoned, closed]",
         "--planned-issue \"$ISSUE_NUMBER\"",
         "timeout-minutes: 5",
         "contents: read",
@@ -3240,76 +3619,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .nth(1)
         .and_then(|tail| tail.split("  parser-pack-assets:").next())
         .ok_or_else(|| io::Error::other("release omitted the Windows prepublish job"))?;
-    let windows_package = release
-        .split("  package-windows:")
-        .nth(1)
-        .and_then(|tail| tail.split("  prepublish-installer-smoke-unix:").next())
-        .ok_or_else(|| io::Error::other("release omitted the Windows package job"))?;
-    let windows_lifecycle_contracts = windows_package
-        .split("      - name: Run Windows release-mode lifecycle contracts")
-        .nth(1)
-        .and_then(|tail| tail.split("\n      - name:").next())
-        .ok_or_else(|| {
-            io::Error::other(
-                "Windows package job omitted release-mode lifecycle contract execution",
-            )
-        })?;
-    for required in [
-        "shell: pwsh",
-        "$contractRunner = Join-Path \"contract-artifacts\" \"projectatlas-packaged-contract.ps1\"",
-        "& pwsh -NoProfile -File $contractRunner implicit_bare_root --nocapture",
-        "Bare-root database preflight release regression failed with exit code $LASTEXITCODE.",
-        "& pwsh -NoProfile -File $contractRunner generated_mcp_config_preserves_explicit_conventional_database_authority --exact --include-ignored --nocapture",
-        "Generated MCP database authority release regression failed with exit code $LASTEXITCODE.",
-    ] {
-        if !windows_lifecycle_contracts.contains(required) {
-            return Err(io::Error::other(format!(
-                "Windows package omitted release-mode lifecycle contract boundary {required:?}"
-            ))
-            .into());
-        }
-    }
-    let bare_root_invocation = windows_lifecycle_contracts
-        .find("& pwsh -NoProfile -File $contractRunner implicit_bare_root --nocapture")
-        .ok_or_else(|| io::Error::other("Windows package omitted bare-root invocation"))?;
-    let generated_config_invocation = windows_lifecycle_contracts
-        .find("& pwsh -NoProfile -File $contractRunner generated_mcp_config_preserves_explicit_conventional_database_authority --exact --include-ignored --nocapture")
-        .ok_or_else(|| io::Error::other("Windows package omitted generated-MCP invocation"))?;
-    if bare_root_invocation >= generated_config_invocation {
-        return Err(io::Error::other(
-            "Windows package must preserve bare-root before generated-MCP release contract ordering",
-        )
-        .into());
-    }
-    let unix_permission_restore = unix_prepublish
-        .split("      - name: Restore packaged contract execute permissions")
-        .nth(1)
-        .and_then(|tail| tail.split("\n      - name:").next())
-        .ok_or_else(|| {
-            io::Error::other(
-                "Unix prepublish omitted the packaged contract permission restoration step",
-            )
-        })?;
-    for required in [
-        "for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do",
-        "binary=\"contract-artifacts/bin/$binary_name\"",
-        "if [ ! -f \"$binary\" ]; then",
-        "Downloaded packaged contract binary was not found: $binary",
-        "chmod +x \"$binary\"",
-    ] {
-        if !unix_permission_restore.contains(required) {
-            return Err(io::Error::other(format!(
-                "Unix packaged contract permission restoration omitted {required:?}"
-            ))
-            .into());
-        }
-    }
-    if windows_prepublish.contains("Restore packaged contract execute permissions") {
-        return Err(io::Error::other(
-            "Windows prepublish must not run the Unix packaged contract permission restoration",
-        )
-        .into());
-    }
     let hosted_tui_step = ci
         .split("      - name: Capture hosted PTY token dashboards")
         .nth(1)
@@ -3702,6 +4011,1406 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let temp = tempfile::tempdir()?;
+    let fixture_repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir_all(fixture_repo.join(GITHOOKS_DIR_NAME))?;
+    fs::create_dir_all(fixture_repo.join(".github").join("scripts"))?;
+    fs::create_dir_all(
+        fixture_repo
+            .join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME),
+    )?;
+    fs::copy(
+        workspace_root
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+        fixture_repo
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+    )?;
+    fs::write(
+        fixture_repo
+            .join(".github")
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+        "",
+    )?;
+    fs::write(
+        fixture_repo
+            .join(OPENSPEC_DIR_NAME)
+            .join(ISSUE_MAP_FILE_NAME),
+        "{\"schema_version\": 2, \"changes\": {}}\n",
+    )?;
+    let issueops_tasks = fixture_repo
+        .join(OPENSPEC_DIR_NAME)
+        .join(CHANGE_DIR_NAME)
+        .join(ISSUEOPS_CHANGE_NAME)
+        .join(TASKS_FILE_NAME);
+    fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
+    fs::write(fixture_repo.join(CANDIDATE_FILE_NAME), "candidate\n")?;
+    git_success(&fixture_repo, &["init", "--initial-branch=main"])?;
+    git_success(
+        &fixture_repo,
+        &["config", "user.email", "test@example.invalid"],
+    )?;
+    git_success(&fixture_repo, &["config", "user.name", "ProjectAtlas test"])?;
+    git_success(&fixture_repo, &["add", "."])?;
+    git_success(&fixture_repo, &["commit", "-m", "baseline (#549)"])?;
+    let base_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !base_output.status.success() {
+        return Err(io::Error::other("pre-push fixture base commit lookup failed").into());
+    }
+    let base = String::from_utf8(base_output.stdout)?.trim().to_owned();
+    git_success(&fixture_repo, &["checkout", "-b", "feature"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "candidate (#549)"],
+    )?;
+    git_success(
+        &fixture_repo,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "follow-up candidate (#549)",
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["update-ref", "refs/remotes/origin/main", &base],
+    )?;
+    fs::create_dir(&fake_path)?;
+    let dispatch_log = temp.path().join(DISPATCH_LOG_FILE_NAME);
+    let python_stub = r#"#!/bin/sh
+printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+case " $* " in
+  *" --owner-from-commits "*)
+    awk '
+      {
+        matches = 0
+        remainder = $0
+        while (match(remainder, /\(#[1-9][0-9]*\)/)) {
+          matches++
+          owner = substr(remainder, RSTART + 2, RLENGTH - 3)
+          remainder = substr(remainder, RSTART + RLENGTH)
+        }
+        if (matches != 1) {
+          invalid = 1
+          next
+        }
+        if (resolved == "") resolved = owner
+        else if (resolved != owner) invalid = 1
+      }
+      END {
+        if (invalid || NR == 0 || resolved == "") exit 1
+        print resolved
+      }
+    '
+    exit $?
+    ;;
+esac
+exit 0
+"#;
+    let cargo_stub = r#"#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let npm_stub = r#"#!/bin/sh
+printf 'npm %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let gh_stub = r#"#!/bin/sh
+printf 'gh %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+if [ "${1:-}" = repo ] && [ "${2:-}" = view ]; then
+  printf '%s\n' styler-ai/ProjectAtlas
+fi
+exit 0
+"#;
+    for (name, script) in [
+        ("python3", python_stub),
+        ("cargo", cargo_stub),
+        ("npm", npm_stub),
+        ("gh", gh_stub),
+    ] {
+        write_executable_script(&fake_path.join(name), script)?;
+    }
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let test_path = std::env::join_paths(
+        std::iter::once(fake_path).chain(std::env::split_paths(&current_path)),
+    )?;
+    let hook = fixture_repo
+        .join(GITHOOKS_DIR_NAME)
+        .join(PRE_PUSH_HOOK_FILE_NAME);
+    let shell = if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+    } else {
+        PathBuf::from("sh")
+    };
+    let head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()?;
+    if !head_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git rev-parse --verify HEAD^{{commit}} failed: {}{}",
+            String::from_utf8_lossy(&head_output.stdout),
+            String::from_utf8_lossy(&head_output.stderr)
+        ))
+        .into());
+    }
+    let current_head = String::from_utf8(head_output.stdout)?.trim().to_owned();
+    if current_head.is_empty() {
+        return Err(io::Error::other("git rev-parse returned an empty HEAD").into());
+    }
+    let run_hook = |records: &str, fail_ls_files: bool| -> Result<(bool, String), Box<dyn Error>> {
+        fs::write(&dispatch_log, "")?;
+        let mut command = StdCommand::new(&shell);
+        command.current_dir(&fixture_repo);
+        if fail_ls_files {
+            command
+                .arg("-c")
+                .arg(
+                    r#"git() {
+  printf 'git %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+  if [ "${1:-}" = ls-files ] && [ "${2:-}" = -v ]; then
+    printf 'git ls-files forced failure\n' >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+    return 1
+  fi
+  command git "$@"
+}
+. "$1"
+"#,
+                )
+                .arg("projectatlas-pre-push")
+                .arg(&hook);
+        } else {
+            command.arg(&hook);
+        }
+        command
+            .env("PATH", &test_path)
+            .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("pre-push hook stdin was not piped"))?
+            .write_all(records.as_bytes())?;
+        let output = child.wait_with_output()?;
+        Ok((output.status.success(), fs::read_to_string(&dispatch_log)?))
+    };
+    let final_issueops = |log: &str| {
+        log.lines()
+            .filter(|line| line.contains("issue-checklists.py --repo"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let (empty_status, empty_log) = run_hook("", false)?;
+    if empty_status
+        || !final_issueops(&empty_log).is_empty()
+        || empty_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "empty pre-push input did not fail closed before validation:\n{empty_log}"
+        ))
+        .into());
+    }
+    let (short_record_status, short_record_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549\n",
+        false,
+    )?;
+    if short_record_status
+        || !final_issueops(&short_record_log).is_empty()
+        || short_record_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "malformed pre-push input did not fail closed before validation:\n{short_record_log}"
+        ))
+        .into());
+    }
+    let (main_status, main_target) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    let main_calls = final_issueops(&main_target);
+    if !main_status || main_calls.len() != 1 || main_calls[0].contains("--candidate-issue") {
+        return Err(io::Error::other(format!(
+            "feature-checkout push to refs/heads/main did not use global IssueOps dispatch:\n{main_target}"
+        ))
+        .into());
+    }
+    let (multiple_candidate_status, multiple_candidate_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/547 3333333333333333333333333333333333333333 refs/heads/fix/547 4444444444444444444444444444444444444444\n",
+        false,
+    )?;
+    if multiple_candidate_status || !final_issueops(&multiple_candidate_log).is_empty() {
+        return Err(io::Error::other(format!(
+            "multiple candidate refs did not fail closed before IssueOps dispatch:\n{multiple_candidate_log}"
+        ))
+        .into());
+    }
+    let mismatched_candidate_records = format!(
+        "refs/heads/fix/549 {} refs/heads/fix/549 2222222222222222222222222222222222222222\n",
+        if current_head == "1111111111111111111111111111111111111111" {
+            "2222222222222222222222222222222222222222"
+        } else {
+            "1111111111111111111111111111111111111111"
+        }
+    );
+    let (mismatched_candidate_status, mismatched_candidate_log) =
+        run_hook(&mismatched_candidate_records, false)?;
+    if mismatched_candidate_status
+        || !final_issueops(&mismatched_candidate_log).is_empty()
+        || mismatched_candidate_log.contains("--candidate-issue")
+        || mismatched_candidate_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "candidate local object mismatch did not fail closed before scoped validation:\n{mismatched_candidate_log}"
+        ))
+        .into());
+    }
+    let zero_candidate_records = "refs/heads/fix/549 0000000000000000000000000000000000000000 refs/heads/fix/549 2222222222222222222222222222222222222222\n";
+    let (zero_candidate_status, zero_candidate_log) = run_hook(zero_candidate_records, false)?;
+    if zero_candidate_status
+        || !final_issueops(&zero_candidate_log).is_empty()
+        || zero_candidate_log.contains("--candidate-issue")
+        || zero_candidate_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "candidate deletion did not fail closed before scoped validation:\n{zero_candidate_log}"
+        ))
+        .into());
+    }
+    let (zero_main_status, zero_main_log) = run_hook(
+        "refs/heads/main 0000000000000000000000000000000000000000 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    if zero_main_status
+        || !final_issueops(&zero_main_log).is_empty()
+        || zero_main_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "main deletion did not fail before IssueOps dispatch:\n{zero_main_log}"
+        ))
+        .into());
+    }
+    let (candidate_status, candidate_target) = run_hook(
+        &format!(
+            "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+        ),
+        false,
+    )?;
+    let candidate_calls = final_issueops(&candidate_target);
+    if !candidate_status
+        || candidate_calls.len() != 1
+        || !candidate_calls[0].contains("--candidate-issue 549")
+    {
+        return Err(io::Error::other(format!(
+            "ordinary candidate push did not use candidate IssueOps dispatch:\n{candidate_target}"
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["checkout", "-b", "unowned-candidate"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "unowned follow-up"],
+    )?;
+    let unowned_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()?;
+    if !unowned_head_output.status.success() {
+        return Err(io::Error::other("fixture unowned candidate commit lookup failed").into());
+    }
+    let unowned_head = String::from_utf8(unowned_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (unowned_status, unowned_log) = run_hook(
+        &format!(
+            "refs/heads/unowned-candidate {unowned_head} refs/heads/unowned-candidate 2222222222222222222222222222222222222222\n"
+        ),
+        false,
+    )?;
+    if unowned_status
+        || !unowned_log.contains("--owner-from-commits")
+        || !final_issueops(&unowned_log).is_empty()
+    {
+        return Err(io::Error::other(format!(
+            "referenced and unreferenced candidate commits did not fail before scoped IssueOps dispatch:\n{unowned_log}"
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["checkout", "feature"])?;
+    let (index_failure_status, index_failure_log) = run_hook(
+        &format!(
+            "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+        ),
+        true,
+    )?;
+    if index_failure_status
+        || !index_failure_log.contains("git ls-files forced failure")
+        || !final_issueops(&index_failure_log).is_empty()
+        || index_failure_log.contains("--owner-from-commits")
+        || index_failure_log.contains("git merge-base")
+        || index_failure_log.contains("git log")
+    {
+        return Err(io::Error::other(format!(
+            "tracked index inspection failure did not fail before scoped validation:\n{index_failure_log}"
+        ))
+        .into());
+    }
+    for index_flag in ["--assume-unchanged", "--skip-worktree"] {
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-assume-unchanged",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-skip-worktree",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &["update-index", index_flag, ISSUEOPS_TASKS_RELATIVE_PATH],
+        )?;
+        fs::write(&issueops_tasks, "- [ ] 1.1 hidden index state\n")?;
+        let status_output = git_command_for_root(&fixture_repo)
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .output()?;
+        if !status_output.status.success() || !status_output.stdout.is_empty() {
+            return Err(io::Error::other(format!(
+                "{index_flag} did not hide the tracked fixture edit from porcelain"
+            ))
+            .into());
+        }
+        let (hidden_status, hidden_log) = run_hook(
+            &format!(
+                "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+            ),
+            false,
+        )?;
+        if hidden_status
+            || !final_issueops(&hidden_log).is_empty()
+            || hidden_log.contains("--owner-from-commits")
+        {
+            return Err(io::Error::other(format!(
+                "{index_flag} tracked fixture edit did not fail before scoped IssueOps dispatch:\n{hidden_log}"
+            ))
+            .into());
+        }
+        fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-assume-unchanged",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-skip-worktree",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+    }
+    let (mixed_status, mixed_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    if mixed_status
+        || !final_issueops(&mixed_log).is_empty()
+        || mixed_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "mixed candidate/main push did not fail before IssueOps dispatch:\n{mixed_log}"
+        ))
+        .into());
+    }
+    let (malformed_status, malformed_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/tags/v0.5.0 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    if malformed_status || !final_issueops(&malformed_log).is_empty() {
+        return Err(io::Error::other(format!(
+            "unsupported pre-push target did not fail closed before IssueOps dispatch:\n{malformed_log}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn pre_push_candidate_rejects_ignored_linked_document_outside_tree() -> Result<(), Box<dyn Error>> {
+    const LINKED_DOCUMENT_DIR_NAME: &str = "docs";
+    const LINKED_DOCUMENT_FILE_NAME: &str = "ignored.md";
+    const LINKED_DOCUMENT_RELATIVE_PATH: &str = "docs/ignored.md";
+
+    let workspace_root = workspace_root()?;
+    let temp = tempfile::tempdir()?;
+    let fixture_repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    let issue_payload = temp.path().join("issue.json");
+    let dispatch_log = temp.path().join(DISPATCH_LOG_FILE_NAME);
+    let hook = fixture_repo
+        .join(GITHOOKS_DIR_NAME)
+        .join(PRE_PUSH_HOOK_FILE_NAME);
+    let issueops_tasks = fixture_repo
+        .join(OPENSPEC_DIR_NAME)
+        .join(CHANGE_DIR_NAME)
+        .join(ISSUEOPS_CHANGE_NAME)
+        .join(TASKS_FILE_NAME);
+    fs::create_dir_all(fixture_repo.join(GITHOOKS_DIR_NAME))?;
+    fs::create_dir_all(fixture_repo.join(".github").join("scripts"))?;
+    fs::create_dir_all(
+        issueops_tasks
+            .parent()
+            .ok_or_else(|| io::Error::other("issueops tasks fixture has no parent"))?,
+    )?;
+    fs::create_dir_all(&fake_path)?;
+    fs::copy(
+        workspace_root
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+        &hook,
+    )?;
+    fs::copy(
+        workspace_root
+            .join(".github")
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+        fixture_repo
+            .join(".github")
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+    )?;
+    fs::write(
+        fixture_repo
+            .join(OPENSPEC_DIR_NAME)
+            .join(ISSUE_MAP_FILE_NAME),
+        format!("{{\"schema_version\": 2, \"changes\": {{\"{ISSUEOPS_CHANGE_NAME}\": 549}}}}\n"),
+    )?;
+    fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
+    let issue_body = r"## Why
+
+Candidate validation needs the linked architecture document from its committed tree.
+
+## What Changes
+
+Reject candidate validation when linked documentation is absent from the candidate tree.
+
+## Capabilities
+
+- `release-issueops`: validates candidate documentation from committed inputs.
+
+## Architecture Diagrams
+
+- [Issue task authority](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/ignored.md#user-content-issue-task-authority)
+
+## Release Scope
+
+This is a release-tooling correctness fix for v0.5.0-00.
+
+## Non-Goals
+
+- Changing product behavior.
+
+## Pre-Mortem
+
+Likely failure modes:
+- A candidate reads an ignored document that is absent from its tree.
+
+Mitigations:
+- [x] Require committed linked documentation. (Implementation tasks: 1.1)
+
+## Implementation Tasks
+
+- [x] 1.1 baseline
+
+## Acceptance and Review Tasks
+
+- [ ] Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary.
+- [ ] Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding.
+- [ ] Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed.
+- [ ] Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes.
+- [ ] Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.
+";
+    fs::write(
+        &issue_payload,
+        serde_json::to_vec(&json!({
+            "state": "OPEN",
+            "number": 549,
+            "labels": [{"name": "complexity:medium"}],
+            "milestone": {"title": "v0.5.0-00"},
+            "body": issue_body,
+        }))?,
+    )?;
+    git_success(
+        &fixture_repo,
+        &["init", "--object-format=sha256", "--initial-branch=main"],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["config", "user.email", "test@example.invalid"],
+    )?;
+    git_success(&fixture_repo, &["config", "user.name", "ProjectAtlas test"])?;
+    git_success(&fixture_repo, &["add", "."])?;
+    git_success(&fixture_repo, &["commit", "-m", "baseline (#549)"])?;
+    let base_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !base_output.status.success() {
+        return Err(io::Error::other("ignored-document fixture base lookup failed").into());
+    }
+    let base = String::from_utf8(base_output.stdout)?.trim().to_owned();
+    git_success(&fixture_repo, &["checkout", "-b", "feature"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "candidate (#549)"],
+    )?;
+    let head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !head_output.status.success() {
+        return Err(io::Error::other("ignored-document fixture HEAD lookup failed").into());
+    }
+    let head = String::from_utf8(head_output.stdout)?.trim().to_owned();
+    git_success(
+        &fixture_repo,
+        &["update-ref", "refs/remotes/origin/main", &base],
+    )?;
+    fs::create_dir_all(fixture_repo.join("docs"))?;
+    fs::write(
+        fixture_repo.join(GIT_DIR_NAME).join("info").join("exclude"),
+        "docs/ignored.md\n",
+    )?;
+    fs::write(
+        fixture_repo
+            .join(LINKED_DOCUMENT_DIR_NAME)
+            .join(LINKED_DOCUMENT_FILE_NAME),
+        "## Issue task authority\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+    )?;
+    let status_output = git_command_for_root(&fixture_repo)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()?;
+    if !status_output.status.success() || !status_output.stdout.is_empty() {
+        return Err(io::Error::other(
+            "ignored linked document was not hidden from ordinary Git status",
+        )
+        .into());
+    }
+    let python_stub = r#"#!/bin/sh
+printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+case " $* " in
+  *" --owner-from-commits "*) exec python "$@" ;;
+  *" --candidate-issue "*) exec python -c '
+import os
+import json
+import pathlib
+import sys
+import types
+
+script = sys.argv[1]
+sys.argv = sys.argv[1:]
+module = types.ModuleType("issue_checklists_fixture")
+module.__file__ = script
+sys.modules[module.__name__] = module
+exec(compile(pathlib.Path(script).read_bytes(), script, "exec"), module.__dict__, module.__dict__)
+module.__dict__["gh_json"] = lambda _args: json.loads(
+    pathlib.Path(os.environ["PROJECTATLAS_ISSUE_PAYLOAD"]).read_text(encoding="utf-8")
+)
+module.__dict__["gh_api_json"] = lambda _args: json.loads(
+    "[{\"data\":{\"repository\":{\"issues\":{\"nodes\":[{\"number\":549,\"state\":\"OPEN\",\"labels\":{\"totalCount\":1,\"nodes\":[{\"name\":\"complexity:medium\"}]},\"milestone\":{\"title\":\"v0.5.0-00\"}}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}]"
+)
+def fake_mermaid(diagram):
+    outcome = module.__dict__["MermaidValidationOutcome"]
+    return outcome.INVALID if "not-mermaid" in diagram else outcome.VALID
+
+module.__dict__["_run_mermaid_parser"] = fake_mermaid
+module.__dict__["mermaid_syntax_is_valid"].cache_clear()
+module.__dict__["main"]()
+' "$@" ;;
+esac
+exit 0
+"#;
+    let cargo_stub = r#"#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let npm_stub = r#"#!/bin/sh
+printf 'npm %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let gh_stub = r#"#!/bin/sh
+printf 'gh %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+if [ "${1:-}" = repo ] && [ "${2:-}" = view ]; then
+  printf '%s\n' styler-ai/ProjectAtlas
+elif [ "${1:-}" = issue ] && [ "${2:-}" = view ]; then
+  cat "$PROJECTATLAS_ISSUE_PAYLOAD"
+elif [ "${1:-}" = api ] && [ "${2:-}" = graphql ]; then
+  printf '%s\n' '[{"data":{"repository":{"issues":{"nodes":[{"number":549,"state":"OPEN","labels":{"totalCount":1,"nodes":[{"name":"complexity:medium"}]},"milestone":{"title":"v0.5.0-00"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]'
+fi
+exit 0
+"#;
+    for (name, script) in [
+        ("python3", python_stub),
+        ("cargo", cargo_stub),
+        ("npm", npm_stub),
+        ("gh", gh_stub),
+    ] {
+        write_executable_script(&fake_path.join(name), script)?;
+    }
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let test_path = std::env::join_paths(
+        std::iter::once(fake_path.clone()).chain(std::env::split_paths(&current_path)),
+    )?;
+    fs::write(&dispatch_log, "")?;
+    let shell = if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+    } else {
+        PathBuf::from("sh")
+    };
+    let mut command = StdCommand::new(&shell);
+    command
+        .current_dir(&fixture_repo)
+        .arg(&hook)
+        .env("PATH", &test_path)
+        .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+        .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("ignored-document hook stdin was not piped"))?
+        .write_all(format!(
+            "refs/heads/feature {head} refs/heads/feature 2222222222222222222222222222222222222222\n"
+        ).as_bytes())?;
+    let output = child.wait_with_output()?;
+    let dispatch = fs::read_to_string(&dispatch_log)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success()
+        || !stderr.contains("has no tracked regular Markdown file in candidate tree")
+        || !dispatch.contains("--candidate-issue 549")
+    {
+        return Err(io::Error::other(format!(
+            "ignored linked document was not rejected from the candidate tree:\nstdout={}\nstderr={stderr}\ndispatch={dispatch}",
+            String::from_utf8_lossy(&output.stdout),
+        ))
+        .into());
+    }
+
+    let linked_document = fixture_repo
+        .join(LINKED_DOCUMENT_DIR_NAME)
+        .join(LINKED_DOCUMENT_FILE_NAME);
+    fs::write(
+        &linked_document,
+        "## Issue task authority\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+    )?;
+    let blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", LINKED_DOCUMENT_RELATIVE_PATH])
+        .output()?;
+    if !blob_output.status.success() {
+        return Err(io::Error::other("symlink-tree fixture blob lookup failed").into());
+    }
+    let blob = String::from_utf8(blob_output.stdout)?.trim().to_owned();
+    let cacheinfo = format!("120000,{blob},{LINKED_DOCUMENT_RELATIVE_PATH}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate linked document (#549)"],
+    )?;
+    let symlink_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !symlink_head_output.status.success() {
+        return Err(io::Error::other("symlink-tree fixture HEAD lookup failed").into());
+    }
+    let symlink_head = String::from_utf8(symlink_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let tree_output = git_command_for_root(&fixture_repo)
+        .args([
+            "ls-tree",
+            &symlink_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    if !tree_output.status.success()
+        || !String::from_utf8_lossy(&tree_output.stdout).starts_with("120000 blob ")
+    {
+        return Err(io::Error::other(format!(
+            "symlink-tree fixture did not create a mode-120000 entry:\n{}{}",
+            String::from_utf8_lossy(&tree_output.stdout),
+            String::from_utf8_lossy(&tree_output.stderr),
+        ))
+        .into());
+    }
+    let inherited_path = std::env::var_os("PATH")
+        .ok_or_else(|| io::Error::other("symlink-tree fixture requires PATH"))?;
+    let real_git = std::env::split_paths(&inherited_path)
+        .map(|directory| {
+            if cfg!(windows) {
+                directory.join("git.exe")
+            } else {
+                directory.join("git")
+            }
+        })
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| io::Error::other("symlink-tree fixture requires git"))?;
+    let real_git = real_git.to_string_lossy();
+    let git_stub_name = if cfg!(windows) { "git.cmd" } else { "git" };
+    let git_stub = if cfg!(windows) {
+        format!(
+            "@echo off\r\nif /I \"%~1\"==\"status\" exit /b 0\r\n\"{real_git}\" %*\r\nexit /b %ERRORLEVEL%\r\n"
+        )
+    } else {
+        format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = status ]; then exit 0; fi\nexec '{real_git}' \"$@\"\n"
+        )
+    };
+    write_executable_script(&fake_path.join(git_stub_name), &git_stub)?;
+    let run_candidate_hook = |head: &str| -> Result<(bool, String, String), Box<dyn Error>> {
+        fs::write(&dispatch_log, "")?;
+        let mut command = StdCommand::new(&shell);
+        command
+            .current_dir(&fixture_repo)
+            .arg(&hook)
+            .env("PATH", &test_path)
+            .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+            .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("candidate hook stdin was not piped"))?
+            .write_all(
+                format!(
+                    "refs/heads/feature {head} refs/heads/feature 2222222222222222222222222222222222222222\n"
+                )
+                .as_bytes(),
+            )?;
+        let output = child.wait_with_output()?;
+        Ok((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            fs::read_to_string(&dispatch_log)?,
+        ))
+    };
+    let (symlink_status, symlink_stderr, symlink_dispatch) = run_candidate_hook(&symlink_head)?;
+    if symlink_status
+        || !symlink_stderr.contains("has no tracked regular Markdown file")
+        || !symlink_dispatch.contains("--candidate-issue 549")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 linked document was not rejected before worktree content validation:\nstderr={symlink_stderr}\ndispatch={symlink_dispatch}",
+        ))
+        .into());
+    }
+
+    let issue_map_relative_path = format!("{OPENSPEC_DIR_NAME}/{ISSUE_MAP_FILE_NAME}");
+    let issue_map_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", &issue_map_relative_path])
+        .output()?;
+    if !issue_map_blob_output.status.success() {
+        return Err(io::Error::other("issue-map tree fixture blob lookup failed").into());
+    }
+    let issue_map_blob = String::from_utf8(issue_map_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let issue_map_cacheinfo = format!("120000,{issue_map_blob},{issue_map_relative_path}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &issue_map_cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate issue map (#549)"],
+    )?;
+    let issue_map_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !issue_map_head_output.status.success() {
+        return Err(io::Error::other("issue-map tree fixture HEAD lookup failed").into());
+    }
+    let issue_map_head = String::from_utf8(issue_map_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (issue_map_status, issue_map_stderr, issue_map_dispatch) =
+        run_candidate_hook(&issue_map_head)?;
+    if issue_map_status
+        || !issue_map_stderr.contains("candidate branch issue-map")
+        || !issue_map_stderr.contains("tracked regular file")
+        || issue_map_dispatch.contains("gh issue")
+        || issue_map_dispatch.contains("gh api")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 issue map was not rejected before scoped IssueOps:\nstderr={issue_map_stderr}\ndispatch={issue_map_dispatch}"
+        ))
+        .into());
+    }
+
+    let issue_map_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", &issue_map_relative_path])
+        .output()?;
+    if !issue_map_blob_output.status.success() {
+        return Err(io::Error::other("issue-map restore blob lookup failed").into());
+    }
+    let issue_map_blob = String::from_utf8(issue_map_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let issue_map_cacheinfo = format!("100644,{issue_map_blob},{issue_map_relative_path}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &issue_map_cacheinfo],
+    )?;
+    git_success(&fixture_repo, &["commit", "-m", "restore issue map (#549)"])?;
+
+    let task_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", ISSUEOPS_TASKS_RELATIVE_PATH])
+        .output()?;
+    if !task_blob_output.status.success() {
+        return Err(io::Error::other("mapped-task tree fixture blob lookup failed").into());
+    }
+    let task_blob = String::from_utf8(task_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let task_cacheinfo = format!("120000,{task_blob},{ISSUEOPS_TASKS_RELATIVE_PATH}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &task_cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate mapped tasks (#549)"],
+    )?;
+    let task_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !task_head_output.status.success() {
+        return Err(io::Error::other("mapped-task tree fixture HEAD lookup failed").into());
+    }
+    let task_head = String::from_utf8(task_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (task_status, task_stderr, task_dispatch) = run_candidate_hook(&task_head)?;
+    if task_status
+        || !task_stderr.contains("candidate branch mapped task file")
+        || !task_stderr.contains("tracked regular file")
+        || task_dispatch.contains("gh issue")
+        || task_dispatch.contains("gh api")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 mapped task file was not rejected before scoped IssueOps:\nstderr={task_stderr}\ndispatch={task_dispatch}"
+        ))
+        .into());
+    }
+
+    fs::write(
+        &linked_document,
+        "## Issue task authority\n\n```mermaid\nflowchart LR\nCOMMITTED --> B\n```\n",
+    )?;
+    let linked_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", LINKED_DOCUMENT_RELATIVE_PATH])
+        .output()?;
+    if !linked_blob_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture document blob lookup failed").into());
+    }
+    let linked_blob = String::from_utf8(linked_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{linked_blob},{LINKED_DOCUMENT_RELATIVE_PATH}"),
+        ],
+    )?;
+    let task_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", ISSUEOPS_TASKS_RELATIVE_PATH])
+        .output()?;
+    if !task_blob_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture task blob lookup failed").into());
+    }
+    let task_blob = String::from_utf8(task_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{task_blob},{ISSUEOPS_TASKS_RELATIVE_PATH}"),
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
+        &[
+            "config",
+            "filter.issueops-clean-smudge.clean",
+            "sed 's/WORKTREE/COMMITTED/g; s/not-mermaid/flowchart LR/'",
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
+        &[
+            "config",
+            "filter.issueops-clean-smudge.smudge",
+            "sed 's/COMMITTED/WORKTREE/g; s/flowchart LR/not-mermaid/'",
+        ],
+    )?;
+    fs::write(
+        fixture_repo.join(".gitattributes"),
+        "docs/ignored.md filter=issueops-clean-smudge\n",
+    )?;
+    git_success(&fixture_repo, &["add", ".gitattributes"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate clean smudge inputs (#549)"],
+    )?;
+    fs::remove_file(&linked_document)?;
+    git_success(
+        &fixture_repo,
+        &["checkout", "--", LINKED_DOCUMENT_RELATIVE_PATH],
+    )?;
+    let filtered_document = fs::read_to_string(&linked_document)?;
+    if !filtered_document.contains("not-mermaid") || !filtered_document.contains("WORKTREE") {
+        return Err(io::Error::other(
+            "clean/smudge fixture did not produce distinct filtered worktree bytes",
+        )
+        .into());
+    }
+    let filtered_status_output = git_command_for_root(&fixture_repo)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()?;
+    if !filtered_status_output.status.success() || !filtered_status_output.stdout.is_empty() {
+        return Err(io::Error::other(format!(
+            "clean/smudge fixture did not preserve clean Git status: stdout={} stderr={}",
+            String::from_utf8_lossy(&filtered_status_output.stdout),
+            String::from_utf8_lossy(&filtered_status_output.stderr),
+        ))
+        .into());
+    }
+    let filtered_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !filtered_head_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture HEAD lookup failed").into());
+    }
+    let filtered_head = String::from_utf8(filtered_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (filtered_status, filtered_stderr, filtered_dispatch) = run_candidate_hook(&filtered_head)?;
+    if !filtered_status || !filtered_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not use submitted clean/smudge tree bytes:\nstatus={filtered_status}\nstderr={filtered_stderr}\ndispatch={filtered_dispatch}"
+        ))
+        .into());
+    }
+
+    let replacement_index = temp.path().join("replacement-index");
+    let replacement_read_tree = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args(["read-tree", &filtered_head])
+        .output()?;
+    if !replacement_read_tree.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not read candidate tree: {}{}",
+            String::from_utf8_lossy(&replacement_read_tree.stdout),
+            String::from_utf8_lossy(&replacement_read_tree.stderr),
+        ))
+        .into());
+    }
+    let replacement_cacheinfo = format!("120000,{linked_blob},{LINKED_DOCUMENT_RELATIVE_PATH}");
+    let replacement_update_index = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &replacement_cacheinfo,
+        ])
+        .output()?;
+    if !replacement_update_index.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write symlink entry: {}{}",
+            String::from_utf8_lossy(&replacement_update_index.stdout),
+            String::from_utf8_lossy(&replacement_update_index.stderr),
+        ))
+        .into());
+    }
+    let replacement_tree_output = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args(["write-tree"])
+        .output()?;
+    if !replacement_tree_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write tree: {}{}",
+            String::from_utf8_lossy(&replacement_tree_output.stdout),
+            String::from_utf8_lossy(&replacement_tree_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_tree = String::from_utf8(replacement_tree_output.stdout)?
+        .trim()
+        .to_owned();
+    let mut replacement_commit_command = git_command_for_root(&fixture_repo);
+    replacement_commit_command
+        .args(["commit-tree", &replacement_tree, "-p", &base])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut replacement_commit = replacement_commit_command.spawn()?;
+    replacement_commit
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("replacement-tree commit stdin was not piped"))?
+        .write_all(b"replacement tree (#549)\n")?;
+    let replacement_commit_output = replacement_commit.wait_with_output()?;
+    if !replacement_commit_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write commit: {}{}",
+            String::from_utf8_lossy(&replacement_commit_output.stdout),
+            String::from_utf8_lossy(&replacement_commit_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_commit_oid = String::from_utf8(replacement_commit_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &["replace", &filtered_head, &replacement_commit_oid],
+    )?;
+    let replaced_tree_output = git_command_for_root(&fixture_repo)
+        .args([
+            "ls-tree",
+            &filtered_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    let original_tree_output = git_command_for_root(&fixture_repo)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args([
+            "ls-tree",
+            &filtered_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    if !replaced_tree_output.status.success()
+        || !String::from_utf8_lossy(&replaced_tree_output.stdout).starts_with("120000 blob ")
+        || !original_tree_output.status.success()
+        || !String::from_utf8_lossy(&original_tree_output.stdout).starts_with("100644 blob ")
+    {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture did not distinguish replacement from submitted tree:\nreplaced={}original={}",
+            String::from_utf8_lossy(&replaced_tree_output.stdout),
+            String::from_utf8_lossy(&original_tree_output.stdout),
+        ))
+        .into());
+    }
+    let (replacement_tree_status, replacement_tree_stderr, replacement_tree_dispatch) =
+        run_candidate_hook(&filtered_head)?;
+    if !replacement_tree_status || !replacement_tree_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not ignore a replacement commit tree:\nstderr={replacement_tree_stderr}\ndispatch={replacement_tree_dispatch}",
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["replace", "-d", &filtered_head])?;
+
+    let replacement_document = temp.path().join("replacement-invalid.md");
+    fs::write(
+        &replacement_document,
+        "## Issue task authority\n\nnot-mermaid replacement bytes\n",
+    )?;
+    let replacement_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w"])
+        .arg(&replacement_document)
+        .output()?;
+    if !replacement_blob_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-blob fixture could not write blob: {}{}",
+            String::from_utf8_lossy(&replacement_blob_output.stdout),
+            String::from_utf8_lossy(&replacement_blob_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_blob = String::from_utf8(replacement_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(&fixture_repo, &["replace", &linked_blob, &replacement_blob])?;
+    let replaced_blob_output = git_command_for_root(&fixture_repo)
+        .args(["cat-file", "blob", &linked_blob])
+        .output()?;
+    let original_blob_output = git_command_for_root(&fixture_repo)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args(["cat-file", "blob", &linked_blob])
+        .output()?;
+    if !replaced_blob_output.status.success()
+        || !String::from_utf8_lossy(&replaced_blob_output.stdout).contains("not-mermaid")
+        || !original_blob_output.status.success()
+        || String::from_utf8_lossy(&original_blob_output.stdout).contains("not-mermaid")
+    {
+        return Err(io::Error::other(
+            "replacement-blob fixture did not distinguish replacement from submitted blob",
+        )
+        .into());
+    }
+    let (replacement_blob_status, replacement_blob_stderr, replacement_blob_dispatch) =
+        run_candidate_hook(&filtered_head)?;
+    if !replacement_blob_status || !replacement_blob_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not ignore a replacement blob:\nstderr={replacement_blob_stderr}\ndispatch={replacement_blob_dispatch}",
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["replace", "-d", &linked_blob])?;
+
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "candidate (#549) (#547"],
+    )?;
+    let malformed_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !malformed_head_output.status.success() {
+        return Err(io::Error::other("malformed-owner fixture HEAD lookup failed").into());
+    }
+    let malformed_head = String::from_utf8(malformed_head_output.stdout)?
+        .trim()
+        .to_owned();
+    fs::write(&dispatch_log, "")?;
+    let mut malformed_command = StdCommand::new(&shell);
+    malformed_command
+        .current_dir(&fixture_repo)
+        .arg(&hook)
+        .env("PATH", &test_path)
+        .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+        .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut malformed_child = malformed_command.spawn()?;
+    malformed_child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("malformed-owner hook stdin was not piped"))?
+        .write_all(
+            format!(
+                "refs/heads/feature {malformed_head} refs/heads/feature 3333333333333333333333333333333333333333\n"
+            )
+            .as_bytes(),
+        )?;
+    let malformed_output = malformed_child.wait_with_output()?;
+    let malformed_dispatch = fs::read_to_string(&dispatch_log)?;
+    let malformed_stderr = String::from_utf8_lossy(&malformed_output.stderr);
+    if malformed_output.status.success()
+        || !malformed_stderr.contains("owner resolution failed")
+        || malformed_dispatch.contains("--candidate-issue")
+    {
+        return Err(io::Error::other(format!(
+            "unmatched owner marker was not rejected before scoped IssueOps:\nstdout={}\\nstderr={malformed_stderr}\\ndispatch={malformed_dispatch}",
+            String::from_utf8_lossy(&malformed_output.stdout),
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn pre_push_candidate_rejects_dirty_worktree_before_issueops() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let source_hook = workspace_root
+        .join(GITHOOKS_DIR_NAME)
+        .join(PRE_PUSH_HOOK_FILE_NAME);
+    let shell = if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+    } else {
+        PathBuf::from("sh")
+    };
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir_all(repo.join(GITHOOKS_DIR_NAME))?;
+    fs::create_dir_all(repo.join(".github").join("scripts"))?;
+    fs::create_dir_all(
+        repo.join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME),
+    )?;
+    fs::create_dir_all(&fake_path)?;
+    fs::copy(
+        &source_hook,
+        repo.join(GITHOOKS_DIR_NAME).join(PRE_PUSH_HOOK_FILE_NAME),
+    )?;
+    fs::write(
+        repo.join(".github")
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+        "",
+    )?;
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME).join(ISSUE_MAP_FILE_NAME),
+        "{\"schema_version\": 2, \"changes\": {}}\n",
+    )?;
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join(TASKS_FILE_NAME),
+        "- [x] 1.1 baseline\n",
+    )?;
+    fs::write(repo.join(CANDIDATE_FILE_NAME), "candidate\n")?;
+
+    let python_stub = r#"#!/bin/sh
+printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+case " $* " in
+  *" --owner-from-commits "*) printf '%s\n' 549 ;;
+esac
+exit 0
+"#;
+    let cargo_stub = r#"#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let npm_stub = r#"#!/bin/sh
+printf 'npm %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let gh_stub = r#"#!/bin/sh
+printf 'gh %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+if [ "${1:-}" = repo ] && [ "${2:-}" = view ]; then
+  printf '%s\n' styler-ai/ProjectAtlas
+fi
+exit 0
+"#;
+    for (name, script) in [
+        ("python3", python_stub),
+        ("cargo", cargo_stub),
+        ("npm", npm_stub),
+        ("gh", gh_stub),
+    ] {
+        write_executable_script(&fake_path.join(name), script)?;
+    }
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let test_path = std::env::join_paths(
+        std::iter::once(fake_path).chain(std::env::split_paths(&current_path)),
+    )?;
+
+    git_success(&repo, &["init", "--initial-branch=main"])?;
+    git_success(&repo, &["config", "user.email", "test@example.invalid"])?;
+    git_success(&repo, &["config", "user.name", "ProjectAtlas test"])?;
+    git_success(&repo, &["add", "."])?;
+    git_success(&repo, &["commit", "-m", "baseline (#549)"])?;
+    let base_output = git_command_for_root(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !base_output.status.success() {
+        return Err(io::Error::other("fixture base commit lookup failed").into());
+    }
+    let base = String::from_utf8(base_output.stdout)?.trim().to_owned();
+    git_success(&repo, &["checkout", "-b", "feature"])?;
+    git_success(
+        &repo,
+        &["commit", "--allow-empty", "-m", "candidate (#549)"],
+    )?;
+    let head_output = git_command_for_root(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !head_output.status.success() {
+        return Err(io::Error::other("fixture candidate commit lookup failed").into());
+    }
+    let head = String::from_utf8(head_output.stdout)?.trim().to_owned();
+    git_success(&repo, &["update-ref", "refs/remotes/origin/main", &base])?;
+
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join(TASKS_FILE_NAME),
+        "- [ ] 1.1 drifted checklist\n",
+    )?;
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME).join(ISSUE_MAP_FILE_NAME),
+        "{\"schema_version\": 2, \"changes\": {\"drift\": 549}}\n",
+    )?;
+    git_success(&repo, &["add", "openspec/issue-map.json"])?;
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join("untracked-notes.md"),
+        "untracked relevant input\n",
+    )?;
+
+    let dispatch_log = temp.path().join(DISPATCH_LOG_FILE_NAME);
+    fs::write(&dispatch_log, "")?;
+    let mut command = StdCommand::new(&shell);
+    command
+        .current_dir(&repo)
+        .arg(repo.join(GITHOOKS_DIR_NAME).join(PRE_PUSH_HOOK_FILE_NAME))
+        .env("PATH", &test_path)
+        .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("dirty candidate hook stdin was not piped"))?
+        .write_all(format!("refs/heads/feature {head} refs/heads/feature {head}\n").as_bytes())?;
+    let output = child.wait_with_output()?;
+    let dispatch = fs::read_to_string(&dispatch_log)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success()
+        || !stderr.contains("candidate branch worktree must be clean")
+        || dispatch
+            .lines()
+            .any(|line| line.contains("issue-checklists.py --repo"))
+        || dispatch.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+                "dirty candidate worktree did not fail before scoped IssueOps dispatch:\nstdout={}\nstderr={stderr}\ndispatch={dispatch}",
+                String::from_utf8_lossy(&output.stdout),
+            ))
+            .into());
+    }
     Ok(())
 }
 
@@ -5054,7 +6763,9 @@ fn windows_installer_obsolete_mcp_handoff_retires_only_exact_child_and_reports_r
             .ok_or_else(|| io::Error::other("stable runtime parent missing"))?,
     )?;
 
-    let fixture_source = temp.path().join("obsolete-projectatlas.cs");
+    let fixture_source = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_SOURCE_FILE_NAME);
     fs::write(
         &fixture_source,
         r#"using System;
@@ -5298,17 +7009,31 @@ public static class Program
             .output()
     };
 
+    let readiness_started = Instant::now();
     let (mut codex_owner, obsolete_mcp_pid) = spawn_codex_owned_obsolete_mcp(
         &codex_owner_fixture,
         &stable_runtime,
         &db,
         Some(&atlas_dir.join("config.toml")),
         &child_pid_file,
+        Some(CODEX_OWNER_DELAYED_PUBLICATION),
+        None,
     )?;
+    let readiness_elapsed = readiness_started.elapsed();
+    let delayed_publication_max_elapsed =
+        CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let delayed_publication_crossed_former_budget = readiness_elapsed > Duration::from_secs(5)
+        && readiness_elapsed < delayed_publication_max_elapsed;
     let mut second_codex_owner = None;
     let mut second_obsolete_mcp_pid = None;
     let mut non_codex_child = None;
     let test_result = (|| -> Result<(), Box<dyn Error>> {
+        if !delayed_publication_crossed_former_budget {
+            return Err(io::Error::other(format!(
+                "delayed Codex owner publication did not cross the former five-second boundary within the one readiness deadline: elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} max_elapsed={delayed_publication_max_elapsed:?}"
+            ))
+            .into());
+        }
         let unsigned_output = run_production_installer()?;
         let unsigned_text = format!(
             "{}\n{}",
@@ -5457,6 +7182,8 @@ public static class Program
             &db,
             Some(&atlas_dir.join("config.toml")),
             &temp.path().join("retry-obsolete-mcp.pid"),
+            None,
+            None,
         )?;
         second_codex_owner = Some(owner);
         second_obsolete_mcp_pid = Some(child_pid.clone());
@@ -6015,6 +7742,8 @@ public static class Program
         &db,
         Some(&atlas_dir.join("config.toml")),
         &first_child_pid_file,
+        None,
+        None,
     )?;
     let mut second_owner = None;
     let mut second_obsolete_mcp_pid = None;
@@ -6282,6 +8011,8 @@ public static class Program
             &db,
             Some(&atlas_dir.join("config.toml")),
             &temp.path().join("second-obsolete-mcp.pid"),
+            None,
+            None,
         )?;
         second_owner = Some(owner);
         second_obsolete_mcp_pid = Some(process_id);
@@ -7371,6 +9102,7 @@ fn windows_installer_obsolete_mcp_handoff_requires_trusted_authenticode_cmdlet()
     fs::write(
         &script,
         r#"$ErrorActionPreference = "Stop"
+$env:PSModulePath = [System.IO.Path]::Combine($PSHOME, "Modules")
 $installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
 $functionNames = @(
     "Test-ProjectAtlasAuthenticodeCodexSignature",
@@ -7403,11 +9135,17 @@ function Get-AuthenticodeSignature {
     throw "Malicious signature probe was called."
 }
 $codexPath = [System.IO.Path]::GetFullPath($env:PROJECTATLAS_TEST_CODEX)
-if ($null -ne (Get-ProjectAtlasCodexImageIdentity $codexPath) `
-    -or $script:maliciousLookupCalled `
-    -or $script:maliciousSignatureCalled `
-    -or $script:imageHashCalls -ne 1) {
-    throw "Unsigned Codex or malicious unqualified command shadow was trusted."
+if ($null -ne (Get-ProjectAtlasCodexImageIdentity $codexPath)) {
+    throw "Unsigned Codex image was trusted."
+}
+if ($script:maliciousLookupCalled) {
+    throw "Unqualified Get-Command shadow was invoked."
+}
+if ($script:maliciousSignatureCalled) {
+    throw "Unqualified Get-AuthenticodeSignature shadow was invoked."
+}
+if ($script:imageHashCalls -ne 2) {
+    throw "Unsigned Codex image digest call count was $script:imageHashCalls instead of one pre-signature and one post-signature digest."
 }
 
 $script:identityMode = "valid"
@@ -7436,14 +9174,16 @@ if (-not (Test-ProjectAtlasAuthenticodeCodexSignature (New-ProjectAtlasTestSigna
     throw "Valid OpenAI Authenticode signature facts were rejected."
 }
 $validSignature = New-ProjectAtlasTestSignature
-if (-not (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("a" * 64)) `
-    -or (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("b" * 64))) {
-    throw "Stable Codex digest binding accepted a pre/post-signature mismatch."
+if (-not (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("a" * 64))) {
+    throw "Matching pre/post Codex image digests were rejected."
+}
+if (Test-ProjectAtlasStableCodexImageIdentity ("a" * 64) $validSignature ("b" * 64)) {
+    throw "Mismatched pre/post Codex image digests were trusted."
 }
 foreach ($mode in @("wrong_signer", "wrong_status", "wrong_type")) {
     $script:identityMode = $mode
     if (Test-ProjectAtlasAuthenticodeCodexSignature (New-ProjectAtlasTestSignature)) {
-        throw "Invalid Codex signature facts were accepted: $mode"
+        throw "Invalid Codex signature $mode facts were accepted."
     }
 }
 Write-Output "trusted_authenticode_cmdlet_only"
@@ -7454,7 +9194,16 @@ Write-Output "trusted_authenticode_cmdlet_only"
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.ps1");
-    let output = StdCommand::new("powershell")
+    let system_root = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    );
+    let powershell_path = system_root
+        .join(WINDOWS_SYSTEM32_DIR)
+        .join(WINDOWS_POWERSHELL_DIR)
+        .join(WINDOWS_POWERSHELL_VERSION_DIR)
+        .join(WINDOWS_POWERSHELL_EXECUTABLE);
+    let output = StdCommand::new(powershell_path)
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -15122,10 +16871,102 @@ fn assert_cli_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>>
 }
 
 /// Return the exact advertised inventory from a real release-candidate stdio process.
+struct McpContractCleanupPacket {
+    child: Child,
+    stdout_reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+}
+
+/// Reap one test-owned MCP contract packet after the observer has returned.
+fn reap_mcp_contract_packet(mut packet: McpContractCleanupPacket) -> Result<(), Box<dyn Error>> {
+    packet.child.stdin.take();
+    if packet.child.try_wait()?.is_none() {
+        packet.child.kill()?;
+    }
+    packet.child.wait()?;
+    if let Some(reader) = packet.stdout_reader.take() {
+        reader
+            .join()
+            .map_err(|_panic| io::Error::other("MCP contract stdout cleanup reader panicked"))?;
+    }
+    if let Some(reader) = packet.stderr_reader.take() {
+        reader
+            .join()
+            .map_err(|_panic| io::Error::other("MCP contract stderr cleanup reader panicked"))??;
+    }
+    Ok(())
+}
+
 fn run_mcp_contract_inventory(
     executable: &Path,
     cwd: &Path,
     database: &Path,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_contract_inventory_with_test_delay(
+        executable,
+        cwd,
+        database,
+        Duration::from_secs(10),
+        None,
+        false,
+    )
+}
+
+fn run_mcp_contract_inventory_with_test_delay(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_contract_inventory_with_test_delay_and_kill(
+        executable,
+        cwd,
+        database,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        &mut |child| child.kill(),
+    )
+}
+
+fn run_mcp_contract_inventory_with_test_delay_and_kill(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+        executable,
+        cwd,
+        database,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        None,
+        None,
+        kill_child,
+        None,
+    )
+}
+
+/// Test-only variant that transfers a proven-live child and its readers to the
+/// caller when injected termination cannot safely reap it here.
+fn run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+    executable: &Path,
+    cwd: &Path,
+    database: &Path,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
 ) -> Result<String, Box<dyn Error>> {
     let (mut session, initialized) = McpContractSession::spawn_initialized(
         executable,
@@ -15141,7 +16982,17 @@ fn run_mcp_contract_inventory(
             serde_json::to_string(&tools)?
         ))
     })();
-    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
+    complete_mcp_test_after_shutdown(operation_result, || {
+        session.shutdown_with_test_delay_and_kill_and_handoff(
+            timeout,
+            observer_delay,
+            hold_stdin_until_observation,
+            exit_probe_error,
+            cleanup_probe_error,
+            kill_child,
+            handoff_live_child,
+        )
+    })
 }
 
 /// Execute one advertised tool through its own real stdio process.
@@ -15454,6 +17305,902 @@ fn mcp_source_publication_table(table: &str) -> bool {
     ) || table.starts_with("file_text_fts")
 }
 
+fn require_injected_exit_probe_failure<T>(
+    result: &Result<T, Box<dyn Error>>,
+    owner: &str,
+    cause: &str,
+    disposition: &str,
+) -> Result<(), Box<dyn Error>> {
+    let error = result
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other(format!("{owner} exit probe failure was not returned")))?;
+    let io_error = error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other(format!("{owner} exit probe lost its io error")))?;
+    let diagnostic = error.to_string();
+    if io_error.kind() != io::ErrorKind::TimedOut
+        || !diagnostic.contains(cause)
+        || !diagnostic.contains(disposition)
+    {
+        return Err(io::Error::other(format!(
+            "{owner} exit probe failure lost its classification, cause, or ownership disposition: {diagnostic}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn require_reaped_probe_failure<T>(
+    result: &Result<T, Box<dyn Error>>,
+    owner: &str,
+    cause: &str,
+) -> Result<(), Box<dyn Error>> {
+    require_injected_exit_probe_failure(result, owner, cause, ") status=")?;
+    let diagnostic = result
+        .as_ref()
+        .err()
+        .ok_or_else(|| {
+            io::Error::other(format!("{owner} post-kill probe failure was not returned"))
+        })?
+        .to_string();
+    if diagnostic.contains("cleanup incomplete") {
+        return Err(io::Error::other(format!(
+            "{owner} detached ownership after successful termination: {diagnostic}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
+-> Result<(), Box<dyn Error>> {
+    const OBSERVER_TIMEOUT: Duration = Duration::from_secs(2);
+    const FIRST_OBSERVATION_DELAY: Duration = Duration::from_secs(3);
+    const INJECTED_EXIT_PROBE_FAILURE: &str = "injected delayed-observer exit probe failure";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        None,
+        false,
+    )?;
+    let late_shutdown = run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        false,
+    );
+    let late_shutdown_text = late_shutdown
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_shutdown.is_ok()
+        || !late_shutdown_text.contains("completed after deadline")
+        || late_shutdown_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not distinguish late completion from a running timeout: {late_shutdown:?}"
+        ))
+        .into());
+    }
+    let mut session_probe_kill_attempted = false;
+    let mut session_probe_was_live = false;
+    let session_probe_failure = run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &database,
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        true,
+        Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+        None,
+        &mut |child| {
+            session_probe_kill_attempted = true;
+            session_probe_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_injected_exit_probe_failure(
+        &session_probe_failure,
+        "MCP session observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup complete: child reaped and readers joined",
+    )?;
+    if !session_probe_kill_attempted || !session_probe_was_live {
+        return Err(io::Error::other(
+            "MCP session synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
+    // Keep the real MCP server's owned pipe open so its stdio future is
+    // causally pending when the zero-length deadline probe runs.
+    let still_running_shutdown = run_mcp_contract_inventory_with_test_delay(
+        &executable,
+        &repo,
+        &database,
+        Duration::ZERO,
+        None,
+        true,
+    );
+    let still_running_shutdown_text = still_running_shutdown
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_shutdown.is_ok()
+        || !still_running_shutdown_text.contains("still running at deadline")
+        || !still_running_shutdown_text.contains("status=")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not terminate and reap a child still running at its deadline: {still_running_shutdown:?}"
+        ))
+        .into());
+    }
+    let mut session_cleanup_packet = None;
+    let mut injected_session_kill =
+        |_child: &mut Child| Err(io::Error::other("injected session kill failure"));
+    let injected_session_failure = {
+        let mut session_cleanup_handoff = |packet: McpContractCleanupPacket| {
+            session_cleanup_packet = Some(packet);
+        };
+        run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &database,
+            Duration::ZERO,
+            None,
+            true,
+            None,
+            None,
+            &mut injected_session_kill,
+            Some(&mut session_cleanup_handoff),
+        )
+    };
+    let injected_session_error = injected_session_failure
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("injected session kill failure was not returned"))?;
+    let injected_session_io_error = injected_session_error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("injected session failure lost its io error"))?;
+    if injected_session_io_error.kind() != io::ErrorKind::TimedOut
+        || !injected_session_error
+            .to_string()
+            .contains("still running at deadline")
+        || !injected_session_error
+            .to_string()
+            .contains("injected session kill failure")
+        || !injected_session_error
+            .to_string()
+            .contains("cleanup incomplete: operating system refused termination")
+    {
+        return Err(io::Error::other(format!(
+            "MCP session observer did not preserve timeout classification for an injected kill failure: {injected_session_failure:?}"
+        ))
+        .into());
+    }
+    let mut session_cleanup_packet = session_cleanup_packet
+        .take()
+        .ok_or_else(|| io::Error::other("session cleanup was not synchronously transferred"))?;
+    let (session_stdout_reader, session_stderr_reader) = match (
+        session_cleanup_packet.stdout_reader.take(),
+        session_cleanup_packet.stderr_reader.take(),
+    ) {
+        (Some(stdout_reader), Some(stderr_reader)) => (stdout_reader, stderr_reader),
+        (stdout_reader, stderr_reader) => {
+            reap_mcp_contract_packet(McpContractCleanupPacket {
+                child: session_cleanup_packet.child,
+                stdout_reader,
+                stderr_reader,
+            })?;
+            return Err(io::Error::other("session readers were not transferred").into());
+        }
+    };
+    let mut session_child = session_cleanup_packet.child;
+    drop(session_child.stdin.take());
+    if session_child.try_wait()?.is_none() {
+        session_child.kill()?;
+    }
+    session_child.wait()?;
+    session_stdout_reader
+        .join()
+        .map_err(|_panic| io::Error::other("session stdout cleanup reader panicked"))?;
+    session_stderr_reader
+        .join()
+        .map_err(|_panic| io::Error::other("session stderr cleanup reader panicked"))??;
+    let args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let messages = vec![
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-process-observer-deadlines", "version": "0.1.0"}
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+    ];
+    let in_time_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        None,
+        false,
+    )?;
+    if mcp_response(&in_time_mcp, 1)?.get("result").is_none() {
+        return Err(io::Error::other("in-time MCP observer omitted initialize result").into());
+    }
+    let late_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        false,
+    );
+    let late_mcp_text = late_mcp
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_mcp.is_ok()
+        || !late_mcp_text.contains("completed after deadline")
+        || late_mcp_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not distinguish late completion from a running timeout: {late_mcp:?}"
+        ))
+        .into());
+    }
+    let mut stdio_probe_kill_attempted = false;
+    let mut stdio_probe_was_live = false;
+    let stdio_probe_failure = run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+        true,
+        Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+        None,
+        &mut |child| {
+            stdio_probe_kill_attempted = true;
+            stdio_probe_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_injected_exit_probe_failure(
+        &stdio_probe_failure,
+        "MCP stdio observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup complete: child reaped and readers joined",
+    )?;
+    if !stdio_probe_kill_attempted || !stdio_probe_was_live {
+        return Err(io::Error::other(
+            "MCP stdio synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
+    let still_running_mcp = run_mcp_stdio_with_env_and_test_delay(
+        &executable,
+        &repo,
+        &args,
+        &messages,
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        Duration::ZERO,
+        None,
+        true,
+    );
+    let still_running_mcp_text = still_running_mcp
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_mcp.is_ok()
+        || !still_running_mcp_text.contains("still running at deadline")
+        || !still_running_mcp_text.contains("status=")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not terminate and reap a child still running at its deadline: {still_running_mcp:?}"
+        ))
+        .into());
+    }
+    let mut stdio_cleanup_packet = None;
+    let mut injected_stdio_kill =
+        |_child: &mut Child| Err(io::Error::other("injected stdio kill failure"));
+    let injected_stdio_failure = {
+        let mut stdio_cleanup_handoff =
+            |child: Child,
+             stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+                stdio_cleanup_packet = Some(McpStdioCleanupPacket {
+                    child,
+                    stdout_reader,
+                    stderr_reader,
+                });
+            };
+        run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &args,
+            &messages,
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+            Duration::ZERO,
+            None,
+            true,
+            None,
+            None,
+            &mut injected_stdio_kill,
+            Some(&mut stdio_cleanup_handoff),
+        )
+    };
+    let injected_stdio_error = injected_stdio_failure
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("injected stdio kill failure was not returned"))?;
+    let injected_stdio_io_error = injected_stdio_error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("injected stdio failure lost its io error"))?;
+    if injected_stdio_io_error.kind() != io::ErrorKind::TimedOut
+        || !injected_stdio_error
+            .to_string()
+            .contains("still running at deadline")
+        || !injected_stdio_error
+            .to_string()
+            .contains("injected stdio kill failure")
+        || !injected_stdio_error
+            .to_string()
+            .contains("cleanup incomplete: operating system refused termination")
+    {
+        return Err(io::Error::other(format!(
+            "MCP stdio observer did not preserve timeout classification for an injected kill failure: {injected_stdio_failure:?}"
+        ))
+        .into());
+    }
+    reap_mcp_stdio_packet(
+        stdio_cleanup_packet
+            .take()
+            .ok_or_else(|| io::Error::other("stdio cleanup was not synchronously transferred"))?,
+    )?;
+
+    let in_time_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "in-time",
+        OBSERVER_TIMEOUT,
+        None,
+    )?;
+    if !in_time_installer.status.success() {
+        return Err(io::Error::other("in-time installer observer rejected --version").into());
+    }
+    let late_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "late",
+        OBSERVER_TIMEOUT,
+        Some(FIRST_OBSERVATION_DELAY),
+    );
+    let late_installer_text = late_installer
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if late_installer.is_ok()
+        || !late_installer_text.contains("completed after deadline")
+        || late_installer_text.contains("still running at deadline")
+    {
+        return Err(io::Error::other(format!(
+            "installer observer did not distinguish late completion from a running timeout: {late_installer:?}"
+        ))
+        .into());
+    }
+    let mut installer_probe_kill_attempted = false;
+    let mut installer_probe_was_live = false;
+    let installer_probe_failure =
+        wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+            "probe-failure",
+            OBSERVER_TIMEOUT,
+            Some(FIRST_OBSERVATION_DELAY),
+            Some(io::Error::other(INJECTED_EXIT_PROBE_FAILURE)),
+            None,
+            &mut |child| {
+                installer_probe_kill_attempted = true;
+                installer_probe_was_live = child.try_wait()?.is_none();
+                child.kill()
+            },
+            None,
+        );
+    require_injected_exit_probe_failure(
+        &installer_probe_failure,
+        "installer observer",
+        INJECTED_EXIT_PROBE_FAILURE,
+        "cleanup complete: child reaped and output drained",
+    )?;
+    if !installer_probe_kill_attempted || !installer_probe_was_live {
+        return Err(io::Error::other(
+            "installer synchronization failure skipped termination of a live child",
+        )
+        .into());
+    }
+    // The held stdio pipe keeps this real MCP child running until the observer
+    // kills this exact process and wait_with_output drains both streams.
+    let still_running_installer = wait_for_plugin_installer_output_with_test_delay(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "still-running",
+        Duration::ZERO,
+        None,
+    );
+    let still_running_installer_text = still_running_installer
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if still_running_installer.is_ok()
+        || !still_running_installer_text.contains("still running at deadline")
+        || !still_running_installer_text.contains("status=")
+        || !still_running_installer_text.contains("stdout:")
+        || !still_running_installer_text.contains("stderr:")
+    {
+        return Err(io::Error::other(format!(
+            "installer observer did not terminate and drain a child still running at its deadline: {still_running_installer:?}"
+        ))
+        .into());
+    }
+    let mut installer_cleanup_child = None;
+    let mut injected_installer_kill =
+        |_child: &mut Child| Err(io::Error::other("injected installer kill failure"));
+    let injected_installer_failure = {
+        let mut installer_cleanup_handoff = |child: Child| {
+            installer_cleanup_child = Some(child);
+        };
+        wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+            "injected-installer",
+            Duration::ZERO,
+            None,
+            None,
+            None,
+            &mut injected_installer_kill,
+            Some(&mut installer_cleanup_handoff),
+        )
+    };
+    let injected_installer_error = injected_installer_failure
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("injected installer kill failure was not returned"))?;
+    let injected_installer_io_error = injected_installer_error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("injected installer failure lost its io error"))?;
+    if injected_installer_io_error.kind() != io::ErrorKind::TimedOut
+        || !injected_installer_error
+            .to_string()
+            .contains("still running at deadline")
+        || !injected_installer_error
+            .to_string()
+            .contains("injected installer kill failure")
+        || !injected_installer_error
+            .to_string()
+            .contains("cleanup incomplete: operating system refused termination")
+    {
+        return Err(io::Error::other(format!(
+            "installer observer did not preserve timeout classification for an injected kill failure: {injected_installer_failure:?}"
+        ))
+        .into());
+    }
+    let mut installer_child = installer_cleanup_child
+        .take()
+        .ok_or_else(|| io::Error::other("installer cleanup was not synchronously transferred"))?;
+    drop(installer_child.stdin.take());
+    if installer_child.try_wait()?.is_none() {
+        installer_child.kill()?;
+    }
+    // The real child may have consumed EOF and exited gracefully before this
+    // test-owned cleanup probe runs. Reaping and draining it is the proof; its
+    // final status is not part of the injected kill-failure contract.
+    reap_plugin_installer_child(installer_child)?;
+    Ok(())
+}
+
+#[test]
+fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
+-> Result<(), Box<dyn Error>> {
+    const INJECTED_REPROBE_FAILURE: &str = "injected post-kill exit probe failure";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+
+    let mut session_handoff_packet = None;
+    let session_result = {
+        let mut handoff = |packet: McpContractCleanupPacket| {
+            session_handoff_packet = Some(packet);
+        };
+        run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &database,
+            Duration::ZERO,
+            None,
+            true,
+            Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
+            &mut |child| child.kill(),
+            Some(&mut handoff),
+        )
+    };
+    require_reaped_probe_failure(
+        &session_result,
+        "MCP session observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if let Some(packet) = session_handoff_packet {
+        reap_mcp_contract_packet(packet)?;
+        return Err(io::Error::other(
+            "MCP session detached after a successful injected termination",
+        )
+        .into());
+    }
+
+    let args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let mut stdio_handoff_packet = None;
+    let stdio_result = {
+        let mut handoff =
+            |child: Child,
+             stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+                stdio_handoff_packet = Some(McpStdioCleanupPacket {
+                    child,
+                    stdout_reader,
+                    stderr_reader,
+                });
+            };
+        run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+            &executable,
+            &repo,
+            &args,
+            &[] as &[String],
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+            Duration::ZERO,
+            None,
+            true,
+            Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
+            &mut |child| child.kill(),
+            Some(&mut handoff),
+        )
+    };
+    require_reaped_probe_failure(
+        &stdio_result,
+        "MCP stdio observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if let Some(packet) = stdio_handoff_packet {
+        reap_mcp_stdio_packet(packet)?;
+        return Err(
+            io::Error::other("MCP stdio detached after a successful injected termination").into(),
+        );
+    }
+
+    let mut installer_handoff_child = None;
+    let installer_result = {
+        let mut handoff = |child: Child| {
+            installer_handoff_child = Some(child);
+        };
+        wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+            "installer post-kill probe",
+            Duration::ZERO,
+            None,
+            Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+            None,
+            &mut |child| child.kill(),
+            Some(&mut handoff),
+        )
+    };
+    require_reaped_probe_failure(
+        &installer_result,
+        "installer observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if let Some(child) = installer_handoff_child {
+        reap_plugin_installer_child(child)?;
+        return Err(
+            io::Error::other("installer detached after a successful injected termination").into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn e2e_process_observers_attempt_termination_when_cleanup_reprobe_fails()
+-> Result<(), Box<dyn Error>> {
+    const INJECTED_REPROBE_FAILURE: &str = "injected pre-termination exit probe failure";
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let executable = mcp_contract_executable();
+
+    let mut session_kill_attempted = false;
+    let mut session_was_live = false;
+    let session_result = run_mcp_contract_inventory_with_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &database,
+        Duration::ZERO,
+        None,
+        true,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            session_kill_attempted = true;
+            session_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &session_result,
+        "MCP session observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !session_kill_attempted || !session_was_live {
+        return Err(io::Error::other(
+            "MCP session cleanup probe failure skipped termination of a live child",
+        )
+        .into());
+    }
+
+    let args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "mcp".to_string(),
+    ];
+    let mut stdio_kill_attempted = false;
+    let mut stdio_was_live = false;
+    let stdio_result = run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+        &executable,
+        &repo,
+        &args,
+        &[] as &[String],
+        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        Duration::ZERO,
+        None,
+        true,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            stdio_kill_attempted = true;
+            stdio_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &stdio_result,
+        "MCP stdio observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !stdio_kill_attempted || !stdio_was_live {
+        return Err(io::Error::other(
+            "MCP stdio cleanup probe failure skipped termination of a live child",
+        )
+        .into());
+    }
+
+    let mut installer_kill_attempted = false;
+    let mut installer_was_live = false;
+    let installer_result = wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        "installer pre-termination probe",
+        Duration::ZERO,
+        None,
+        None,
+        Some(io::Error::other(INJECTED_REPROBE_FAILURE)),
+        &mut |child| {
+            installer_kill_attempted = true;
+            installer_was_live = child.try_wait()?.is_none();
+            child.kill()
+        },
+        None,
+    );
+    require_reaped_probe_failure(
+        &installer_result,
+        "installer observer",
+        INJECTED_REPROBE_FAILURE,
+    )?;
+    if !installer_kill_attempted || !installer_was_live {
+        return Err(io::Error::other(
+            "installer cleanup probe failure skipped termination of a live child",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn mcp_contract_shutdown_disconnects_saturated_responses_before_reader_join()
+-> Result<(), Box<dyn Error>> {
+    let executable = mcp_contract_executable();
+    let mut child = StdCommand::new(&executable)
+        .arg("--version")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("saturated-response fixture stdin was not piped"))?;
+    let (sender, responses) =
+        mpsc::sync_channel::<io::Result<String>>(MCP_CONTRACT_RESPONSE_CAPACITY);
+    let (state_sender, state_receiver) = mpsc::channel();
+    let stdout_reader = thread::spawn(move || {
+        for id in 0..MCP_CONTRACT_RESPONSE_CAPACITY {
+            if sender
+                .send(Ok(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {}
+                })
+                .to_string()))
+                .is_err()
+            {
+                return;
+            }
+        }
+        if state_sender.send("saturated").is_err() {
+            return;
+        }
+        let disconnected = sender
+            .send(Ok(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": MCP_CONTRACT_RESPONSE_CAPACITY,
+                "result": {}
+            })
+            .to_string()))
+            .is_err();
+        let _terminal_state = state_sender.send(if disconnected {
+            "disconnected"
+        } else {
+            "accepted"
+        });
+    });
+    let stderr_reader = thread::spawn(|| Ok(Vec::new()));
+    let session = McpContractSession {
+        child: Some(child),
+        stdin: Some(stdin),
+        responses,
+        stdout_reader: Some(stdout_reader),
+        stderr_reader: Some(stderr_reader),
+        next_request_id: 1,
+    };
+    let state = state_receiver.recv_timeout(Duration::from_secs(10))?;
+    if state != "saturated" {
+        return Err(io::Error::other(format!(
+            "response reader did not fill the bounded channel: {state}"
+        ))
+        .into());
+    }
+
+    let shutdown = session.shutdown_with_test_delay(Duration::ZERO, None, false);
+    let error = shutdown
+        .as_ref()
+        .err()
+        .ok_or_else(|| io::Error::other("saturated response shutdown was not timed out"))?;
+    let io_error = error
+        .downcast_ref::<io::Error>()
+        .ok_or_else(|| io::Error::other("saturated response shutdown lost its io error"))?;
+    if io_error.kind() != io::ErrorKind::TimedOut {
+        return Err(io::Error::other(format!(
+            "saturated response shutdown was not TimedOut: {error}"
+        ))
+        .into());
+    }
+    let terminal_state = state_receiver.try_recv()?;
+    if terminal_state != "disconnected" {
+        return Err(io::Error::other(format!(
+            "stdout reader did not observe response disconnection: {terminal_state}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+const MCP_CONTRACT_RESPONSE_CAPACITY: usize = 64;
+
 /// Persistent real MCP session used by E2E contract clients.
 struct McpContractSession {
     child: Option<Child>,
@@ -15464,7 +18211,6 @@ struct McpContractSession {
     next_request_id: u64,
 }
 
-#[allow(dead_code)]
 impl McpContractSession {
     /// Spawn and initialize one telemetry-disabled release-candidate MCP process.
     fn spawn(executable: &Path, repo: &Path, database: &Path) -> Result<Self, Box<dyn Error>> {
@@ -15513,7 +18259,7 @@ impl McpContractSession {
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr was not piped"))?;
-        let (sender, responses) = mpsc::sync_channel(64);
+        let (sender, responses) = mpsc::sync_channel(MCP_CONTRACT_RESPONSE_CAPACITY);
         let stdout_reader = thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             loop {
@@ -15675,86 +18421,6 @@ impl McpContractSession {
         }
     }
 
-    /// Wait for a follow-up response while rejecting a late response to a
-    /// request that the MCP peer already cancelled.
-    fn wait_for_response_rejecting(
-        &mut self,
-        request_id: u64,
-        method: &str,
-        rejected_id: u64,
-        rejected_method: &str,
-    ) -> Result<Value, Box<dyn Error>> {
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(10))
-            .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;
-        let follow_up = loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("MCP contract request {request_id} for {method} timed out"),
-                )
-                .into());
-            }
-            let line = match self.responses.recv_timeout(remaining) {
-                Ok(line) => line?,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("MCP contract request {request_id} for {method} timed out"),
-                    )
-                    .into());
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "MCP contract response stream disconnected",
-                    )
-                    .into());
-                }
-            };
-            let response: Value = serde_json::from_str(line.trim())?;
-            match response.get("id").and_then(Value::as_u64) {
-                Some(id) if id == rejected_id => {
-                    return Err(io::Error::other(format!(
-                        "MCP emitted a late response for cancelled {rejected_method}: {response}"
-                    ))
-                    .into());
-                }
-                Some(id) if id == request_id => break response,
-                _ => {}
-            }
-        };
-
-        let grace_deadline = Instant::now()
-            .checked_add(Duration::from_millis(300))
-            .ok_or_else(|| io::Error::other("MCP cancellation grace deadline overflowed"))?;
-        loop {
-            let remaining = grace_deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(follow_up);
-            }
-            let line = match self.responses.recv_timeout(remaining) {
-                Ok(line) => line?,
-                Err(mpsc::RecvTimeoutError::Timeout) => return Ok(follow_up),
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "MCP contract response stream disconnected during cancellation grace window",
-                    )
-                    .into());
-                }
-            };
-            let response: Value = serde_json::from_str(line.trim())?;
-            if response.get("id").and_then(Value::as_u64) == Some(rejected_id) {
-                return Err(io::Error::other(format!(
-                    "MCP emitted a late response for cancelled {rejected_method}: {response}"
-                ))
-                .into());
-            }
-        }
-    }
-
     /// Send one notification without waiting for a response.
     fn notify(&mut self, method: &str, params: &Value) -> Result<(), Box<dyn Error>> {
         self.write_message(&serde_json::json!({
@@ -15776,47 +18442,303 @@ impl McpContractSession {
         Ok(())
     }
 
+    /// Disconnect the bounded stdout sender before joining its reader.
+    fn disconnect_responses(&mut self) {
+        let (_sender, disconnected) = mpsc::channel();
+        self.responses = disconnected;
+    }
+
     /// Close stdin and require a clean bounded process exit.
-    fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
-        self.stdin.take();
+    fn shutdown(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown_with_test_delay(Duration::from_secs(10), None, false)
+    }
+
+    fn shutdown_with_test_delay(
+        self,
+        timeout: Duration,
+        observer_delay: Option<Duration>,
+        hold_stdin_until_observation: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        self.shutdown_with_test_delay_and_kill(
+            timeout,
+            observer_delay,
+            hold_stdin_until_observation,
+            &mut |child| child.kill(),
+        )
+    }
+
+    fn shutdown_with_test_delay_and_kill(
+        self,
+        timeout: Duration,
+        observer_delay: Option<Duration>,
+        hold_stdin_until_observation: bool,
+        kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.shutdown_with_test_delay_and_kill_and_handoff(
+            timeout,
+            observer_delay,
+            hold_stdin_until_observation,
+            None,
+            None,
+            kill_child,
+            None,
+        )
+    }
+
+    /// Test-only seam for transferring a proven-live child and its readers.
+    fn shutdown_with_test_delay_and_kill_and_handoff(
+        mut self,
+        timeout: Duration,
+        observer_delay: Option<Duration>,
+        hold_stdin_until_observation: bool,
+        exit_probe_error: Option<io::Error>,
+        cleanup_probe_error: Option<io::Error>,
+        kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+        handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut exit_probe_error = exit_probe_error;
+        let mut cleanup_probe_error = cleanup_probe_error;
+        if !hold_stdin_until_observation {
+            self.stdin.take();
+        }
+        if observer_delay.is_some() && (!hold_stdin_until_observation || exit_probe_error.is_some())
+        {
+            let synchronization = self.child.as_mut().map_or_else(
+                || Err(io::Error::other("MCP contract child was consumed")),
+                |child| {
+                    synchronize_prompt_exit_before_delayed_observation(
+                        child,
+                        "MCP contract server",
+                        exit_probe_error.take(),
+                    )
+                },
+            );
+            if let Err(error) = synchronization {
+                let stdout_reader = self.stdout_reader.take();
+                let stderr_reader = self.stderr_reader.take();
+                let mut child = self
+                    .child
+                    .take()
+                    .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+                let kill_result = kill_child(&mut child);
+                self.stdin.take();
+                let status_after_kill = child.try_wait();
+                if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+                    let packet = McpContractCleanupPacket {
+                        child,
+                        stdout_reader,
+                        stderr_reader,
+                    };
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(packet);
+                    } else {
+                        drop(packet);
+                    }
+                    let mut diagnostic = format!(
+                        "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+                    );
+                    if let Some(kill_error) = kill_result.as_ref().err() {
+                        diagnostic.push_str("; termination failed: ");
+                        diagnostic.push_str(&kill_error.to_string());
+                    }
+                    if let Err(probe_error) = status_after_kill {
+                        diagnostic.push_str("; re-probe failed after termination attempt: ");
+                        diagnostic.push_str(&probe_error.to_string());
+                    }
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+                let status = child.wait()?;
+                self.disconnect_responses();
+                if let Some(reader) = stdout_reader {
+                    reader.join().map_err(|_panic| {
+                        io::Error::other("MCP contract stdout reader panicked")
+                    })?;
+                }
+                if let Some(reader) = stderr_reader {
+                    reader.join().map_err(|_panic| {
+                        io::Error::other("MCP contract stderr reader panicked")
+                    })??;
+                }
+                let diagnostic = format!(
+                    "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
+                );
+                return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+            }
+        }
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(10))
+            .checked_add(timeout)
             .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
-        let status = loop {
-            let child = self
-                .child
-                .as_mut()
-                .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
+        if let Some(delay) = observer_delay {
+            thread::sleep(delay);
+        }
+        let mut timeout_reason = None;
+        let mut accepted_completion = false;
+        loop {
             if Instant::now() >= deadline {
-                child.kill()?;
-                let _status = child.wait()?;
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "MCP contract server did not exit after stdin closed",
-                )
-                .into());
+                timeout_reason = Some("still running at deadline".to_string());
+                break;
             }
-            thread::sleep(Duration::from_millis(25));
-        };
-        self.child.take();
-        if let Some(reader) = self.stdout_reader.take() {
+            let (status, observed_at) = {
+                let child = self
+                    .child
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+                let status = child.try_wait()?;
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            match status {
+                Some(_) if observed_at < deadline => {
+                    accepted_completion = true;
+                    break;
+                }
+                Some(_) => {
+                    timeout_reason = Some(format!(
+                        "completed after deadline (observed_at={observed_at:?})"
+                    ));
+                    break;
+                }
+                None => {
+                    let remaining = deadline.saturating_duration_since(observed_at);
+                    if remaining.is_zero() {
+                        timeout_reason = Some("still running at deadline".to_string());
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(25).min(remaining));
+                }
+            }
+        }
+
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("MCP contract child was consumed"))?;
+        let mut pre_termination_probe_error = None;
+        let mut post_termination_probe_error = None;
+        if timeout_reason.is_some() {
+            let (status, observed_at) = {
+                let status = match cleanup_probe_error.take() {
+                    Some(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
+                    }
+                    None => match child.try_wait() {
+                        Ok(status) => status,
+                        Err(error) => {
+                            pre_termination_probe_error = Some(error);
+                            None
+                        }
+                    },
+                };
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            if status.is_none() {
+                let kill_result = kill_child(&mut child);
+                let status_after_kill = match exit_probe_error.take() {
+                    Some(error) => Err(error),
+                    None => child.try_wait(),
+                };
+                let status_after_kill = match status_after_kill {
+                    Ok(status) => status,
+                    Err(error) if kill_result.is_ok() => {
+                        post_termination_probe_error = Some(error);
+                        None
+                    }
+                    Err(error) => {
+                        self.stdin.take();
+                        let packet = McpContractCleanupPacket {
+                            child,
+                            stdout_reader: self.stdout_reader.take(),
+                            stderr_reader: self.stderr_reader.take(),
+                        };
+                        if let Some(handoff) = handoff_live_child {
+                            handoff(packet);
+                        } else {
+                            drop(packet);
+                        }
+                        let mut diagnostic = format!(
+                            "MCP contract server did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child/readers detached)",
+                            timeout_reason.as_deref().unwrap_or("timeout")
+                        );
+                        if let Some(kill_error) = kill_result.as_ref().err() {
+                            diagnostic.push_str("; termination failed: ");
+                            diagnostic.push_str(&kill_error.to_string());
+                        }
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                    }
+                };
+                if let Err(error) = kill_result
+                    && status_after_kill.is_none()
+                {
+                    self.stdin.take();
+                    let packet = McpContractCleanupPacket {
+                        child,
+                        stdout_reader: self.stdout_reader.take(),
+                        stderr_reader: self.stderr_reader.take(),
+                    };
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(packet);
+                    } else {
+                        drop(packet);
+                    }
+                    let diagnostic = format!(
+                        "MCP contract server did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; cleanup incomplete: operating system refused termination; child was not reaped; child/readers detached)",
+                        timeout_reason.as_deref().unwrap_or("timeout")
+                    );
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+            } else if timeout_reason.as_deref() == Some("still running at deadline") {
+                timeout_reason = Some(format!(
+                    "completed after deadline (observed_at={observed_at:?})"
+                ));
+            }
+        }
+        self.stdin.take();
+        let wait_result = child.wait();
+        self.disconnect_responses();
+        let stdout_result = self.stdout_reader.take().map(|reader| {
             reader
                 .join()
-                .map_err(|_panic| io::Error::other("MCP contract stdout reader panicked"))?;
-        }
-        let stderr = self
+                .map_err(|_panic| io::Error::other("MCP contract stdout reader panicked"))
+        });
+        let stderr_result = self
             .stderr_reader
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr reader was consumed"))?
             .join()
             .map_err(|_panic| io::Error::other("MCP contract stderr reader panicked"))??;
-        if !status.success() {
+        if let Some(reason) = timeout_reason {
+            let mut diagnostic =
+                format!("MCP contract server did not exit after stdin closed: {reason}");
+            if let Some(error) = pre_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed before termination attempt: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Some(error) = post_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed after successful termination: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Ok(status) = &wait_result {
+                diagnostic.push_str(" status=");
+                diagnostic.push_str(&status.to_string());
+            }
+            if !stderr_result.is_empty() {
+                diagnostic.push_str(" stderr=");
+                diagnostic.push_str(&String::from_utf8_lossy(&stderr_result));
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+        }
+        let status = wait_result?;
+        stdout_result.transpose()?;
+        if !accepted_completion || !status.success() {
             return Err(io::Error::other(format!(
                 "MCP contract server failed: {}",
-                String::from_utf8_lossy(&stderr)
+                String::from_utf8_lossy(&stderr_result)
             ))
             .into());
         }
@@ -15824,7 +18746,6 @@ impl McpContractSession {
     }
 }
 
-#[allow(dead_code)]
 impl Drop for McpContractSession {
     fn drop(&mut self) {
         self.stdin.take();
@@ -15833,6 +18754,7 @@ impl Drop for McpContractSession {
             drop(child.wait());
         }
         self.child.take();
+        self.disconnect_responses();
         if let Some(reader) = self.stdout_reader.take() {
             drop(reader.join());
         }
@@ -17435,6 +20357,49 @@ fn compile_codex_mcp_owner_fixture(output: &Path) -> Result<(), Box<dyn Error>> 
 }
 
 #[cfg(windows)]
+fn compile_obsolete_projectatlas_fixture(output: &Path) -> Result<(), Box<dyn Error>> {
+    let source = output.with_extension("cs");
+    fs::write(
+        &source,
+        r#"using System;
+using System.Threading;
+
+public static class Program
+{
+    public static int Main(string[] arguments)
+    {
+        if (Array.IndexOf(arguments, "mcp") >= 0)
+        {
+            Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
+        return 2;
+    }
+}
+"#,
+    )?;
+    let compile_output = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(
+            "Add-Type -Path $env:PROJECTATLAS_FIXTURE_SOURCE -OutputAssembly $env:PROJECTATLAS_FIXTURE_RUNTIME -OutputType ConsoleApplication",
+        )
+        .env("PROJECTATLAS_FIXTURE_SOURCE", &source)
+        .env("PROJECTATLAS_FIXTURE_RUNTIME", output)
+        .output()?;
+    if !compile_output.status.success() {
+        return Err(io::Error::other(format!(
+            "failed to compile obsolete ProjectAtlas fixture runtime:\n{}",
+            String::from_utf8_lossy(&compile_output.stderr)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn write_installer_with_test_codex_identity_seam(
     installer: &Path,
     output: &Path,
@@ -17558,49 +20523,259 @@ fn windows_test_process_id_allowlist(process_ids: &[u32]) -> io::Result<String> 
 }
 
 #[cfg(windows)]
+/// Derive the fixture-private identity record used when normal publication is absent.
+fn codex_owner_retained_identity_path(child_identity_file: &Path) -> PathBuf {
+    let mut retained_identity = child_identity_file.as_os_str().to_os_string();
+    retained_identity.push(".owner");
+    PathBuf::from(retained_identity)
+}
+
+#[cfg(windows)]
+fn codex_owner_cleanup_deadline(started: Instant) -> Instant {
+    started
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+}
+
+#[cfg(windows)]
+fn codex_owner_cleanup_capture_deadline(cleanup_deadline: Instant) -> Instant {
+    let now = Instant::now();
+    let capture_budget = cleanup_deadline
+        .saturating_duration_since(now)
+        .saturating_sub(CODEX_OWNER_CHILD_STOP_BUDGET)
+        .saturating_sub(CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET)
+        .saturating_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET)
+        .min(CODEX_OWNER_FAILURE_CLEANUP_BUDGET);
+    now + capture_budget
+}
+
+#[cfg(windows)]
+fn cleanup_codex_owner_processes_after_spawn_failure(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    mut failures: Vec<String>,
+    cleanup_deadline: Instant,
+    identity_capture_delay: Option<Duration>,
+    child_stop_delay: Option<Duration>,
+    fail_helper_spawns: bool,
+) -> Result<(), Box<dyn Error>> {
+    let retained_identity_file = codex_owner_retained_identity_path(child_identity_file);
+    let capture_deadline = codex_owner_cleanup_capture_deadline(cleanup_deadline);
+    let mut capture_failures = Vec::new();
+    let child_identity = match read_codex_owner_child_identity_with_test_delay(
+        child_identity_file,
+        stable_runtime,
+        capture_deadline,
+        identity_capture_delay,
+    ) {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            capture_failures.push(format!("normal child identity capture failed: {error}"));
+            match read_codex_owner_child_identity_with_test_delay(
+                &retained_identity_file,
+                stable_runtime,
+                capture_deadline,
+                identity_capture_delay,
+            ) {
+                Ok(identity) => Some(identity),
+                Err(error) => {
+                    capture_failures
+                        .push(format!("retained child identity capture failed: {error}"));
+                    None
+                }
+            }
+        }
+    };
+    let child_cleanup_result = match child_identity {
+        Some(identity) => stop_windows_fixture_process_until_with_fallback_test_delay(
+            &identity,
+            cleanup_deadline,
+            child_stop_delay,
+            None,
+            None,
+            fail_helper_spawns,
+        ),
+        None => match read_codex_owner_identity_record(&retained_identity_file) {
+            Ok(identity) => stop_windows_fixture_process_until_with_fallback_test_delay(
+                &identity,
+                cleanup_deadline,
+                child_stop_delay,
+                None,
+                None,
+                fail_helper_spawns,
+            ),
+            Err(error) => Err(io::Error::other(format!(
+                "no retained child identity was available after capture failure ({}): {error}",
+                capture_failures.join("; ")
+            ))
+            .into()),
+        },
+    };
+    if let Err(error) = child_cleanup_result {
+        failures.push(format!("could not retire its owned child safely: {error}"));
+    }
+    let kill_result = parent.kill();
+    let wait_result = parent.wait();
+    if let Err(error) = kill_result
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        failures.push(format!(
+            "could not terminate the held owner process: {error}"
+        ));
+    }
+    if let Err(error) = wait_result {
+        failures.push(format!("could not reap the held owner process: {error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "Codex owner fixture cleanup failed: {}",
+            failures.join("; ")
+        ))
+        .into())
+    }
+}
+
+#[cfg(windows)]
+fn codex_owner_observation_failure(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    error: impl std::fmt::Display,
+    cleanup_deadline: Instant,
+) -> Result<(), Box<dyn Error>> {
+    match cleanup_codex_owner_processes_after_spawn_failure(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        Vec::new(),
+        cleanup_deadline,
+        None,
+        None,
+        false,
+    ) {
+        Ok(()) => Ok(()),
+        Err(cleanup_error) => Err(io::Error::other(format!(
+            "failed to preserve child-first cleanup after owner observation error ({error}): {cleanup_error}"
+        ))
+        .into()),
+    }
+}
+
+#[cfg(windows)]
 fn stop_codex_owner_after_spawn_failure(
     parent: &mut Child,
     child_identity_file: &Path,
     stable_runtime: &Path,
 ) -> Result<(), Box<dyn Error>> {
+    stop_codex_owner_after_spawn_failure_with_test_delays(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        None,
+        None,
+        None,
+        false,
+    )
+}
+
+#[cfg(windows)]
+fn stop_codex_owner_after_spawn_failure_with_test_delays(
+    parent: &mut Child,
+    child_identity_file: &Path,
+    stable_runtime: &Path,
+    identity_capture_delay: Option<Duration>,
+    child_stop_delay: Option<Duration>,
+    owner_observation_delay: Option<Duration>,
+    fail_helper_spawns: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut stop_file = child_identity_file.as_os_str().to_os_string();
     stop_file.push(".stop");
     let stop_result = fs::write(PathBuf::from(stop_file), b"stop");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let cleanup_started = Instant::now();
+    let cleanup_deadline = codex_owner_cleanup_deadline(cleanup_started);
+    let observation_deadline = cleanup_started + CODEX_OWNER_FAILURE_CLEANUP_BUDGET;
+    let mut observation_error = None;
+    let mut failures = Vec::new();
     if stop_result.is_ok() {
+        if let Some(delay) = owner_observation_delay {
+            thread::sleep(delay);
+        }
         loop {
             match parent.try_wait() {
-                Ok(Some(_)) => return Ok(()),
+                Ok(Some(status)) => {
+                    if Instant::now() >= observation_deadline {
+                        failures.push(format!(
+                            "owner fixture exited after observation deadline: {status} (owner_observation_elapsed_ms={})",
+                            cleanup_started.elapsed().as_millis()
+                        ));
+                        break;
+                    }
+                    return Ok(());
+                }
                 Ok(None) => {}
                 Err(error) => {
-                    drop(parent.kill());
-                    drop(parent.wait());
-                    return Err(io::Error::other(format!(
-                        "failed to observe Codex owner fixture cleanup: {error}"
-                    ))
-                    .into());
+                    observation_error = Some(error);
+                    break;
                 }
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= observation_deadline {
                 break;
             }
-            thread::sleep(Duration::from_millis(25));
+            let remaining = observation_deadline.saturating_duration_since(Instant::now());
+            thread::sleep(remaining.min(Duration::from_millis(25)));
         }
     }
 
-    let child_cleanup_result = read_codex_owner_child_identity(child_identity_file, stable_runtime)
-        .and_then(|identity| stop_windows_fixture_process(&identity));
-    let kill_result = parent.kill();
-    let wait_result = parent.wait();
-    let mut failures = Vec::new();
+    if let Some(error) = observation_error {
+        codex_owner_observation_failure(
+            parent,
+            child_identity_file,
+            stable_runtime,
+            error,
+            cleanup_deadline,
+        )?;
+        return Ok(());
+    }
+
     if let Err(error) = stop_result {
         failures.push(format!("could not signal the owner fixture: {error}"));
     } else {
         failures.push("owner fixture did not stop within five seconds".to_string());
     }
+    cleanup_codex_owner_processes_after_spawn_failure(
+        parent,
+        child_identity_file,
+        stable_runtime,
+        failures,
+        cleanup_deadline,
+        identity_capture_delay,
+        child_stop_delay,
+        fail_helper_spawns,
+    )
+}
+
+#[cfg(windows)]
+/// Retire the exact published child, then kill and reap its owned parent.
+fn cleanup_codex_owner_processes(
+    mut parent: Child,
+    child_identity: &WindowsProcessIdentity,
+) -> Result<(), Box<dyn Error>> {
+    let cleanup_deadline = codex_owner_cleanup_deadline(Instant::now());
+    let child_cleanup_result =
+        stop_windows_fixture_process_until(child_identity, cleanup_deadline, None, None);
+    let kill_result = parent.kill();
+    let wait_result = parent.wait();
+    let mut failures = Vec::new();
     if let Err(error) = child_cleanup_result {
         failures.push(format!(
-            "could not retire its published child safely: {error}"
+            "could not retire the published child safely: {error}"
         ));
     }
     if let Err(error) = kill_result
@@ -17613,17 +20788,89 @@ fn stop_codex_owner_after_spawn_failure(
     if let Err(error) = wait_result {
         failures.push(format!("could not reap the held owner process: {error}"));
     }
-    Err(io::Error::other(format!(
-        "Codex owner fixture cleanup failed: {}",
-        failures.join("; ")
-    ))
-    .into())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(failures.join("; ")).into())
+    }
 }
 
 #[cfg(windows)]
-fn read_codex_owner_child_identity(
+/// Preserve a negative assertion while cleaning up an unexpectedly accepted owner.
+fn codex_owner_unexpected_acceptance_error(
+    mode: &str,
+    parent: Child,
+    child_identity: &WindowsProcessIdentity,
+) -> Box<dyn Error> {
+    let cleanup_result = cleanup_codex_owner_processes(parent, child_identity);
+    let mut message = format!("{mode} owner fixture publication was accepted");
+    if let Err(error) = cleanup_result {
+        message.push_str("; fixture cleanup also failed: ");
+        message.push_str(&error.to_string());
+    }
+    io::Error::other(message).into()
+}
+
+#[cfg(windows)]
+fn read_codex_owner_child_identity_with_test_delay(
     child_identity_file: &Path,
     stable_runtime: &Path,
+    readiness_deadline: Instant,
+    test_delay: Option<Duration>,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    if Instant::now() >= readiness_deadline {
+        return Err(io::Error::other(
+            "Windows fixture identity validation reached the readiness deadline before probing",
+        )
+        .into());
+    }
+    let published = read_codex_owner_identity_record(child_identity_file)?;
+    let captured = capture_windows_process_identity_until(
+        published.process_id,
+        readiness_deadline,
+        test_delay,
+        None,
+    )?;
+    if captured.process_id != published.process_id
+        || captured.creation_file_time_utc != published.creation_file_time_utc
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child identity differed: published_pid={} captured_pid={} published_creation={} captured_creation={}",
+            published.process_id,
+            captured.process_id,
+            published.creation_file_time_utc,
+            captured.creation_file_time_utc
+        ))
+        .into());
+    }
+    let owner_canonical =
+        normalize_native_path_display(fs::canonicalize(&published.executable_path)?);
+    let captured_canonical =
+        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
+    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
+    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
+        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
+    {
+        return Err(io::Error::other(format!(
+            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
+            published.executable_path.display(),
+            captured.executable_path.display(),
+            stable_runtime.display()
+        ))
+        .into());
+    }
+    if Instant::now() >= readiness_deadline {
+        return Err(io::Error::other(
+            "Windows fixture identity validation completed after the readiness deadline",
+        )
+        .into());
+    }
+    Ok(captured)
+}
+
+#[cfg(windows)]
+fn read_codex_owner_identity_record(
+    child_identity_file: &Path,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
     let identity_text = fs::read_to_string(child_identity_file)?;
     let mut identity_lines = identity_text.lines();
@@ -17641,49 +20888,44 @@ fn read_codex_owner_child_identity(
             .filter(|path| !path.is_empty())
             .ok_or_else(|| io::Error::other("owner fixture omitted child executable path"))?,
     );
-    let captured = capture_windows_process_identity(process_id)?;
-    if captured.process_id != process_id
-        || captured.creation_file_time_utc != owner_creation_file_time_utc
-    {
-        return Err(io::Error::other(format!(
-            "owner-published child identity differed: published_pid={process_id} captured_pid={} published_creation={owner_creation_file_time_utc} captured_creation={}",
-            captured.process_id,
-            captured.creation_file_time_utc
-        ))
-        .into());
-    }
-    let owner_canonical = normalize_native_path_display(fs::canonicalize(&owner_executable_path)?);
-    let captured_canonical =
-        normalize_native_path_display(fs::canonicalize(&captured.executable_path)?);
-    let expected_canonical = normalize_native_path_display(fs::canonicalize(stable_runtime)?);
-    if !captured_canonical.eq_ignore_ascii_case(&owner_canonical)
-        || !captured_canonical.eq_ignore_ascii_case(&expected_canonical)
-    {
-        return Err(io::Error::other(format!(
-            "owner-published child path differed: published_raw={} captured_raw={} expected_raw={} published_canonical={owner_canonical} captured_canonical={captured_canonical} expected_canonical={expected_canonical}",
-            owner_executable_path.display(),
-            captured.executable_path.display(),
-            stable_runtime.display()
-        ))
-        .into());
-    }
-    Ok(captured)
+    Ok(WindowsProcessIdentity {
+        process_id,
+        creation_file_time_utc: owner_creation_file_time_utc,
+        executable_path: owner_executable_path,
+    })
 }
 
 #[cfg(windows)]
 fn codex_owner_spawn_error(
     parent: &mut Child,
+    codex_fixture: &Path,
     child_identity_file: &Path,
     stable_runtime: &Path,
     error: impl std::fmt::Display,
 ) -> Box<dyn Error> {
     match stop_codex_owner_after_spawn_failure(parent, child_identity_file, stable_runtime) {
-        Ok(()) => io::Error::other(error.to_string()).into(),
+        Ok(()) => io::Error::other(format!(
+            "{error}; owner={}; identity_file={}; expected_runtime={}",
+            codex_fixture.display(),
+            child_identity_file.display(),
+            stable_runtime.display()
+        ))
+        .into(),
         Err(cleanup_error) => io::Error::other(format!(
-            "{error}; fixture cleanup also failed: {cleanup_error}"
+            "{error}; owner={}; identity_file={}; expected_runtime={}; fixture cleanup also failed: {cleanup_error}",
+            codex_fixture.display(),
+            child_identity_file.display(),
+            stable_runtime.display()
         ))
         .into(),
     }
+}
+
+#[cfg(windows)]
+fn codex_owner_readiness_deadline(started: Instant) -> Result<Instant, Box<dyn Error>> {
+    started
+        .checked_add(CODEX_OWNER_READINESS_TIMEOUT)
+        .ok_or_else(|| io::Error::other("Codex MCP owner readiness deadline overflow").into())
 }
 
 #[cfg(windows)]
@@ -17693,7 +20935,36 @@ fn spawn_codex_owned_obsolete_mcp(
     db: &Path,
     config: Option<&Path>,
     child_pid_file: &Path,
+    publication_delay: Option<Duration>,
+    publication_mode: Option<&str>,
 ) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
+    spawn_codex_owned_obsolete_mcp_with_test_delays(
+        codex_fixture,
+        stable_runtime,
+        db,
+        config,
+        child_pid_file,
+        publication_delay,
+        publication_mode,
+        None,
+        None,
+    )
+}
+
+#[cfg(windows)]
+fn spawn_codex_owned_obsolete_mcp_with_test_delays(
+    codex_fixture: &Path,
+    stable_runtime: &Path,
+    db: &Path,
+    config: Option<&Path>,
+    child_pid_file: &Path,
+    publication_delay: Option<Duration>,
+    publication_mode: Option<&str>,
+    identity_capture_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+) -> Result<(Child, WindowsProcessIdentity), Box<dyn Error>> {
+    let started = Instant::now();
+    let deadline = codex_owner_readiness_deadline(started)?;
     let mut command = StdCommand::new(codex_fixture);
     command
         .arg(child_pid_file)
@@ -17705,17 +20976,31 @@ fn spawn_codex_owned_obsolete_mcp(
     if let Some(config) = config {
         command.arg(config).arg("--config").arg("model=\"o3\"");
     }
+    if let Some(delay) = publication_delay {
+        command.env(
+            CODEX_OWNER_PUBLICATION_DELAY_ENV,
+            delay.as_millis().to_string(),
+        );
+    }
+    if let Some(mode) = publication_mode {
+        command.env(CODEX_OWNER_PUBLICATION_MODE_ENV, mode);
+    }
     let mut parent = command.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
     loop {
         match parent.try_wait() {
             Ok(Some(status)) => {
+                let observation_elapsed = started.elapsed();
                 return Err(codex_owner_spawn_error(
                     &mut parent,
+                    codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!(
-                        "Codex MCP owner fixture exited before publishing its child PID: {status}"
+                        "Codex MCP owner fixture exited before publishing its child PID: {status} (owner_observation_elapsed_ms={})",
+                        observation_elapsed.as_millis()
                     ),
                 ));
             }
@@ -17723,6 +21008,7 @@ fn spawn_codex_owned_obsolete_mcp(
             Err(error) => {
                 return Err(codex_owner_spawn_error(
                     &mut parent,
+                    codex_fixture,
                     child_pid_file,
                     stable_runtime,
                     format!("failed to inspect Codex MCP owner fixture: {error}"),
@@ -17730,28 +21016,430 @@ fn spawn_codex_owned_obsolete_mcp(
             }
         }
         if child_pid_file.is_file() {
-            match read_codex_owner_child_identity(child_pid_file, stable_runtime) {
+            let observed_at = Instant::now();
+            if observed_at >= deadline {
+                let elapsed = started.elapsed();
+                return Err(codex_owner_spawn_error(
+                    &mut parent,
+                    codex_fixture,
+                    child_pid_file,
+                    stable_runtime,
+                    format!(
+                        "Codex MCP owner fixture published its child PID after the readiness deadline (readiness_elapsed_ms={})",
+                        elapsed.as_millis()
+                    ),
+                ));
+            }
+            // Publication and exact identity validation share this one readiness deadline.
+            match read_codex_owner_child_identity_with_test_delay(
+                child_pid_file,
+                stable_runtime,
+                deadline,
+                identity_capture_delay,
+            ) {
                 Ok(captured) => return Ok((parent, captured)),
                 Err(error) => {
                     return Err(codex_owner_spawn_error(
                         &mut parent,
+                        codex_fixture,
                         child_pid_file,
                         stable_runtime,
-                        error,
+                        format!(
+                            "failed to validate published child identity (readiness_elapsed_ms={}): {error}",
+                            started.elapsed().as_millis()
+                        ),
                     ));
                 }
             }
         }
         if Instant::now() >= deadline {
+            let elapsed = started.elapsed();
             return Err(codex_owner_spawn_error(
                 &mut parent,
+                codex_fixture,
                 child_pid_file,
                 stable_runtime,
-                "Codex MCP owner fixture did not publish its child PID",
+                format!(
+                    "Codex MCP owner fixture did not publish its child PID within {CODEX_OWNER_READINESS_TIMEOUT:?} (elapsed={elapsed:?} readiness_elapsed_ms={})",
+                    elapsed.as_millis()
+                ),
             ));
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let db = atlas_dir.join("projectatlas.db");
+    let runtime = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_obsolete_projectatlas_fixture(&runtime)?;
+    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_codex_mcp_owner_fixture(&codex_fixture)?;
+
+    // Exercise the production readiness helper with prompt publication plus a real PowerShell
+    // identity capture delay beyond the former five-second boundary, while remaining inside the
+    // one absolute readiness deadline.
+    let delayed_identity_file = temp.path().join("delayed-identity.pid");
+    let delayed_started = Instant::now();
+    let (delayed_parent, delayed_identity) = spawn_codex_owned_obsolete_mcp_with_test_delays(
+        &codex_fixture,
+        &runtime,
+        &db,
+        None,
+        &delayed_identity_file,
+        Some(CODEX_OWNER_DELAYED_PUBLICATION),
+        None,
+        Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+        None,
+    )?;
+    let delayed_elapsed = delayed_started.elapsed();
+    if delayed_elapsed <= Duration::from_secs(5) || delayed_elapsed >= CODEX_OWNER_READINESS_TIMEOUT
+    {
+        let cleanup_result = cleanup_codex_owner_processes(delayed_parent, &delayed_identity);
+        return Err(io::Error::other(format!(
+            "delayed publication and identity capture did not stay inside one readiness deadline: elapsed={delayed_elapsed:?} publication_delay={CODEX_OWNER_DELAYED_PUBLICATION:?} capture_delay={CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} cleanup={cleanup_result:?}"
+        ))
+        .into());
+    }
+    let delayed_cleanup = cleanup_codex_owner_processes(delayed_parent, &delayed_identity);
+    if delayed_cleanup.is_err() || windows_process_is_alive(&delayed_identity)? {
+        return Err(io::Error::other(format!(
+            "delayed publication and identity capture did not clean up its accepted child: {delayed_cleanup:?}"
+        ))
+        .into());
+    }
+
+    for (index, (mode, expected)) in [
+        ("early-exit", "exited before publishing"),
+        ("malformed", "failed to validate published child identity"),
+        ("mismatched", "owner-published child identity differed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let identity_file = temp.path().join(format!("{mode}-{index}.pid"));
+        let started = Instant::now();
+        let result = spawn_codex_owned_obsolete_mcp(
+            &codex_fixture,
+            &runtime,
+            &db,
+            Some(&atlas_dir.join("config.toml")),
+            &identity_file,
+            None,
+            Some(mode),
+        );
+        let error = match result {
+            Ok((parent, child_identity)) => {
+                return Err(codex_owner_unexpected_acceptance_error(
+                    mode,
+                    parent,
+                    &child_identity,
+                ));
+            }
+            Err(error) => error,
+        };
+        let elapsed = started.elapsed();
+        let text = error.to_string();
+        let early_exit_observation_elapsed = if mode == "early-exit" {
+            Some(
+                text.split("owner_observation_elapsed_ms=")
+                    .nth(1)
+                    .and_then(|value| value.split(')').next())
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "early-exit owner fixture omitted its observation elapsed diagnostic:\n{text}"
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        if !text.contains(expected)
+            || !text.contains(&format!("owner={}", codex_fixture.display()))
+            || !text.contains(&format!("identity_file={}", identity_file.display()))
+            || !text.contains(&format!("expected_runtime={}", runtime.display()))
+            || (mode == "early-exit" && elapsed > codex_owner_early_exit_max_elapsed())
+            || early_exit_observation_elapsed
+                .as_ref()
+                .is_some_and(|observed| *observed >= CODEX_OWNER_READINESS_TIMEOUT)
+            || text.contains("fixture cleanup also failed")
+        {
+            return Err(io::Error::other(format!(
+                "{mode} owner fixture failure was not bounded and diagnostic: elapsed={elapsed:?} observed={early_exit_observation_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} max_early_exit={:?}\n{text}",
+                codex_owner_early_exit_max_elapsed()
+            ))
+            .into());
+        }
+    }
+
+    // Exercise the same branch a negative fixture would take if validation regressed.
+    let accepted_identity_file = temp.path().join("unexpected-acceptance.pid");
+    let accepted = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &accepted_identity_file,
+        None,
+        None,
+    )?;
+    let accepted_identity = accepted.1.clone();
+    let unexpected_error =
+        codex_owner_unexpected_acceptance_error("mismatched", accepted.0, &accepted_identity);
+    let unexpected_error_text = unexpected_error.to_string();
+    if windows_process_is_alive(&accepted_identity)?
+        || !unexpected_error_text.contains("mismatched owner fixture publication was accepted")
+        || unexpected_error_text.contains("fixture cleanup also failed")
+    {
+        return Err(io::Error::other(format!(
+            "unexpectedly accepted negative owner fixture did not clean up its owned processes: {unexpected_error}"
+        ))
+        .into());
+    }
+
+    let observation_identity_file = temp.path().join("observation-failure.pid");
+    let (mut observation_parent, observation_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &observation_identity_file,
+        None,
+        None,
+    )?;
+    // Inject only the observation decision while exercising the same child-first cleanup path;
+    // the production caller retains the actual observation error in its spawn diagnostic.
+    let observation_cleanup_deadline = Instant::now()
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+    let observation_cleanup_result = codex_owner_observation_failure(
+        &mut observation_parent,
+        &observation_identity_file,
+        &runtime,
+        "synthetic parent observation failure",
+        observation_cleanup_deadline,
+    );
+    if observation_parent.try_wait()?.is_none()
+        || windows_process_is_alive(&observation_identity)?
+        || observation_cleanup_result.is_err()
+    {
+        return Err(io::Error::other(format!(
+            "parent observation failure did not preserve exact child-first cleanup: {observation_cleanup_result:?}"
+        ))
+        .into());
+    }
+
+    // A promptly stopped owner can be observed after the five-second owner-observation
+    // deadline when the polling caller is descheduled.  The late completion is a failure
+    // classification, but it must still use the retained-identity child-first cleanup path.
+    let late_observation_identity_file = temp.path().join("late-owner-observation.pid");
+    let (mut late_observation_parent, late_observation_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &late_observation_identity_file,
+        None,
+        None,
+    )?;
+    // Remove normal publication so cleanup must use the fixture-retained identity record.
+    fs::remove_file(&late_observation_identity_file)?;
+    let late_observation_result = stop_codex_owner_after_spawn_failure_with_test_delays(
+        &mut late_observation_parent,
+        &late_observation_identity_file,
+        &runtime,
+        None,
+        None,
+        Some(CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY),
+        false,
+    );
+    let late_observation_text = late_observation_result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let late_observation_elapsed = late_observation_text
+        .split("owner_observation_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "late owner observation omitted its elapsed diagnostic: {late_observation_text}"
+            ))
+        })?;
+    if late_observation_result.is_ok()
+        || !late_observation_text.contains("owner fixture exited after observation deadline")
+        || late_observation_elapsed < CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY
+        || late_observation_elapsed
+            > CODEX_OWNER_LATE_OWNER_OBSERVATION_TEST_DELAY
+                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+        || late_observation_parent.try_wait()?.is_none()
+        || windows_process_is_alive(&late_observation_identity)?
+        || late_observation_text.contains("could not retire its owned child safely")
+    {
+        return Err(io::Error::other(format!(
+            "late owner observation did not fail closed through exact child-first cleanup: result={late_observation_result:?} child_alive={}\n{late_observation_text}",
+            windows_process_is_alive(&late_observation_identity)?
+        ))
+        .into());
+    }
+
+    // Exercise the real production helper when publication and PowerShell identity capture
+    // compose beyond the same absolute readiness deadline. Cleanup must reap the exact retained
+    // child and the held owner without creating a second readiness envelope.
+    let boundary_identity_file = temp.path().join("readiness-boundary.pid");
+    let boundary_started = Instant::now();
+    let boundary_result = spawn_codex_owned_obsolete_mcp_with_test_delays(
+        &codex_fixture,
+        &runtime,
+        &db,
+        None,
+        &boundary_identity_file,
+        Some(CODEX_OWNER_READINESS_BOUNDARY_PUBLICATION_DELAY),
+        None,
+        Some(CODEX_OWNER_READINESS_BOUNDARY_CAPTURE_DELAY),
+        None,
+    );
+    let boundary_elapsed = boundary_started.elapsed();
+    let boundary_error = match boundary_result {
+        Ok((parent, child_identity)) => {
+            return Err(codex_owner_unexpected_acceptance_error(
+                "readiness-boundary",
+                parent,
+                &child_identity,
+            ));
+        }
+        Err(error) => error,
+    };
+    let boundary_text = boundary_error.to_string();
+    let boundary_identity = read_codex_owner_identity_record(&codex_owner_retained_identity_path(
+        &boundary_identity_file,
+    ))?;
+    let boundary_readiness_elapsed = boundary_text
+        .split("readiness_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "readiness-boundary capture failure omitted total readiness elapsed: {boundary_text}"
+            ))
+        })?;
+    let boundary_total_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    if boundary_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || boundary_elapsed > boundary_total_upper_bound
+        || boundary_readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || boundary_readiness_elapsed
+            > CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+        || !boundary_text.contains("timed out capturing Windows fixture process identity")
+        || !boundary_text.contains("readiness_elapsed_ms=")
+        || !boundary_text.contains(&format!("owner={}", codex_fixture.display()))
+        || !boundary_text.contains(&format!(
+            "identity_file={}",
+            boundary_identity_file.display()
+        ))
+        || !boundary_text.contains(&format!("expected_runtime={}", runtime.display()))
+        || boundary_text.contains("fixture cleanup also failed")
+        || windows_process_is_alive(&boundary_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "readiness-boundary capture did not fail at the one bounded deadline or clean up its exact child: total_elapsed={boundary_elapsed:?} readiness_elapsed={boundary_readiness_elapsed:?} publication_delay={CODEX_OWNER_READINESS_BOUNDARY_PUBLICATION_DELAY:?} capture_delay={CODEX_OWNER_READINESS_BOUNDARY_CAPTURE_DELAY:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} total_upper_bound={boundary_total_upper_bound:?}\n{boundary_text}"
+        ))
+        .into());
+    }
+
+    let identity_file = temp.path().join("timeout.pid");
+    let timeout_started = Instant::now();
+    let result = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        Some(&atlas_dir.join("config.toml")),
+        &identity_file,
+        None,
+        Some("timeout-ignore-stop"),
+    );
+    let error = match result {
+        Ok((parent, child_identity)) => {
+            return Err(codex_owner_unexpected_acceptance_error(
+                "timeout",
+                parent,
+                &child_identity,
+            ));
+        }
+        Err(error) => error,
+    };
+    let timeout_elapsed = timeout_started.elapsed();
+    let timeout_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let text = error.to_string();
+    let timeout_readiness_elapsed = text
+        .split("readiness_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "true owner fixture timeout omitted its pre-cleanup readiness elapsed diagnostic:\n{text}"
+            ))
+        })?;
+    let timeout_readiness_upper_bound =
+        CODEX_OWNER_READINESS_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let timeout_child_identity =
+        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
+    if timeout_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || timeout_elapsed > timeout_upper_bound
+        || timeout_readiness_elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || timeout_readiness_elapsed > timeout_readiness_upper_bound
+        || !text.contains("did not publish its child PID within 30s")
+        || !text.contains("elapsed=")
+        || !text.contains(&format!("owner={}", codex_fixture.display()))
+        || !text.contains(&format!("identity_file={}", identity_file.display()))
+        || !text.contains(&format!("expected_runtime={}", runtime.display()))
+        || !text.contains("owner fixture did not stop within five seconds")
+        || !text.contains("fixture cleanup also failed")
+        || windows_process_is_alive(&timeout_child_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "true owner fixture timeout was not bounded and diagnostic: total_elapsed={timeout_elapsed:?} readiness_elapsed={timeout_readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} owner_observation_budget={CODEX_OWNER_FAILURE_CLEANUP_BUDGET:?} child_stop_budget={CODEX_OWNER_CHILD_STOP_BUDGET:?} cleanup_scheduler_tolerance={CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE:?} total_upper_bound={timeout_upper_bound:?} readiness_upper_bound={timeout_readiness_upper_bound:?}\n{text}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -17766,15 +21454,244 @@ struct WindowsProcessIdentity {
 fn capture_windows_process_identity(
     process_id: u32,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
-    let output = StdCommand::new("powershell")
+    windows_native_process::capture_exact(process_id).map_err(|error| {
+        io::Error::other(format!(
+            "failed to capture exact Windows fixture process identity {process_id}: {error}"
+        ))
+        .into()
+    })
+}
+
+#[cfg(windows)]
+fn capture_windows_process_identity_with_timeout(
+    process_id: u32,
+    timeout: Duration,
+    test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    if timeout.is_zero() {
+        return Err(io::Error::other(format!(
+            "Windows fixture identity capture budget expired before probing process {process_id}"
+        ))
+        .into());
+    }
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("Windows fixture identity capture deadline overflow"))?;
+    let mut capture = spawn_windows_process_identity_capture(process_id, test_delay)?;
+    if observation_delay.is_some() {
+        // Release the intentional observer delay only after the small capture
+        // process has exited, so host scheduling cannot masquerade as a late
+        // completion.
+        if let Err(error) = synchronize_prompt_exit_before_delayed_observation(
+            &mut capture,
+            "Windows fixture identity capture",
+            None,
+        ) {
+            let kill_result = capture.kill();
+            let wait_result = capture.wait();
+            return Err(io::Error::other(format!(
+                "Windows fixture identity capture did not complete before delayed observation: {error}; cleanup kill={kill_result:?} wait={wait_result:?}"
+            ))
+            .into());
+        }
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            io::Error::other("Windows fixture identity capture deadline overflow")
+        })?;
+        return capture_windows_process_identity_from_child(
+            process_id,
+            capture,
+            deadline,
+            observation_delay,
+        );
+    }
+    let capture =
+        reject_windows_identity_capture_started_after_deadline(process_id, capture, deadline)?;
+    capture_windows_process_identity_from_child(process_id, capture, deadline, None)
+}
+
+#[cfg(windows)]
+fn capture_windows_process_identity_until(
+    process_id: u32,
+    deadline: Instant,
+    test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    if Instant::now() >= deadline {
+        return Err(io::Error::other(format!(
+            "Windows fixture identity capture deadline expired before probing process {process_id}"
+        ))
+        .into());
+    }
+    let capture = spawn_windows_process_identity_capture(process_id, test_delay)?;
+    let capture =
+        reject_windows_identity_capture_started_after_deadline(process_id, capture, deadline)?;
+    capture_windows_process_identity_from_child(process_id, capture, deadline, observation_delay)
+}
+
+#[cfg(windows)]
+fn reject_windows_identity_capture_started_after_deadline(
+    process_id: u32,
+    mut capture: Child,
+    deadline: Instant,
+) -> Result<Child, Box<dyn Error>> {
+    if Instant::now() >= deadline {
+        let cleanup_result = terminate_windows_identity_capture(
+            &mut capture,
+            deadline
+                .checked_add(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE)
+                .unwrap_or(deadline),
+        );
+        return Err(io::Error::other(format!(
+            "Windows fixture identity capture process {process_id} started after the readiness deadline; cleanup={cleanup_result:?}"
+        ))
+        .into());
+    }
+    Ok(capture)
+}
+
+#[cfg(windows)]
+fn spawn_windows_process_identity_capture(
+    process_id: u32,
+    test_delay: Option<Duration>,
+) -> Result<Child, Box<dyn Error>> {
+    let mut command = StdCommand::new("powershell");
+    command
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
         .arg(
-            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction Stop; [pscustomobject]@{ process_id = [uint32]$process.Id; creation_file_time_utc = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); executable_path = [System.IO.Path]::GetFullPath($process.Path) } | ConvertTo-Json -Compress",
+            "$delay = 0; if ($env:PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS) { $delay = [int]$env:PROJECTATLAS_TEST_CODEX_OWNER_IDENTITY_CAPTURE_DELAY_MS }; if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }; $process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction Stop; [pscustomobject]@{ process_id = [uint32]$process.Id; creation_file_time_utc = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); executable_path = [System.IO.Path]::GetFullPath($process.Path) } | ConvertTo-Json -Compress",
         )
         .env("PROJECTATLAS_FIXTURE_PID", process_id.to_string())
-        .output()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(delay) = test_delay {
+        command.env(
+            CODEX_OWNER_IDENTITY_CAPTURE_DELAY_ENV,
+            delay.as_millis().to_string(),
+        );
+    }
+    Ok(command.spawn()?)
+}
+
+#[cfg(windows)]
+fn terminate_windows_identity_capture(capture: &mut Child, deadline: Instant) -> io::Result<()> {
+    let process_id = capture.id();
+    let kill_error = match capture.kill() {
+        Ok(()) => None,
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => None,
+        Err(error) => Some(error),
+    };
+    loop {
+        match capture.try_wait() {
+            Ok(Some(_status)) => {
+                return kill_error.map_or(Ok(()), |error| {
+                    Err(io::Error::other(format!(
+                        "could not terminate identity capture process {process_id}: {error}"
+                    )))
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "identity capture process {process_id} was not reaped by its bounded cleanup deadline"
+                    ),
+                ));
+            }
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "could not observe identity capture process {process_id} after termination: {error}"
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn capture_windows_process_identity_from_child(
+    process_id: u32,
+    mut capture: Child,
+    deadline: Instant,
+    observation_delay: Option<Duration>,
+) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
+    let started = Instant::now();
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
+    let output = loop {
+        match capture.try_wait() {
+            Ok(Some(_)) => {
+                let output = capture.wait_with_output()?;
+                let observed_at = Instant::now();
+                if observed_at >= deadline {
+                    return Err(io::Error::other(format!(
+                        "Windows fixture identity capture completed after the readiness deadline (observed after {:?})",
+                        observed_at.duration_since(started)
+                    ))
+                    .into());
+                }
+                break output;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let cleanup_result = terminate_windows_identity_capture(
+                    &mut capture,
+                    deadline
+                        .checked_add(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE)
+                        .unwrap_or(deadline),
+                );
+                let mut cleanup = Vec::new();
+                if let Err(error) = cleanup_result {
+                    cleanup.push(format!("identity capture cleanup failed: {error}"));
+                }
+                let cleanup_detail = if cleanup.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {}", cleanup.join("; "))
+                };
+                return Err(io::Error::other(format!(
+                    "timed out capturing Windows fixture process identity {process_id} at the readiness deadline (observed after {:?}){cleanup_detail}",
+                    Instant::now().duration_since(started)
+                ))
+                .into());
+            }
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    let cleanup_result = terminate_windows_identity_capture(
+                        &mut capture,
+                        deadline
+                            .checked_add(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE)
+                            .unwrap_or(deadline),
+                    );
+                    return Err(io::Error::other(format!(
+                        "timed out capturing Windows fixture process identity {process_id} at the readiness deadline; cleanup={cleanup_result:?}"
+                    ))
+                    .into());
+                }
+                thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => {
+                let cleanup_result = terminate_windows_identity_capture(
+                    &mut capture,
+                    Instant::now()
+                        .checked_add(CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE)
+                        .unwrap_or_else(Instant::now),
+                );
+                let cleanup_detail = format!("; identity-capture cleanup={cleanup_result:?}");
+                return Err(io::Error::other(format!(
+                    "failed to observe Windows fixture identity capture {process_id}: {error}{cleanup_detail}"
+                ))
+                .into());
+            }
+        }
+    };
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "failed to capture Windows fixture process identity {process_id}:\n{}",
@@ -17826,27 +21743,1407 @@ fn windows_process_is_alive(identity: &WindowsProcessIdentity) -> Result<bool, B
 
 #[cfg(windows)]
 fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(), Box<dyn Error>> {
-    let status = StdCommand::new("powershell")
+    let deadline = Instant::now()
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+    stop_windows_fixture_process_until(identity, deadline, None, None)
+}
+
+#[cfg(windows)]
+const WINDOWS_FIXTURE_STOP_SCRIPT: &str = "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { if ($env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) }; $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result";
+
+#[cfg(windows)]
+fn spawn_windows_fixture_stop_helper(
+    identity: &WindowsProcessIdentity,
+    test_delay: Option<Duration>,
+    fail_spawn: bool,
+) -> Result<Child, Box<dyn Error>> {
+    if fail_spawn {
+        return Err(
+            io::Error::other("test-injected Windows fixture stop-helper spawn failure").into(),
+        );
+    }
+    let mut command = StdCommand::new("powershell");
+    command
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
-        .arg(
-            "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result",
-        )
-        .env(
-            "PROJECTATLAS_FIXTURE_PID",
-            identity.process_id.to_string(),
-        )
+        .arg(WINDOWS_FIXTURE_STOP_SCRIPT)
+        .env("PROJECTATLAS_FIXTURE_PID", identity.process_id.to_string())
         .env(
             "PROJECTATLAS_FIXTURE_CREATION",
             identity.creation_file_time_utc.to_string(),
         )
         .env("PROJECTATLAS_FIXTURE_PATH", &identity.executable_path)
-        .status()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "refused to stop Windows fixture process {} without its exact captured identity",
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(delay) = test_delay {
+        command.env(CODEX_OWNER_STOP_DELAY_ENV, delay.as_millis().to_string());
+    }
+    Ok(command.spawn()?)
+}
+
+#[cfg(windows)]
+fn force_stop_windows_fixture_process(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+    test_delay: Option<Duration>,
+    fail_spawn: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut stop = spawn_windows_fixture_stop_helper(identity, test_delay, fail_spawn)?;
+    let started = Instant::now();
+    loop {
+        match stop.try_wait() {
+            Ok(Some(status)) if status.success() && Instant::now() < deadline => return Ok(()),
+            Ok(Some(status)) if status.success() => {
+                return Err(io::Error::other(format!(
+                    "exact child cleanup fallback completed after deadline for Windows fixture process {} (observed after {:?})",
+                    identity.process_id,
+                    started.elapsed()
+                ))
+                .into());
+            }
+            Ok(Some(status)) => {
+                return Err(io::Error::other(format!(
+                    "exact child cleanup fallback refused Windows fixture process {} with status {status}",
+                    identity.process_id
+                ))
+                .into());
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let kill_result = stop.kill();
+                let wait_result = stop.wait();
+                return Err(io::Error::other(format!(
+                    "exact child cleanup fallback timed out for Windows fixture process {} after {:?}; helper cleanup kill={kill_result:?} wait={wait_result:?}",
+                    identity.process_id,
+                    started.elapsed()
+                ))
+                .into());
+            }
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => {
+                let kill_result = stop.kill();
+                let wait_result = stop.wait();
+                return Err(io::Error::other(format!(
+                    "exact child cleanup fallback could not observe Windows fixture process {}: {error}; helper cleanup kill={kill_result:?} wait={wait_result:?}",
+                    identity.process_id
+                ))
+                .into());
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+/// Provides the bounded, helper-free exact-process cleanup fallback.
+#[allow(unsafe_code)]
+mod windows_native_process {
+    use super::WindowsProcessIdentity;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    const WAIT_FAILED: u32 = u32::MAX;
+    const MAX_PROCESS_PATH: usize = 32_768;
+
+    type Handle = *mut std::ffi::c_void;
+
+    #[repr(C)]
+    struct FileTime {
+        low_date_time: u32,
+        high_date_time: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CloseHandle(handle: Handle) -> i32;
+        fn GetExitCodeProcess(handle: Handle, exit_code: *mut u32) -> i32;
+        fn GetProcessTimes(
+            handle: Handle,
+            creation_time: *mut FileTime,
+            exit_time: *mut FileTime,
+            kernel_time: *mut FileTime,
+            user_time: *mut FileTime,
+        ) -> i32;
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn QueryFullProcessImageNameW(
+            handle: Handle,
+            flags: u32,
+            executable_path: *mut u16,
+            path_length: *mut u32,
+        ) -> i32;
+        fn TerminateProcess(handle: Handle, exit_code: u32) -> i32;
+        fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    }
+
+    /// Owns one exact process handle and closes it on every return path.
+    struct ProcessHandle(Handle);
+
+    impl ProcessHandle {
+        fn open(process_id: u32) -> io::Result<Self> {
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                    0,
+                    process_id,
+                )
+            };
+            if handle.is_null() {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER) {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, error));
+                }
+                return Err(error);
+            }
+            Ok(Self(handle))
+        }
+    }
+
+    impl Drop for ProcessHandle {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// Captures one process identity without starting a helper process.
+    pub(super) fn capture_exact(process_id: u32) -> io::Result<WindowsProcessIdentity> {
+        let handle = match ProcessHandle::open(process_id) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(error),
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "native exact process identity could not open Windows fixture process {process_id}: {error}"
+                )));
+            }
+        };
+        let (creation_file_time_utc, executable_path) = query_identity(handle.0)?;
+        Ok(WindowsProcessIdentity {
+            process_id,
+            creation_file_time_utc,
+            executable_path,
+        })
+    }
+
+    /// Stops only a process whose retained identity still matches, without spawning a helper.
+    pub(super) fn stop_exact(
+        identity: &WindowsProcessIdentity,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "native exact child cleanup deadline expired for Windows fixture process {}",
+                    identity.process_id
+                ),
+            ));
+        }
+        let handle = match ProcessHandle::open(identity.process_id) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "native exact child cleanup could not open Windows fixture process {}: {error}",
+                    identity.process_id
+                )));
+            }
+        };
+        verify_identity(handle.0, identity)?;
+        if process_exit_code(handle.0)? != STILL_ACTIVE {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "native exact child cleanup deadline expired before terminating Windows fixture process {}",
+                    identity.process_id
+                ),
+            ));
+        }
+        let terminated = unsafe { TerminateProcess(handle.0, 1) } != 0;
+        if !terminated {
+            let error = io::Error::last_os_error();
+            if process_exit_code(handle.0).is_ok_and(|exit_code| exit_code != STILL_ACTIVE) {
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "native exact child cleanup could not terminate Windows fixture process {}: {error}",
+                identity.process_id
+            )));
+        }
+        let timeout = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(u128::from(u32::MAX)) as u32;
+        let wait_result = unsafe { WaitForSingleObject(handle.0, timeout) };
+        let observed_at = Instant::now();
+        match wait_result {
+            WAIT_OBJECT_0 if observed_at < deadline => Ok(()),
+            WAIT_OBJECT_0 => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "native exact child cleanup observed Windows fixture process {} after its deadline",
+                    identity.process_id
+                ),
+            )),
+            WAIT_TIMEOUT => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "native exact child cleanup timed out waiting for Windows fixture process {}",
+                    identity.process_id
+                ),
+            )),
+            WAIT_FAILED => Err(io::Error::other(format!(
+                "native exact child cleanup could not wait for Windows fixture process {}: {}",
+                identity.process_id,
+                io::Error::last_os_error()
+            ))),
+            result => Err(io::Error::other(format!(
+                "native exact child cleanup returned unexpected wait status {result} for Windows fixture process {}",
+                identity.process_id
+            ))),
+        }
+    }
+
+    fn process_exit_code(handle: Handle) -> io::Result<u32> {
+        let mut exit_code = 0;
+        if unsafe { GetExitCodeProcess(handle, &raw mut exit_code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(exit_code)
+    }
+
+    fn verify_identity(handle: Handle, expected: &WindowsProcessIdentity) -> io::Result<()> {
+        let (actual_creation_time, actual_path) = query_identity(handle)?;
+        let actual_path = fs::canonicalize(actual_path)?;
+        let expected_path = fs::canonicalize(&expected.executable_path)?;
+        let actual_path = actual_path.to_str().ok_or_else(|| {
+            io::Error::other("native exact child cleanup received a non-UTF-8 executable path")
+        })?;
+        let expected_path = expected_path.to_str().ok_or_else(|| {
+            io::Error::other("native exact child cleanup retained a non-UTF-8 executable path")
+        })?;
+        if actual_creation_time != expected.creation_file_time_utc
+            || !actual_path.eq_ignore_ascii_case(expected_path)
+        {
+            return Err(io::Error::other(format!(
+                "native exact child cleanup refused Windows fixture process {} because its creation time or executable path did not match",
+                expected.process_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn query_identity(handle: Handle) -> io::Result<(i64, PathBuf)> {
+        let mut creation_time = FileTime {
+            low_date_time: 0,
+            high_date_time: 0,
+        };
+        let mut exit_time = FileTime {
+            low_date_time: 0,
+            high_date_time: 0,
+        };
+        let mut kernel_time = FileTime {
+            low_date_time: 0,
+            high_date_time: 0,
+        };
+        let mut user_time = FileTime {
+            low_date_time: 0,
+            high_date_time: 0,
+        };
+        if unsafe {
+            GetProcessTimes(
+                handle,
+                &raw mut creation_time,
+                &raw mut exit_time,
+                &raw mut kernel_time,
+                &raw mut user_time,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let actual_creation_time = (u64::from(creation_time.high_date_time) << 32
+            | u64::from(creation_time.low_date_time)) as i64;
+        let mut path = vec![0; MAX_PROCESS_PATH];
+        let mut path_length = path.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &raw mut path_length) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        path.truncate(path_length as usize);
+        Ok((
+            actual_creation_time,
+            PathBuf::from(OsString::from_wide(&path)),
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn stop_windows_fixture_process_native(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+) -> Result<(), Box<dyn Error>> {
+    match windows_native_process::stop_exact(identity, deadline) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "native exact child cleanup failed for Windows fixture process {}: {error}",
             identity.process_id
+        ))
+        .into()),
+    }
+}
+
+#[cfg(windows)]
+fn windows_fixture_stop_failure_with_fallback(
+    identity: &WindowsProcessIdentity,
+    detail: impl std::fmt::Display,
+    fallback_deadline: Instant,
+    final_deadline: Instant,
+    fallback_test_delay: Option<Duration>,
+    fail_helper_spawn: bool,
+) -> Box<dyn Error> {
+    let fallback_result = force_stop_windows_fixture_process(
+        identity,
+        fallback_deadline,
+        fallback_test_delay,
+        fail_helper_spawn,
+    );
+    let fallback_succeeded = fallback_result.is_ok();
+    let fallback_detail = match fallback_result.as_ref() {
+        Ok(()) => "exact child cleanup fallback completed".to_string(),
+        Err(error) => format!("exact child cleanup fallback failed: {error}"),
+    };
+    let final_detail = if fallback_succeeded {
+        "exact child cleanup final stop skipped after fallback success".to_string()
+    } else {
+        match stop_windows_fixture_process_native(identity, final_deadline) {
+            Ok(()) => "exact child cleanup final stop completed".to_string(),
+            Err(error) => format!("exact child cleanup final stop failed: {error}"),
+        }
+    };
+    io::Error::other(format!("{detail}; {fallback_detail}; {final_detail}")).into()
+}
+
+#[cfg(windows)]
+fn stop_windows_fixture_process_until(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+    test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+) -> Result<(), Box<dyn Error>> {
+    stop_windows_fixture_process_until_with_fallback_test_delay(
+        identity,
+        deadline,
+        test_delay,
+        observation_delay,
+        None,
+        false,
+    )
+}
+
+#[cfg(windows)]
+fn stop_windows_fixture_process_until_with_fallback_test_delay(
+    identity: &WindowsProcessIdentity,
+    deadline: Instant,
+    test_delay: Option<Duration>,
+    observation_delay: Option<Duration>,
+    fallback_test_delay: Option<Duration>,
+    fail_helper_spawns: bool,
+) -> Result<(), Box<dyn Error>> {
+    let primary_deadline = deadline
+        .checked_sub(CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET)
+        .and_then(|deadline| deadline.checked_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET))
+        .unwrap_or(deadline);
+    let fallback_deadline = deadline
+        .checked_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET)
+        .unwrap_or(deadline);
+    let mut stop = match spawn_windows_fixture_stop_helper(identity, test_delay, fail_helper_spawns)
+    {
+        Ok(stop) => stop,
+        Err(error) => {
+            return Err(windows_fixture_stop_failure_with_fallback(
+                identity,
+                format!(
+                    "failed to start Windows fixture stop helper for {}: {error}",
+                    identity.process_id
+                ),
+                fallback_deadline,
+                deadline,
+                fallback_test_delay,
+                fail_helper_spawns,
+            ));
+        }
+    };
+    let started = Instant::now();
+    if let Some(delay) = observation_delay {
+        thread::sleep(delay);
+    }
+    let status = loop {
+        match stop.try_wait() {
+            Ok(Some(status)) => {
+                let observed_elapsed = started.elapsed();
+                if Instant::now() >= primary_deadline {
+                    let wait_result = stop.wait();
+                    let reap_detail = wait_result
+                        .err()
+                        .map(|error| format!("; late stop-helper reap failed: {error}"))
+                        .unwrap_or_default();
+                    return Err(windows_fixture_stop_failure_with_fallback(
+                        identity,
+                        format!(
+                            "timed out stopping Windows fixture process {} after {:?}; stop helper completed after deadline (observed after {observed_elapsed:?}){reap_detail}",
+                            identity.process_id, observed_elapsed
+                        ),
+                        fallback_deadline,
+                        deadline,
+                        fallback_test_delay,
+                        fail_helper_spawns,
+                    ));
+                }
+                break status;
+            }
+            Ok(None) if Instant::now() >= primary_deadline => {
+                let kill_result = stop.kill();
+                let wait_result = stop.wait();
+                let cleanup_detail = match (kill_result, wait_result) {
+                    (Ok(()), Ok(_)) => String::new(),
+                    (kill, wait) => {
+                        format!("; stop-helper cleanup kill={kill:?} wait={wait:?}")
+                    }
+                };
+                return Err(windows_fixture_stop_failure_with_fallback(
+                    identity,
+                    format!(
+                        "timed out stopping Windows fixture process {} after {:?}{cleanup_detail}",
+                        identity.process_id,
+                        started.elapsed()
+                    ),
+                    fallback_deadline,
+                    deadline,
+                    fallback_test_delay,
+                    fail_helper_spawns,
+                ));
+            }
+            Ok(None) => {
+                let remaining = primary_deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => {
+                let kill_result = stop.kill();
+                let wait_result = stop.wait();
+                return Err(windows_fixture_stop_failure_with_fallback(
+                    identity,
+                    format!(
+                        "failed to observe Windows fixture stop helper for {}: {error}; cleanup kill={kill_result:?} wait={wait_result:?}",
+                        identity.process_id
+                    ),
+                    fallback_deadline,
+                    deadline,
+                    fallback_test_delay,
+                    fail_helper_spawns,
+                ));
+            }
+        }
+    };
+    if !status.success() {
+        return Err(windows_fixture_stop_failure_with_fallback(
+            identity,
+            format!(
+                "refused to stop Windows fixture process {} without its exact captured identity",
+                identity.process_id
+            ),
+            fallback_deadline,
+            deadline,
+            fallback_test_delay,
+            fail_helper_spawns,
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let started = Instant::now();
+    let result = capture_windows_process_identity_with_timeout(
+        identity.process_id,
+        CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
+        Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+        None,
+    );
+    let elapsed = started.elapsed();
+    let cleanup_result = if windows_process_is_alive(&identity)? {
+        stop_windows_fixture_process(&identity)
+    } else {
+        Ok(())
+    };
+    process.wait()?;
+    cleanup_result?;
+    if result.is_ok()
+        || elapsed
+            > CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+    {
+        return Err(io::Error::other(format!(
+            "stalled Windows fixture identity capture was not bounded: elapsed={elapsed:?} timeout={CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} result={result:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_identity_capture_rejects_late_completion() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let result = capture_windows_process_identity_with_timeout(
+        identity.process_id,
+        CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
+        None,
+        Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
+    );
+    let child_alive = windows_process_is_alive(&identity)?;
+    let cleanup_result = if child_alive {
+        stop_windows_fixture_process(&identity)
+    } else {
+        Ok(())
+    };
+    process.wait()?;
+    cleanup_result?;
+    let Err(error) = result else {
+        return Err(io::Error::other("late identity capture completion was accepted").into());
+    };
+    if !error.to_string().contains("completed after") {
+        return Err(io::Error::other(format!(
+            "late identity capture did not exercise the completion-after-deadline branch: {error}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let started = Instant::now();
+    let deadline = started
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+    let result = stop_windows_fixture_process_until(
+        &identity,
+        deadline,
+        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        None,
+    );
+    let elapsed = started.elapsed();
+    let child_alive_before_cleanup = windows_process_is_alive(&identity)?;
+    let wait_result = if child_alive_before_cleanup {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        wait_result
+    } else {
+        process.wait()
+    };
+    wait_result?;
+    let child_alive_after_cleanup = windows_process_is_alive(&identity)?;
+    let result_text = result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if result.is_ok()
+        || !result_text.contains("exact child cleanup fallback completed")
+        || child_alive_after_cleanup
+        || elapsed
+            > CODEX_OWNER_CHILD_STOP_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
+    {
+        return Err(io::Error::other(format!(
+            "stalled Windows fixture stop helper was not bounded or left its child alive: elapsed={elapsed:?} timeout={CODEX_OWNER_CHILD_STOP_BUDGET:?} fallback={CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET:?} scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} child_alive_before_cleanup={child_alive_before_cleanup} child_alive_after_cleanup={child_alive_after_cleanup} result={result:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_total_cleanup_deadline_is_bounded() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let started = Instant::now();
+    let deadline = started
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+    let result = stop_windows_fixture_process_until_with_fallback_test_delay(
+        &identity,
+        deadline,
+        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        None,
+        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        false,
+    );
+    let elapsed = started.elapsed();
+    let child_alive_after_cleanup = windows_process_is_alive(&identity)?;
+    process.wait()?;
+    let result_text = result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let helper_budget = CODEX_OWNER_CHILD_STOP_BUDGET + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET;
+    let total_budget = helper_budget + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+    let lower_bound = helper_budget.saturating_sub(CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE);
+    let upper_bound = total_budget + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+    if result.is_ok()
+        || child_alive_after_cleanup
+        || !result_text.contains("timed out stopping Windows fixture process")
+        || !result_text.contains("exact child cleanup fallback timed out")
+        || !result_text.contains("exact child cleanup final stop completed")
+        || elapsed < lower_bound
+        || elapsed > upper_bound
+    {
+        return Err(io::Error::other(format!(
+            "stalled Windows fixture cleanup exceeded its absolute deadline or skipped a bounded phase: elapsed={elapsed:?} lower_bound={lower_bound:?} upper_bound={upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} result={result:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_primary_spawn_failure_cleans_exact_child()
+-> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let mut sentinel = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let sentinel_identity = match capture_windows_process_identity(sentinel.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            drop(sentinel.kill());
+            drop(sentinel.wait());
+            return Err(error);
+        }
+    };
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        let started = Instant::now();
+        let deadline = started
+            + CODEX_OWNER_CHILD_STOP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+        let result = stop_windows_fixture_process_until_with_fallback_test_delay(
+            &identity, deadline, None, None, None, true,
+        );
+        let elapsed = started.elapsed();
+        let exact_child_alive_before_cleanup = windows_process_is_alive(&identity)?;
+        let mut mismatched_sentinel_identity = sentinel_identity.clone();
+        mismatched_sentinel_identity.creation_file_time_utc += 1;
+        let mismatch_result = stop_windows_fixture_process_until_with_fallback_test_delay(
+            &mismatched_sentinel_identity,
+            Instant::now() + CODEX_OWNER_CHILD_STOP_BUDGET,
+            None,
+            None,
+            None,
+            true,
+        );
+        let sentinel_alive_after_mismatch = windows_process_is_alive(&sentinel_identity)?;
+        let result_text = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let mismatch_text = mismatch_result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let total_budget = CODEX_OWNER_CHILD_STOP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
+        let upper_bound = total_budget + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+        if result.is_ok()
+            || result_text
+                .matches("test-injected Windows fixture stop-helper spawn failure")
+                .count()
+                < 2
+            || !result_text.contains("exact child cleanup fallback failed")
+            || !result_text.contains("exact child cleanup final stop completed")
+            || exact_child_alive_before_cleanup
+            || mismatch_result.is_ok()
+            || !mismatch_text.contains("native exact child cleanup failed")
+            || !mismatch_text.contains("creation time or executable path did not match")
+            || !sentinel_alive_after_mismatch
+            || elapsed > upper_bound
+        {
+            return Err(io::Error::other(format!(
+                "primary stop-helper spawn failure did not preserve bounded exact cleanup: elapsed={elapsed:?} upper_bound={upper_bound:?} exact_child_alive_before_cleanup={exact_child_alive_before_cleanup} sentinel_alive_after_mismatch={sentinel_alive_after_mismatch} mismatch_result={mismatch_result:?} result={result:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+    let exact_cleanup_result = if windows_process_is_alive(&identity)? {
+        let kill_result = process.kill();
+        let wait_result = process.wait();
+        if let Err(error) = kill_result
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            Err(error)
+        } else {
+            wait_result
+        }
+    } else {
+        process.wait()
+    };
+    let sentinel_cleanup_result = if windows_process_is_alive(&sentinel_identity)? {
+        let cleanup_result = stop_windows_fixture_process(&sentinel_identity);
+        let wait_result = sentinel.wait();
+        cleanup_result.and(wait_result.map_err(Into::into))
+    } else {
+        sentinel.wait().map_err(Into::into)
+    };
+    exact_cleanup_result?;
+    sentinel_cleanup_result?;
+    test_result
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_codex_owner_native_cleanup_retires_child_when_helpers_fail() -> Result<(), Box<dyn Error>>
+{
+    windows_codex_owner_native_cleanup_with_injected_failure(
+        WindowsNativeCleanupInjectedFailure::None,
+    )
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_codex_owner_native_cleanup_retires_child_when_sentinel_spawn_fails()
+-> Result<(), Box<dyn Error>> {
+    windows_codex_owner_native_cleanup_with_injected_failure(
+        WindowsNativeCleanupInjectedFailure::SentinelSpawn,
+    )
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_codex_owner_native_cleanup_retires_processes_when_owner_identity_capture_fails()
+-> Result<(), Box<dyn Error>> {
+    windows_codex_owner_native_cleanup_with_injected_failure(
+        WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture,
+    )
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_codex_owner_native_cleanup_retires_processes_when_sentinel_identity_capture_fails()
+-> Result<(), Box<dyn Error>> {
+    windows_codex_owner_native_cleanup_with_injected_failure(
+        WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture,
+    )
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsNativeCleanupInjectedFailure {
+    None,
+    OwnerIdentityCapture,
+    SentinelSpawn,
+    SentinelIdentityCapture,
+}
+
+#[cfg(windows)]
+fn windows_codex_owner_native_cleanup_with_injected_failure(
+    injected_failure: WindowsNativeCleanupInjectedFailure,
+) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
+    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    let db = temp.path().join("projectatlas.db");
+    let identity_file = temp.path().join("uncooperative-owner.pid");
+    compile_obsolete_projectatlas_fixture(&runtime)?;
+    compile_codex_mcp_owner_fixture(&codex_fixture)?;
+
+    let (mut owner, child_identity) = spawn_codex_owned_obsolete_mcp(
+        &codex_fixture,
+        &runtime,
+        &db,
+        None,
+        &identity_file,
+        None,
+        Some("ignore-stop"),
+    )?;
+    let injected_owner_identity = if injected_failure
+        == WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture
+    {
+        match capture_windows_process_identity(owner.id()) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
+                return Err(io::Error::other(format!(
+                    "failed to prepare the injected owner identity-capture failure: {error}; child-first owner cleanup={cleanup_result:?}"
+                ))
+                .into());
+            }
+        }
+    } else {
+        None
+    };
+    let owner_identity = match if injected_owner_identity.is_some() {
+        Err(io::Error::other("test-injected Windows owner identity capture failure").into())
+    } else {
+        capture_windows_process_identity(owner.id())
+    } {
+        Ok(identity) => identity,
+        Err(error) => {
+            let cleanup_started = Instant::now();
+            let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
+            if injected_failure == WindowsNativeCleanupInjectedFailure::OwnerIdentityCapture {
+                let expected_owner_identity =
+                    injected_owner_identity.as_ref().ok_or_else(|| {
+                        io::Error::other(
+                            "injected owner capture failure omitted its exact test identity",
+                        )
+                    })?;
+                let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
+                let owner_alive_after_cleanup = windows_process_is_alive(expected_owner_identity)?;
+                let cleanup_elapsed = cleanup_started.elapsed();
+                let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                    + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+                    + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+                let safety_child_cleanup = if child_alive_after_cleanup {
+                    stop_windows_fixture_process(&child_identity)
+                } else {
+                    Ok(())
+                };
+                let safety_owner_cleanup = if owner_alive_after_cleanup {
+                    stop_windows_fixture_process(expected_owner_identity)
+                } else {
+                    Ok(())
+                };
+                if !error
+                    .to_string()
+                    .contains("test-injected Windows owner identity capture failure")
+                    || cleanup_result.is_err()
+                    || child_alive_after_cleanup
+                    || owner_alive_after_cleanup
+                    || cleanup_elapsed > cleanup_upper_bound
+                {
+                    return Err(io::Error::other(format!(
+                        "forced owner identity-capture failure did not preserve bounded child-first cleanup: elapsed={cleanup_elapsed:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} cleanup={cleanup_result:?} safety_child_cleanup={safety_child_cleanup:?} safety_owner_cleanup={safety_owner_cleanup:?}"
+                    ))
+                    .into());
+                }
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "failed to capture uncooperative Codex owner identity: {error}; child-first owner cleanup={cleanup_result:?}"
+            ))
+            .into());
+        }
+    };
+
+    let mut sentinel = match if injected_failure
+        == WindowsNativeCleanupInjectedFailure::SentinelSpawn
+    {
+        Err(io::Error::other(
+            "test-injected mismatched Windows sentinel spawn failure",
+        ))
+    } else {
+        StdCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg("Start-Sleep -Seconds 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    } {
+        Ok(sentinel) => sentinel,
+        Err(error) => {
+            // Force this setup-failure arm in one test without relying on host resource exhaustion.
+            let cleanup_started = Instant::now();
+            let cleanup_result = cleanup_codex_owner_processes(owner, &child_identity);
+            let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
+            let owner_alive_after_cleanup = windows_process_is_alive(&owner_identity)?;
+            let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                + CODEX_OWNER_CHILD_STOP_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+                + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+            if injected_failure == WindowsNativeCleanupInjectedFailure::SentinelSpawn {
+                if !error
+                    .to_string()
+                    .contains("test-injected mismatched Windows sentinel spawn failure")
+                    || cleanup_result.is_err()
+                    || child_alive_after_cleanup
+                    || owner_alive_after_cleanup
+                    || cleanup_started.elapsed() > cleanup_upper_bound
+                {
+                    return Err(io::Error::other(format!(
+                        "forced mismatched sentinel spawn failure did not preserve bounded child-first owner cleanup: elapsed={:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} cleanup={cleanup_result:?}",
+                        cleanup_started.elapsed()
+                    ))
+                    .into());
+                }
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "failed to start mismatched Windows sentinel: {error}; child-first owner cleanup={cleanup_result:?}"
+            ))
+            .into());
+        }
+    };
+    let injected_sentinel_identity = if injected_failure
+        == WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture
+    {
+        match capture_windows_process_identity(sentinel.id()) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                let owner_cleanup = cleanup_codex_owner_processes(owner, &child_identity);
+                let sentinel_kill = sentinel.kill();
+                let sentinel_wait = sentinel.wait();
+                return Err(io::Error::other(format!(
+                    "failed to prepare the injected sentinel identity-capture failure: {error}; child-first owner cleanup={owner_cleanup:?}; sentinel cleanup kill={sentinel_kill:?} wait={sentinel_wait:?}"
+                ))
+                .into());
+            }
+        }
+    } else {
+        None
+    };
+    let sentinel_identity = match if injected_sentinel_identity.is_some() {
+        Err(io::Error::other("test-injected Windows sentinel identity capture failure").into())
+    } else {
+        capture_windows_process_identity(sentinel.id())
+    } {
+        Ok(identity) => identity,
+        Err(error) => {
+            let cleanup_started = Instant::now();
+            let owner_cleanup = cleanup_codex_owner_processes(owner, &child_identity);
+            let sentinel_kill = sentinel.kill();
+            let sentinel_wait = sentinel.wait();
+            if injected_failure == WindowsNativeCleanupInjectedFailure::SentinelIdentityCapture {
+                let expected_sentinel_identity =
+                    injected_sentinel_identity.as_ref().ok_or_else(|| {
+                        io::Error::other(
+                            "injected sentinel capture failure omitted its exact test identity",
+                        )
+                    })?;
+                let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
+                let owner_alive_after_cleanup = windows_process_is_alive(&owner_identity)?;
+                let sentinel_alive_after_cleanup =
+                    windows_process_is_alive(expected_sentinel_identity)?;
+                let cleanup_elapsed = cleanup_started.elapsed();
+                let cleanup_upper_bound = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                    + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                    + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+                    + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+                let safety_child_cleanup = if child_alive_after_cleanup {
+                    stop_windows_fixture_process(&child_identity)
+                } else {
+                    Ok(())
+                };
+                let safety_owner_cleanup = if owner_alive_after_cleanup {
+                    stop_windows_fixture_process(&owner_identity)
+                } else {
+                    Ok(())
+                };
+                let safety_sentinel_cleanup = if sentinel_alive_after_cleanup {
+                    stop_windows_fixture_process(expected_sentinel_identity)
+                } else {
+                    Ok(())
+                };
+                if !error
+                    .to_string()
+                    .contains("test-injected Windows sentinel identity capture failure")
+                    || owner_cleanup.is_err()
+                    || sentinel_kill.is_err()
+                    || sentinel_wait.is_err()
+                    || child_alive_after_cleanup
+                    || owner_alive_after_cleanup
+                    || sentinel_alive_after_cleanup
+                    || cleanup_elapsed > cleanup_upper_bound
+                {
+                    return Err(io::Error::other(format!(
+                        "forced sentinel identity-capture failure did not preserve bounded child-first owner and sentinel cleanup: elapsed={cleanup_elapsed:?} upper_bound={cleanup_upper_bound:?} child_alive_after_cleanup={child_alive_after_cleanup} owner_alive_after_cleanup={owner_alive_after_cleanup} sentinel_alive_after_cleanup={sentinel_alive_after_cleanup} owner_cleanup={owner_cleanup:?} sentinel_kill={sentinel_kill:?} sentinel_wait={sentinel_wait:?} safety_child_cleanup={safety_child_cleanup:?} safety_owner_cleanup={safety_owner_cleanup:?} safety_sentinel_cleanup={safety_sentinel_cleanup:?}"
+                    ))
+                    .into());
+                }
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "failed to capture mismatched Windows sentinel identity: {error}; child-first owner cleanup={owner_cleanup:?}; sentinel cleanup kill={sentinel_kill:?} wait={sentinel_wait:?}"
+            ))
+            .into());
+        }
+    };
+
+    let test_result = (|| -> Result<(), Box<dyn Error>> {
+        if !windows_process_is_alive(&child_identity)? || owner.try_wait()?.is_some() {
+            return Err(io::Error::other(
+                "uncooperative Codex owner did not retain a live exact child before cleanup",
+            )
+            .into());
+        }
+        let started = Instant::now();
+        let result = stop_codex_owner_after_spawn_failure_with_test_delays(
+            &mut owner,
+            &identity_file,
+            &runtime,
+            None,
+            None,
+            None,
+            true,
+        );
+        let elapsed = started.elapsed();
+        let owner_reaped = owner.try_wait()?.is_some();
+        let child_alive_after_cleanup = windows_process_is_alive(&child_identity)?;
+        let result_text = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let mut mismatched_sentinel_identity = sentinel_identity.clone();
+        mismatched_sentinel_identity.creation_file_time_utc += 1;
+        let mismatch_started = Instant::now();
+        let mismatch_result = stop_windows_fixture_process_until_with_fallback_test_delay(
+            &mismatched_sentinel_identity,
+            mismatch_started
+                + CODEX_OWNER_CHILD_STOP_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+                + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET,
+            None,
+            None,
+            None,
+            true,
+        );
+        let mismatch_elapsed = mismatch_started.elapsed();
+        let sentinel_alive_after_mismatch = windows_process_is_alive(&sentinel_identity)?;
+        let total_budget = CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+            + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+            + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+        let mismatch_budget = CODEX_OWNER_CHILD_STOP_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+            + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+            + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE;
+        if result.is_ok()
+            || !result_text.contains("owner fixture did not stop within five seconds")
+            || result_text
+                .matches("test-injected Windows fixture stop-helper spawn failure")
+                .count()
+                < 2
+            || !result_text.contains("exact child cleanup fallback failed")
+            || !result_text.contains("exact child cleanup final stop completed")
+            || !owner_reaped
+            || child_alive_after_cleanup
+            || elapsed < CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+            || elapsed > total_budget
+            || mismatch_result.is_ok()
+            || !mismatch_result.as_ref().err().is_some_and(|error| {
+                error
+                    .to_string()
+                    .contains("native exact child cleanup failed")
+            })
+            || !mismatch_result.as_ref().err().is_some_and(|error| {
+                error
+                    .to_string()
+                    .contains("creation time or executable path did not match")
+            })
+            || !sentinel_alive_after_mismatch
+            || mismatch_elapsed > mismatch_budget
+        {
+            return Err(io::Error::other(format!(
+                "uncooperative Codex owner did not preserve native child-first cleanup: elapsed={elapsed:?} total_budget={total_budget:?} owner_reaped={owner_reaped} child_alive_after_cleanup={child_alive_after_cleanup} sentinel_alive_after_mismatch={sentinel_alive_after_mismatch} mismatch_elapsed={mismatch_elapsed:?} mismatch_budget={mismatch_budget:?} result={result:?} mismatch_result={mismatch_result:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    })();
+
+    let owner_cleanup_result = if owner.try_wait()?.is_none() {
+        let kill_result = owner.kill();
+        let wait_result = owner.wait();
+        if let Err(error) = kill_result
+            && error.kind() != io::ErrorKind::InvalidInput
+        {
+            Err(error)
+        } else {
+            wait_result
+        }
+    } else {
+        owner.wait()
+    };
+    let child_cleanup_result = if windows_process_is_alive(&child_identity)? {
+        stop_windows_fixture_process(&child_identity)
+    } else {
+        Ok(())
+    };
+    let sentinel_cleanup_result = if windows_process_is_alive(&sentinel_identity)? {
+        let cleanup_result = stop_windows_fixture_process(&sentinel_identity);
+        let wait_result = sentinel.wait();
+        cleanup_result.and(wait_result.map_err(Into::into))
+    } else {
+        sentinel.wait().map_err(Into::into)
+    };
+    owner_cleanup_result?;
+    child_cleanup_result?;
+    sentinel_cleanup_result?;
+    test_result
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_stop_helper_rejects_late_completion() -> Result<(), Box<dyn Error>> {
+    let mut process = StdCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Start-Sleep -Seconds 30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let identity = match capture_windows_process_identity(process.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(process.kill());
+            drop(process.wait());
+            return Err(error);
+        }
+    };
+    let deadline = Instant::now() + CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT;
+    let result = stop_windows_fixture_process_until(
+        &identity,
+        deadline,
+        None,
+        Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
+    );
+    let child_alive = windows_process_is_alive(&identity)?;
+    if child_alive {
+        drop(process.kill());
+    }
+    process.wait()?;
+    if child_alive
+        || result.as_ref().is_ok()
+        || !result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("completed after deadline"))
+    {
+        return Err(io::Error::other(format!(
+            "late stop-helper completion did not fail closed or clean its child: child_alive={child_alive} result={result:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_fixture_identity_observed_after_readiness_is_rejected() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
+    let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
+    let db = temp.path().join("projectatlas.db");
+    let identity_file = temp.path().join("late-publication.pid");
+    compile_obsolete_projectatlas_fixture(&runtime)?;
+    compile_codex_mcp_owner_fixture(&codex_fixture)?;
+
+    let started = Instant::now();
+    let result = spawn_codex_owned_obsolete_mcp_with_test_delays(
+        &codex_fixture,
+        &runtime,
+        &db,
+        None,
+        &identity_file,
+        Some(CODEX_OWNER_DELAYED_PUBLICATION),
+        Some("late-publication"),
+        None,
+        Some(CODEX_OWNER_OBSERVATION_TEST_DELAY),
+    );
+    let elapsed = started.elapsed();
+    let error = match result {
+        Ok((parent, child_identity)) => {
+            return Err(codex_owner_unexpected_acceptance_error(
+                "late-publication",
+                parent,
+                &child_identity,
+            ));
+        }
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    let retained_identity =
+        read_codex_owner_identity_record(&codex_owner_retained_identity_path(&identity_file))?;
+    let total_upper_bound = CODEX_OWNER_READINESS_TIMEOUT
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
+        + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET
+        + CODEX_OWNER_CLEANUP_SCHEDULER_TOLERANCE
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    let readiness_elapsed = text
+        .split("readiness_elapsed_ms=")
+        .nth(1)
+        .and_then(|value| value.split(')').next())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "late-observed identity timeout omitted its readiness elapsed diagnostic: {text}"
+            ))
+        })?;
+    // The helper starts its absolute deadline before spawning the fixture. Keep the wall-clock
+    // assertion's process-start allowance bounded while preserving the 30-second readiness
+    // contract and the explicit observer delay.
+    let readiness_observation_upper_bound = CODEX_OWNER_OBSERVATION_TEST_DELAY
+        + CODEX_OWNER_FAILURE_CLEANUP_BUDGET
+        + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE;
+    if elapsed < CODEX_OWNER_READINESS_TIMEOUT
+        || elapsed > total_upper_bound
+        || readiness_elapsed <= CODEX_OWNER_READINESS_TIMEOUT
+        || readiness_elapsed > readiness_observation_upper_bound
+        || !text.contains("published its child PID after the readiness deadline")
+        || !text.contains(&format!("owner={}", codex_fixture.display()))
+        || !text.contains(&format!("identity_file={}", identity_file.display()))
+        || !text.contains(&format!("expected_runtime={}", runtime.display()))
+        || windows_process_is_alive(&retained_identity)?
+    {
+        return Err(io::Error::other(format!(
+            "late-observed identity was accepted or not bounded: elapsed={elapsed:?} readiness_elapsed={readiness_elapsed:?} readiness={CODEX_OWNER_READINESS_TIMEOUT:?} readiness_observation_upper_bound={readiness_observation_upper_bound:?} readiness_scheduler_tolerance={CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE:?} cleanup_deadline={total_upper_bound:?}\n{text}"
         ))
         .into());
     }
@@ -18140,28 +23437,219 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     Ok(command)
 }
 
+/// Reap one test-owned installer child after the observer has returned.
+fn reap_plugin_installer_child(mut child: Child) -> Result<std::process::Output, Box<dyn Error>> {
+    child.stdin.take();
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+    }
+    Ok(child.wait_with_output()?)
+}
+
 /// Collect one coordinated installer process under an explicit deadline.
 fn wait_for_plugin_installer_output(
-    mut child: Child,
+    child: Child,
     label: &str,
     timeout: Duration,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if child.try_wait()?.is_some() {
-            return Ok(child.wait_with_output()?);
+    wait_for_plugin_installer_output_with_test_delay(child, label, timeout, None)
+}
+
+fn wait_for_plugin_installer_output_with_test_delay(
+    child: Child,
+    label: &str,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+        child,
+        label,
+        timeout,
+        observer_delay,
+        None,
+        None,
+        &mut |child| child.kill(),
+        None,
+    )
+}
+
+/// Test-only variant that transfers a proven-live child to the caller when
+/// injected termination cannot safely reap it here.
+fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+    mut child: Child,
+    label: &str,
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    handoff_live_child: Option<&mut dyn FnMut(Child)>,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let mut exit_probe_error = exit_probe_error;
+    let mut cleanup_probe_error = cleanup_probe_error;
+    if observer_delay.is_some()
+        && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
+            &mut child,
+            label,
+            exit_probe_error.take(),
+        )
+    {
+        let kill_result = kill_child(&mut child);
+        child.stdin.take();
+        let status_after_kill = child.try_wait();
+        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+            if let Some(handoff) = handoff_live_child {
+                handoff(child);
+            } else {
+                drop(child);
+            }
+            let mut diagnostic = format!(
+                "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup incomplete: child detached"
+            );
+            if let Some(kill_error) = kill_result.as_ref().err() {
+                diagnostic.push_str("; termination failed: ");
+                diagnostic.push_str(&kill_error.to_string());
+            }
+            if let Err(probe_error) = status_after_kill {
+                diagnostic.push_str("; re-probe failed after termination attempt: ");
+                diagnostic.push_str(&probe_error.to_string());
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
+        let output = child.wait_with_output()?;
+        let diagnostic = format!(
+            "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and output drained status={}",
+            output.status
+        );
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+    }
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("plugin installer deadline overflowed"))?;
+    if let Some(delay) = observer_delay {
+        thread::sleep(delay);
+    }
+    loop {
         if Instant::now() >= deadline {
-            drop(child.kill());
+            let mut pre_termination_probe_error = None;
+            let (status, _observed_at) = {
+                let status = match cleanup_probe_error.take() {
+                    Some(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
+                    }
+                    None => match child.try_wait() {
+                        Ok(status) => status,
+                        Err(error) => {
+                            pre_termination_probe_error = Some(error);
+                            None
+                        }
+                    },
+                };
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            let still_running = status.is_none();
+            let mut post_termination_probe_error = None;
+            if still_running {
+                let kill_result = kill_child(&mut child);
+                let status_after_kill = match exit_probe_error.take() {
+                    Some(error) => Err(error),
+                    None => child.try_wait(),
+                };
+                let status_after_kill = match status_after_kill {
+                    Ok(status) => status,
+                    Err(error) if kill_result.is_ok() => {
+                        post_termination_probe_error = Some(error);
+                        None
+                    }
+                    Err(error) => {
+                        child.stdin.take();
+                        if let Some(handoff) = handoff_live_child {
+                            handoff(child);
+                        } else {
+                            drop(child);
+                        }
+                        let mut diagnostic = format!(
+                            "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child detached)"
+                        );
+                        if let Some(kill_error) = kill_result.as_ref().err() {
+                            diagnostic.push_str("; termination failed: ");
+                            diagnostic.push_str(&kill_error.to_string());
+                        }
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                    }
+                };
+                if let Err(kill_error) = kill_result
+                    && status_after_kill.is_none()
+                {
+                    child.stdin.take();
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(child);
+                    } else {
+                        drop(child);
+                    }
+                    let diagnostic = format!(
+                        "{label} plugin installer exceeded {timeout:?}: still running at deadline status=still-running at deadline (termination failed: {kill_error}; cleanup incomplete: operating system refused termination; child was not reaped; child detached)"
+                    );
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+            }
             let output = child.wait_with_output()?;
-            return Err(io::Error::other(format!(
-                "{label} plugin installer exceeded {timeout:?}\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ))
+            let mut diagnostic = format!(
+                "{label} plugin installer exceeded {timeout:?}: {}",
+                if still_running {
+                    "still running at deadline"
+                } else {
+                    "completed after deadline"
+                }
+            );
+            if let Some(error) = post_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed after successful termination: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Some(error) = pre_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed before termination attempt: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            diagnostic.push_str(" status=");
+            diagnostic.push_str(&output.status.to_string());
+            diagnostic.push_str("\nstdout:\n");
+            diagnostic.push_str(&String::from_utf8_lossy(&output.stdout));
+            diagnostic.push_str("\nstderr:\n");
+            diagnostic.push_str(&String::from_utf8_lossy(&output.stderr));
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+        }
+        let (status, observed_at) = {
+            let status = child.try_wait()?;
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        if let Some(_status) = status {
+            if observed_at < deadline {
+                return Ok(child.wait_with_output()?);
+            }
+            let output = child.wait_with_output()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{label} plugin installer exceeded {timeout:?}: completed after deadline (observed_at={observed_at:?}) status={}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
             .into());
         }
-        thread::sleep(Duration::from_millis(25));
+        let remaining = deadline.saturating_duration_since(observed_at);
+        if remaining.is_zero() {
+            continue;
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
     }
 }
 

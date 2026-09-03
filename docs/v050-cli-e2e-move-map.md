@@ -5,7 +5,8 @@ This map freezes the complete pre-move contract before e2e.rs is deleted. The ma
 - Baseline commit: b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb
 - Baseline e2e.rs SHA-256: e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c
 - Inventoried pre-deletion e2e.rs SHA-256: 942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757 (the only edits before deletion rewired contract assertions/selectors to their split owners)
-- Symbols inventoried: 431 top-level items; tests: 158
+- Baseline symbols inventoried: 431 top-level items; baseline tests: 158
+- Accepted post-baseline tests reconciled from `main`: 21; current mapped tests: 179
 - Post-move union proof compares the tests.name set in the JSON with the test names listed by all five e2e_* binaries.
 
 ## Durable binary ownership
@@ -13,8 +14,8 @@ This map freezes the complete pre-move contract before e2e.rs is deleted. The ma
 | Binary | Owns | Tests |
 | --- | --- | ---: |
 | e2e_lifecycle | lifecycle and database contracts | 37 |
-| e2e_delivery | installer, release, packaged, and plugin contracts | 56 |
-| e2e_navigation | CLI, MCP, graph, document, and language navigation contracts | 32 |
+| e2e_delivery | installer, release, packaged, and plugin contracts | 75 |
+| e2e_navigation | CLI, MCP, graph, document, and language navigation contracts | 34 |
 | e2e_worktrees | worktree, watcher, freshness, and federation contracts | 17 |
 | e2e_maintenance | purpose, lint, telemetry, and TUI contracts | 16 |
 
@@ -22,7 +23,9 @@ Only concrete process, repository, JSON, platform, and packaged-contract support
 
 ## Enforced inventory contract
 
-The e2e_delivery integration binary loads docs/v050-cli-e2e-inventory.json on every normal test run. Schema 2 records the five split source-file SHA-256 digests after normalizing CRLF/CR to LF and excluding absolute paths and line metadata; these digests cover complete test bodies, assertions, and recorded contract facets. The multiply-owned process, repository, JSON, SQLite, and platform helpers have one private owner at `crates/projectatlas-cli/tests/support/mod.rs`; the executable checker freezes the complete normalized support module with its own fixed SHA-256 digest, so constants, type shapes, and helper bodies cannot drift or be concealed by updating a current binary digest. It also validates the frozen baseline and pre-deletion identities, complete symbol and fixture names/owners/attributes, every recorded facet line, and the immutable pre-move selector inventory before rescanning test names, duplicate/missing ownership, attributes/platform gates, and the accepted e2e_*.rs binary boundary (including rejection of legacy e2e.rs). It then compares every recorded CI/release selector by normalized relative workflow path and selector text, recognizing both Cargo `--test e2e_*` and `--test=e2e_*` forms. Its positive and tamper cases prove source assertion/facet, shared support (including the Git scrub-list), symbol, fixture, baseline, legacy-target, and spaced/equal-form legacy or unknown selector drift fails closed. The two checker tests are recorded outside the 158 moved tests so the frozen pre-move union remains exact.
+The e2e_delivery integration binary loads docs/v050-cli-e2e-inventory.json on every normal test run. Schema 2 records the five split source-file SHA-256 digests after normalizing CRLF/CR to LF and excluding absolute paths and line metadata; these digests cover complete test bodies, assertions, and recorded contract facets. The multiply-owned process, repository, JSON, SQLite, and platform helpers have one private owner at `crates/projectatlas-cli/tests/support/mod.rs`; the executable checker freezes the complete normalized support module with its own fixed SHA-256 digest, so constants, type shapes, and helper bodies cannot drift or be concealed by updating a current binary digest. It also validates the frozen baseline and pre-deletion identities, complete baseline symbol and fixture names/owners/attributes, every recorded facet line, and the immutable pre-move selector inventory before rescanning all 179 current test names, duplicate/missing ownership, attributes/platform gates, and the accepted e2e_*.rs binary boundary (including rejection of legacy e2e.rs). It then compares every recorded CI/release selector by normalized relative workflow path and selector text, recognizing both Cargo `--test e2e_*` and `--test=e2e_*` forms. Its positive and tamper cases prove source assertion/facet, shared support (including the Git scrub-list), symbol, fixture, baseline, legacy-target, and spaced/equal-form legacy or unknown selector drift fails closed. The three checker tests are recorded outside the 179 mapped tests.
+
+The post-`main` refresh retains all 21 tests added after the original baseline: IssueOps candidate authority and dispatch coverage, process-observer and MCP shutdown coverage, the complete Windows Codex-owner readiness/native-cleanup matrix, and typed graph-identity rejection coverage. Their exact names, attributes, and delivery or navigation owner are recorded in the JSON inventory; the source and shared-support digests freeze their full helper, assertion, timeout, cleanup, and platform behavior.
 
 ## Test-to-domain move map
 
@@ -215,6 +218,6 @@ The existing CLI E2E contract-ownership split diagram remains semantically true:
 
 ## Post-move contract proof
 
-The exact union check reads the 158 frozen test names from the JSON inventory and the declarations in all five split files. It reports expected `158`, actual `158`, no duplicates, no missing names, and no unexpected names. The resulting source ownership counts are lifecycle `37`, delivery `56`, navigation `32`, worktrees `17`, and maintenance `16`.
+The exact union check reads the 179 mapped test names from the JSON inventory and the declarations in all five split files. It reports expected `179`, actual `179`, no duplicates, no missing names, and no unexpected names. The resulting source ownership counts are lifecycle `37`, delivery `75`, navigation `34`, worktrees `17`, and maintenance `16`; the three inventory-gate tests remain separate enforcement tests.
 
-Each split binary was compiled and run independently with all features. Windows execution ran lifecycle `34 passed, 1 ignored`, delivery `47 passed`, navigation `32 passed`, worktrees `16 passed, 1 ignored`, and maintenance `16 passed`; the ignored cases retain their supplied-archive and hosted-holistic requirements. Release-mode compilation emitted all five binaries, and each binary's `--list` route completed successfully. The exact legacy `--test e2e` and `e2e.rs` selectors are absent from repository workflows and scripts.
+Each split binary was compiled and run independently with all features. Windows execution ran lifecycle `34 passed, 1 ignored`, delivery `69 passed` including the three inventory-gate tests, navigation `34 passed`, worktrees `16 passed, 1 ignored`, and maintenance `16 passed`; the ignored cases retain their supplied-archive and hosted-holistic requirements. Release-mode compilation emitted all five binaries, and each binary's `--list` route completed successfully. The exact legacy `--test e2e` and `e2e.rs` selectors are absent from repository workflows and scripts.

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
+use std::process::{Child, Command as StdCommand, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,6 +50,33 @@ pub(super) struct McpDatabaseSnapshot {
     pub(super) purpose_revision: u64,
     pub(super) publication_state: String,
 }
+
+pub(super) fn synchronize_prompt_exit_before_delayed_observation(
+    child: &mut Child,
+    label: &str,
+    exit_probe_error: Option<io::Error>,
+) -> io::Result<()> {
+    if let Some(error) = exit_probe_error {
+        return Err(error);
+    }
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(10))
+        .ok_or_else(|| io::Error::other("test child exit deadline overflowed"))?;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{label} did not exit before the delayed observer was released"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
+    }
+}
+
 /// Launch a real MCP stdio child and return stdout after stdin closes.
 pub(super) fn run_mcp_stdio(
     executable: &std::path::Path,
@@ -68,6 +95,119 @@ pub(super) fn run_mcp_stdio_with_env(
     messages: &[impl AsRef<str>],
     environment: &[(&str, Option<&str>)],
 ) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env_and_test_delay_and_kill(
+        executable,
+        cwd,
+        args,
+        messages,
+        environment,
+        Duration::from_secs(10),
+        None,
+        false,
+        &mut |child| child.kill(),
+    )
+}
+
+pub(super) struct McpStdioCleanupPacket {
+    pub(super) child: Child,
+    pub(super) stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    pub(super) stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+}
+
+/// Reap one test-owned MCP stdio packet after the observer has returned.
+pub(super) fn reap_mcp_stdio_packet(
+    mut packet: McpStdioCleanupPacket,
+) -> Result<(), Box<dyn Error>> {
+    packet.child.stdin.take();
+    if packet.child.try_wait()?.is_none() {
+        packet.child.kill()?;
+    }
+    packet.child.wait()?;
+    packet
+        .stdout_reader
+        .join()
+        .map_err(|_panic| io::Error::other("mcp stdout cleanup reader panicked"))??;
+    packet
+        .stderr_reader
+        .join()
+        .map_err(|_panic| io::Error::other("mcp stderr cleanup reader panicked"))??;
+    Ok(())
+}
+
+pub(super) fn run_mcp_stdio_with_env_and_test_delay(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env_and_test_delay_and_kill(
+        executable,
+        cwd,
+        args,
+        messages,
+        environment,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        &mut |child| child.kill(),
+    )
+}
+
+fn run_mcp_stdio_with_env_and_test_delay_and_kill(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+) -> Result<String, Box<dyn Error>> {
+    run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+        executable,
+        cwd,
+        args,
+        messages,
+        environment,
+        timeout,
+        observer_delay,
+        hold_stdin_until_observation,
+        None,
+        None,
+        kill_child,
+        None,
+    )
+}
+
+/// Test-only variant that transfers a proven-live child and its readers to the
+/// caller when injected termination cannot safely reap it here.
+pub(super) fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+    executable: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+    messages: &[impl AsRef<str>],
+    environment: &[(&str, Option<&str>)],
+    timeout: Duration,
+    observer_delay: Option<Duration>,
+    hold_stdin_until_observation: bool,
+    exit_probe_error: Option<io::Error>,
+    cleanup_probe_error: Option<io::Error>,
+    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    handoff_live_child: Option<
+        &mut dyn FnMut(
+            Child,
+            thread::JoinHandle<io::Result<Vec<u8>>>,
+            thread::JoinHandle<io::Result<Vec<u8>>>,
+        ),
+    >,
+) -> Result<String, Box<dyn Error>> {
+    let mut exit_probe_error = exit_probe_error;
+    let mut cleanup_probe_error = cleanup_probe_error;
     let mut expected_responses = BTreeSet::new();
     for message in messages {
         let request: Value = serde_json::from_str(message.as_ref())?;
@@ -98,10 +238,12 @@ pub(super) fn run_mcp_stdio_with_env(
         }
     }
     let mut child = command.spawn()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?;
+    let mut stdin = Some(
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("mcp stdin was not piped"))?,
+    );
     let mut stdout_pipe = child
         .stdout
         .take()
@@ -131,6 +273,9 @@ pub(super) fn run_mcp_stdio_with_env(
     });
 
     let response_result = (|| -> Result<(), Box<dyn Error>> {
+        let stdin = stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("mcp stdin was closed before requests were sent"))?;
         stdin.write_all(input.as_bytes())?;
         stdin.flush()?;
         let mut response_deadline = Instant::now()
@@ -173,36 +318,205 @@ pub(super) fn run_mcp_stdio_with_env(
         }
         Ok(())
     })();
-    drop(stdin);
+    if !hold_stdin_until_observation {
+        stdin.take();
+    }
     drop(response_receiver);
 
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(10) {
-            if child.try_wait()?.is_none() {
-                child.kill()?;
+    if observer_delay.is_some()
+        && (!hold_stdin_until_observation || exit_probe_error.is_some())
+        && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
+            &mut child,
+            "projectatlas mcp",
+            exit_probe_error.take(),
+        )
+    {
+        let kill_result = kill_child(&mut child);
+        stdin.take();
+        let status_after_kill = child.try_wait();
+        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+            if let Some(handoff) = handoff_live_child {
+                handoff(child, stdout_reader, stderr_reader);
+            } else {
+                drop(child);
+                drop(stdout_reader);
+                drop(stderr_reader);
             }
-            let _status = child.wait()?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "projectatlas mcp did not exit after stdin closed",
-            )
-            .into());
+            let mut diagnostic = format!(
+                "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+            );
+            if let Some(kill_error) = kill_result.as_ref().err() {
+                diagnostic.push_str("; termination failed: ");
+                diagnostic.push_str(&kill_error.to_string());
+            }
+            if let Err(probe_error) = status_after_kill {
+                diagnostic.push_str("; re-probe failed after termination attempt: ");
+                diagnostic.push_str(&probe_error.to_string());
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
-        thread::sleep(Duration::from_millis(100));
-    };
+        let status = child.wait()?;
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+        let diagnostic = format!(
+            "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
+        );
+        let _ = (stdout, stderr);
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+    }
 
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("MCP process deadline overflowed"))?;
+    if let Some(delay) = observer_delay {
+        thread::sleep(delay);
+    }
+    let mut timeout_reason = None;
+    let mut accepted_completion = false;
+    let mut pre_termination_probe_error = None;
+    let mut post_termination_probe_error = None;
+    loop {
+        if Instant::now() >= deadline {
+            timeout_reason = Some("still running at deadline".to_string());
+            break;
+        }
+        let (status, observed_at) = {
+            let status = child.try_wait()?;
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        match status {
+            Some(_) if observed_at < deadline => {
+                accepted_completion = true;
+                break;
+            }
+            Some(_) => {
+                timeout_reason = Some(format!(
+                    "completed after deadline (observed_at={observed_at:?})"
+                ));
+                break;
+            }
+            None => {
+                let remaining = deadline.saturating_duration_since(observed_at);
+                if remaining.is_zero() {
+                    timeout_reason = Some("still running at deadline".to_string());
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100).min(remaining));
+            }
+        }
+    }
+
+    if timeout_reason.is_some() {
+        let (status, observed_at) = {
+            let status = match cleanup_probe_error.take() {
+                Some(error) => {
+                    pre_termination_probe_error = Some(error);
+                    None
+                }
+                None => match child.try_wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        pre_termination_probe_error = Some(error);
+                        None
+                    }
+                },
+            };
+            let observed_at = Instant::now();
+            (status, observed_at)
+        };
+        if status.is_none() {
+            let kill_result = kill_child(&mut child);
+            let status_after_kill = match exit_probe_error.take() {
+                Some(error) => Err(error),
+                None => child.try_wait(),
+            };
+            let status_after_kill = match status_after_kill {
+                Ok(status) => status,
+                Err(error) if kill_result.is_ok() => {
+                    post_termination_probe_error = Some(error);
+                    None
+                }
+                Err(error) => {
+                    stdin.take();
+                    if let Some(handoff) = handoff_live_child {
+                        handoff(child, stdout_reader, stderr_reader);
+                    } else {
+                        drop(child);
+                        drop(stdout_reader);
+                        drop(stderr_reader);
+                    }
+                    let mut diagnostic = format!(
+                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child/readers detached)",
+                        timeout_reason.as_deref().unwrap_or("timeout")
+                    );
+                    if let Some(kill_error) = kill_result.as_ref().err() {
+                        diagnostic.push_str("; termination failed: ");
+                        diagnostic.push_str(&kill_error.to_string());
+                    }
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+            };
+            if let Err(error) = kill_result
+                && status_after_kill.is_none()
+            {
+                stdin.take();
+                if let Some(handoff) = handoff_live_child {
+                    handoff(child, stdout_reader, stderr_reader);
+                } else {
+                    drop(child);
+                    drop(stdout_reader);
+                    drop(stderr_reader);
+                }
+                let diagnostic = format!(
+                    "projectatlas mcp did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; cleanup incomplete: operating system refused termination; child was not reaped; child/readers detached)",
+                    timeout_reason.as_deref().unwrap_or("timeout")
+                );
+                return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+            }
+        } else if timeout_reason.as_deref() == Some("still running at deadline") {
+            timeout_reason = Some(format!(
+                "completed after deadline (observed_at={observed_at:?})"
+            ));
+        }
+    }
+    stdin.take();
+    let wait_result = child.wait();
     let stdout = stdout_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
     let stderr = stderr_reader
         .join()
         .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+    if let Some(reason) = timeout_reason {
+        let mut diagnostic = format!("projectatlas mcp did not exit after stdin closed: {reason}");
+        if let Some(error) = pre_termination_probe_error {
+            diagnostic.push_str(" status=unknown (re-probe failed before termination attempt: ");
+            diagnostic.push_str(&error.to_string());
+            diagnostic.push(')');
+        }
+        if let Some(error) = post_termination_probe_error {
+            diagnostic.push_str(" status=unknown (re-probe failed after successful termination: ");
+            diagnostic.push_str(&error.to_string());
+            diagnostic.push(')');
+        }
+        if let Ok(status) = &wait_result {
+            diagnostic.push_str(" status=");
+            diagnostic.push_str(&status.to_string());
+        }
+        if !stderr.is_empty() {
+            diagnostic.push_str(" stderr=");
+            diagnostic.push_str(&String::from_utf8_lossy(&stderr));
+        }
+        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+    }
     response_result?;
-    if !status.success() {
+    let status = wait_result?;
+    if !accepted_completion || !status.success() {
         return Err(io::Error::other(format!(
             "projectatlas mcp failed: {}",
             String::from_utf8_lossy(&stderr)

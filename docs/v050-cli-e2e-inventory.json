@@ -3,10 +3,10 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "8beab06646923a2090547e90b44a17ecdb4c06a572d9f1fb2825c59f14bcd67a",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "975b5d6315afac1a5050ccec104a7c48fcf2597c7b5975e85177b1d9a17afd6a",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "f56144991337cb7697cdf49c602f2afb605c3679c8a0d107a0c9148b0eb04219",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "2c7adf8169a95cc44880205ee3e85142b535481085c54d07e99a689fb4931f02",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "6aef07cba8790befa0c957bd8e27165b376b79667ccd461e6912cba8f3089bb6",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "8e79ebf6628b010a9ff7eac09276662017752f9294a562cf6a67f8f88a66167d"
     }
   },
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 158,
+  "test_count": 179,
   "symbol_count": 431,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -29,6 +29,165 @@
     "cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift"
   ],
   "tests": [
+    {
+      "name": "pre_push_dispatch_follows_pushed_remote_targets",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "pre_push_candidate_rejects_ignored_linked_document_outside_tree",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "pre_push_candidate_rejects_dirty_worktree_before_issueops",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "e2e_process_observers_reject_late_completion_and_preserve_in_time_success",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "e2e_process_observers_reap_after_successful_kill_when_reprobe_fails",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "e2e_process_observers_attempt_termination_when_cleanup_reprobe_fails",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "mcp_contract_shutdown_disconnects_saturated_responses_before_reader_join",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_fixture_identity_capture_is_bounded",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_fixture_identity_capture_rejects_late_completion",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_fixture_stop_helper_is_bounded_and_child_safe",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_fixture_stop_helper_total_cleanup_deadline_is_bounded",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_fixture_stop_helper_primary_spawn_failure_cleans_exact_child",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_codex_owner_native_cleanup_retires_child_when_helpers_fail",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_codex_owner_native_cleanup_retires_child_when_sentinel_spawn_fails",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_codex_owner_native_cleanup_retires_processes_when_owner_identity_capture_fails",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[cfg(windows)]",
+        "#[test]"
+      ]
+    },
+    {
+      "name": "windows_codex_owner_native_cleanup_retires_processes_when_sentinel_identity_capture_fails",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[cfg(windows)]",
+        "#[test]"
+      ]
+    },
+    {
+      "name": "windows_fixture_stop_helper_rejects_late_completion",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "windows_fixture_identity_observed_after_readiness_is_rejected",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "bounded_identity_rejection_coverage_stays_accessible_across_cli_and_mcp",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
     {
       "name": "runtime_info_does_not_create_projectatlas_directory",
       "line": 348,
@@ -4771,6 +4930,7 @@
       "line": 27858,
       "end_line": 27869,
       "owners": [
+        "e2e_delivery",
         "e2e_lifecycle",
         "e2e_navigation",
         "e2e_worktrees"
@@ -6113,7 +6273,7 @@
     },
     {
       "kind": "function",
-      "name": "read_codex_owner_child_identity",
+      "name": "read_codex_owner_child_identity_with_test_delay",
       "line": 35719,
       "end_line": 35766,
       "owners": [
@@ -10874,11 +11034,11 @@
       },
       {
         "line": 33630,
-        "text": "        if started.elapsed() > Duration::from_secs(10) {"
+        "text": "        .checked_add(timeout)"
       },
       {
         "line": 33641,
-        "text": "        thread::sleep(Duration::from_millis(100));"
+        "text": "                thread::sleep(Duration::from_millis(100).min(remaining));"
       },
       {
         "line": 35416,
@@ -10898,7 +11058,7 @@
       },
       {
         "line": 35664,
-        "text": "    let deadline = Instant::now() + Duration::from_secs(5);"
+        "text": "    let cleanup_deadline = codex_owner_cleanup_deadline(Instant::now());"
       },
       {
         "line": 35679,
@@ -10910,7 +11070,7 @@
       },
       {
         "line": 35804,
-        "text": "    let deadline = Instant::now() + Duration::from_secs(5);"
+        "text": "    let deadline = codex_owner_readiness_deadline(started)?;"
       },
       {
         "line": 35840,
@@ -10930,7 +11090,7 @@
       },
       {
         "line": 36244,
-        "text": "    let deadline = Instant::now() + timeout;"
+        "text": "        .ok_or_else(|| io::Error::other(\"plugin installer deadline overflowed\"))?;"
       },
       {
         "line": 36249,
@@ -10938,7 +11098,7 @@
       },
       {
         "line": 36253,
-        "text": "                \"{label} plugin installer exceeded {timeout:?}\\nstdout:\\n{}\\nstderr:\\n{}\","
+        "text": "                \"{label} plugin installer exceeded {timeout:?}: {}\","
       },
       {
         "line": 36259,
@@ -12116,19 +12276,19 @@
       },
       {
         "line": 35671,
-        "text": "                    drop(parent.kill());"
+        "text": "    let kill_result = parent.kill();"
       },
       {
         "line": 35672,
-        "text": "                    drop(parent.wait());"
+        "text": "    let wait_result = parent.wait();"
       },
       {
         "line": 35674,
-        "text": "                        \"failed to observe Codex owner fixture cleanup: {error}\""
+        "text": "        failures.push(format!(\"could not reap the held owner process: {error}\"));"
       },
       {
         "line": 35686,
-        "text": "    let child_cleanup_result = read_codex_owner_child_identity(child_identity_file, stable_runtime)"
+        "text": "    let child_cleanup_result = match child_identity {"
       },
       {
         "line": 35688,
@@ -12144,7 +12304,7 @@
       },
       {
         "line": 35712,
-        "text": "        \"Codex owner fixture cleanup failed: {}\","
+        "text": "            \"Codex owner fixture cleanup failed: {}\","
       },
       {
         "line": 35777,
@@ -12152,7 +12312,7 @@
       },
       {
         "line": 35778,
-        "text": "            \"{error}; fixture cleanup also failed: {cleanup_error}\""
+        "text": "            \"{error}; owner={}; identity_file={}; expected_runtime={}; fixture cleanup also failed: {cleanup_error}\","
       },
       {
         "line": 35953,
@@ -18904,7 +19064,7 @@
       },
       {
         "line": 36253,
-        "text": "                \"{label} plugin installer exceeded {timeout:?}\\nstdout:\\n{}\\nstderr:\\n{}\","
+        "text": "                \"{label} plugin installer exceeded {timeout:?}: {}\","
       },
       {
         "line": 36263,
@@ -19194,6 +19354,11 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 185,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery e2e_process_observers_ -- --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "line": 169,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture"
     },
@@ -19201,6 +19366,11 @@
       "workflow": ".github/workflows/ci.yml",
       "line": 170,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 193,
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
