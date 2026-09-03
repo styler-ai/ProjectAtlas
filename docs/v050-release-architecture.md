@@ -353,7 +353,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    support[Shared process, repo, JSON, platform, package support]
+    support[Shared test support owner: crates/projectatlas-cli/tests/support/mod.rs]
     lifecycle[Lifecycle and database contracts] --> support
     delivery[Installer and release contracts] --> support
     navigation[CLI, MCP, graph, document, language contracts] --> support
