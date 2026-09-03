@@ -26,7 +26,77 @@ python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
 command -v gh >/dev/null 2>&1
 repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-python3 .github/scripts/issue-checklists.py \
-  --repo "$repo" --root . --issue-map openspec/issue-map.json
+push_scope="$(
+  awk '
+    NF != 4 { invalid=1; next }
+    {
+      if ($2 ~ /^0+$/ || $3 !~ /^refs\/heads\/[^[:space:]]+$/) invalid=1
+      else {
+        seen=1
+        updates += 1
+        local_oid = $2
+        if ($3 == "refs/heads/main") main=1
+      }
+    }
+    END {
+      if (!seen || invalid || updates != 1) exit 1
+      if (main) print "global"
+      else print "candidate:" local_oid
+    }
+  '
+)"
+if [ "$push_scope" = "global" ]; then
+  python3 .github/scripts/issue-checklists.py \
+    --repo "$repo" --root . --issue-map openspec/issue-map.json
+elif [ "${push_scope#candidate:}" != "$push_scope" ]; then
+  candidate_local_oid="${push_scope#candidate:}"
+  export GIT_NO_REPLACE_OBJECTS=1
+  if ! current_head="$(git rev-parse --verify 'HEAD^{commit}')" ||
+    [ -z "$current_head" ]; then
+    echo "candidate branch checked-out HEAD is unreadable" >&2
+    exit 1
+  fi
+  if [ "$candidate_local_oid" != "$current_head" ]; then
+    echo "candidate branch local object does not match checked-out HEAD" >&2
+    exit 1
+  fi
+  if ! worktree_status="$(git status --porcelain=v1 --untracked-files=all)"; then
+    echo "candidate branch worktree status is unreadable" >&2
+    exit 1
+  fi
+  if [ -n "$worktree_status" ]; then
+    echo "candidate branch worktree must be clean before scoped validation" >&2
+    exit 1
+  fi
+  if ! index_state="$(git ls-files -v)"; then
+    echo "candidate branch tracked index state is unreadable" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$index_state" | awk '
+    substr($0, 1, 1) == "S" || substr($0, 1, 1) ~ /^[[:lower:]]$/ { hidden=1 }
+    END { exit hidden ? 0 : 1 }
+  '; then
+    echo "candidate branch index hides tracked state" >&2
+    exit 1
+  fi
+  if ! accepted_base="$(git merge-base origin/main HEAD)" || [ -z "$accepted_base" ]; then
+    echo "candidate branch accepted origin/main base is unreadable" >&2
+    exit 1
+  fi
+  if ! owner_issue="$(
+    git log --format=%s "$accepted_base..HEAD" |
+      python3 .github/scripts/issue-checklists.py --owner-from-commits
+  )"; then
+    echo "candidate branch owner resolution failed" >&2
+    exit 1
+  fi
+  python3 .github/scripts/issue-checklists.py \
+    --repo "$repo" --root . --issue-map openspec/issue-map.json \
+    --candidate-issue "$owner_issue" --candidate-local-oid "$candidate_local_oid" \
+    --base "$accepted_base"
+else
+  echo "pre-push validation scope is invalid" >&2
+  exit 1
+fi
 cargo run --locked -p projectatlas-cli -- --format json scan .
 cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low

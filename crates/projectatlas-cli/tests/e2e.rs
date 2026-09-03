@@ -122,6 +122,15 @@ const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_COMMON_DIR",
 ];
 const OPENSPEC_DIR_NAME: &str = "openspec";
+const ISSUE_CHECKLISTS_SCRIPT_FILE_NAME: &str = "issue-checklists.py";
+const ISSUE_MAP_FILE_NAME: &str = "issue-map.json";
+const CHANGE_DIR_NAME: &str = "changes";
+const ISSUEOPS_CHANGE_NAME: &str = "scope-local-issueops-branch-validation";
+const TASKS_FILE_NAME: &str = "tasks.md";
+const ISSUEOPS_TASKS_RELATIVE_PATH: &str =
+    "openspec/changes/scope-local-issueops-branch-validation/tasks.md";
+const CANDIDATE_FILE_NAME: &str = "candidate.txt";
+const DISPATCH_LOG_FILE_NAME: &str = "dispatch.log";
 const AGENT_INTEGRATION_DOC_FILE_NAME: &str = "agent-integration.md";
 const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 const OPTIONAL_PARSER_PACK_WORKFLOW_FILE_NAME: &str = "optional-parser-pack.yml";
@@ -9088,7 +9097,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let workspace_root = workspace_root()?;
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
-    let issueops = fs::read_to_string(github.join("scripts").join("issue-checklists.py"))?;
+    let issueops = fs::read_to_string(
+        github
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+    )?;
     let mermaid_parser = github.join("mermaid-parser");
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
@@ -9120,14 +9133,14 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let issue_map = fs::read_to_string(
         workspace_root
             .join(OPENSPEC_DIR_NAME)
-            .join("issue-map.json"),
+            .join(ISSUE_MAP_FILE_NAME),
     )?;
     let tasks = fs::read_to_string(
         workspace_root
             .join(OPENSPEC_DIR_NAME)
-            .join("changes")
+            .join(CHANGE_DIR_NAME)
             .join("enforce-rust-test-quality-gates")
-            .join("tasks.md"),
+            .join(TASKS_FILE_NAME),
     )?;
 
     let issueops_self_test_command = "python3 .github/scripts/issue-checklists.py --self-test";
@@ -9234,10 +9247,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "must be OPEN",
         "ISSUE_REFERENCE_RE",
         "pull_request_owner_issue",
+        "COMMIT_ISSUE_REFERENCE_RE",
+        "candidate_owner_issue_from_subjects",
         "configured_issue_map_path",
         "base_issue_map(",
         "base_local_tasks",
         "check_pull_request_tasks",
+        "check_candidate_tasks",
         "issue_map_path=args.issue_map",
     ] {
         if !issueops.contains(required) {
@@ -9284,6 +9300,56 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if !hook.contains("python3 .github/scripts/verify-rust-toolchain.py") {
         return Err(io::Error::other(
             "local pre-push validation omitted the shared Rust toolchain preflight",
+        )
+        .into());
+    }
+    let normalized_hook = hook.replace("\r\n", "\n");
+    for required in [
+        "push_scope=\"$(\n  awk '",
+        "NF != 4",
+        "if ($2 ~ /^0+$/ || $3 !~",
+        "if (!seen || invalid || updates != 1) exit 1",
+        "updates += 1",
+        "local_oid = $2",
+        "else print \"candidate:\" local_oid",
+        "refs/heads/main",
+        "if [ \"$push_scope\" = \"global\" ]; then",
+        "elif [ \"${push_scope#candidate:}\" != \"$push_scope\" ]; then",
+        "candidate_local_oid=\"${push_scope#candidate:}\"",
+        "git rev-parse --verify 'HEAD^{commit}'",
+        "candidate branch local object does not match checked-out HEAD",
+        "git merge-base origin/main HEAD",
+        "git log --format=%s",
+        "--owner-from-commits",
+        "--candidate-issue \"$owner_issue\"",
+        "--candidate-local-oid \"$candidate_local_oid\"",
+        "--base \"$accepted_base\"",
+    ] {
+        if !normalized_hook.contains(required) {
+            return Err(io::Error::other(format!(
+                "local pre-push hook is missing candidate/main IssueOps routing {required:?}"
+            ))
+            .into());
+        }
+    }
+    let main_route = normalized_hook
+        .find("if [ \"$push_scope\" = \"global\" ]; then")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted main route"))?;
+    let global_route = normalized_hook
+        .find("--repo \"$repo\" --root . --issue-map openspec/issue-map.json")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted global IssueOps route"))?;
+    let candidate_route = normalized_hook
+        .find("--candidate-issue \"$owner_issue\"")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted candidate IssueOps route"))?;
+    if !(main_route < global_route && global_route < candidate_route) {
+        return Err(io::Error::other(
+            "pre-push hook must keep global and candidate IssueOps routes in their target scopes",
+        )
+        .into());
+    }
+    if normalized_hook.contains("git branch --show-current") {
+        return Err(io::Error::other(
+            "pre-push hook must select validation from pushed remote refs, not checkout state",
         )
         .into());
     }
@@ -10099,6 +10165,1406 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let temp = tempfile::tempdir()?;
+    let fixture_repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir_all(fixture_repo.join(GITHOOKS_DIR_NAME))?;
+    fs::create_dir_all(fixture_repo.join(".github").join("scripts"))?;
+    fs::create_dir_all(
+        fixture_repo
+            .join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME),
+    )?;
+    fs::copy(
+        workspace_root
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+        fixture_repo
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+    )?;
+    fs::write(
+        fixture_repo
+            .join(".github")
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+        "",
+    )?;
+    fs::write(
+        fixture_repo
+            .join(OPENSPEC_DIR_NAME)
+            .join(ISSUE_MAP_FILE_NAME),
+        "{\"schema_version\": 2, \"changes\": {}}\n",
+    )?;
+    let issueops_tasks = fixture_repo
+        .join(OPENSPEC_DIR_NAME)
+        .join(CHANGE_DIR_NAME)
+        .join(ISSUEOPS_CHANGE_NAME)
+        .join(TASKS_FILE_NAME);
+    fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
+    fs::write(fixture_repo.join(CANDIDATE_FILE_NAME), "candidate\n")?;
+    git_success(&fixture_repo, &["init", "--initial-branch=main"])?;
+    git_success(
+        &fixture_repo,
+        &["config", "user.email", "test@example.invalid"],
+    )?;
+    git_success(&fixture_repo, &["config", "user.name", "ProjectAtlas test"])?;
+    git_success(&fixture_repo, &["add", "."])?;
+    git_success(&fixture_repo, &["commit", "-m", "baseline (#549)"])?;
+    let base_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !base_output.status.success() {
+        return Err(io::Error::other("pre-push fixture base commit lookup failed").into());
+    }
+    let base = String::from_utf8(base_output.stdout)?.trim().to_owned();
+    git_success(&fixture_repo, &["checkout", "-b", "feature"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "candidate (#549)"],
+    )?;
+    git_success(
+        &fixture_repo,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "follow-up candidate (#549)",
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["update-ref", "refs/remotes/origin/main", &base],
+    )?;
+    fs::create_dir(&fake_path)?;
+    let dispatch_log = temp.path().join(DISPATCH_LOG_FILE_NAME);
+    let python_stub = r#"#!/bin/sh
+printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+case " $* " in
+  *" --owner-from-commits "*)
+    awk '
+      {
+        matches = 0
+        remainder = $0
+        while (match(remainder, /\(#[1-9][0-9]*\)/)) {
+          matches++
+          owner = substr(remainder, RSTART + 2, RLENGTH - 3)
+          remainder = substr(remainder, RSTART + RLENGTH)
+        }
+        if (matches != 1) {
+          invalid = 1
+          next
+        }
+        if (resolved == "") resolved = owner
+        else if (resolved != owner) invalid = 1
+      }
+      END {
+        if (invalid || NR == 0 || resolved == "") exit 1
+        print resolved
+      }
+    '
+    exit $?
+    ;;
+esac
+exit 0
+"#;
+    let cargo_stub = r#"#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let npm_stub = r#"#!/bin/sh
+printf 'npm %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let gh_stub = r#"#!/bin/sh
+printf 'gh %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+if [ "${1:-}" = repo ] && [ "${2:-}" = view ]; then
+  printf '%s\n' styler-ai/ProjectAtlas
+fi
+exit 0
+"#;
+    for (name, script) in [
+        ("python3", python_stub),
+        ("cargo", cargo_stub),
+        ("npm", npm_stub),
+        ("gh", gh_stub),
+    ] {
+        write_executable_script(&fake_path.join(name), script)?;
+    }
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let test_path = std::env::join_paths(
+        std::iter::once(fake_path).chain(std::env::split_paths(&current_path)),
+    )?;
+    let hook = fixture_repo
+        .join(GITHOOKS_DIR_NAME)
+        .join(PRE_PUSH_HOOK_FILE_NAME);
+    let shell = if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+    } else {
+        PathBuf::from("sh")
+    };
+    let head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()?;
+    if !head_output.status.success() {
+        return Err(io::Error::other(format!(
+            "git rev-parse --verify HEAD^{{commit}} failed: {}{}",
+            String::from_utf8_lossy(&head_output.stdout),
+            String::from_utf8_lossy(&head_output.stderr)
+        ))
+        .into());
+    }
+    let current_head = String::from_utf8(head_output.stdout)?.trim().to_owned();
+    if current_head.is_empty() {
+        return Err(io::Error::other("git rev-parse returned an empty HEAD").into());
+    }
+    let run_hook = |records: &str, fail_ls_files: bool| -> Result<(bool, String), Box<dyn Error>> {
+        fs::write(&dispatch_log, "")?;
+        let mut command = StdCommand::new(&shell);
+        command.current_dir(&fixture_repo);
+        if fail_ls_files {
+            command
+                .arg("-c")
+                .arg(
+                    r#"git() {
+  printf 'git %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+  if [ "${1:-}" = ls-files ] && [ "${2:-}" = -v ]; then
+    printf 'git ls-files forced failure\n' >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+    return 1
+  fi
+  command git "$@"
+}
+. "$1"
+"#,
+                )
+                .arg("projectatlas-pre-push")
+                .arg(&hook);
+        } else {
+            command.arg(&hook);
+        }
+        command
+            .env("PATH", &test_path)
+            .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("pre-push hook stdin was not piped"))?
+            .write_all(records.as_bytes())?;
+        let output = child.wait_with_output()?;
+        Ok((output.status.success(), fs::read_to_string(&dispatch_log)?))
+    };
+    let final_issueops = |log: &str| {
+        log.lines()
+            .filter(|line| line.contains("issue-checklists.py --repo"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let (empty_status, empty_log) = run_hook("", false)?;
+    if empty_status
+        || !final_issueops(&empty_log).is_empty()
+        || empty_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "empty pre-push input did not fail closed before validation:\n{empty_log}"
+        ))
+        .into());
+    }
+    let (short_record_status, short_record_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549\n",
+        false,
+    )?;
+    if short_record_status
+        || !final_issueops(&short_record_log).is_empty()
+        || short_record_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "malformed pre-push input did not fail closed before validation:\n{short_record_log}"
+        ))
+        .into());
+    }
+    let (main_status, main_target) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    let main_calls = final_issueops(&main_target);
+    if !main_status || main_calls.len() != 1 || main_calls[0].contains("--candidate-issue") {
+        return Err(io::Error::other(format!(
+            "feature-checkout push to refs/heads/main did not use global IssueOps dispatch:\n{main_target}"
+        ))
+        .into());
+    }
+    let (multiple_candidate_status, multiple_candidate_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/547 3333333333333333333333333333333333333333 refs/heads/fix/547 4444444444444444444444444444444444444444\n",
+        false,
+    )?;
+    if multiple_candidate_status || !final_issueops(&multiple_candidate_log).is_empty() {
+        return Err(io::Error::other(format!(
+            "multiple candidate refs did not fail closed before IssueOps dispatch:\n{multiple_candidate_log}"
+        ))
+        .into());
+    }
+    let mismatched_candidate_records = format!(
+        "refs/heads/fix/549 {} refs/heads/fix/549 2222222222222222222222222222222222222222\n",
+        if current_head == "1111111111111111111111111111111111111111" {
+            "2222222222222222222222222222222222222222"
+        } else {
+            "1111111111111111111111111111111111111111"
+        }
+    );
+    let (mismatched_candidate_status, mismatched_candidate_log) =
+        run_hook(&mismatched_candidate_records, false)?;
+    if mismatched_candidate_status
+        || !final_issueops(&mismatched_candidate_log).is_empty()
+        || mismatched_candidate_log.contains("--candidate-issue")
+        || mismatched_candidate_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "candidate local object mismatch did not fail closed before scoped validation:\n{mismatched_candidate_log}"
+        ))
+        .into());
+    }
+    let zero_candidate_records = "refs/heads/fix/549 0000000000000000000000000000000000000000 refs/heads/fix/549 2222222222222222222222222222222222222222\n";
+    let (zero_candidate_status, zero_candidate_log) = run_hook(zero_candidate_records, false)?;
+    if zero_candidate_status
+        || !final_issueops(&zero_candidate_log).is_empty()
+        || zero_candidate_log.contains("--candidate-issue")
+        || zero_candidate_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "candidate deletion did not fail closed before scoped validation:\n{zero_candidate_log}"
+        ))
+        .into());
+    }
+    let (zero_main_status, zero_main_log) = run_hook(
+        "refs/heads/main 0000000000000000000000000000000000000000 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    if zero_main_status
+        || !final_issueops(&zero_main_log).is_empty()
+        || zero_main_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "main deletion did not fail before IssueOps dispatch:\n{zero_main_log}"
+        ))
+        .into());
+    }
+    let (candidate_status, candidate_target) = run_hook(
+        &format!(
+            "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+        ),
+        false,
+    )?;
+    let candidate_calls = final_issueops(&candidate_target);
+    if !candidate_status
+        || candidate_calls.len() != 1
+        || !candidate_calls[0].contains("--candidate-issue 549")
+    {
+        return Err(io::Error::other(format!(
+            "ordinary candidate push did not use candidate IssueOps dispatch:\n{candidate_target}"
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["checkout", "-b", "unowned-candidate"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "unowned follow-up"],
+    )?;
+    let unowned_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()?;
+    if !unowned_head_output.status.success() {
+        return Err(io::Error::other("fixture unowned candidate commit lookup failed").into());
+    }
+    let unowned_head = String::from_utf8(unowned_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (unowned_status, unowned_log) = run_hook(
+        &format!(
+            "refs/heads/unowned-candidate {unowned_head} refs/heads/unowned-candidate 2222222222222222222222222222222222222222\n"
+        ),
+        false,
+    )?;
+    if unowned_status
+        || !unowned_log.contains("--owner-from-commits")
+        || !final_issueops(&unowned_log).is_empty()
+    {
+        return Err(io::Error::other(format!(
+            "referenced and unreferenced candidate commits did not fail before scoped IssueOps dispatch:\n{unowned_log}"
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["checkout", "feature"])?;
+    let (index_failure_status, index_failure_log) = run_hook(
+        &format!(
+            "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+        ),
+        true,
+    )?;
+    if index_failure_status
+        || !index_failure_log.contains("git ls-files forced failure")
+        || !final_issueops(&index_failure_log).is_empty()
+        || index_failure_log.contains("--owner-from-commits")
+        || index_failure_log.contains("git merge-base")
+        || index_failure_log.contains("git log")
+    {
+        return Err(io::Error::other(format!(
+            "tracked index inspection failure did not fail before scoped validation:\n{index_failure_log}"
+        ))
+        .into());
+    }
+    for index_flag in ["--assume-unchanged", "--skip-worktree"] {
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-assume-unchanged",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-skip-worktree",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &["update-index", index_flag, ISSUEOPS_TASKS_RELATIVE_PATH],
+        )?;
+        fs::write(&issueops_tasks, "- [ ] 1.1 hidden index state\n")?;
+        let status_output = git_command_for_root(&fixture_repo)
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .output()?;
+        if !status_output.status.success() || !status_output.stdout.is_empty() {
+            return Err(io::Error::other(format!(
+                "{index_flag} did not hide the tracked fixture edit from porcelain"
+            ))
+            .into());
+        }
+        let (hidden_status, hidden_log) = run_hook(
+            &format!(
+                "refs/heads/fix/549 {current_head} refs/heads/fix/549 2222222222222222222222222222222222222222\n"
+            ),
+            false,
+        )?;
+        if hidden_status
+            || !final_issueops(&hidden_log).is_empty()
+            || hidden_log.contains("--owner-from-commits")
+        {
+            return Err(io::Error::other(format!(
+                "{index_flag} tracked fixture edit did not fail before scoped IssueOps dispatch:\n{hidden_log}"
+            ))
+            .into());
+        }
+        fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-assume-unchanged",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+        git_success(
+            &fixture_repo,
+            &[
+                "update-index",
+                "--no-skip-worktree",
+                ISSUEOPS_TASKS_RELATIVE_PATH,
+            ],
+        )?;
+    }
+    let (mixed_status, mixed_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    if mixed_status
+        || !final_issueops(&mixed_log).is_empty()
+        || mixed_log.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+            "mixed candidate/main push did not fail before IssueOps dispatch:\n{mixed_log}"
+        ))
+        .into());
+    }
+    let (malformed_status, malformed_log) = run_hook(
+        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/tags/v0.5.0 2222222222222222222222222222222222222222\n",
+        false,
+    )?;
+    if malformed_status || !final_issueops(&malformed_log).is_empty() {
+        return Err(io::Error::other(format!(
+            "unsupported pre-push target did not fail closed before IssueOps dispatch:\n{malformed_log}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn pre_push_candidate_rejects_ignored_linked_document_outside_tree() -> Result<(), Box<dyn Error>> {
+    const LINKED_DOCUMENT_DIR_NAME: &str = "docs";
+    const LINKED_DOCUMENT_FILE_NAME: &str = "ignored.md";
+    const LINKED_DOCUMENT_RELATIVE_PATH: &str = "docs/ignored.md";
+
+    let workspace_root = workspace_root()?;
+    let temp = tempfile::tempdir()?;
+    let fixture_repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    let issue_payload = temp.path().join("issue.json");
+    let dispatch_log = temp.path().join(DISPATCH_LOG_FILE_NAME);
+    let hook = fixture_repo
+        .join(GITHOOKS_DIR_NAME)
+        .join(PRE_PUSH_HOOK_FILE_NAME);
+    let issueops_tasks = fixture_repo
+        .join(OPENSPEC_DIR_NAME)
+        .join(CHANGE_DIR_NAME)
+        .join(ISSUEOPS_CHANGE_NAME)
+        .join(TASKS_FILE_NAME);
+    fs::create_dir_all(fixture_repo.join(GITHOOKS_DIR_NAME))?;
+    fs::create_dir_all(fixture_repo.join(".github").join("scripts"))?;
+    fs::create_dir_all(
+        issueops_tasks
+            .parent()
+            .ok_or_else(|| io::Error::other("issueops tasks fixture has no parent"))?,
+    )?;
+    fs::create_dir_all(&fake_path)?;
+    fs::copy(
+        workspace_root
+            .join(GITHOOKS_DIR_NAME)
+            .join(PRE_PUSH_HOOK_FILE_NAME),
+        &hook,
+    )?;
+    fs::copy(
+        workspace_root
+            .join(".github")
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+        fixture_repo
+            .join(".github")
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+    )?;
+    fs::write(
+        fixture_repo
+            .join(OPENSPEC_DIR_NAME)
+            .join(ISSUE_MAP_FILE_NAME),
+        format!("{{\"schema_version\": 2, \"changes\": {{\"{ISSUEOPS_CHANGE_NAME}\": 549}}}}\n"),
+    )?;
+    fs::write(&issueops_tasks, "- [x] 1.1 baseline\n")?;
+    let issue_body = r"## Why
+
+Candidate validation needs the linked architecture document from its committed tree.
+
+## What Changes
+
+Reject candidate validation when linked documentation is absent from the candidate tree.
+
+## Capabilities
+
+- `release-issueops`: validates candidate documentation from committed inputs.
+
+## Architecture Diagrams
+
+- [Issue task authority](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/ignored.md#user-content-issue-task-authority)
+
+## Release Scope
+
+This is a release-tooling correctness fix for v0.5.0-00.
+
+## Non-Goals
+
+- Changing product behavior.
+
+## Pre-Mortem
+
+Likely failure modes:
+- A candidate reads an ignored document that is absent from its tree.
+
+Mitigations:
+- [x] Require committed linked documentation. (Implementation tasks: 1.1)
+
+## Implementation Tasks
+
+- [x] 1.1 baseline
+
+## Acceptance and Review Tasks
+
+- [ ] Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary.
+- [ ] Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding.
+- [ ] Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed.
+- [ ] Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes.
+- [ ] Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.
+";
+    fs::write(
+        &issue_payload,
+        serde_json::to_vec(&json!({
+            "state": "OPEN",
+            "number": 549,
+            "labels": [{"name": "complexity:medium"}],
+            "milestone": {"title": "v0.5.0-00"},
+            "body": issue_body,
+        }))?,
+    )?;
+    git_success(
+        &fixture_repo,
+        &["init", "--object-format=sha256", "--initial-branch=main"],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["config", "user.email", "test@example.invalid"],
+    )?;
+    git_success(&fixture_repo, &["config", "user.name", "ProjectAtlas test"])?;
+    git_success(&fixture_repo, &["add", "."])?;
+    git_success(&fixture_repo, &["commit", "-m", "baseline (#549)"])?;
+    let base_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !base_output.status.success() {
+        return Err(io::Error::other("ignored-document fixture base lookup failed").into());
+    }
+    let base = String::from_utf8(base_output.stdout)?.trim().to_owned();
+    git_success(&fixture_repo, &["checkout", "-b", "feature"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "candidate (#549)"],
+    )?;
+    let head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !head_output.status.success() {
+        return Err(io::Error::other("ignored-document fixture HEAD lookup failed").into());
+    }
+    let head = String::from_utf8(head_output.stdout)?.trim().to_owned();
+    git_success(
+        &fixture_repo,
+        &["update-ref", "refs/remotes/origin/main", &base],
+    )?;
+    fs::create_dir_all(fixture_repo.join("docs"))?;
+    fs::write(
+        fixture_repo.join(GIT_DIR_NAME).join("info").join("exclude"),
+        "docs/ignored.md\n",
+    )?;
+    fs::write(
+        fixture_repo
+            .join(LINKED_DOCUMENT_DIR_NAME)
+            .join(LINKED_DOCUMENT_FILE_NAME),
+        "## Issue task authority\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+    )?;
+    let status_output = git_command_for_root(&fixture_repo)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()?;
+    if !status_output.status.success() || !status_output.stdout.is_empty() {
+        return Err(io::Error::other(
+            "ignored linked document was not hidden from ordinary Git status",
+        )
+        .into());
+    }
+    let python_stub = r#"#!/bin/sh
+printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+case " $* " in
+  *" --owner-from-commits "*) exec python "$@" ;;
+  *" --candidate-issue "*) exec python -c '
+import os
+import json
+import pathlib
+import sys
+import types
+
+script = sys.argv[1]
+sys.argv = sys.argv[1:]
+module = types.ModuleType("issue_checklists_fixture")
+module.__file__ = script
+sys.modules[module.__name__] = module
+exec(compile(pathlib.Path(script).read_bytes(), script, "exec"), module.__dict__, module.__dict__)
+module.__dict__["gh_json"] = lambda _args: json.loads(
+    pathlib.Path(os.environ["PROJECTATLAS_ISSUE_PAYLOAD"]).read_text(encoding="utf-8")
+)
+module.__dict__["gh_api_json"] = lambda _args: json.loads(
+    "[{\"data\":{\"repository\":{\"issues\":{\"nodes\":[{\"number\":549,\"state\":\"OPEN\",\"labels\":{\"totalCount\":1,\"nodes\":[{\"name\":\"complexity:medium\"}]},\"milestone\":{\"title\":\"v0.5.0-00\"}}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}]"
+)
+def fake_mermaid(diagram):
+    outcome = module.__dict__["MermaidValidationOutcome"]
+    return outcome.INVALID if "not-mermaid" in diagram else outcome.VALID
+
+module.__dict__["_run_mermaid_parser"] = fake_mermaid
+module.__dict__["mermaid_syntax_is_valid"].cache_clear()
+module.__dict__["main"]()
+' "$@" ;;
+esac
+exit 0
+"#;
+    let cargo_stub = r#"#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let npm_stub = r#"#!/bin/sh
+printf 'npm %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let gh_stub = r#"#!/bin/sh
+printf 'gh %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+if [ "${1:-}" = repo ] && [ "${2:-}" = view ]; then
+  printf '%s\n' styler-ai/ProjectAtlas
+elif [ "${1:-}" = issue ] && [ "${2:-}" = view ]; then
+  cat "$PROJECTATLAS_ISSUE_PAYLOAD"
+elif [ "${1:-}" = api ] && [ "${2:-}" = graphql ]; then
+  printf '%s\n' '[{"data":{"repository":{"issues":{"nodes":[{"number":549,"state":"OPEN","labels":{"totalCount":1,"nodes":[{"name":"complexity:medium"}]},"milestone":{"title":"v0.5.0-00"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]'
+fi
+exit 0
+"#;
+    for (name, script) in [
+        ("python3", python_stub),
+        ("cargo", cargo_stub),
+        ("npm", npm_stub),
+        ("gh", gh_stub),
+    ] {
+        write_executable_script(&fake_path.join(name), script)?;
+    }
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let test_path = std::env::join_paths(
+        std::iter::once(fake_path.clone()).chain(std::env::split_paths(&current_path)),
+    )?;
+    fs::write(&dispatch_log, "")?;
+    let shell = if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+    } else {
+        PathBuf::from("sh")
+    };
+    let mut command = StdCommand::new(&shell);
+    command
+        .current_dir(&fixture_repo)
+        .arg(&hook)
+        .env("PATH", &test_path)
+        .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+        .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("ignored-document hook stdin was not piped"))?
+        .write_all(format!(
+            "refs/heads/feature {head} refs/heads/feature 2222222222222222222222222222222222222222\n"
+        ).as_bytes())?;
+    let output = child.wait_with_output()?;
+    let dispatch = fs::read_to_string(&dispatch_log)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success()
+        || !stderr.contains("has no tracked regular Markdown file in candidate tree")
+        || !dispatch.contains("--candidate-issue 549")
+    {
+        return Err(io::Error::other(format!(
+            "ignored linked document was not rejected from the candidate tree:\nstdout={}\nstderr={stderr}\ndispatch={dispatch}",
+            String::from_utf8_lossy(&output.stdout),
+        ))
+        .into());
+    }
+
+    let linked_document = fixture_repo
+        .join(LINKED_DOCUMENT_DIR_NAME)
+        .join(LINKED_DOCUMENT_FILE_NAME);
+    fs::write(
+        &linked_document,
+        "## Issue task authority\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+    )?;
+    let blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", LINKED_DOCUMENT_RELATIVE_PATH])
+        .output()?;
+    if !blob_output.status.success() {
+        return Err(io::Error::other("symlink-tree fixture blob lookup failed").into());
+    }
+    let blob = String::from_utf8(blob_output.stdout)?.trim().to_owned();
+    let cacheinfo = format!("120000,{blob},{LINKED_DOCUMENT_RELATIVE_PATH}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate linked document (#549)"],
+    )?;
+    let symlink_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !symlink_head_output.status.success() {
+        return Err(io::Error::other("symlink-tree fixture HEAD lookup failed").into());
+    }
+    let symlink_head = String::from_utf8(symlink_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let tree_output = git_command_for_root(&fixture_repo)
+        .args([
+            "ls-tree",
+            &symlink_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    if !tree_output.status.success()
+        || !String::from_utf8_lossy(&tree_output.stdout).starts_with("120000 blob ")
+    {
+        return Err(io::Error::other(format!(
+            "symlink-tree fixture did not create a mode-120000 entry:\n{}{}",
+            String::from_utf8_lossy(&tree_output.stdout),
+            String::from_utf8_lossy(&tree_output.stderr),
+        ))
+        .into());
+    }
+    let inherited_path = std::env::var_os("PATH")
+        .ok_or_else(|| io::Error::other("symlink-tree fixture requires PATH"))?;
+    let real_git = std::env::split_paths(&inherited_path)
+        .map(|directory| {
+            if cfg!(windows) {
+                directory.join("git.exe")
+            } else {
+                directory.join("git")
+            }
+        })
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| io::Error::other("symlink-tree fixture requires git"))?;
+    let real_git = real_git.to_string_lossy();
+    let git_stub_name = if cfg!(windows) { "git.cmd" } else { "git" };
+    let git_stub = if cfg!(windows) {
+        format!(
+            "@echo off\r\nif /I \"%~1\"==\"status\" exit /b 0\r\n\"{real_git}\" %*\r\nexit /b %ERRORLEVEL%\r\n"
+        )
+    } else {
+        format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = status ]; then exit 0; fi\nexec '{real_git}' \"$@\"\n"
+        )
+    };
+    write_executable_script(&fake_path.join(git_stub_name), &git_stub)?;
+    let run_candidate_hook = |head: &str| -> Result<(bool, String, String), Box<dyn Error>> {
+        fs::write(&dispatch_log, "")?;
+        let mut command = StdCommand::new(&shell);
+        command
+            .current_dir(&fixture_repo)
+            .arg(&hook)
+            .env("PATH", &test_path)
+            .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+            .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("candidate hook stdin was not piped"))?
+            .write_all(
+                format!(
+                    "refs/heads/feature {head} refs/heads/feature 2222222222222222222222222222222222222222\n"
+                )
+                .as_bytes(),
+            )?;
+        let output = child.wait_with_output()?;
+        Ok((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            fs::read_to_string(&dispatch_log)?,
+        ))
+    };
+    let (symlink_status, symlink_stderr, symlink_dispatch) = run_candidate_hook(&symlink_head)?;
+    if symlink_status
+        || !symlink_stderr.contains("has no tracked regular Markdown file")
+        || !symlink_dispatch.contains("--candidate-issue 549")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 linked document was not rejected before worktree content validation:\nstderr={symlink_stderr}\ndispatch={symlink_dispatch}",
+        ))
+        .into());
+    }
+
+    let issue_map_relative_path = format!("{OPENSPEC_DIR_NAME}/{ISSUE_MAP_FILE_NAME}");
+    let issue_map_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", &issue_map_relative_path])
+        .output()?;
+    if !issue_map_blob_output.status.success() {
+        return Err(io::Error::other("issue-map tree fixture blob lookup failed").into());
+    }
+    let issue_map_blob = String::from_utf8(issue_map_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let issue_map_cacheinfo = format!("120000,{issue_map_blob},{issue_map_relative_path}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &issue_map_cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate issue map (#549)"],
+    )?;
+    let issue_map_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !issue_map_head_output.status.success() {
+        return Err(io::Error::other("issue-map tree fixture HEAD lookup failed").into());
+    }
+    let issue_map_head = String::from_utf8(issue_map_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (issue_map_status, issue_map_stderr, issue_map_dispatch) =
+        run_candidate_hook(&issue_map_head)?;
+    if issue_map_status
+        || !issue_map_stderr.contains("candidate branch issue-map")
+        || !issue_map_stderr.contains("tracked regular file")
+        || issue_map_dispatch.contains("gh issue")
+        || issue_map_dispatch.contains("gh api")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 issue map was not rejected before scoped IssueOps:\nstderr={issue_map_stderr}\ndispatch={issue_map_dispatch}"
+        ))
+        .into());
+    }
+
+    let issue_map_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", &issue_map_relative_path])
+        .output()?;
+    if !issue_map_blob_output.status.success() {
+        return Err(io::Error::other("issue-map restore blob lookup failed").into());
+    }
+    let issue_map_blob = String::from_utf8(issue_map_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let issue_map_cacheinfo = format!("100644,{issue_map_blob},{issue_map_relative_path}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &issue_map_cacheinfo],
+    )?;
+    git_success(&fixture_repo, &["commit", "-m", "restore issue map (#549)"])?;
+
+    let task_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", ISSUEOPS_TASKS_RELATIVE_PATH])
+        .output()?;
+    if !task_blob_output.status.success() {
+        return Err(io::Error::other("mapped-task tree fixture blob lookup failed").into());
+    }
+    let task_blob = String::from_utf8(task_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let task_cacheinfo = format!("120000,{task_blob},{ISSUEOPS_TASKS_RELATIVE_PATH}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &task_cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate mapped tasks (#549)"],
+    )?;
+    let task_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !task_head_output.status.success() {
+        return Err(io::Error::other("mapped-task tree fixture HEAD lookup failed").into());
+    }
+    let task_head = String::from_utf8(task_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (task_status, task_stderr, task_dispatch) = run_candidate_hook(&task_head)?;
+    if task_status
+        || !task_stderr.contains("candidate branch mapped task file")
+        || !task_stderr.contains("tracked regular file")
+        || task_dispatch.contains("gh issue")
+        || task_dispatch.contains("gh api")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 mapped task file was not rejected before scoped IssueOps:\nstderr={task_stderr}\ndispatch={task_dispatch}"
+        ))
+        .into());
+    }
+
+    fs::write(
+        &linked_document,
+        "## Issue task authority\n\n```mermaid\nflowchart LR\nCOMMITTED --> B\n```\n",
+    )?;
+    let linked_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", LINKED_DOCUMENT_RELATIVE_PATH])
+        .output()?;
+    if !linked_blob_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture document blob lookup failed").into());
+    }
+    let linked_blob = String::from_utf8(linked_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{linked_blob},{LINKED_DOCUMENT_RELATIVE_PATH}"),
+        ],
+    )?;
+    let task_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", ISSUEOPS_TASKS_RELATIVE_PATH])
+        .output()?;
+    if !task_blob_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture task blob lookup failed").into());
+    }
+    let task_blob = String::from_utf8(task_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{task_blob},{ISSUEOPS_TASKS_RELATIVE_PATH}"),
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
+        &[
+            "config",
+            "filter.issueops-clean-smudge.clean",
+            "sed 's/WORKTREE/COMMITTED/g; s/not-mermaid/flowchart LR/'",
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
+        &[
+            "config",
+            "filter.issueops-clean-smudge.smudge",
+            "sed 's/COMMITTED/WORKTREE/g; s/flowchart LR/not-mermaid/'",
+        ],
+    )?;
+    fs::write(
+        fixture_repo.join(".gitattributes"),
+        "docs/ignored.md filter=issueops-clean-smudge\n",
+    )?;
+    git_success(&fixture_repo, &["add", ".gitattributes"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate clean smudge inputs (#549)"],
+    )?;
+    fs::remove_file(&linked_document)?;
+    git_success(
+        &fixture_repo,
+        &["checkout", "--", LINKED_DOCUMENT_RELATIVE_PATH],
+    )?;
+    let filtered_document = fs::read_to_string(&linked_document)?;
+    if !filtered_document.contains("not-mermaid") || !filtered_document.contains("WORKTREE") {
+        return Err(io::Error::other(
+            "clean/smudge fixture did not produce distinct filtered worktree bytes",
+        )
+        .into());
+    }
+    let filtered_status_output = git_command_for_root(&fixture_repo)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()?;
+    if !filtered_status_output.status.success() || !filtered_status_output.stdout.is_empty() {
+        return Err(io::Error::other(format!(
+            "clean/smudge fixture did not preserve clean Git status: stdout={} stderr={}",
+            String::from_utf8_lossy(&filtered_status_output.stdout),
+            String::from_utf8_lossy(&filtered_status_output.stderr),
+        ))
+        .into());
+    }
+    let filtered_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !filtered_head_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture HEAD lookup failed").into());
+    }
+    let filtered_head = String::from_utf8(filtered_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (filtered_status, filtered_stderr, filtered_dispatch) = run_candidate_hook(&filtered_head)?;
+    if !filtered_status || !filtered_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not use submitted clean/smudge tree bytes:\nstatus={filtered_status}\nstderr={filtered_stderr}\ndispatch={filtered_dispatch}"
+        ))
+        .into());
+    }
+
+    let replacement_index = temp.path().join("replacement-index");
+    let replacement_read_tree = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args(["read-tree", &filtered_head])
+        .output()?;
+    if !replacement_read_tree.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not read candidate tree: {}{}",
+            String::from_utf8_lossy(&replacement_read_tree.stdout),
+            String::from_utf8_lossy(&replacement_read_tree.stderr),
+        ))
+        .into());
+    }
+    let replacement_cacheinfo = format!("120000,{linked_blob},{LINKED_DOCUMENT_RELATIVE_PATH}");
+    let replacement_update_index = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &replacement_cacheinfo,
+        ])
+        .output()?;
+    if !replacement_update_index.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write symlink entry: {}{}",
+            String::from_utf8_lossy(&replacement_update_index.stdout),
+            String::from_utf8_lossy(&replacement_update_index.stderr),
+        ))
+        .into());
+    }
+    let replacement_tree_output = git_command_for_root(&fixture_repo)
+        .env("GIT_INDEX_FILE", &replacement_index)
+        .args(["write-tree"])
+        .output()?;
+    if !replacement_tree_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write tree: {}{}",
+            String::from_utf8_lossy(&replacement_tree_output.stdout),
+            String::from_utf8_lossy(&replacement_tree_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_tree = String::from_utf8(replacement_tree_output.stdout)?
+        .trim()
+        .to_owned();
+    let mut replacement_commit_command = git_command_for_root(&fixture_repo);
+    replacement_commit_command
+        .args(["commit-tree", &replacement_tree, "-p", &base])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut replacement_commit = replacement_commit_command.spawn()?;
+    replacement_commit
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("replacement-tree commit stdin was not piped"))?
+        .write_all(b"replacement tree (#549)\n")?;
+    let replacement_commit_output = replacement_commit.wait_with_output()?;
+    if !replacement_commit_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture could not write commit: {}{}",
+            String::from_utf8_lossy(&replacement_commit_output.stdout),
+            String::from_utf8_lossy(&replacement_commit_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_commit_oid = String::from_utf8(replacement_commit_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &["replace", &filtered_head, &replacement_commit_oid],
+    )?;
+    let replaced_tree_output = git_command_for_root(&fixture_repo)
+        .args([
+            "ls-tree",
+            &filtered_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    let original_tree_output = git_command_for_root(&fixture_repo)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args([
+            "ls-tree",
+            &filtered_head,
+            "--",
+            LINKED_DOCUMENT_RELATIVE_PATH,
+        ])
+        .output()?;
+    if !replaced_tree_output.status.success()
+        || !String::from_utf8_lossy(&replaced_tree_output.stdout).starts_with("120000 blob ")
+        || !original_tree_output.status.success()
+        || !String::from_utf8_lossy(&original_tree_output.stdout).starts_with("100644 blob ")
+    {
+        return Err(io::Error::other(format!(
+            "replacement-tree fixture did not distinguish replacement from submitted tree:\nreplaced={}original={}",
+            String::from_utf8_lossy(&replaced_tree_output.stdout),
+            String::from_utf8_lossy(&original_tree_output.stdout),
+        ))
+        .into());
+    }
+    let (replacement_tree_status, replacement_tree_stderr, replacement_tree_dispatch) =
+        run_candidate_hook(&filtered_head)?;
+    if !replacement_tree_status || !replacement_tree_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not ignore a replacement commit tree:\nstderr={replacement_tree_stderr}\ndispatch={replacement_tree_dispatch}",
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["replace", "-d", &filtered_head])?;
+
+    let replacement_document = temp.path().join("replacement-invalid.md");
+    fs::write(
+        &replacement_document,
+        "## Issue task authority\n\nnot-mermaid replacement bytes\n",
+    )?;
+    let replacement_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w"])
+        .arg(&replacement_document)
+        .output()?;
+    if !replacement_blob_output.status.success() {
+        return Err(io::Error::other(format!(
+            "replacement-blob fixture could not write blob: {}{}",
+            String::from_utf8_lossy(&replacement_blob_output.stdout),
+            String::from_utf8_lossy(&replacement_blob_output.stderr),
+        ))
+        .into());
+    }
+    let replacement_blob = String::from_utf8(replacement_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(&fixture_repo, &["replace", &linked_blob, &replacement_blob])?;
+    let replaced_blob_output = git_command_for_root(&fixture_repo)
+        .args(["cat-file", "blob", &linked_blob])
+        .output()?;
+    let original_blob_output = git_command_for_root(&fixture_repo)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args(["cat-file", "blob", &linked_blob])
+        .output()?;
+    if !replaced_blob_output.status.success()
+        || !String::from_utf8_lossy(&replaced_blob_output.stdout).contains("not-mermaid")
+        || !original_blob_output.status.success()
+        || String::from_utf8_lossy(&original_blob_output.stdout).contains("not-mermaid")
+    {
+        return Err(io::Error::other(
+            "replacement-blob fixture did not distinguish replacement from submitted blob",
+        )
+        .into());
+    }
+    let (replacement_blob_status, replacement_blob_stderr, replacement_blob_dispatch) =
+        run_candidate_hook(&filtered_head)?;
+    if !replacement_blob_status || !replacement_blob_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not ignore a replacement blob:\nstderr={replacement_blob_stderr}\ndispatch={replacement_blob_dispatch}",
+        ))
+        .into());
+    }
+    git_success(&fixture_repo, &["replace", "-d", &linked_blob])?;
+
+    git_success(
+        &fixture_repo,
+        &["commit", "--allow-empty", "-m", "candidate (#549) (#547"],
+    )?;
+    let malformed_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !malformed_head_output.status.success() {
+        return Err(io::Error::other("malformed-owner fixture HEAD lookup failed").into());
+    }
+    let malformed_head = String::from_utf8(malformed_head_output.stdout)?
+        .trim()
+        .to_owned();
+    fs::write(&dispatch_log, "")?;
+    let mut malformed_command = StdCommand::new(&shell);
+    malformed_command
+        .current_dir(&fixture_repo)
+        .arg(&hook)
+        .env("PATH", &test_path)
+        .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+        .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut malformed_child = malformed_command.spawn()?;
+    malformed_child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("malformed-owner hook stdin was not piped"))?
+        .write_all(
+            format!(
+                "refs/heads/feature {malformed_head} refs/heads/feature 3333333333333333333333333333333333333333\n"
+            )
+            .as_bytes(),
+        )?;
+    let malformed_output = malformed_child.wait_with_output()?;
+    let malformed_dispatch = fs::read_to_string(&dispatch_log)?;
+    let malformed_stderr = String::from_utf8_lossy(&malformed_output.stderr);
+    if malformed_output.status.success()
+        || !malformed_stderr.contains("owner resolution failed")
+        || malformed_dispatch.contains("--candidate-issue")
+    {
+        return Err(io::Error::other(format!(
+            "unmatched owner marker was not rejected before scoped IssueOps:\nstdout={}\\nstderr={malformed_stderr}\\ndispatch={malformed_dispatch}",
+            String::from_utf8_lossy(&malformed_output.stdout),
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn pre_push_candidate_rejects_dirty_worktree_before_issueops() -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let source_hook = workspace_root
+        .join(GITHOOKS_DIR_NAME)
+        .join(PRE_PUSH_HOOK_FILE_NAME);
+    let shell = if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+    } else {
+        PathBuf::from("sh")
+    };
+
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let fake_path = temp.path().join(FAKE_PATH_DIR);
+    fs::create_dir_all(repo.join(GITHOOKS_DIR_NAME))?;
+    fs::create_dir_all(repo.join(".github").join("scripts"))?;
+    fs::create_dir_all(
+        repo.join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME),
+    )?;
+    fs::create_dir_all(&fake_path)?;
+    fs::copy(
+        &source_hook,
+        repo.join(GITHOOKS_DIR_NAME).join(PRE_PUSH_HOOK_FILE_NAME),
+    )?;
+    fs::write(
+        repo.join(".github")
+            .join("scripts")
+            .join(ISSUE_CHECKLISTS_SCRIPT_FILE_NAME),
+        "",
+    )?;
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME).join(ISSUE_MAP_FILE_NAME),
+        "{\"schema_version\": 2, \"changes\": {}}\n",
+    )?;
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join(TASKS_FILE_NAME),
+        "- [x] 1.1 baseline\n",
+    )?;
+    fs::write(repo.join(CANDIDATE_FILE_NAME), "candidate\n")?;
+
+    let python_stub = r#"#!/bin/sh
+printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+case " $* " in
+  *" --owner-from-commits "*) printf '%s\n' 549 ;;
+esac
+exit 0
+"#;
+    let cargo_stub = r#"#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let npm_stub = r#"#!/bin/sh
+printf 'npm %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+exit 0
+"#;
+    let gh_stub = r#"#!/bin/sh
+printf 'gh %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
+if [ "${1:-}" = repo ] && [ "${2:-}" = view ]; then
+  printf '%s\n' styler-ai/ProjectAtlas
+fi
+exit 0
+"#;
+    for (name, script) in [
+        ("python3", python_stub),
+        ("cargo", cargo_stub),
+        ("npm", npm_stub),
+        ("gh", gh_stub),
+    ] {
+        write_executable_script(&fake_path.join(name), script)?;
+    }
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let test_path = std::env::join_paths(
+        std::iter::once(fake_path).chain(std::env::split_paths(&current_path)),
+    )?;
+
+    git_success(&repo, &["init", "--initial-branch=main"])?;
+    git_success(&repo, &["config", "user.email", "test@example.invalid"])?;
+    git_success(&repo, &["config", "user.name", "ProjectAtlas test"])?;
+    git_success(&repo, &["add", "."])?;
+    git_success(&repo, &["commit", "-m", "baseline (#549)"])?;
+    let base_output = git_command_for_root(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !base_output.status.success() {
+        return Err(io::Error::other("fixture base commit lookup failed").into());
+    }
+    let base = String::from_utf8(base_output.stdout)?.trim().to_owned();
+    git_success(&repo, &["checkout", "-b", "feature"])?;
+    git_success(
+        &repo,
+        &["commit", "--allow-empty", "-m", "candidate (#549)"],
+    )?;
+    let head_output = git_command_for_root(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !head_output.status.success() {
+        return Err(io::Error::other("fixture candidate commit lookup failed").into());
+    }
+    let head = String::from_utf8(head_output.stdout)?.trim().to_owned();
+    git_success(&repo, &["update-ref", "refs/remotes/origin/main", &base])?;
+
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join(TASKS_FILE_NAME),
+        "- [ ] 1.1 drifted checklist\n",
+    )?;
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME).join(ISSUE_MAP_FILE_NAME),
+        "{\"schema_version\": 2, \"changes\": {\"drift\": 549}}\n",
+    )?;
+    git_success(&repo, &["add", "openspec/issue-map.json"])?;
+    fs::write(
+        repo.join(OPENSPEC_DIR_NAME)
+            .join(CHANGE_DIR_NAME)
+            .join(ISSUEOPS_CHANGE_NAME)
+            .join("untracked-notes.md"),
+        "untracked relevant input\n",
+    )?;
+
+    let dispatch_log = temp.path().join(DISPATCH_LOG_FILE_NAME);
+    fs::write(&dispatch_log, "")?;
+    let mut command = StdCommand::new(&shell);
+    command
+        .current_dir(&repo)
+        .arg(repo.join(GITHOOKS_DIR_NAME).join(PRE_PUSH_HOOK_FILE_NAME))
+        .env("PATH", &test_path)
+        .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("dirty candidate hook stdin was not piped"))?
+        .write_all(format!("refs/heads/feature {head} refs/heads/feature {head}\n").as_bytes())?;
+    let output = child.wait_with_output()?;
+    let dispatch = fs::read_to_string(&dispatch_log)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success()
+        || !stderr.contains("candidate branch worktree must be clean")
+        || dispatch
+            .lines()
+            .any(|line| line.contains("issue-checklists.py --repo"))
+        || dispatch.contains("--owner-from-commits")
+    {
+        return Err(io::Error::other(format!(
+                "dirty candidate worktree did not fail before scoped IssueOps dispatch:\nstdout={}\nstderr={stderr}\ndispatch={dispatch}",
+                String::from_utf8_lossy(&output.stdout),
+            ))
+            .into());
+    }
     Ok(())
 }
 

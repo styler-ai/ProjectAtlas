@@ -13,13 +13,25 @@ flowchart LR
     Acceptance --> Gates[Five ordered review gates]
     Sync --> Contract
     Gates --> Contract
-    PR[PR candidate branch] --> Owner[One open owner against live state]
+    PR[Hosted PR candidate] --> Owner[One open owner against live state]
     PR --> Base[Unrelated open slices against accepted PR base]
+    Push[Git pre-push ref-update records] --> MainTarget["Exactly one refs/heads/main target"]
+    Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
+    Push --> InvalidTarget["Zero or multiple records; deletions; malformed or unsupported targets"]
+    MainTarget --> Global[Global live-state validation]
+    CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
+    CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes; no hidden flags; issue map, mapped tasks, and linked docs are regular candidate-tree files read from their blobs with replacement refs disabled"]
+    CandidateClean --> Candidate[Local candidate branch]
+    Candidate --> CandidateOwner["Each post-base subject has one same-owner (#NNN) reference"]
+    Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract
     Base --> Contract
+    CandidateOwner --> Contract
+    CandidateBase --> Contract
     Closed[Already CLOSED mapped issue] --> Inert[Native closed state only; no body migration or validation]
     Reopened[Reopened mapped issue] --> Implementation
     Hidden[Hidden, duplicate, or legacy open fields] --> Reject[Fail closed]
+    InvalidTarget --> Reject
     Contract --> Ready[Truthful incremental or closure-ready state]
 ```
 
