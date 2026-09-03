@@ -10,5 +10,5 @@
 
 ## 3. Integration and Acceptance
 
-- [ ] 3.1 Run the focused fixture and installer E2E, repeated required parallel workspace gate, strict Rust/workspace/OpenSpec/IssueOps checks, and exact-head hosted Windows proof; refresh dependent #487 only after the accepted fix is on `main`, and confirm it retains one final helper owner.
+- [x] 3.1 Run the focused fixture and installer E2E, repeated required parallel workspace gate, strict Rust/workspace/OpenSpec/IssueOps checks, and exact-head hosted Windows proof; refresh dependent #487 only after the accepted fix is on `main`, and confirm it retains one final helper owner.
 - [x] 3.2 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
