@@ -3766,6 +3766,18 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
         ],
         "source",
     )?;
+    let cli_document_coverage =
+        json_at(&cli_relation, &["symbol_relations", "anchor", "coverage"])?
+            .as_array()
+            .and_then(|coverage| {
+                coverage.iter().find(|row| {
+                    row.pointer("/relation/value").and_then(Value::as_str) == Some("documents")
+                })
+            })
+            .ok_or_else(|| io::Error::other("CLI guide document coverage row missing"))?;
+    require_json_string(cli_document_coverage, &["state"], "complete")?;
+    require_json_usize(cli_document_coverage, &["covered"], 1)?;
+    require_json_usize(cli_document_coverage, &["omitted"], 0)?;
 
     let inbound_output = Command::new(mcp_contract_executable())
         .current_dir(&repo)
@@ -4114,6 +4126,18 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
             &["symbol_relations", "rows", "0", "target", "classification"],
             "source",
         )?;
+        let mcp_document_coverage =
+            json_at(&mcp_outbound, &["symbol_relations", "anchor", "coverage"])?
+                .as_array()
+                .and_then(|coverage| {
+                    coverage.iter().find(|row| {
+                        row.pointer("/relation/value").and_then(Value::as_str) == Some("documents")
+                    })
+                })
+                .ok_or_else(|| io::Error::other("MCP guide document coverage row missing"))?;
+        require_json_string(mcp_document_coverage, &["state"], "complete")?;
+        require_json_usize(mcp_document_coverage, &["covered"], 1)?;
+        require_json_usize(mcp_document_coverage, &["omitted"], 0)?;
 
         let mcp_no_candidates: Value = toon_format::decode_default(&session.call_tool(
             "atlas_symbol_relations",

@@ -494,7 +494,7 @@ const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
 
 const CLI_E2E_ENVIRONMENT_FACETS_DIGEST: &str =
-    "2789e6dc790b730c110127224b2c95c71e63f50a673e964fcb32c756053b04a2";
+    "addd2e61ae70c2a11c1acb53abfb49d8dff160d0eda87b1e48164270a0c651a4";
 
 const CLI_E2E_TIMEOUT_FACETS_DIGEST: &str =
     "e218dd8e0d97b946adf22f6ad9a3e702039a3858d8cb7d7bda59eb8d35e003a4";
@@ -2392,15 +2392,19 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
     let verified_runtime = user_bin.join("projectatlas.cmd");
     fs::write(&verified_runtime, "@exit /b 0\r\n")?;
-    let hanging_runtime = temp.path().join("hanging-projectatlas.cmd");
-    fs::write(&hanging_runtime, "@echo off\r\n:probe\r\ngoto probe\r\n")?;
     let flooding_runtime = temp.path().join("flooding-projectatlas.cmd");
     let flood_child_pid = temp.path().join("flood-child.pid");
+    let timeout_runtime = temp.path().join("timeout-projectatlas.cmd");
+    let timeout_child_pid = temp.path().join("timeout-child.pid");
     let probe_temp = temp.path().join("runtime-probe-temp");
     fs::create_dir_all(&probe_temp)?;
     fs::write(
         &flooding_runtime,
         "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
+    )?;
+    fs::write(
+        &timeout_runtime,
+        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID; Start-Sleep -Seconds 60; [Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\"\r\n",
     )?;
     let async_runtime = temp.path().join("async-projectatlas.cmd");
     let async_child_pid = temp.path().join("async-child.pid");
@@ -2678,14 +2682,6 @@ if ($env:PROJECTATLAS_TEST_PERSIST_USER_PATH -eq "1") {
     }
 }
 $probe = [Diagnostics.Stopwatch]::StartNew()
-if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_HANGING_RUNTIME $null) {
-    throw "Nonreturning runtime was accepted"
-}
-$probe.Stop()
-if ($probe.Elapsed -gt [TimeSpan]::FromSeconds(10)) {
-    throw "Nonreturning runtime probe exceeded its bounded tolerance: $($probe.Elapsed)"
-}
-$probe = [Diagnostics.Stopwatch]::StartNew()
 if (Test-ProjectAtlasRuntime $env:PROJECTATLAS_TEST_FLOODING_RUNTIME $null) {
     throw "Output-flooding runtime was accepted"
 }
@@ -2724,6 +2720,47 @@ try {
 finally {
     if ($floodChildPid -and (Get-Process -Id $floodChildPid -ErrorAction SilentlyContinue)) {
         & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $floodChildPid /T /F | Out-Null
+    }
+}
+$timeoutDisposition = $null
+$timeoutPayload = Invoke-ProjectAtlasBoundedJsonCommand `
+    $env:PROJECTATLAS_TEST_TIMEOUT_RUNTIME `
+    ([string[]]@("runtime-info")) `
+    ([ref]$timeoutDisposition)
+if ($null -ne $timeoutPayload -or $timeoutDisposition -ne "timeout") {
+    throw "Below-limit delayed runtime was not causally stopped by its timeout: payload='$timeoutPayload' disposition='$timeoutDisposition'"
+}
+$timeoutChildPid = $null
+try {
+    if (-not (Test-Path -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID)) {
+        throw "Below-limit delayed runtime did not report its child process"
+    }
+    $timeoutChildPid = [int](Get-Content -Raw -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID)
+    $childDeadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $timeoutChild = Get-Process -Id $timeoutChildPid -ErrorAction SilentlyContinue
+        if (-not $timeoutChild) {
+            break
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    while ([DateTime]::UtcNow -lt $childDeadline)
+    if ($timeoutChild) {
+        throw "Timed-out runtime probe left its owned child process alive: $timeoutChildPid"
+    }
+    $leftoverProbeFiles = @(
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
+            -Filter "projectatlas-command-probe-*" `
+            -File |
+        Select-Object -ExpandProperty FullName
+    )
+    if ($leftoverProbeFiles.Count -ne 0) {
+        throw "Timed-out runtime probe left temporary files: $($leftoverProbeFiles -join ', ')"
+    }
+}
+finally {
+    if ($timeoutChildPid -and (Get-Process -Id $timeoutChildPid -ErrorAction SilentlyContinue)) {
+        & (Join-Path $env:SystemRoot "System32\taskkill.exe") /PID $timeoutChildPid /T /F | Out-Null
     }
 }
 $canary = Start-Process `
@@ -2843,9 +2880,10 @@ finally {
         .env("PROJECTATLAS_TEST_EMPTY_BIN", &empty_bin)
         .env("PROJECTATLAS_TEST_SYSTEM_POWERSHELL", &system_powershell)
         .env("PROJECTATLAS_TEST_VERIFIED_RUNTIME", &verified_runtime)
-        .env("PROJECTATLAS_TEST_HANGING_RUNTIME", &hanging_runtime)
         .env("PROJECTATLAS_TEST_FLOODING_RUNTIME", &flooding_runtime)
         .env("PROJECTATLAS_TEST_FLOOD_CHILD_PID", &flood_child_pid)
+        .env("PROJECTATLAS_TEST_TIMEOUT_RUNTIME", &timeout_runtime)
+        .env("PROJECTATLAS_TEST_TIMEOUT_CHILD_PID", &timeout_child_pid)
         .env("PROJECTATLAS_TEST_ASYNC_RUNTIME", &async_runtime)
         .env("PROJECTATLAS_TEST_ASYNC_CHILD_PID", &async_child_pid)
         .env(

@@ -3,10 +3,10 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "57bfdc98086b361c86f6261744ed2614a9b64ebff4aa22fe5c630f9040c7f057",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "c434ea173efaa7622dacd1e24156c8a3838a41be0b16299aaf077414fb54582d",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "f56144991337cb7697cdf49c602f2afb605c3679c8a0d107a0c9148b0eb04219",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "5fa2cc6be3575c21347ea1f32f715da9e3986fcce8243892c191bb014b442d11",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "72b95317626c27cbe036b8fc02d2749a302347c4fb1f3fb961f1e86d9bcee397",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "8e79ebf6628b010a9ff7eac09276662017752f9294a562cf6a67f8f88a66167d"
     }
   },
@@ -7801,7 +7801,7 @@
       },
       {
         "line": 7393,
-        "text": "        .env(\"PROJECTATLAS_TEST_HANGING_RUNTIME\", &hanging_runtime)"
+        "text": "        .env(\"PROJECTATLAS_TEST_TIMEOUT_RUNTIME\", &timeout_runtime)"
       },
       {
         "line": 7394,
