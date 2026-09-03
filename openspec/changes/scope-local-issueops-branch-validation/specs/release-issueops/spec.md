@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Local candidate branches use owner-scoped checklist authority
-ProjectAtlas SHALL validate one local candidate issue against its live GitHub checklist while comparing every unrelated open mapped task slice with the accepted base. Before content validation, the candidate issue map, every candidate-local mapped task file, and every linked architecture document SHALL be tracked regular files in the submitted candidate tree; linked architecture documents SHALL additionally be Markdown.
+ProjectAtlas SHALL validate one local candidate issue against its live GitHub checklist while comparing every unrelated open mapped task slice with the accepted base. Before content validation, the candidate issue map, every candidate-local mapped task file, and every linked architecture document SHALL be tracked regular files in the submitted candidate tree; linked architecture documents SHALL additionally be Markdown. Candidate validation SHALL parse each of those inputs from the exact UTF-8 blob in the submitted candidate tree rather than from mutable worktree bytes.
 
 #### Scenario: Independent live progress does not invalidate a candidate
 - **WHEN** the candidate owner's local tasks match its live issue and an unrelated issue's live tasks have advanced beyond the accepted base
@@ -14,6 +14,10 @@ ProjectAtlas SHALL validate one local candidate issue against its live GitHub ch
 #### Scenario: Candidate changes an unrelated slice
 - **WHEN** the candidate changes an unrelated open issue's task slice from the accepted base
 - **THEN** validation fails even if that unrelated slice happens to match mutable live state
+
+#### Scenario: Candidate worktree bytes differ through a clean/smudge filter
+- **WHEN** a candidate's tracked issue-map, mapped task, or linked architecture document has clean worktree bytes that differ from its submitted tree blob while ordinary Git status remains clean
+- **THEN** candidate validation uses the submitted blob bytes and does not approve or parse the smudged worktree content
 
 ### Requirement: Candidate ownership and base authority fail closed
 ProjectAtlas SHALL require exactly one mapped open owning issue and a readable accepted base for local candidate validation.

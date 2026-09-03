@@ -602,10 +602,17 @@ def validate_unique_issue_ownership(
             issue_owners[owner.issue] = change
 
 
-def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
-    path = Path(path)
-    with path.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
+def parse_issue_map_payload(
+    payload: object,
+    source: str | Path,
+    *,
+    candidate_change_names: set[str] | None = None,
+) -> dict[str, tuple[Owner, ...]]:
+    """Parse one issue-map payload from an explicitly selected authority."""
+
+    path = Path(source)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
     if payload.get("schema_version") != 2:
         raise SystemExit(f"{path} must use schema_version 2")
     changes = payload.get("changes", {})
@@ -646,12 +653,18 @@ def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
             raise SystemExit(f"{path} primary issue for {change} must own the first range")
         mapped[str(change)] = tuple(parsed)
 
-    changes_dir = path.parent / "changes"
-    if changes_dir.exists():
-        missing = sorted(
+    if candidate_change_names is None:
+        changes_dir = path.parent / "changes"
+        change_names = {
             child.name
             for child in changes_dir.iterdir()
-            if child.is_dir() and (child / "tasks.md").exists() and child.name not in mapped
+            if child.is_dir() and (child / "tasks.md").exists()
+        } if changes_dir.exists() else set()
+    else:
+        change_names = candidate_change_names
+    if change_names:
+        missing = sorted(
+            change for change in change_names if change not in mapped
         )
         if missing:
             raise SystemExit(
@@ -659,6 +672,29 @@ def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
             )
     validate_unique_issue_ownership(path, mapped)
     return mapped
+
+
+def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
+    path = Path(path)
+    with path.open(encoding="utf-8") as handle:
+        return parse_issue_map_text(handle.read(), path)
+
+
+def parse_issue_map_text(
+    text: str,
+    source: str | Path,
+    *,
+    candidate_change_names: set[str] | None = None,
+) -> dict[str, tuple[Owner, ...]]:
+    """Decode and validate issue-map text from one selected authority."""
+
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"{source} is not valid JSON") from error
+    return parse_issue_map_payload(
+        payload, source, candidate_change_names=candidate_change_names
+    )
 
 
 def issue_payload(
@@ -1117,27 +1153,27 @@ def planned_issue_failures(
     return failures
 
 
-def candidate_tree_contains_regular_file(candidate_tree_ref: str, path: str) -> bool:
-    """Require one exact regular-file entry before reading its worktree copy."""
+def candidate_tree_blob_oid(candidate_tree_ref: str, path: str) -> str | None:
+    """Return one exact regular-file blob from the selected candidate tree."""
 
     try:
         path_bytes = path.encode("utf-8")
         if b"\0" in path_bytes:
-            return False
+            return None
         output = run(
             ["git", "ls-tree", "-z", candidate_tree_ref, "--", path],
             raw_output=True,
         )
     except (OSError, SystemExit, UnicodeEncodeError, ValueError, subprocess.SubprocessError):
-        return False
+        return None
     if not isinstance(output, bytes):
-        return False
+        return None
     records = output.split(b"\0")
     if len(records) != 2 or records[1] != b"":
-        return False
+        return None
     metadata, separator, entry_path = records[0].partition(b"\t")
     fields = metadata.split()
-    return (
+    if not (
         separator == b"\t"
         and entry_path == path_bytes
         and len(fields) == 3
@@ -1145,7 +1181,72 @@ def candidate_tree_contains_regular_file(candidate_tree_ref: str, path: str) -> 
         and fields[1] == b"blob"
         and len(fields[2]) == 40
         and all(byte in b"0123456789abcdefABCDEF" for byte in fields[2])
-    )
+    ):
+        return None
+    return fields[2].decode("ascii")
+
+
+def candidate_tree_change_names(
+    candidate_tree_ref: str, root: Path, issue_map_path: str | Path
+) -> set[str]:
+    """List mapped OpenSpec change names from the candidate tree only."""
+
+    relative = candidate_tree_relative_path(root, issue_map_path)
+    if relative is None:
+        raise SystemExit(
+            f"candidate branch issue-map {issue_map_path!s} is outside repository root {root}"
+        )
+    parent, separator, _ = relative.rpartition("/")
+    changes_path = f"{parent + '/' if separator else ''}changes"
+    try:
+        output = run(
+            ["git", "ls-tree", "-r", "-z", candidate_tree_ref, "--", changes_path],
+            raw_output=True,
+        )
+    except (OSError, SystemExit, subprocess.SubprocessError) as error:
+        raise SystemExit(
+            f"candidate branch OpenSpec changes are unreadable in candidate tree "
+            f"{candidate_tree_ref!r}"
+        ) from error
+    if not isinstance(output, bytes):
+        raise SystemExit("candidate branch OpenSpec changes returned non-binary tree data")
+    records = output.split(b"\0")
+    if not records or records[-1] != b"":
+        raise SystemExit("candidate branch OpenSpec changes returned malformed tree data")
+    prefix = f"{changes_path}/".encode("utf-8")
+    names: set[str] = set()
+    for record in records[:-1]:
+        metadata, separator, entry_path = record.partition(b"\t")
+        fields = metadata.split()
+        if (
+            separator != b"\t"
+            or len(fields) != 3
+            or len(fields[2]) != 40
+            or fields[1] not in {b"blob", b"tree", b"commit"}
+            or not all(byte in b"0123456789abcdefABCDEF" for byte in fields[2])
+            or not fields[0]
+            or not all(byte in b"01234567" for byte in fields[0])
+            or not entry_path.startswith(prefix)
+        ):
+            raise SystemExit("candidate branch OpenSpec changes returned malformed tree data")
+        try:
+            path_text = entry_path.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise SystemExit(
+                "candidate branch OpenSpec changes contain a non-UTF-8 path"
+            ) from error
+        suffix = "/tasks.md"
+        if path_text.endswith(suffix):
+            change = path_text[len(prefix.decode("utf-8")) : -len(suffix)]
+            if change and "/" not in change:
+                names.add(change)
+    return names
+
+
+def candidate_tree_contains_regular_file(candidate_tree_ref: str, path: str) -> bool:
+    """Require one exact regular-file entry in the selected candidate tree."""
+
+    return candidate_tree_blob_oid(candidate_tree_ref, path) is not None
 
 
 def candidate_tree_relative_path(root: Path, path: str | Path) -> str | None:
@@ -1170,33 +1271,35 @@ def candidate_tree_relative_path(root: Path, path: str | Path) -> str | None:
     return "/".join(parts)
 
 
-def candidate_tree_input_failures(
-    root: Path,
-    issue_map_path: str | Path,
-    issue_map: dict[str, tuple[Owner, ...]],
+def candidate_tree_file_text(
     candidate_tree_ref: str,
-) -> list[str]:
-    """Require every mutable candidate IssueOps input to be a tree regular file."""
+    root: Path,
+    path: str | Path,
+    label: str,
+) -> str:
+    """Read UTF-8 bytes directly from one regular file in the candidate tree."""
 
-    paths = [("issue-map", Path(issue_map_path))]
-    paths.extend(
-        (
-            "mapped task file",
-            root / "openspec" / "changes" / change / "tasks.md",
+    relative = candidate_tree_relative_path(root, path)
+    if relative is None:
+        raise SystemExit(
+            f"candidate branch {label} {path!s} is outside repository root {root}"
         )
-        for change in sorted(issue_map)
-    )
-    failures: list[str] = []
-    for label, path in paths:
-        relative = candidate_tree_relative_path(root, path)
-        if relative is None or not candidate_tree_contains_regular_file(
-            candidate_tree_ref, relative
-        ):
-            failures.append(
-                f"candidate branch {label} {path!s} must be a tracked regular file "
-                f"in candidate tree {candidate_tree_ref!r}"
-            )
-    return failures
+    blob_oid = candidate_tree_blob_oid(candidate_tree_ref, relative)
+    if blob_oid is None:
+        raise SystemExit(
+            f"candidate branch {label} {path!s} must be a tracked regular file "
+            f"in candidate tree {candidate_tree_ref!r}"
+        )
+    try:
+        content = run(["git", "cat-file", "blob", blob_oid], raw_output=True)
+        if not isinstance(content, bytes):
+            raise ValueError("git cat-file returned text instead of bytes")
+        return content.decode("utf-8")
+    except (OSError, UnicodeError, ValueError, SystemExit, subprocess.SubprocessError) as error:
+        raise SystemExit(
+            f"candidate branch {label} {path!s} contents are unreadable in "
+            f"candidate tree {candidate_tree_ref!r}"
+        ) from error
 
 
 def architecture_diagram_link_failures(
@@ -1275,19 +1378,21 @@ def architecture_diagram_link_failures(
                     f"in candidate tree {candidate_tree_ref!r}"
                 )
                 continue
-        candidate = docs_root.joinpath(*relative_parts).resolve()
-        try:
-            candidate.relative_to(docs_root)
-        except ValueError:
-            failures.append(
-                f"architecture diagram link {url!r} escapes the local docs directory"
-            )
-            continue
+        candidate = docs_root.joinpath(*relative_parts)
+        if candidate_tree_ref is None:
+            candidate = candidate.resolve()
+            try:
+                candidate.relative_to(docs_root)
+            except ValueError:
+                failures.append(
+                    f"architecture diagram link {url!r} escapes the local docs directory"
+                )
+                continue
         if candidate.suffix.casefold() != ".md":
             failures.append(
                 f"architecture diagram link {url!r} must target a Markdown document"
             )
-        elif not candidate.is_file():
+        elif candidate_tree_ref is None and not candidate.is_file():
             failures.append(
                 f"architecture diagram link {url!r} has no matching local documentation file"
             )
@@ -1297,8 +1402,16 @@ def architecture_diagram_link_failures(
             )
         else:
             try:
-                document = candidate.read_text(encoding="utf-8")
-            except OSError as error:
+                if candidate_tree_ref is None:
+                    document = candidate.read_text(encoding="utf-8")
+                else:
+                    document = candidate_tree_file_text(
+                        candidate_tree_ref,
+                        root,
+                        Path("docs", relative_parts[0]),
+                        "architecture diagram",
+                    )
+            except (OSError, SystemExit) as error:
                 failures.append(
                     f"architecture diagram link {url!r} documentation could not be read: {error}"
                 )
@@ -1588,11 +1701,22 @@ def acceptance_task_failures(
     return failures
 
 
-def local_tasks(root: Path, change: str) -> tuple[Path, list[tuple[bool, str]]]:
+def local_tasks(
+    root: Path,
+    change: str,
+    *,
+    candidate_tree_ref: str | None = None,
+) -> tuple[Path, list[tuple[bool, str]]]:
     path = root / "openspec" / "changes" / change / "tasks.md"
-    if not path.exists():
+    if candidate_tree_ref is None and not path.exists():
         raise SystemExit(f"OpenSpec tasks file missing for {change}: {path}")
-    tasks = parse_tasks(path.read_text(encoding="utf-8"))
+    if candidate_tree_ref is None:
+        text = path.read_text(encoding="utf-8")
+    else:
+        text = candidate_tree_file_text(
+            candidate_tree_ref, root, path, "mapped task file"
+        )
+    tasks = parse_tasks(text)
     if not tasks:
         raise SystemExit(f"OpenSpec tasks file has no checkbox tasks: {path}")
     ids = [task_id(task) for task in tasks]
@@ -1822,7 +1946,13 @@ def check_pull_request_tasks(
     for change, owners in sorted(issue_map.items()):
         if all(issue_states[owner.issue] != "OPEN" for owner in owners):
             continue
-        path, candidate_tasks = local_tasks(root, change)
+        try:
+            path, candidate_tasks = local_tasks(
+                root, change, candidate_tree_ref=candidate_tree_ref
+            )
+        except SystemExit as error:
+            failures.append(str(error))
+            continue
         try:
             candidate_slices = owner_slices(path, candidate_tasks, owners)
         except SystemExit as error:
@@ -2374,6 +2504,8 @@ Mitigations:
             "issue_state_payloads",
             "load_issue_map",
             "candidate_tree_contains_regular_file",
+            "candidate_tree_change_names",
+            "candidate_tree_file_text",
             "check_pull_request_tasks",
             "check_candidate_tasks",
             "check_openspec_tasks",
@@ -2405,6 +2537,10 @@ Mitigations:
         ]
         globals()["load_issue_map"] = lambda _path, **_kwargs: {}
         globals()["candidate_tree_contains_regular_file"] = lambda *_args: True
+        globals()["candidate_tree_change_names"] = lambda *_args: set()
+        globals()["candidate_tree_file_text"] = lambda *_args: (
+            '{"schema_version": 2, "changes": {}}'
+        )
         globals()["check_pull_request_tasks"] = lambda *_args, **kwargs: (
             pull_request_issue_map_paths.append(kwargs["issue_map_path"]) or []
         )
@@ -2802,6 +2938,9 @@ Timeout --> Recovery
                 b"docs/architecture.md\0"
             )
         }
+        tree_content = (
+            b"## Target View\n\n```mermaid\nflowchart LR\nA --> B\n```\n"
+        )
 
         def tree_run(args: list[str], *, raw_output: bool = False) -> str | bytes:
             if len(args) > 1 and args[1] == "ls-tree":
@@ -2809,6 +2948,8 @@ Timeout --> Recovery
                 if output is None:
                     raise SystemExit("synthetic git ls-tree failure")
                 return output
+            if len(args) > 1 and args[1] == "cat-file":
+                return tree_content
             return saved_run(args)
 
         globals()["run"] = tree_run
@@ -2834,6 +2975,9 @@ Timeout --> Recovery
                 b"100644 blob 0123456789012345678901234567890123456789\t"
                 b"docs/caf\xc3\xa9.md\0"
             )
+            tree_content = (
+                b"## Target View\n\n```mermaid\nflowchart LR\nA --> B\n```\n"
+            )
             assert (
                 architecture_diagram_link_failures(
                     unicode_link,
@@ -2843,6 +2987,22 @@ Timeout --> Recovery
                 )
                 == []
             )
+            tree_output["value"] = (
+                b"100644 blob 0123456789012345678901234567890123456789\t"
+                b"openspec/changes/active/tasks.md\0"
+            )
+            assert candidate_tree_change_names(
+                "candidate", architecture_root, "openspec/issue-map.json"
+            ) == {"active"}
+            tree_output["value"] = b"malformed tree entry\0"
+            try:
+                candidate_tree_change_names(
+                    "candidate", architecture_root, "openspec/issue-map.json"
+                )
+            except SystemExit as error:
+                assert "malformed tree data" in str(error)
+            else:
+                raise AssertionError("malformed candidate tree changes were accepted")
             for output in (
                 (
                     b"120000 blob 0123456789012345678901234567890123456789\t"
@@ -4359,29 +4519,23 @@ def main() -> None:
         raise SystemExit("--candidate-local-oid requires --candidate-issue")
     if args.pull_request is None and args.candidate_issue is None and args.base:
         raise SystemExit("--base requires --pull-request or --candidate-issue")
-    if args.candidate_issue is not None:
-        candidate_tree_path = candidate_tree_relative_path(root, args.issue_map)
-        if candidate_tree_path is None or not candidate_tree_contains_regular_file(
-            args.candidate_local_oid, candidate_tree_path
-        ):
-            raise SystemExit(
-                f"candidate branch issue-map {args.issue_map} must be a tracked regular file "
-                f"in candidate tree {args.candidate_local_oid!r}"
-            )
     failures: list[str] = []
-    issue_map = load_issue_map(args.issue_map)
     if args.candidate_issue is not None:
-        candidate_input_failures = candidate_tree_input_failures(
-            root,
-            args.issue_map,
-            issue_map,
-            args.candidate_local_oid,
+        candidate_change_names = candidate_tree_change_names(
+            args.candidate_local_oid, root, args.issue_map
         )
-        if candidate_input_failures:
-            print("\nIssue checklist validation failed:", file=sys.stderr)
-            for failure in candidate_input_failures:
-                print(f"- {failure}", file=sys.stderr)
-            raise SystemExit(1)
+        issue_map = parse_issue_map_text(
+            candidate_tree_file_text(
+                args.candidate_local_oid,
+                root,
+                args.issue_map,
+                "issue-map",
+            ),
+            args.issue_map,
+            candidate_change_names=candidate_change_names,
+        )
+    else:
+        issue_map = load_issue_map(args.issue_map)
     pull_request_owner = None
     pull_request_owner_error = None
     planned_issue_payload = None

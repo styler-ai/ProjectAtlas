@@ -10757,7 +10757,34 @@ Mitigations:
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
-  *" --owner-from-commits "*|*" --candidate-issue "*) exec python "$@" ;;
+  *" --owner-from-commits "*) exec python "$@" ;;
+  *" --candidate-issue "*) exec python -c '
+import os
+import json
+import pathlib
+import sys
+import types
+
+script = sys.argv[1]
+sys.argv = sys.argv[1:]
+module = types.ModuleType("issue_checklists_fixture")
+module.__file__ = script
+sys.modules[module.__name__] = module
+exec(compile(pathlib.Path(script).read_bytes(), script, "exec"), module.__dict__, module.__dict__)
+module.__dict__["gh_json"] = lambda _args: json.loads(
+    pathlib.Path(os.environ["PROJECTATLAS_ISSUE_PAYLOAD"]).read_text(encoding="utf-8")
+)
+module.__dict__["gh_api_json"] = lambda _args: json.loads(
+    "[{\"data\":{\"repository\":{\"issues\":{\"nodes\":[{\"number\":549,\"state\":\"OPEN\",\"labels\":{\"totalCount\":1,\"nodes\":[{\"name\":\"complexity:medium\"}]},\"milestone\":{\"title\":\"v0.5.0-00\"}}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}]"
+)
+def fake_mermaid(diagram):
+    outcome = module.__dict__["MermaidValidationOutcome"]
+    return outcome.INVALID if "not-mermaid" in diagram else outcome.VALID
+
+module.__dict__["_run_mermaid_parser"] = fake_mermaid
+module.__dict__["mermaid_syntax_is_valid"].cache_clear()
+module.__dict__["main"]()
+' "$@" ;;
 esac
 exit 0
 "#;
@@ -11039,6 +11066,111 @@ exit 0
     {
         return Err(io::Error::other(format!(
             "mode-120000 mapped task file was not rejected before scoped IssueOps:\nstderr={task_stderr}\ndispatch={task_dispatch}"
+        ))
+        .into());
+    }
+
+    fs::write(
+        &linked_document,
+        "## Issue task authority\n\n```mermaid\nflowchart LR\nCOMMITTED --> B\n```\n",
+    )?;
+    let linked_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", LINKED_DOCUMENT_RELATIVE_PATH])
+        .output()?;
+    if !linked_blob_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture document blob lookup failed").into());
+    }
+    let linked_blob = String::from_utf8(linked_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{linked_blob},{LINKED_DOCUMENT_RELATIVE_PATH}"),
+        ],
+    )?;
+    let task_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", ISSUEOPS_TASKS_RELATIVE_PATH])
+        .output()?;
+    if !task_blob_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture task blob lookup failed").into());
+    }
+    let task_blob = String::from_utf8(task_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    git_success(
+        &fixture_repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{task_blob},{ISSUEOPS_TASKS_RELATIVE_PATH}"),
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
+        &[
+            "config",
+            "filter.issueops-clean-smudge.clean",
+            "sed 's/WORKTREE/COMMITTED/g; s/not-mermaid/flowchart LR/'",
+        ],
+    )?;
+    git_success(
+        &fixture_repo,
+        &[
+            "config",
+            "filter.issueops-clean-smudge.smudge",
+            "sed 's/COMMITTED/WORKTREE/g; s/flowchart LR/not-mermaid/'",
+        ],
+    )?;
+    fs::write(
+        fixture_repo.join(".gitattributes"),
+        "docs/ignored.md filter=issueops-clean-smudge\n",
+    )?;
+    git_success(&fixture_repo, &["add", ".gitattributes"])?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate clean smudge inputs (#549)"],
+    )?;
+    fs::remove_file(&linked_document)?;
+    git_success(
+        &fixture_repo,
+        &["checkout", "--", LINKED_DOCUMENT_RELATIVE_PATH],
+    )?;
+    let filtered_document = fs::read_to_string(&linked_document)?;
+    if !filtered_document.contains("not-mermaid") || !filtered_document.contains("WORKTREE") {
+        return Err(io::Error::other(
+            "clean/smudge fixture did not produce distinct filtered worktree bytes",
+        )
+        .into());
+    }
+    let filtered_status_output = git_command_for_root(&fixture_repo)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()?;
+    if !filtered_status_output.status.success() || !filtered_status_output.stdout.is_empty() {
+        return Err(io::Error::other(format!(
+            "clean/smudge fixture did not preserve clean Git status: stdout={} stderr={}",
+            String::from_utf8_lossy(&filtered_status_output.stdout),
+            String::from_utf8_lossy(&filtered_status_output.stderr),
+        ))
+        .into());
+    }
+    let filtered_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !filtered_head_output.status.success() {
+        return Err(io::Error::other("clean/smudge fixture HEAD lookup failed").into());
+    }
+    let filtered_head = String::from_utf8(filtered_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (filtered_status, filtered_stderr, filtered_dispatch) = run_candidate_hook(&filtered_head)?;
+    if !filtered_status || !filtered_dispatch.contains("--candidate-issue 549") {
+        return Err(io::Error::other(format!(
+            "candidate validation did not use submitted clean/smudge tree bytes:\nstatus={filtered_status}\nstderr={filtered_stderr}\ndispatch={filtered_dispatch}"
         ))
         .into());
     }

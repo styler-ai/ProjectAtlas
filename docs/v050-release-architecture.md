@@ -19,7 +19,7 @@ flowchart LR
     Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
     MainTarget --> Global[Global live-state validation]
     CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
-    CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes; no hidden flags; issue map, mapped tasks, and linked docs are tracked regular files in candidate tree"]
+    CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes; no hidden flags; issue map, mapped tasks, and linked docs are regular candidate-tree files read from their blobs"]
     CandidateClean --> Candidate[Local candidate branch]
     Candidate --> CandidateOwner["Each post-base subject has one same-owner (#NNN) reference"]
     Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
