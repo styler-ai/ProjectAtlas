@@ -64,6 +64,13 @@ The `pr-state` concurrency namespace is separate from source CI and automatic
 cancellation is disabled, so metadata activity cannot cancel useful
 compilation, tests, another state check, or an IssueOps run.
 
+This deliberately supersedes #299's Codex-only GraphQL polling gate. Native
+conversation resolution applies to every review conversation, including human
+threads; that stronger rule matches the repository requirement to disposition
+all actionable review feedback and is the smallest gate whose state changes
+immediately when a thread is resolved or reopened. The obsolete polling script
+and its workflow step are removed rather than retained as duplicate authority.
+
 The existing code workflow remains the source-verification owner and runs for
 pull-request source changes, protected-branch pushes, merge-group candidates
 when enabled, and explicit dispatch. Splitting the workflows is the smallest
@@ -264,6 +271,10 @@ representation is sufficient; no second task store, hash, or receipt is added.
   native required-conversation-resolution rule instead of polling or an
   Actions event that does not exist; verify both resolve and reopen behavior
   during the controlled branch-protection transition.
+- **The native rule broadens the former Codex-only gate to human threads.** ->
+  Make that compatibility change explicit, remove the superseded custom gate,
+  and prove unresolved and resolved human and Codex conversations in hosted
+  branch protection.
 - **Parallel execution spends runner time when an early quality check fails.**
   -> Prefer lower merge latency for valid changes, cancel superseded source
   runs, and measure runner-minutes; do not add speculative stage barriers.

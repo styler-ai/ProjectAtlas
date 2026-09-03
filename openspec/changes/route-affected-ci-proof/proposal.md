@@ -20,7 +20,7 @@ ProjectAtlas currently spends roughly 29-47 minutes of pull-request wall time an
 
 ### Modified Capabilities
 
-None.
+- `codex-pr-review-thread-gate`: Replace the stale Codex-only Actions polling gate with GitHub native required conversation resolution for every pull-request review conversation.
 
 ## Non-Goals
 
@@ -32,4 +32,4 @@ None.
 
 ## Impact
 
-The change affects the ordinary CI workflow, its required-context migration, one standard-library planner/self-test, the existing IssueOps and workflow-policy self-tests, and the owning architecture documentation. It builds on #487's responsibility-coherent CLI E2E targets, preserves #366's input-equivalent release-proof reuse, and applies #341's measured-materiality rule without extending its cache design. It changes no product runtime, crate dependency, database schema, public CLI/MCP behavior, package, or release artifact. Issue #555 is a direct `v0.5.0-00` child of release owner #492 and is blocked only by completed #487 so the acceleration lands before the remaining release issues.
+The change affects the ordinary CI workflow, local pre-push, branch protection, its required-context migration, one standard-library planner/self-test, removal of the superseded Codex-only polling script, the existing IssueOps and workflow-policy self-tests, and the owning architecture documentation. It builds on #487's responsibility-coherent CLI E2E targets, preserves #366's input-equivalent release-proof reuse, and applies #341's measured-materiality rule without extending its cache design. It changes no product runtime, crate dependency, database schema, public CLI/MCP behavior, package, or release artifact. Issue #555 is a direct `v0.5.0-00` child of release owner #492 and is blocked only by completed #487 so the acceleration lands before the remaining release issues.
