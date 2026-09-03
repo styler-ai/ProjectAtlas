@@ -1148,6 +1148,57 @@ def candidate_tree_contains_regular_file(candidate_tree_ref: str, path: str) -> 
     )
 
 
+def candidate_tree_relative_path(root: Path, path: str | Path) -> str | None:
+    """Return a safe lexical repository path without following worktree links."""
+
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.absolute().relative_to(root.absolute())
+        except ValueError:
+            return None
+    parts = candidate.parts
+    if not parts or any(
+        part in {"", ".", ".."}
+        or "\0" in part
+        or "/" in part
+        or "\\" in part
+        or ":" in part
+        for part in parts
+    ):
+        return None
+    return "/".join(parts)
+
+
+def candidate_tree_input_failures(
+    root: Path,
+    issue_map_path: str | Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    candidate_tree_ref: str,
+) -> list[str]:
+    """Require every mutable candidate IssueOps input to be a tree regular file."""
+
+    paths = [("issue-map", Path(issue_map_path))]
+    paths.extend(
+        (
+            "mapped task file",
+            root / "openspec" / "changes" / change / "tasks.md",
+        )
+        for change in sorted(issue_map)
+    )
+    failures: list[str] = []
+    for label, path in paths:
+        relative = candidate_tree_relative_path(root, path)
+        if relative is None or not candidate_tree_contains_regular_file(
+            candidate_tree_ref, relative
+        ):
+            failures.append(
+                f"candidate branch {label} {path!s} must be a tracked regular file "
+                f"in candidate tree {candidate_tree_ref!r}"
+            )
+    return failures
+
+
 def architecture_diagram_link_failures(
     section: str,
     repo: str,
@@ -2322,6 +2373,7 @@ Mitigations:
             "pull_request_payload",
             "issue_state_payloads",
             "load_issue_map",
+            "candidate_tree_contains_regular_file",
             "check_pull_request_tasks",
             "check_candidate_tasks",
             "check_openspec_tasks",
@@ -2352,6 +2404,7 @@ Mitigations:
             for number, payload in complexity_payloads.items()
         ]
         globals()["load_issue_map"] = lambda _path, **_kwargs: {}
+        globals()["candidate_tree_contains_regular_file"] = lambda *_args: True
         globals()["check_pull_request_tasks"] = lambda *_args, **kwargs: (
             pull_request_issue_map_paths.append(kwargs["issue_map_path"]) or []
         )
@@ -4284,8 +4337,6 @@ def main() -> None:
         raise SystemExit("--repo is required unless --self-test is used")
 
     root = Path(args.root)
-    failures: list[str] = []
-    issue_map = load_issue_map(args.issue_map)
     scoped_dispatches = sum(
         value is not None
         for value in (args.pull_request, args.planned_issue, args.candidate_issue)
@@ -4308,6 +4359,29 @@ def main() -> None:
         raise SystemExit("--candidate-local-oid requires --candidate-issue")
     if args.pull_request is None and args.candidate_issue is None and args.base:
         raise SystemExit("--base requires --pull-request or --candidate-issue")
+    if args.candidate_issue is not None:
+        candidate_tree_path = candidate_tree_relative_path(root, args.issue_map)
+        if candidate_tree_path is None or not candidate_tree_contains_regular_file(
+            args.candidate_local_oid, candidate_tree_path
+        ):
+            raise SystemExit(
+                f"candidate branch issue-map {args.issue_map} must be a tracked regular file "
+                f"in candidate tree {args.candidate_local_oid!r}"
+            )
+    failures: list[str] = []
+    issue_map = load_issue_map(args.issue_map)
+    if args.candidate_issue is not None:
+        candidate_input_failures = candidate_tree_input_failures(
+            root,
+            args.issue_map,
+            issue_map,
+            args.candidate_local_oid,
+        )
+        if candidate_input_failures:
+            print("\nIssue checklist validation failed:", file=sys.stderr)
+            for failure in candidate_input_failures:
+                print(f"- {failure}", file=sys.stderr)
+            raise SystemExit(1)
     pull_request_owner = None
     pull_request_owner_error = None
     planned_issue_payload = None

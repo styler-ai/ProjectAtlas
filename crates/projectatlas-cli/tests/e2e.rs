@@ -10904,38 +10904,141 @@ exit 0
         )
     };
     write_executable_script(&fake_path.join(git_stub_name), &git_stub)?;
-    fs::write(&dispatch_log, "")?;
-    let mut symlink_command = StdCommand::new(&shell);
-    symlink_command
-        .current_dir(&fixture_repo)
-        .arg(&hook)
-        .env("PATH", &test_path)
-        .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
-        .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut symlink_child = symlink_command.spawn()?;
-    symlink_child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("symlink-tree hook stdin was not piped"))?
-        .write_all(
-            format!(
-                "refs/heads/feature {symlink_head} refs/heads/feature 2222222222222222222222222222222222222222\n"
-            )
-            .as_bytes(),
-        )?;
-    let symlink_output = symlink_child.wait_with_output()?;
-    let symlink_dispatch = fs::read_to_string(&dispatch_log)?;
-    let symlink_stderr = String::from_utf8_lossy(&symlink_output.stderr);
-    if symlink_output.status.success()
+    let run_candidate_hook = |head: &str| -> Result<(bool, String, String), Box<dyn Error>> {
+        fs::write(&dispatch_log, "")?;
+        let mut command = StdCommand::new(&shell);
+        command
+            .current_dir(&fixture_repo)
+            .arg(&hook)
+            .env("PATH", &test_path)
+            .env("PROJECTATLAS_HOOK_DISPATCH_LOG", &dispatch_log)
+            .env("PROJECTATLAS_ISSUE_PAYLOAD", &issue_payload)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("candidate hook stdin was not piped"))?
+            .write_all(
+                format!(
+                    "refs/heads/feature {head} refs/heads/feature 2222222222222222222222222222222222222222\n"
+                )
+                .as_bytes(),
+            )?;
+        let output = child.wait_with_output()?;
+        Ok((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            fs::read_to_string(&dispatch_log)?,
+        ))
+    };
+    let (symlink_status, symlink_stderr, symlink_dispatch) = run_candidate_hook(&symlink_head)?;
+    if symlink_status
         || !symlink_stderr.contains("has no tracked regular Markdown file")
         || !symlink_dispatch.contains("--candidate-issue 549")
     {
         return Err(io::Error::other(format!(
-            "mode-120000 linked document was not rejected before worktree content validation:\nstdout={}\nstderr={symlink_stderr}\ndispatch={symlink_dispatch}",
-            String::from_utf8_lossy(&symlink_output.stdout),
+            "mode-120000 linked document was not rejected before worktree content validation:\nstderr={symlink_stderr}\ndispatch={symlink_dispatch}",
+        ))
+        .into());
+    }
+
+    let issue_map_relative_path = format!("{OPENSPEC_DIR_NAME}/{ISSUE_MAP_FILE_NAME}");
+    let issue_map_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", &issue_map_relative_path])
+        .output()?;
+    if !issue_map_blob_output.status.success() {
+        return Err(io::Error::other("issue-map tree fixture blob lookup failed").into());
+    }
+    let issue_map_blob = String::from_utf8(issue_map_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let issue_map_cacheinfo = format!("120000,{issue_map_blob},{issue_map_relative_path}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &issue_map_cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate issue map (#549)"],
+    )?;
+    let issue_map_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !issue_map_head_output.status.success() {
+        return Err(io::Error::other("issue-map tree fixture HEAD lookup failed").into());
+    }
+    let issue_map_head = String::from_utf8(issue_map_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (issue_map_status, issue_map_stderr, issue_map_dispatch) =
+        run_candidate_hook(&issue_map_head)?;
+    if issue_map_status
+        || !issue_map_stderr.contains("candidate branch issue-map")
+        || !issue_map_stderr.contains("tracked regular file")
+        || issue_map_dispatch.contains("gh issue")
+        || issue_map_dispatch.contains("gh api")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 issue map was not rejected before scoped IssueOps:\nstderr={issue_map_stderr}\ndispatch={issue_map_dispatch}"
+        ))
+        .into());
+    }
+
+    let issue_map_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", &issue_map_relative_path])
+        .output()?;
+    if !issue_map_blob_output.status.success() {
+        return Err(io::Error::other("issue-map restore blob lookup failed").into());
+    }
+    let issue_map_blob = String::from_utf8(issue_map_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let issue_map_cacheinfo = format!("100644,{issue_map_blob},{issue_map_relative_path}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &issue_map_cacheinfo],
+    )?;
+    git_success(&fixture_repo, &["commit", "-m", "restore issue map (#549)"])?;
+
+    let task_blob_output = git_command_for_root(&fixture_repo)
+        .args(["hash-object", "-w", ISSUEOPS_TASKS_RELATIVE_PATH])
+        .output()?;
+    if !task_blob_output.status.success() {
+        return Err(io::Error::other("mapped-task tree fixture blob lookup failed").into());
+    }
+    let task_blob = String::from_utf8(task_blob_output.stdout)?
+        .trim()
+        .to_owned();
+    let task_cacheinfo = format!("120000,{task_blob},{ISSUEOPS_TASKS_RELATIVE_PATH}");
+    git_success(
+        &fixture_repo,
+        &["update-index", "--add", "--cacheinfo", &task_cacheinfo],
+    )?;
+    git_success(
+        &fixture_repo,
+        &["commit", "-m", "candidate mapped tasks (#549)"],
+    )?;
+    let task_head_output = git_command_for_root(&fixture_repo)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !task_head_output.status.success() {
+        return Err(io::Error::other("mapped-task tree fixture HEAD lookup failed").into());
+    }
+    let task_head = String::from_utf8(task_head_output.stdout)?
+        .trim()
+        .to_owned();
+    let (task_status, task_stderr, task_dispatch) = run_candidate_hook(&task_head)?;
+    if task_status
+        || !task_stderr.contains("candidate branch mapped task file")
+        || !task_stderr.contains("tracked regular file")
+        || task_dispatch.contains("gh issue")
+        || task_dispatch.contains("gh api")
+    {
+        return Err(io::Error::other(format!(
+            "mode-120000 mapped task file was not rejected before scoped IssueOps:\nstderr={task_stderr}\ndispatch={task_dispatch}"
         ))
         .into());
     }

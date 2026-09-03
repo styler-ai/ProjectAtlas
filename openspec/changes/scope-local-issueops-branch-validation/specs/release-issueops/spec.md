@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Local candidate branches use owner-scoped checklist authority
-ProjectAtlas SHALL validate one local candidate issue against its live GitHub checklist while comparing every unrelated open mapped task slice with the accepted base. Before content validation, every linked architecture document SHALL be a tracked regular Markdown file in the submitted candidate tree.
+ProjectAtlas SHALL validate one local candidate issue against its live GitHub checklist while comparing every unrelated open mapped task slice with the accepted base. Before content validation, the candidate issue map, every candidate-local mapped task file, and every linked architecture document SHALL be tracked regular files in the submitted candidate tree; linked architecture documents SHALL additionally be Markdown.
 
 #### Scenario: Independent live progress does not invalidate a candidate
 - **WHEN** the candidate owner's local tasks match its live issue and an unrelated issue's live tasks have advanced beyond the accepted base
@@ -68,6 +68,10 @@ ProjectAtlas SHALL select global checklist validation when any pre-push update t
 #### Scenario: Candidate links a non-regular tree entry
 - **WHEN** a candidate issue links an architecture document whose submitted candidate tree entry is a non-regular mode such as `120000`
 - **THEN** pre-push fails closed before reading the worktree path or approving scoped IssueOps
+
+#### Scenario: Candidate IssueOps inputs are non-regular tree entries
+- **WHEN** the submitted candidate tree marks the issue map or a mapped task file as a non-regular entry such as `120000`
+- **THEN** pre-push fails closed before reading the worktree input or approving scoped IssueOps
 
 #### Scenario: Main and candidate refs are pushed together
 - **WHEN** one pre-push update targets `refs/heads/main` and another targets a non-main branch
