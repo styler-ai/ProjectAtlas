@@ -1,4 +1,5 @@
 //! Purpose: Validate compatibility behavior for legacy source purpose metadata.
+//! Measurement-only CLI test-domain change; removed before merge.
 
 use assert_cmd::Command;
 use predicates::prelude::*;

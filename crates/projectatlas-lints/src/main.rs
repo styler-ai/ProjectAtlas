@@ -1,6 +1,5 @@
 //! Purpose: Enforce `ProjectAtlas` source-code policy beyond built-in Clippy lints.
 //! Cargo-adjacent lint gate for `ProjectAtlas`-specific Rust contracts.
-//! Measurement-only leaf-crate change; removed before merge.
 
 use proc_macro2::{TokenStream, TokenTree};
 use regex::Regex;
