@@ -477,15 +477,15 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli --test e2e_delivery posix_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture
 
-      - name: Windows release asset failure regressions
+      - name: Windows release asset checksum failure regression
         if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
         timeout-minutes: 5
-        shell: pwsh
-        run: |
-          cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_only_rejects_invalid_runtime_without_fallback -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture
+
+      - name: Windows release asset runtime failure regression
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_only_rejects_invalid_runtime_without_fallback -- --exact --nocapture
 
       - name: Graph, symbol, purpose, and viewport regressions
         if: contains(matrix.contracts, 'navigation')

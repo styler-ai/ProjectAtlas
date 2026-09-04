@@ -19378,13 +19378,13 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 485,
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture"
+      "line": 483,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 487,
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_only_rejects_invalid_runtime_without_fallback -- --exact --nocapture"
+      "line": 488,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_only_rejects_invalid_runtime_without_fallback -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
