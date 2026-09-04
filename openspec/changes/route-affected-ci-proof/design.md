@@ -267,17 +267,17 @@ a fifteen-minute design ceiling. If runner queueing or an indivisible causal
 job prevents a target, the implementation records the measured cause and
 keeps the proof; it does not omit a test to make the number green. The current
 29-48 minute wall and 53-75 raw runner-minute ranges are the before baseline.
-Raw runner-minutes below sum non-skipped source-workflow job durations; the
-separate required `pr-state` workflow completed in 7-32 seconds and never
-launched source work.
+Raw runner-minutes below sum every non-skipped source-workflow job plus the
+matching required `pr-state` job; skipped `refresh-pr-state` jobs contribute
+zero and no metadata workflow launches source work.
 
 | Change class | Required-check wall after routing | Raw runner-minutes after routing | Disposition |
 | --- | ---: | ---: | --- |
-| Documentation-only | 0:48 | 0.97 | Retained: at least 97% less wall time and 98% fewer runner-minutes than the best baseline. |
+| Documentation-only | 0:49 | 1.35 | Retained: at least 97% less wall time and 97% fewer runner-minutes than the best baseline. |
 | Eligible independent leaf crate | N/A | N/A | No eligible live production path exists: the Cargo-leaf lint crate has only `src/main.rs`, whose target predicates make exact-source classification select complete fallback. No synthetic file or hosted run was created. |
-| CLI test/domain | 2:49 | 3.07 | Retained: at least 90% less wall time and 94% fewer runner-minutes than the best baseline while running only its owning Rust, repository, and test-domain proof. |
-| Shared core / complete fallback | 12:10 | 45.05 | Retained for safety: the identical complete plan used by shared-core, unknown, and workflow-authority changes is at least 58% faster in wall time and inside the 15-minute ceiling. Raw cost improved only 15% against the best baseline, so no material raw-cost claim is made. |
-| Platform-sensitive | 13:40 | 21.90 | Retained: the corrected narrow plan ran only repository policy, the owning Rust target, macOS Intel/ARM, and the aggregate. It improved wall time by at least 52% and raw runner time by at least 58%, stayed inside the 15-minute ceiling, and identified macOS Intel at 13:08 as the limiter. The earlier failed narrow run caught the Bash 3.2 defect. |
+| CLI test/domain | 2:49 | 3.40 | Retained: at least 90% less wall time and 93% fewer runner-minutes than the best baseline while running only its owning Rust, repository, and test-domain proof. |
+| Shared core / complete fallback | 12:10 | 45.30 | Retained for safety: the identical complete plan used by shared-core, unknown, and workflow-authority changes is at least 58% faster in wall time and inside the 15-minute ceiling. Raw cost improved only 14% against the best baseline, so no material raw-cost claim is made. |
+| Platform-sensitive | 13:40 | 22.17 | Retained: the corrected narrow plan ran only repository policy, the owning Rust target, macOS Intel/ARM, and the aggregate. It improved wall time by at least 52% and raw runner time by at least 58%, stayed inside the 15-minute ceiling, and identified macOS Intel at 13:08 as the limiter. The earlier failed narrow run caught the Bash 3.2 defect. |
 
 One earlier complete activation run reached 15:22 because its Windows owner took
 15:00, exceeding the ceiling by 22 seconds; the unchanged complete-plan
