@@ -781,12 +781,15 @@ def pr_state_refreshes(
         raise SystemExit("open pull-request inventory reached the refresh bound")
     refreshes = []
     for pull_request in pull_requests:
-        if pull_request.get("baseRefName") not in ("main", "dev"):
-            continue
         owners = referenced_issue_numbers(
             repo, pull_request.get("title"), pull_request.get("body")
         )
         if issue_number not in owners:
+            continue
+        base = pull_request.get("baseRefName")
+        if not isinstance(base, str) or not base:
+            raise SystemExit("GitHub returned an invalid pull-request base branch")
+        if base not in ("main", "dev"):
             continue
         number = pull_request.get("number")
         head = pull_request.get("headRefOid")
@@ -2607,6 +2610,17 @@ Mitigations:
         {"number": 600, "head": "a" * 40},
         {"number": 602, "head": "a" * 40},
     ]
+    for invalid_base in (None, 3, ""):
+        try:
+            pr_state_refreshes(
+                "owner/repo",
+                517,
+                [{**refresh_pr, "baseRefName": invalid_base}],
+            )
+        except SystemExit as error:
+            assert "invalid pull-request base branch" in str(error)
+        else:
+            raise AssertionError("an invalid pull-request base branch was skipped")
     assert matching_pr_state_run(
         600,
         "a" * 40,
