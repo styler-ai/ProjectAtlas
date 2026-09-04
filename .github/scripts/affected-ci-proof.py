@@ -687,7 +687,7 @@ def plan_changes(
             cargo_dependency=cargo_dependency,
         )
 
-    repository = {"issueops", "mermaid"}
+    repository = {"issueops", "mermaid", "source-policy"}
     packages: set[str] = set()
     production_packages: set[str] = set()
     test_targets: set[str] = set()
@@ -764,7 +764,6 @@ def plan_changes(
                     test_targets.update(owning_tests)
                     for target in owning_tests:
                         test_platform_owners(target, platforms)
-                    repository.add("source-policy")
                     platform_owners(path, platforms, source_platforms.get(path, ()))
                     reasons.append(f"Cargo package {owner} owns {path}")
                 else:
@@ -772,7 +771,6 @@ def plan_changes(
                     break
                 continue
             if path.startswith("plugins/"):
-                repository.add("source-policy")
                 owning_tests = ["e2e_delivery"]
                 if path in INSTALLER_SCRIPT_PATHS:
                     owning_tests.append("installer_trust_boundaries")
@@ -911,7 +909,7 @@ def decision_reason(plan: dict[str, object], contract: str, selected: bool) -> s
     repository_rules = {
         "issueops": "ordinary change requires mapped issue-state consistency",
         "mermaid": "IssueOps architecture links require the locked Mermaid parser",
-        "source-policy": "affected production source or installer owns source policy",
+        "source-policy": "every affected tracked change owns repository-wide source policy",
         "dependency-audit": "Mermaid dependency manifest changed or drift proof was requested",
         "cargo-dependency": "Cargo dependency manifest changed or drift proof was requested",
         "benchmark-policy": "benchmark documentation or complete fallback owns benchmark policy",
@@ -1058,8 +1056,8 @@ def self_test() -> None:
         changes=[Change("M", ("docs/readme.md",))],
         graph=graph,
     )
-    assert plan["jobs"] == {"repository": True, "rust": False, "platform": False}
-    assert plan["repository_contracts"] == ["issueops", "mermaid"]
+    assert plan["jobs"] == {"repository": True, "rust": True, "platform": False}
+    assert plan["repository_contracts"] == ["issueops", "mermaid", "source-policy"]
     assert "actor" not in plan["binding"]
     report = summary(plan)
     assert "ordinary change requires mapped issue-state consistency" in report
@@ -1200,6 +1198,7 @@ def self_test() -> None:
     )
     assert cli_domain["test_only"] is True
     assert cli_domain["test_targets"] == ["e2e_navigation"]
+    assert "source-policy" in cli_domain["repository_contracts"]
     assert cli_domain["platform_matrix"]["include"] == [
         {"label": "linux", "os": "ubuntu-latest", "contracts": ["navigation"]}
     ]
@@ -1430,17 +1429,20 @@ def self_test() -> None:
         "a" * 40,
         "b" * 40,
         "pull_request",
-        {"repository": "success", "rust": "skipped", "platform": "skipped"},
+        {"repository": "success", "rust": "success", "platform": "skipped"},
     )
     for name, result in (
         ("repository", "failure"),
         ("repository", "cancelled"),
         ("repository", "skipped"),
         ("repository", "missing"),
-        ("rust", "success"),
+        ("rust", "failure"),
+        ("rust", "cancelled"),
+        ("rust", "skipped"),
+        ("rust", "missing"),
         ("platform", "success"),
     ):
-        failing = {"repository": "success", "rust": "skipped", "platform": "skipped"}
+        failing = {"repository": "success", "rust": "success", "platform": "skipped"}
         failing[name] = result
         try:
             aggregate(plan, "a" * 40, "b" * 40, "pull_request", failing)
@@ -1454,7 +1456,7 @@ def self_test() -> None:
             "c" * 40,
             "b" * 40,
             "pull_request",
-            {"repository": "success", "rust": "skipped", "platform": "skipped"},
+            {"repository": "success", "rust": "success", "platform": "skipped"},
         )
     except RuntimeError:
         pass
@@ -1466,7 +1468,7 @@ def self_test() -> None:
             "a" * 40,
             "c" * 40,
             "pull_request",
-            {"repository": "success", "rust": "skipped", "platform": "skipped"},
+            {"repository": "success", "rust": "success", "platform": "skipped"},
         )
     except RuntimeError:
         pass
@@ -1478,7 +1480,7 @@ def self_test() -> None:
             "a" * 40,
             "b" * 40,
             "push",
-            {"repository": "success", "rust": "skipped", "platform": "skipped"},
+            {"repository": "success", "rust": "success", "platform": "skipped"},
         )
     except RuntimeError:
         pass
