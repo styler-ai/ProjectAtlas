@@ -501,10 +501,10 @@ const CLI_E2E_TIMEOUT_FACETS_DIGEST: &str =
     "d342a5ccc1c1022a5ec329fa63bb6deb34c5e7bbc219de7856a3b5c4975fbe49";
 
 const CLI_E2E_CLEANUP_FACETS_DIGEST: &str =
-    "d84ba7d169f1c4ea581aa986edf4466993e81b28a873269a4d559dea6612849e";
+    "9282ebf08fd5952b243454de85d6b9d0a8a84ff2144caa324423b8e07427afd8";
 
 const CLI_E2E_ISOLATION_FACETS_DIGEST: &str =
-    "a34f40d2d7249dafba32af229a0a068c7ab0ab6c2ffd5128c90c8d65a8c834bf";
+    "43adc416950bd34765ca41b5d7694a24aed2e749a143a7b1bd3703ce9bad4202";
 
 const CLI_E2E_PACKAGED_FACETS_DIGEST: &str =
     "0a2d634dad641fa3dded1fcb23fc74abc8ff27bc9027f1bf0e3659f542709a4c";
@@ -2481,7 +2481,8 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.ps1");
-    let output = StdCommand::new("pwsh")
+    let mut command = StdCommand::new("pwsh");
+    command
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -2917,8 +2918,8 @@ finally {
         )
         .env("PROJECTATLAS_TEST_UNPINNED_RUNTIME", &unpinned_runtime)
         .env("PROJECTATLAS_TEST_STABLE_RUNTIME", &stable_runtime)
-        .env("LOCALAPPDATA", &local_app_data)
-        .spawn()?;
+        .env("LOCALAPPDATA", &local_app_data);
+    let output = spawn_plugin_installer_process(&mut command)?;
     let output = wait_for_plugin_installer_output(
         output,
         "fresh Windows PATH probe",
@@ -11836,7 +11837,7 @@ exit 0
         }
     }
 
-    let mut first_child = first_command.spawn()?;
+    let mut first_child = spawn_plugin_installer_process(&mut first_command)?;
     let first_deadline = Instant::now() + Duration::from_secs(15);
     while !first_mutated.is_file() {
         if let Some(status) = first_child.try_wait()? {
@@ -11852,7 +11853,7 @@ exit 0
             .into());
         }
         if Instant::now() >= first_deadline {
-            drop(first_child.kill());
+            drop(terminate_plugin_installer_process_tree(&mut first_child));
             drop(first_child.wait());
             return Err(io::Error::other(
                 "first installer did not enter its held destructive operation",
@@ -11862,7 +11863,7 @@ exit 0
         thread::sleep(Duration::from_millis(25));
     }
 
-    let second_child = second_command.spawn()?;
+    let second_child = spawn_plugin_installer_process(&mut second_command)?;
     let second_config = second_repo
         .join(ATLAS_DIR_NAME)
         .join("projectatlas.opencode.json");
@@ -12566,7 +12567,7 @@ exec stat "$@"
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = wait_for_plugin_installer_output(
-        command.spawn()?,
+        spawn_plugin_installer_process(&mut command)?,
         "hostile POSIX restore",
         Duration::from_secs(45),
     )?;
@@ -18176,12 +18177,13 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
     )?;
 
     let in_time_installer = wait_for_plugin_installer_output_with_test_delay(
-        StdCommand::new(&executable)
-            .current_dir(&repo)
-            .arg("--version")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?,
+        spawn_plugin_installer_process(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--version")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )?,
         "in-time",
         OBSERVER_TIMEOUT,
         None,
@@ -18190,12 +18192,13 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         return Err(io::Error::other("in-time installer observer rejected --version").into());
     }
     let late_installer = wait_for_plugin_installer_output_with_test_delay(
-        StdCommand::new(&executable)
-            .current_dir(&repo)
-            .arg("--version")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?,
+        spawn_plugin_installer_process(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--version")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )?,
         "late",
         OBSERVER_TIMEOUT,
         Some(FIRST_OBSERVATION_DELAY),
@@ -18254,15 +18257,16 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
     // The held stdio pipe keeps this real MCP child running until the observer
     // kills this exact process and joins both output readers.
     let still_running_installer = wait_for_plugin_installer_output_with_test_delay(
-        StdCommand::new(&executable)
-            .current_dir(&repo)
-            .arg("--db")
-            .arg(&database)
-            .arg("mcp")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?,
+        spawn_plugin_installer_process(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )?,
         "still-running",
         Duration::ZERO,
         None,
@@ -20782,7 +20786,7 @@ fn run_release_asset_installer(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command.spawn()?;
+    let child = spawn_plugin_installer_process(command)?;
     wait_for_plugin_installer_output(child, label, release_server.remaining_timeout())
 }
 
@@ -21302,7 +21306,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         command.arg("5");
         command
     };
-    let child = command.spawn()?;
+    let child = spawn_plugin_installer_process(&mut command)?;
     let owner_result =
         wait_for_plugin_installer_output(child, "fixture-timeout", server.remaining_timeout());
     let Err(timeout_error) = server.finish(owner_result) else {
@@ -21313,6 +21317,58 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
             .to_string()
             .contains("fixture-timeout plugin installer exceeded"),
         "live installer timeout was not preserved",
+    )?;
+
+    let server = new_server()?;
+    #[cfg(windows)]
+    let mut descendant_command = {
+        let mut command = StdCommand::new("cmd");
+        command.args(["/D", "/C", "ping.exe -n 6 127.0.0.1"]);
+        command
+    };
+    #[cfg(unix)]
+    let mut descendant_command = {
+        let mut command = StdCommand::new("sh");
+        command.arg("-c").arg("sleep 5 & wait");
+        command
+    };
+    descendant_command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let descendant_started = Instant::now();
+    let owner_result = wait_for_plugin_installer_output(
+        spawn_plugin_installer_process(&mut descendant_command)?,
+        "fixture-descendant-timeout",
+        Duration::from_millis(250),
+    );
+    let owner_error = match owner_result {
+        Err(error) => error,
+        Ok(output) => {
+            return Err(io::Error::other(format!(
+                "descendant installer unexpectedly completed: status={}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    };
+    let Err(descendant_error) = server.finish::<()>(Err(owner_error)) else {
+        return Err(io::Error::other("descendant installer timeout unexpectedly passed").into());
+    };
+    if !descendant_error
+        .to_string()
+        .contains("fixture-descendant-timeout plugin installer exceeded")
+    {
+        return Err(io::Error::other(format!(
+            "descendant installer timeout was not preserved: {descendant_error}"
+        ))
+        .into());
+    }
+    require(
+        descendant_started.elapsed() < Duration::from_secs(3),
+        "descendant installer retained output pipes after tree termination",
     )?;
 
     let flood_marker = b"release-asset-observer-flood";
@@ -21336,7 +21392,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     flood_command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let flood_started = Instant::now();
     let flood_output = wait_for_plugin_installer_output(
-        flood_command.spawn()?,
+        spawn_plugin_installer_process(&mut flood_command)?,
         "pipe-drain",
         Duration::from_secs(5),
     )?;
@@ -24499,6 +24555,61 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     Ok(command)
 }
 
+fn spawn_plugin_installer_process(command: &mut StdCommand) -> io::Result<Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+    }
+    command.spawn()
+}
+
+#[cfg(unix)]
+fn terminate_plugin_installer_process_tree(child: &mut Child) -> io::Result<()> {
+    let process_group = format!("-{}", child.id());
+    let output = StdCommand::new("/bin/kill")
+        .args(["-KILL", "--", &process_group])
+        .stdin(Stdio::null())
+        .output()?;
+    if output.status.success() || child.try_wait()?.is_some() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "failed to terminate plugin installer process group {}: {}",
+            child.id(),
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
+}
+
+#[cfg(windows)]
+fn terminate_plugin_installer_process_tree(child: &mut Child) -> io::Result<()> {
+    let taskkill = std::env::var_os("SystemRoot")
+        .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from)
+        .join("System32")
+        .join("taskkill.exe");
+    let process_id = child.id().to_string();
+    let output = StdCommand::new(taskkill)
+        .args(["/PID", &process_id, "/T", "/F"])
+        .stdin(Stdio::null())
+        .output()?;
+    if output.status.success() || child.try_wait()?.is_some() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "failed to terminate plugin installer process tree {}: {}",
+            child.id(),
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_plugin_installer_process_tree(child: &mut Child) -> io::Result<()> {
+    child.kill()
+}
+
 struct PluginInstallerOutputReaders {
     stdout: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
     stderr: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
@@ -24599,7 +24710,7 @@ fn wait_for_plugin_installer_output_with_test_delay(
         observer_delay,
         None,
         None,
-        &mut |child| child.kill(),
+        &mut terminate_plugin_installer_process_tree,
         None,
     )
 }

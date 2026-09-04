@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "fe5e647eb08adde33480f9109d97bedd49473dd34522187c4beda20a4f616503",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "287eeb52e1c5c476c33ee625333e65911af044cf099ccc2f078c4338a6299a41",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "35c4cf8a4e3e69ffd4fb3ca18b191d5c79ea27646ba9fd7d3d21f5c0788aab32",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "72b95317626c27cbe036b8fc02d2749a302347c4fb1f3fb961f1e86d9bcee397",
@@ -11673,7 +11673,7 @@
       },
       {
         "line": 15563,
-        "text": "            drop(first_child.kill());"
+        "text": "            drop(terminate_plugin_installer_process_tree(&mut first_child));"
       },
       {
         "line": 15564,
@@ -13175,7 +13175,7 @@
       },
       {
         "line": 7026,
-        "text": "    let output = StdCommand::new(\"pwsh\")"
+        "text": "    let mut command = StdCommand::new(\"pwsh\");"
       },
       {
         "line": 8434,
@@ -13463,11 +13463,11 @@
       },
       {
         "line": 15547,
-        "text": "    let mut first_child = first_command.spawn()?;"
+        "text": "    let mut first_child = spawn_plugin_installer_process(&mut first_command)?;"
       },
       {
         "line": 15573,
-        "text": "    let second_child = second_command.spawn()?;"
+        "text": "    let second_child = spawn_plugin_installer_process(&mut second_command)?;"
       },
       {
         "line": 15642,
@@ -13495,7 +13495,7 @@
       },
       {
         "line": 16277,
-        "text": "        command.spawn()?,"
+        "text": "        spawn_plugin_installer_process(&mut command)?,"
       },
       {
         "line": 16399,
