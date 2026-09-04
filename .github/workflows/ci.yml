@@ -270,8 +270,8 @@ jobs:
           PLAN: ${{ needs.plan.outputs.plan }}
         run: |
           set -euo pipefail
-          mapfile -t packages < <(python3 -c 'import json,os,sys; sys.stdout.write("\n".join(json.loads(os.environ["PLAN"])["rust_packages"]))')
-          mapfile -t targets < <(python3 -c 'import json,os,sys; sys.stdout.write("\n".join(json.loads(os.environ["PLAN"])["test_targets"]))')
+          mapfile -t packages < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["rust_packages"]).encode())')
+          mapfile -t targets < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["test_targets"]).encode())')
           package_args=()
           for package in "${packages[@]}"; do
             case "$package" in

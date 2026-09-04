@@ -5823,6 +5823,17 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         .into());
     }
     let target_compile_run = target_compile["run"].as_str().unwrap_or_default();
+    if target_compile_run
+        .matches("sys.stdout.buffer.write")
+        .count()
+        != 2
+        || target_compile_run.contains("sys.stdout.write")
+    {
+        return Err(io::Error::other(
+            "affected target compile must emit planner lists without Windows CRLF translation",
+        )
+        .into());
+    }
     for required in [
         r#"["rust_packages"]"#,
         r#"["test_targets"]"#,
