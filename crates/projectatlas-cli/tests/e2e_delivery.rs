@@ -23128,6 +23128,8 @@ mod windows_native_process {
     use std::time::Instant;
 
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const PROCESS_TERMINATE: u32 = 0x0001;
     const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -23144,6 +23146,42 @@ mod windows_native_process {
     struct FileTime {
         low_date_time: u32,
         high_date_time: u32,
+    }
+
+    #[derive(Default)]
+    #[repr(C)]
+    struct JobObjectBasicLimitInformation {
+        _per_process_user_time_limit: i64,
+        _per_job_user_time_limit: i64,
+        limit_flags: u32,
+        _minimum_working_set_size: usize,
+        _maximum_working_set_size: usize,
+        _active_process_limit: u32,
+        _affinity: usize,
+        _priority_class: u32,
+        _scheduling_class: u32,
+    }
+
+    #[derive(Default)]
+    #[repr(C)]
+    struct IoCounters {
+        _read_operations: u64,
+        _write_operations: u64,
+        _other_operations: u64,
+        _bytes_read: u64,
+        _bytes_written: u64,
+        _other_bytes: u64,
+    }
+
+    #[derive(Default)]
+    #[repr(C)]
+    struct JobObjectExtendedLimitInformation {
+        basic_limit_information: JobObjectBasicLimitInformation,
+        _io_info: IoCounters,
+        _process_memory_limit: usize,
+        _job_memory_limit: usize,
+        _peak_process_memory_used: usize,
+        _peak_job_memory_used: usize,
     }
 
     #[link(name = "kernel32")]
@@ -23166,8 +23204,13 @@ mod windows_native_process {
             executable_path: *mut u16,
             path_length: *mut u32,
         ) -> i32;
+        fn SetInformationJobObject(
+            job: Handle,
+            information_class: i32,
+            information: *const std::ffi::c_void,
+            information_length: u32,
+        ) -> i32;
         fn TerminateProcess(handle: Handle, exit_code: u32) -> i32;
-        fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
         fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
     }
 
@@ -23209,32 +23252,24 @@ mod windows_native_process {
 
     pub(super) struct InstallerJob {
         handle: Handle,
-        terminated: bool,
     }
 
     impl InstallerJob {
         pub(super) fn terminate(&mut self) -> io::Result<()> {
-            if self.terminated {
+            if self.handle.is_null() {
                 return Ok(());
             }
-            if unsafe { TerminateJobObject(self.handle, 1) } == 0 {
+            if unsafe { CloseHandle(self.handle) } == 0 {
                 return Err(io::Error::last_os_error());
             }
-            self.terminated = true;
+            self.handle = std::ptr::null_mut();
             Ok(())
         }
     }
 
     impl Drop for InstallerJob {
         fn drop(&mut self) {
-            if !self.terminated {
-                unsafe {
-                    let _ = TerminateJobObject(self.handle, 1);
-                }
-            }
-            unsafe {
-                let _ = CloseHandle(self.handle);
-            }
+            drop(self.terminate());
         }
     }
 
@@ -23260,10 +23295,26 @@ mod windows_native_process {
         if raw_job.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let job = InstallerJob {
-            handle: raw_job,
-            terminated: false,
-        };
+        let job = InstallerJob { handle: raw_job };
+        let mut limit_information = JobObjectExtendedLimitInformation::default();
+        limit_information.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let limit_information_length = u32::try_from(std::mem::size_of_val(&limit_information))
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "Windows installer job limits exceeded u32: {error}"
+                ))
+            })?;
+        if unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                (&raw const limit_information).cast(),
+                limit_information_length,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         if unsafe { AssignProcessToJobObject(job.handle, child.as_raw_handle().cast()) } == 0 {
             return Err(io::Error::last_os_error());
         }
