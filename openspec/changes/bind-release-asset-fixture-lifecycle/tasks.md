@@ -5,8 +5,8 @@
 
 ## 2. Causal Fixture Lifetime
 
-- [ ] 2.1 Replace the release-asset server's independent pre-request deadline with one checked four-minute absolute operation deadline created before listener and installer launch, pass only its remaining budget to the existing `wait_for_plugin_installer_output`, use one bounded standard-library completion/cancellation signal, always join, and preserve current request routing, exact payload, two-request completion, and dual-error truth on every terminal path.
-- [ ] 2.2 Add `release_asset_server_lifecycle_is_causal_and_bounded` coverage for delayed live-owner startup, archive/checksum success, invalid, empty, partial, or missing requests, installer spawn/exit/timeout failure, dual diagnostics, absolute-deadline process/thread cleanup, all four Windows callers, and unchanged POSIX checksum-mismatch behavior without retry, a new fixture lock, broader serialization, new dependencies, or an independent timeout.
+- [x] 2.1 Replace the release-asset server's independent pre-request deadline with one checked four-minute absolute operation deadline created before listener and installer launch, pass only its remaining budget to the existing `wait_for_plugin_installer_output`, use one bounded standard-library completion/cancellation signal, always join, and preserve current request routing, exact payload, two-request completion, and dual-error truth on every terminal path.
+- [x] 2.2 Add `release_asset_server_lifecycle_is_causal_and_bounded` coverage for delayed live-owner startup, archive/checksum success, invalid, empty, partial, or missing requests, installer spawn/exit/timeout failure, dual diagnostics, absolute-deadline process/thread cleanup, all four Windows callers, and unchanged POSIX checksum-mismatch behavior without retry, a new fixture lock, broader serialization, new dependencies, or an independent timeout.
 
 ## 3. Verification And Delivery
 

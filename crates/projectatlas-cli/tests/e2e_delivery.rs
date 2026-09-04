@@ -304,6 +304,7 @@ const WINDOWS_POWERSHELL_EXECUTABLE: &str = "powershell.exe";
 
 #[cfg(windows)]
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT: Duration = Duration::from_mins(4);
 
 #[cfg(windows)]
 const CODEX_MCP_OWNER_FIXTURE_SOURCE: &str = r#"using System;
@@ -497,7 +498,7 @@ const CLI_E2E_ENVIRONMENT_FACETS_DIGEST: &str =
     "addd2e61ae70c2a11c1acb53abfb49d8dff160d0eda87b1e48164270a0c651a4";
 
 const CLI_E2E_TIMEOUT_FACETS_DIGEST: &str =
-    "e218dd8e0d97b946adf22f6ad9a3e702039a3858d8cb7d7bda59eb8d35e003a4";
+    "d342a5ccc1c1022a5ec329fa63bb6deb34c5e7bbc219de7856a3b5c4975fbe49";
 
 const CLI_E2E_CLEANUP_FACETS_DIGEST: &str =
     "d84ba7d169f1c4ea581aa986edf4466993e81b28a873269a4d559dea6612849e";
@@ -6404,8 +6405,6 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
 
     let test_result = (|| -> Result<(), Box<dyn Error>> {
         let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
-        let release_asset_guard = lock_windows_release_asset_tests();
-        let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
         let workspace_root = workspace_root()?;
         let installer = workspace_root
             .join("plugins")
@@ -6416,49 +6415,45 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
         fs::create_dir_all(&standalone_installer_dir)?;
         let standalone_installer = standalone_installer_dir.join("install-runtime.ps1");
         fs::copy(&installer, &standalone_installer)?;
-        let output = StdCommand::new("powershell")
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(&installer)
-            .arg("-ProjectRoot")
-            .arg(&repo)
-            .arg("-ProjectAtlasVersion")
-            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
-            .arg("-ReleaseBaseUrl")
-            .arg(&release_base_url)
-            .arg("-ReleaseBinaryOnly")
-            .env("HOME", &isolated_home)
-            .env("USERPROFILE", &isolated_home)
-            .env("APPDATA", &app_data)
-            .env("LOCALAPPDATA", &local_app_data)
-            .env("PATH", &parent_path)
-            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
-            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
-            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
-            .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
-            .env(
-                "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
-                &fake_codex_stale_registry,
-            )
-            .env(
-                "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
-                &fake_codex_current_registry,
-            )
-            .env("PROJECTATLAS_NO_TELEMETRY", "1")
-            .output()?;
-        let server_result = release_server.join().map_err(|panic_payload| {
-            let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-                *message
-            } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-                message.as_str()
-            } else {
-                "unknown panic payload"
-            };
-            io::Error::other(format!("release asset test server panicked: {message}"))
-        })?;
-        server_result?;
+        let release_asset_guard = lock_windows_release_asset_tests();
+        let release_server = serve_release_assets(&release_archive, None)?;
+        let release_base_url = release_server.base_url().to_owned();
+        let installer_result = {
+            let mut command = StdCommand::new("powershell");
+            command
+                .arg("-NoProfile")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-File")
+                .arg(&installer)
+                .arg("-ProjectRoot")
+                .arg(&repo)
+                .arg("-ProjectAtlasVersion")
+                .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+                .arg("-ReleaseBaseUrl")
+                .arg(&release_base_url)
+                .arg("-ReleaseBinaryOnly")
+                .env("HOME", &isolated_home)
+                .env("USERPROFILE", &isolated_home)
+                .env("APPDATA", &app_data)
+                .env("LOCALAPPDATA", &local_app_data)
+                .env("PATH", &parent_path)
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+                .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+                .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+                .env(
+                    "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
+                    &fake_codex_stale_registry,
+                )
+                .env(
+                    "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+                    &fake_codex_current_registry,
+                )
+                .env("PROJECTATLAS_NO_TELEMETRY", "1");
+            run_release_asset_installer(&release_server, "release-binary installer", &mut command)
+        };
+        let output = release_server.finish(installer_result)?;
         drop(release_asset_guard);
         let installer_output_text = format!(
             "{}\n{}",
@@ -13357,57 +13352,51 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
 
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
-    let release_asset_guard = lock_windows_release_asset_tests();
-    let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
         .join("plugins")
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.ps1");
-    let output = StdCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-File")
-        .arg(&installer)
-        .arg("-ProjectRoot")
-        .arg(&repo)
-        .arg("-ProjectAtlasVersion")
-        .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
-        .arg("-ReleaseBaseUrl")
-        .arg(&release_base_url)
-        .arg("-ReleaseBinaryOnly")
-        .env("HOME", &isolated_home)
-        .env("USERPROFILE", &isolated_home)
-        .env("APPDATA", &app_data)
-        .env("LOCALAPPDATA", &local_app_data)
-        .env("PATH", &parent_path)
-        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
-        .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
-        .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
-        .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
-        .env(
-            "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
-            &fake_codex_stale_registry,
-        )
-        .env(
-            "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
-            &fake_codex_current_registry,
-        )
-        .env("PROJECTATLAS_NO_TELEMETRY", "1")
-        .output()?;
-    let server_result = release_server.join().map_err(|panic_payload| {
-        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            *message
-        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-            message.as_str()
-        } else {
-            "unknown panic payload"
-        };
-        io::Error::other(format!("release asset test server panicked: {message}"))
-    })?;
-    server_result?;
+    let release_asset_guard = lock_windows_release_asset_tests();
+    let release_server = serve_release_assets(&release_archive, None)?;
+    let release_base_url = release_server.base_url().to_owned();
+    let installer_result = {
+        let mut command = StdCommand::new("powershell");
+        command
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&installer)
+            .arg("-ProjectRoot")
+            .arg(&repo)
+            .arg("-ProjectAtlasVersion")
+            .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .arg("-ReleaseBaseUrl")
+            .arg(&release_base_url)
+            .arg("-ReleaseBinaryOnly")
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("APPDATA", &app_data)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("PATH", &parent_path)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_CODEX_COMMAND", &fake_codex)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+            .env("PROJECTATLAS_FAKE_CODEX_STATE", &fake_codex_state)
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
+                &fake_codex_stale_registry,
+            )
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+                &fake_codex_current_registry,
+            )
+            .env("PROJECTATLAS_NO_TELEMETRY", "1");
+        run_release_asset_installer(&release_server, "release-binary installer", &mut command)
+    };
+    let output = release_server.finish(installer_result)?;
     drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
@@ -13638,16 +13627,17 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let release_archive = create_windows_release_archive(temp.path(), &runtime)?;
     let wrong_hash = "0".repeat(64);
-    let release_asset_guard = lock_windows_release_asset_tests();
-    let (release_base_url, release_server) =
-        serve_release_assets(&release_archive, Some(wrong_hash.as_str()))?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
         .join("plugins")
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.ps1");
-    let output = StdCommand::new("powershell")
+    let release_asset_guard = lock_windows_release_asset_tests();
+    let release_server = serve_release_assets(&release_archive, Some(wrong_hash.as_str()))?;
+    let release_base_url = release_server.base_url().to_owned();
+    let mut command = StdCommand::new("powershell");
+    command
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -13666,19 +13656,10 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
         .env("LOCALAPPDATA", &local_app_data)
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
-        .env("PROJECTATLAS_NO_TELEMETRY", "1")
-        .output()?;
-    let server_result = release_server.join().map_err(|panic_payload| {
-        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            *message
-        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-            message.as_str()
-        } else {
-            "unknown panic payload"
-        };
-        io::Error::other(format!("release asset test server panicked: {message}"))
-    })?;
-    server_result?;
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    let installer_result =
+        run_release_asset_installer(&release_server, "release-binary installer", &mut command);
+    let output = release_server.finish(installer_result)?;
     drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
@@ -13736,15 +13717,17 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         b"this is not a valid ProjectAtlas Windows executable",
     )?;
     let release_archive = create_windows_release_archive(temp.path(), &invalid_runtime)?;
-    let release_asset_guard = lock_windows_release_asset_tests();
-    let (release_base_url, release_server) = serve_release_assets(&release_archive, None)?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
         .join("plugins")
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.ps1");
-    let output = StdCommand::new("powershell")
+    let release_asset_guard = lock_windows_release_asset_tests();
+    let release_server = serve_release_assets(&release_archive, None)?;
+    let release_base_url = release_server.base_url().to_owned();
+    let mut command = StdCommand::new("powershell");
+    command
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -13763,19 +13746,10 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         .env("LOCALAPPDATA", &local_app_data)
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
-        .env("PROJECTATLAS_NO_TELEMETRY", "1")
-        .output()?;
-    let server_result = release_server.join().map_err(|panic_payload| {
-        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            *message
-        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-            message.as_str()
-        } else {
-            "unknown panic payload"
-        };
-        io::Error::other(format!("release asset test server panicked: {message}"))
-    })?;
-    server_result?;
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    let installer_result =
+        run_release_asset_installer(&release_server, "release-binary installer", &mut command);
+    let output = release_server.finish(installer_result)?;
     drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
@@ -13817,15 +13791,16 @@ fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let release_archive = create_posix_release_archive(temp.path(), &runtime)?;
     let wrong_hash = "0".repeat(64);
-    let (release_base_url, release_server) =
-        serve_release_assets(&release_archive, Some(wrong_hash.as_str()))?;
     let workspace_root = workspace_root()?;
     let installer = workspace_root
         .join("plugins")
         .join("projectatlas")
         .join("scripts")
         .join("install-runtime.sh");
-    let output = StdCommand::new("bash")
+    let release_server = serve_release_assets(&release_archive, Some(wrong_hash.as_str()))?;
+    let release_base_url = release_server.base_url().to_owned();
+    let mut command = StdCommand::new("bash");
+    command
         .arg(installer)
         .arg(&repo)
         .env(
@@ -13836,19 +13811,10 @@ fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<
         .env("PROJECTATLAS_RELEASE_BINARY_ONLY", "1")
         .env("HOME", &isolated_home)
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
-        .env("PROJECTATLAS_NO_TELEMETRY", "1")
-        .output()?;
-    let server_result = release_server.join().map_err(|panic_payload| {
-        let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            *message
-        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-            message.as_str()
-        } else {
-            "unknown panic payload"
-        };
-        io::Error::other(format!("release asset test server panicked: {message}"))
-    })?;
-    server_result?;
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    let installer_result =
+        run_release_asset_installer(&release_server, "release-binary installer", &mut command);
+    let output = release_server.finish(installer_result)?;
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -18286,7 +18252,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         .into());
     }
     // The held stdio pipe keeps this real MCP child running until the observer
-    // kills this exact process and wait_with_output drains both streams.
+    // kills this exact process and joins both output readers.
     let still_running_installer = wait_for_plugin_installer_output_with_test_delay(
         StdCommand::new(&executable)
             .current_dir(&repo)
@@ -18317,12 +18283,12 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let mut installer_cleanup_child = None;
+    let mut installer_cleanup_packet = None;
     let mut injected_installer_kill =
         |_child: &mut Child| Err(io::Error::other("injected installer kill failure"));
     let injected_installer_failure = {
-        let mut installer_cleanup_handoff = |child: Child| {
-            installer_cleanup_child = Some(child);
+        let mut installer_cleanup_handoff = |packet: PluginInstallerCleanupPacket| {
+            installer_cleanup_packet = Some(packet);
         };
         wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             StdCommand::new(&executable)
@@ -18366,17 +18332,17 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         ))
         .into());
     }
-    let mut installer_child = installer_cleanup_child
+    let mut installer_packet = installer_cleanup_packet
         .take()
         .ok_or_else(|| io::Error::other("installer cleanup was not synchronously transferred"))?;
-    drop(installer_child.stdin.take());
-    if installer_child.try_wait()?.is_none() {
-        installer_child.kill()?;
+    drop(installer_packet.child.stdin.take());
+    if installer_packet.child.try_wait()?.is_none() {
+        installer_packet.child.kill()?;
     }
     // The real child may have consumed EOF and exited gracefully before this
     // test-owned cleanup probe runs. Reaping and draining it is the proof; its
     // final status is not part of the injected kill-failure contract.
-    reap_plugin_installer_child(installer_child)?;
+    reap_plugin_installer_child(installer_packet)?;
     Ok(())
 }
 
@@ -18467,10 +18433,10 @@ fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
         );
     }
 
-    let mut installer_handoff_child = None;
+    let mut installer_handoff_packet = None;
     let installer_result = {
-        let mut handoff = |child: Child| {
-            installer_handoff_child = Some(child);
+        let mut handoff = |packet: PluginInstallerCleanupPacket| {
+            installer_handoff_packet = Some(packet);
         };
         wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             StdCommand::new(&executable)
@@ -18496,8 +18462,8 @@ fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
         "installer observer",
         INJECTED_REPROBE_FAILURE,
     )?;
-    if let Some(child) = installer_handoff_child {
-        reap_plugin_installer_child(child)?;
+    if let Some(packet) = installer_handoff_packet {
+        reap_plugin_installer_child(packet)?;
         return Err(
             io::Error::other("installer detached after a successful injected termination").into(),
         );
@@ -20744,11 +20710,157 @@ fn spawn_exclusive_file_lock(path: &Path) -> Result<Child, Box<dyn Error>> {
     Ok(child)
 }
 
+struct ReleaseAssetServer {
+    base_url: String,
+    deadline: Instant,
+    completion: Option<mpsc::SyncSender<()>>,
+    handle: Option<thread::JoinHandle<Result<(), io::Error>>>,
+}
+
+impl ReleaseAssetServer {
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn remaining_timeout(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    fn join(&mut self) -> Result<(), Box<dyn Error>> {
+        if let Some(completion) = self.completion.take() {
+            match completion.try_send(()) {
+                Ok(())
+                | Err(mpsc::TrySendError::Full(()) | mpsc::TrySendError::Disconnected(())) => {}
+            }
+        }
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        match handle.join() {
+            Ok(result) => result.map_err(Into::into),
+            Err(panic_payload) => {
+                let message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
+                    *message
+                } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+                    message.as_str()
+                } else {
+                    "unknown panic payload"
+                };
+                Err(
+                    io::Error::other(format!("release asset test server panicked: {message}"))
+                        .into(),
+                )
+            }
+        }
+    }
+
+    fn finish<T>(mut self, initiating: Result<T, Box<dyn Error>>) -> Result<T, Box<dyn Error>> {
+        let server_result = self.join();
+        match (initiating, server_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(initiating), Err(server)) => Err(io::Error::other(format!(
+                "{initiating}; release asset server also failed: {server}"
+            ))
+            .into()),
+        }
+    }
+}
+
+impl Drop for ReleaseAssetServer {
+    fn drop(&mut self) {
+        drop(self.join());
+    }
+}
+
+fn run_release_asset_installer(
+    release_server: &ReleaseAssetServer,
+    label: &str,
+    command: &mut StdCommand,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn()?;
+    wait_for_plugin_installer_output(child, label, release_server.remaining_timeout())
+}
+
 /// Serve local release archive and checksum requests for installer smoke tests.
 fn serve_release_assets(
     archive: &Path,
     override_hash: Option<&str>,
-) -> Result<(String, thread::JoinHandle<Result<(), io::Error>>), Box<dyn Error>> {
+) -> Result<ReleaseAssetServer, Box<dyn Error>> {
+    let deadline = Instant::now()
+        .checked_add(RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT)
+        .ok_or_else(|| io::Error::other("release asset installer deadline overflowed"))?;
+    serve_release_assets_with_deadline(archive, override_hash, deadline)
+}
+
+fn release_asset_server_completion_result(
+    served_archive: bool,
+    served_checksums: bool,
+) -> Result<(), io::Error> {
+    if served_archive && served_checksums {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "release asset server stopped before receiving both requests (archive={served_archive}, checksums={served_checksums})"
+        )))
+    }
+}
+
+fn write_release_asset_bytes(
+    stream: &mut std::net::TcpStream,
+    bytes: &[u8],
+    deadline: Instant,
+    completion_receiver: &Receiver<()>,
+    served_archive: bool,
+    served_checksums: bool,
+) -> Result<bool, io::Error> {
+    let mut written = 0;
+    while written < bytes.len() {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out writing release asset response",
+            ));
+        }
+        match stream.write(&bytes[written..]) {
+            Ok(bytes_written) if bytes_written > 0 => written += bytes_written,
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "release asset response write returned zero bytes",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match completion_receiver.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                    Ok(()) => {
+                        release_asset_server_completion_result(served_archive, served_checksums)?;
+                        return Ok(false);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(io::Error::other(
+                            "release asset server completion signal disconnected",
+                        ));
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
+fn serve_release_assets_with_deadline(
+    archive: &Path,
+    override_hash: Option<&str>,
+    deadline: Instant,
+) -> Result<ReleaseAssetServer, Box<dyn Error>> {
     use std::io::Read as _;
 
     let asset_name = archive
@@ -20762,17 +20874,60 @@ fn serve_release_assets(
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let base_url = format!("http://{}", listener.local_addr()?);
+    let (completion, completion_receiver) = mpsc::sync_channel(1);
     let handle = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_mins(1);
         let mut served_archive = false;
         let mut served_checksums = false;
         loop {
+            match completion_receiver.try_recv() {
+                Ok(()) => {
+                    return release_asset_server_completion_result(
+                        served_archive,
+                        served_checksums,
+                    );
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(io::Error::other(
+                        "release asset server completion signal disconnected",
+                    ));
+                }
+            }
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    stream.set_nonblocking(false)?;
-                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                     let mut request = [0_u8; 1024];
-                    let bytes_read = stream.read(&mut request)?;
+                    stream.set_nonblocking(true)?;
+                    let bytes_read = loop {
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "timed out waiting for release asset request",
+                            ));
+                        }
+                        match stream.read(&mut request) {
+                            Ok(bytes_read) => break bytes_read,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                match completion_receiver
+                                    .recv_timeout(remaining.min(Duration::from_millis(50)))
+                                {
+                                    Ok(()) => {
+                                        return release_asset_server_completion_result(
+                                            served_archive,
+                                            served_checksums,
+                                        );
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                        return Err(io::Error::other(
+                                            "release asset server completion signal disconnected",
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    };
                     if bytes_read == 0 {
                         return Err(io::Error::new(
                             io::ErrorKind::UnexpectedEof,
@@ -20805,30 +20960,420 @@ fn serve_release_assets(
                             "unexpected release asset request path {request_path:?}"
                         )));
                     };
-                    write!(
-                        stream,
+                    let response_headers = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
-                    )?;
-                    stream.write_all(body)?;
+                    )
+                    .into_bytes();
+                    if !write_release_asset_bytes(
+                        &mut stream,
+                        &response_headers,
+                        deadline,
+                        &completion_receiver,
+                        served_archive,
+                        served_checksums,
+                    )? {
+                        return Ok(());
+                    }
+                    if !write_release_asset_bytes(
+                        &mut stream,
+                        body,
+                        deadline,
+                        &completion_receiver,
+                        served_archive,
+                        served_checksums,
+                    )? {
+                        return Ok(());
+                    }
                     if served_archive && served_checksums {
                         return Ok(());
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    match completion_receiver.recv_timeout(Duration::from_millis(50)) {
+                        Ok(()) => {
+                            return release_asset_server_completion_result(
+                                served_archive,
+                                served_checksums,
+                            );
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(io::Error::other(
+                                "release asset server completion signal disconnected",
+                            ));
+                        }
+                    }
                     if Instant::now() >= deadline {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
                             "timed out waiting for release asset request",
                         ));
                     }
-                    thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => return Err(error),
             }
         }
     });
-    Ok((base_url, handle))
+    Ok(ReleaseAssetServer {
+        base_url,
+        deadline,
+        completion: Some(completion),
+        handle: Some(handle),
+    })
+}
+
+#[test]
+fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn Error>> {
+    const FLOOD_CHUNK_BYTES: usize = 128 * 1024;
+    const FLOOD_CHUNKS: usize = 16;
+
+    let temp = tempfile::tempdir()?;
+    let archive = temp.path().join("projectatlas-test.zip");
+    let asset = b"release asset fixture";
+    fs::write(&archive, asset)?;
+    let asset_name = archive
+        .file_name()
+        .ok_or_else(|| io::Error::other("release fixture name missing"))?
+        .to_string_lossy()
+        .into_owned();
+    let read_response = |stream: &mut std::net::TcpStream| -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut response = Vec::new();
+        match stream.read_to_end(&mut response) {
+            Ok(_) => Ok(response),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                Ok(response)
+            }
+            Err(error) => Err(error.into()),
+        }
+    };
+    let request = |base_url: &str, path: &str| -> Result<Vec<u8>, Box<dyn Error>> {
+        let address = base_url
+            .strip_prefix("http://")
+            .ok_or_else(|| io::Error::other("release fixture URL was not HTTP"))?;
+        let mut stream = std::net::TcpStream::connect(address)?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )?;
+        read_response(&mut stream)
+    };
+    let empty_request = |base_url: &str| -> Result<Vec<u8>, Box<dyn Error>> {
+        let address = base_url
+            .strip_prefix("http://")
+            .ok_or_else(|| io::Error::other("release fixture URL was not HTTP"))?;
+        let mut stream = std::net::TcpStream::connect(address)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        read_response(&mut stream)
+    };
+    let require = |condition: bool, message: &str| -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message).into())
+        }
+    };
+    let new_server = || {
+        serve_release_assets_with_deadline(&archive, None, Instant::now() + Duration::from_secs(2))
+    };
+
+    let server = new_server()?;
+    thread::sleep(Duration::from_millis(200));
+    let archive_response = request(server.base_url(), &format!("/assets/{asset_name}"))?;
+    require(
+        archive_response
+            .windows(asset.len())
+            .any(|window| window == asset),
+        "release archive response did not contain the fixture bytes",
+    )?;
+    let checksum_response = request(server.base_url(), "/assets/SHA256SUMS")?;
+    require(
+        checksum_response
+            .windows(asset_name.len())
+            .any(|window| window == asset_name.as_bytes()),
+        "release checksum response did not contain the archive name",
+    )?;
+    server.finish(Ok(()))?;
+
+    let server = new_server()?;
+    let Err(owner_error) = server.finish::<()>(Err(io::Error::other("installer failed").into()))
+    else {
+        return Err(io::Error::other("owner failure without requests unexpectedly passed").into());
+    };
+    let owner_error_text = owner_error.to_string();
+    require(
+        owner_error_text.contains("installer failed"),
+        "owner failure was not preserved",
+    )?;
+    require(
+        owner_error_text.contains("both requests"),
+        "missing request state was not preserved",
+    )?;
+
+    let server = new_server()?;
+    let mut command = StdCommand::new(temp.path().join("missing-release-asset-installer"));
+    let spawn_result = run_release_asset_installer(&server, "fixture-spawn", &mut command);
+    require(
+        spawn_result.is_err(),
+        "missing installer command unexpectedly spawned",
+    )?;
+    let Err(spawn_error) = server.finish(spawn_result) else {
+        return Err(io::Error::other("spawn failure unexpectedly passed").into());
+    };
+    require(
+        spawn_error.to_string().contains("both requests"),
+        "spawn failure did not retain missing request state",
+    )?;
+
+    let server = new_server()?;
+    let partial_response = request(server.base_url(), &format!("/assets/{asset_name}"))?;
+    require(
+        partial_response
+            .windows(asset.len())
+            .any(|window| window == asset),
+        "partial request did not receive the archive fixture",
+    )?;
+    let Err(partial_error) = server.finish::<()>(Err(io::Error::other("installer failed").into()))
+    else {
+        return Err(io::Error::other("partial request unexpectedly passed").into());
+    };
+    require(
+        partial_error.to_string().contains("both requests"),
+        "partial request state was not preserved",
+    )?;
+
+    let server = new_server()?;
+    let empty_response = empty_request(server.base_url())?;
+    require(
+        empty_response.is_empty(),
+        "empty release asset request unexpectedly returned a response",
+    )?;
+    let Err(empty_error) = server.finish::<()>(Err(io::Error::other("installer failed").into()))
+    else {
+        return Err(io::Error::other("empty request unexpectedly passed").into());
+    };
+    let empty_error_text = empty_error.to_string();
+    require(
+        empty_error_text.contains("installer failed"),
+        "empty-request owner failure was not preserved",
+    )?;
+    require(
+        empty_error_text.contains("release asset request was empty"),
+        "empty request failure was not preserved",
+    )?;
+
+    let server = new_server()?;
+    let invalid_response = request(server.base_url(), "/assets/unexpected")?;
+    require(
+        invalid_response.is_empty(),
+        "invalid release asset request unexpectedly returned a response",
+    )?;
+    let Err(invalid_error) = server.finish::<()>(Err(io::Error::other("installer failed").into()))
+    else {
+        return Err(io::Error::other("invalid request unexpectedly passed").into());
+    };
+    let invalid_error_text = invalid_error.to_string();
+    require(
+        invalid_error_text.contains("installer failed"),
+        "invalid-request owner failure was not preserved",
+    )?;
+    require(
+        invalid_error_text.contains("unexpected release asset request path"),
+        "invalid request failure was not preserved",
+    )?;
+
+    let server = serve_release_assets_with_deadline(
+        &archive,
+        None,
+        Instant::now() + Duration::from_millis(100),
+    )?;
+    thread::sleep(Duration::from_millis(200));
+    let Err(deadline_error) = server.finish::<()>(Ok(())) else {
+        return Err(io::Error::other("unserved fixture unexpectedly passed").into());
+    };
+    require(
+        deadline_error
+            .to_string()
+            .contains("timed out waiting for release asset request"),
+        "unserved fixture did not enforce its absolute deadline",
+    )?;
+
+    let server = serve_release_assets_with_deadline(
+        &archive,
+        None,
+        Instant::now() + Duration::from_millis(100),
+    )?;
+    let address = server
+        .base_url()
+        .strip_prefix("http://")
+        .ok_or_else(|| io::Error::other("release fixture URL was not HTTP"))?;
+    let _stalled_client = std::net::TcpStream::connect(address)?;
+    thread::sleep(Duration::from_millis(200));
+    let join_started = Instant::now();
+    let Err(stalled_error) = server.finish::<()>(Ok(())) else {
+        return Err(io::Error::other("stalled request unexpectedly passed").into());
+    };
+    require(
+        stalled_error
+            .to_string()
+            .contains("timed out waiting for release asset request"),
+        "stalled request did not enforce its absolute deadline",
+    )?;
+    require(
+        join_started.elapsed() < Duration::from_secs(1),
+        "stalled request delayed server join beyond its deadline",
+    )?;
+
+    let stalled_archive = temp.path().join("projectatlas-stalled.zip");
+    let stalled_asset = vec![b'x'; 8 * 1024 * 1024];
+    fs::write(&stalled_archive, &stalled_asset)?;
+    drop(stalled_asset);
+    let stalled_asset_name = stalled_archive
+        .file_name()
+        .ok_or_else(|| io::Error::other("stalled release fixture name missing"))?
+        .to_string_lossy()
+        .into_owned();
+    let server = serve_release_assets_with_deadline(
+        &stalled_archive,
+        None,
+        Instant::now() + Duration::from_mins(4),
+    )?;
+    let address = server
+        .base_url()
+        .strip_prefix("http://")
+        .ok_or_else(|| io::Error::other("release fixture URL was not HTTP"))?;
+    let mut stalled_client = std::net::TcpStream::connect(address)?;
+    stalled_client.write_all(
+        format!(
+            "GET /assets/{stalled_asset_name} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )?;
+    stalled_client.shutdown(std::net::Shutdown::Write)?;
+    stalled_client.set_read_timeout(Some(Duration::from_secs(1)))?;
+    let mut response_prefix = [0_u8; 1];
+    let response_probe = stalled_client.peek(&mut response_prefix);
+    let join_started = Instant::now();
+    let Err(stalled_reader_error) = server.finish::<()>(Ok(())) else {
+        return Err(io::Error::other("stalled reader unexpectedly passed").into());
+    };
+    let stalled_reader_error_text = stalled_reader_error.to_string();
+    require(
+        stalled_reader_error_text.contains("archive=true"),
+        "valid stalled-reader request was not processed before completion",
+    )?;
+    match response_probe {
+        Ok(bytes_read) => require(
+            bytes_read > 0,
+            "stalled reader did not reach the release asset response path",
+        )?,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset
+            ) => {}
+        Err(error) => return Err(error.into()),
+    }
+    require(
+        join_started.elapsed() < Duration::from_secs(1),
+        "stalled reader delayed server join beyond its deadline",
+    )?;
+
+    let server = new_server()?;
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = StdCommand::new("powershell");
+        command
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("Start-Sleep -Seconds 5");
+        command
+    };
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = StdCommand::new("sleep");
+        command.arg("5");
+        command
+    };
+    let child = command.spawn()?;
+    let owner_result =
+        wait_for_plugin_installer_output(child, "fixture-timeout", server.remaining_timeout());
+    let Err(timeout_error) = server.finish(owner_result) else {
+        return Err(io::Error::other("live installer unexpectedly passed").into());
+    };
+    require(
+        timeout_error
+            .to_string()
+            .contains("fixture-timeout plugin installer exceeded"),
+        "live installer timeout was not preserved",
+    )?;
+
+    let flood_marker = b"release-asset-observer-flood";
+    #[cfg(windows)]
+    let mut flood_command = {
+        let mut command = StdCommand::new("powershell");
+        command
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("$chunk = -join ('x' * 131072); for ($i = 0; $i -lt 16; $i++) { [Console]::Out.Write('release-asset-observer-flood'); [Console]::Out.Write($chunk); [Console]::Error.Write('release-asset-observer-flood'); [Console]::Error.Write($chunk) }");
+        command
+    };
+    #[cfg(unix)]
+    let mut flood_command = {
+        let mut command = StdCommand::new("sh");
+        command.arg("-c").arg(
+            "payload=$(dd if=/dev/zero bs=131072 count=1 2>/dev/null | tr '\\0' x); i=0; while [ \"$i\" -lt 16 ]; do printf 'release-asset-observer-flood'; printf '%s' \"$payload\"; printf 'release-asset-observer-flood' >&2; printf '%s' \"$payload\" >&2; i=$((i + 1)); done",
+        );
+        command
+    };
+    flood_command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let flood_started = Instant::now();
+    let flood_output = wait_for_plugin_installer_output(
+        flood_command.spawn()?,
+        "pipe-drain",
+        Duration::from_secs(5),
+    )?;
+    require(
+        flood_output.status.success(),
+        "pipe-drain installer did not exit successfully",
+    )?;
+    let flood_payload = vec![b'x'; FLOOD_CHUNK_BYTES];
+    let mut expected_flood_output =
+        Vec::with_capacity((FLOOD_CHUNK_BYTES + flood_marker.len()) * FLOOD_CHUNKS);
+    for _ in 0..FLOOD_CHUNKS {
+        expected_flood_output.extend_from_slice(flood_marker);
+        expected_flood_output.extend_from_slice(&flood_payload);
+    }
+    for (name, output) in [
+        ("stdout", &flood_output.stdout),
+        ("stderr", &flood_output.stderr),
+    ] {
+        require(
+            output.len() == expected_flood_output.len(),
+            "pipe-drain installer output was truncated",
+        )?;
+        if output != &expected_flood_output {
+            return Err(io::Error::other(format!(
+                "pipe-drain installer {name} output was corrupted: expected_bytes={}, actual_bytes={}",
+                expected_flood_output.len(),
+                output.len()
+            ))
+            .into());
+        }
+    }
+    require(
+        flood_started.elapsed() < Duration::from_secs(5),
+        "pipe-drain installer exceeded its observer deadline",
+    )?;
+
+    Ok(())
 }
 
 fn write_executable_script(path: &Path, script: &str) -> Result<(), Box<dyn Error>> {
@@ -23954,13 +24499,82 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     Ok(command)
 }
 
-/// Reap one test-owned installer child after the observer has returned.
-fn reap_plugin_installer_child(mut child: Child) -> Result<std::process::Output, Box<dyn Error>> {
-    child.stdin.take();
-    if child.try_wait()?.is_none() {
-        child.kill()?;
+struct PluginInstallerOutputReaders {
+    stdout: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stderr: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+}
+
+impl PluginInstallerOutputReaders {
+    fn take(child: &mut Child) -> Self {
+        let stdout = child.stdout.take().map(|mut stdout| {
+            thread::spawn(move || {
+                let mut output = Vec::new();
+                stdout.read_to_end(&mut output)?;
+                Ok(output)
+            })
+        });
+        let stderr = child.stderr.take().map(|mut stderr| {
+            thread::spawn(move || {
+                let mut output = Vec::new();
+                stderr.read_to_end(&mut output)?;
+                Ok(output)
+            })
+        });
+        Self { stdout, stderr }
     }
-    Ok(child.wait_with_output()?)
+
+    fn join(self) -> io::Result<(Vec<u8>, Vec<u8>)> {
+        let stdout_result: io::Result<Vec<u8>> = self.stdout.map_or_else(
+            || Ok(Vec::new()),
+            |reader| {
+                reader
+                    .join()
+                    .map_err(|_panic| io::Error::other("plugin installer stdout reader panicked"))?
+            },
+        );
+        let stderr_result: io::Result<Vec<u8>> = self.stderr.map_or_else(
+            || Ok(Vec::new()),
+            |reader| {
+                reader
+                    .join()
+                    .map_err(|_panic| io::Error::other("plugin installer stderr reader panicked"))?
+            },
+        );
+        let stdout = stdout_result?;
+        let stderr = stderr_result?;
+        Ok((stdout, stderr))
+    }
+}
+
+struct PluginInstallerCleanupPacket {
+    child: Child,
+    readers: PluginInstallerOutputReaders,
+}
+
+fn collect_plugin_installer_output(
+    mut child: Child,
+    readers: PluginInstallerOutputReaders,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let wait_result = child.wait();
+    let output_result = readers.join();
+    let status = wait_result?;
+    let (stdout, stderr) = output_result?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Reap one test-owned installer child after the observer has returned.
+fn reap_plugin_installer_child(
+    mut packet: PluginInstallerCleanupPacket,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    packet.child.stdin.take();
+    if packet.child.try_wait()?.is_none() {
+        packet.child.kill()?;
+    }
+    collect_plugin_installer_output(packet.child, packet.readers)
 }
 
 /// Collect one coordinated installer process under an explicit deadline.
@@ -23990,8 +24604,8 @@ fn wait_for_plugin_installer_output_with_test_delay(
     )
 }
 
-/// Test-only variant that transfers a proven-live child to the caller when
-/// injected termination cannot safely reap it here.
+/// Test-only variant that transfers a proven-live child and its readers to the
+/// caller when injected termination cannot safely reap it here.
 fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     mut child: Child,
     label: &str,
@@ -24000,10 +24614,11 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     exit_probe_error: Option<io::Error>,
     cleanup_probe_error: Option<io::Error>,
     kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
-    handoff_live_child: Option<&mut dyn FnMut(Child)>,
+    handoff_live_child: Option<&mut dyn FnMut(PluginInstallerCleanupPacket)>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let mut exit_probe_error = exit_probe_error;
     let mut cleanup_probe_error = cleanup_probe_error;
+    let readers = PluginInstallerOutputReaders::take(&mut child);
     if observer_delay.is_some()
         && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
             &mut child,
@@ -24016,9 +24631,9 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
         let status_after_kill = child.try_wait();
         if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
             if let Some(handoff) = handoff_live_child {
-                handoff(child);
+                handoff(PluginInstallerCleanupPacket { child, readers });
             } else {
-                drop(child);
+                drop(PluginInstallerCleanupPacket { child, readers });
             }
             let mut diagnostic = format!(
                 "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup incomplete: child detached"
@@ -24033,7 +24648,7 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             }
             return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
-        let output = child.wait_with_output()?;
+        let output = collect_plugin_installer_output(child, readers)?;
         let diagnostic = format!(
             "{label} plugin installer exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and output drained status={}",
             output.status
@@ -24083,9 +24698,9 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                     Err(error) => {
                         child.stdin.take();
                         if let Some(handoff) = handoff_live_child {
-                            handoff(child);
+                            handoff(PluginInstallerCleanupPacket { child, readers });
                         } else {
-                            drop(child);
+                            drop(PluginInstallerCleanupPacket { child, readers });
                         }
                         let mut diagnostic = format!(
                             "{label} plugin installer exceeded {timeout:?}: still running at deadline status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child detached)"
@@ -24102,9 +24717,9 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                 {
                     child.stdin.take();
                     if let Some(handoff) = handoff_live_child {
-                        handoff(child);
+                        handoff(PluginInstallerCleanupPacket { child, readers });
                     } else {
-                        drop(child);
+                        drop(PluginInstallerCleanupPacket { child, readers });
                     }
                     let diagnostic = format!(
                         "{label} plugin installer exceeded {timeout:?}: still running at deadline status=still-running at deadline (termination failed: {kill_error}; cleanup incomplete: operating system refused termination; child was not reaped; child detached)"
@@ -24112,7 +24727,7 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                     return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                 }
             }
-            let output = child.wait_with_output()?;
+            let output = collect_plugin_installer_output(child, readers)?;
             let mut diagnostic = format!(
                 "{label} plugin installer exceeded {timeout:?}: {}",
                 if still_running {
@@ -24148,9 +24763,9 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
         };
         if let Some(_status) = status {
             if observed_at < deadline {
-                return Ok(child.wait_with_output()?);
+                return collect_plugin_installer_output(child, readers);
             }
-            let output = child.wait_with_output()?;
+            let output = collect_plugin_installer_output(child, readers)?;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
