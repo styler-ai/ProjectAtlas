@@ -104,7 +104,7 @@ Issue-reference and milestone validation SHALL run in a lightweight required `pr
 - **THEN** the native branch rule refreshes readiness without requiring a workflow rerun
 
 ### Requirement: Cancellation is limited to superseded same-PR source verification
-Automatic workflow cancellation SHALL apply only when a newer `pull_request` source-verification run supersedes an older `pull_request` source-verification run for the same pull-request number. Pull-request source verification, `pr-state`, push, merge-group, workflow-dispatch, schedule, IssueOps, release, publish, and deploy owners SHALL use separate deterministic concurrency namespaces, and automatic cancellation SHALL be disabled for every namespace except same-number pull-request source verification.
+Automatic workflow cancellation SHALL apply only when a newer `pull_request` source-verification run supersedes an older `pull_request` source-verification run for the same pull-request number. Pull-request source verification, `pr-state`, merge-group, workflow-dispatch, schedule, IssueOps, release, publish, and deploy owners SHALL use separate deterministic concurrency namespaces, and automatic cancellation SHALL be disabled for every namespace except same-number pull-request source verification.
 
 #### Scenario: New source run supersedes the same pull request
 - **WHEN** a newer `pull_request` source-verification run starts while an older source-verification run for the same pull-request number is active
@@ -119,7 +119,7 @@ Automatic workflow cancellation SHALL apply only when a newer `pull_request` sou
 - **THEN** the metadata-only event uses a unique non-cancelling namespace and cannot cancel or satisfy the source run
 
 #### Scenario: Non-PR-source events overlap
-- **WHEN** a pull-request source run overlaps a push, merge-group, workflow-dispatch, or scheduled run
+- **WHEN** a pull-request source run overlaps a merge-group, workflow-dispatch, or scheduled run
 - **THEN** separate namespaces and disabled cancellation preserve every run
 
 #### Scenario: Governance or delivery workflow overlaps source verification
@@ -218,12 +218,12 @@ The implementation SHALL measure required-check wall time including queueing and
 - **WHEN** measurements are noisy, below materiality, or reveal loss of a causal proof contract
 - **THEN** the narrowing rule is rejected or returned to complete fallback rather than accepted on assertion
 
-### Requirement: Default-branch and drift backstops preserve coverage
-Protected-branch pushes SHALL run affected proof for the merged change, scheduled and manual drift checks SHALL run complete normal-pull-request proof, and ambiguous merge-group inputs SHALL fail closed.
+### Requirement: Protected-branch merges and drift backstops avoid duplicate work without losing coverage
+An accepted pull-request or merge-group source proof SHALL remain authoritative when that exact tree reaches a protected branch, the resulting push SHALL NOT launch duplicate source CI, scheduled and manual drift checks SHALL run complete normal-pull-request proof, and ambiguous merge-group inputs SHALL fail closed.
 
 #### Scenario: Merged change reaches the protected branch
 - **WHEN** a pull request merges
-- **THEN** the protected-branch workflow verifies the affected contracts against the merged tree
+- **THEN** no duplicate source workflow runs solely because the already accepted tree reached the protected branch
 
 #### Scenario: Scheduled or manual drift check runs
 - **WHEN** the complete drift backstop is scheduled or explicitly dispatched
