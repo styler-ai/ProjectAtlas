@@ -3430,8 +3430,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     for required in [
         "affected-ci-proof.py plan",
         "cargo check --workspace --all-targets --all-features --locked",
-        "cargo check \"$@\" --lib --bins --examples --all-features --locked",
+        "cargo check \"$@\" --bins --examples --tests --all-features --locked",
+        "cargo clippy \"$@\" --bins --examples --tests --all-features --locked -- -D warnings",
         "cargo test \"$@\" --lib --bins --all-features --locked",
+        "cargo test --locked -p projectatlas-lints --bins --all-features",
+        "cargo test --doc \"$@\" --all-features --locked",
+        "cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features",
         "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
         "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled",
         "npm ls --depth=0 --prefix .github/mermaid-parser",
@@ -3481,8 +3485,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
         "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled",
         "cargo check --workspace --all-targets --all-features --locked",
-        "cargo check \"${package_args[@]}\" --lib --bins --examples --all-features --locked",
-        "cargo test \"${package_args[@]}\" --lib --bins --all-features --locked",
+        "cargo check \"${package_args[@]}\" --bins --examples --tests --all-features --locked",
+        "cargo clippy \"${package_args[@]}\" --bins --examples --tests --all-features --locked -- -D warnings",
+        "cargo test \"${library_package_args[@]}\" --lib --bins --all-features --locked",
+        "cargo test --locked -p projectatlas-lints --bins --all-features",
+        "cargo test --doc \"${library_package_args[@]}\" --all-features --locked",
+        "cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features",
         "cargo test --workspace --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
@@ -4434,7 +4442,7 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
   *"affected-ci-proof.py plan "*)
-    printf '%s\n' '{"mode":"narrow","repository_contracts":["issueops","mermaid"],"rust_packages":[],"test_targets":[],"test_only":false,"jobs":{"rust":false}}'
+    printf '%s\n' '{"mode":"narrow","repository_contracts":["issueops","mermaid"],"rust_packages":["projectatlas-lints"],"test_targets":["lint_diagnostics"],"test_only":false,"jobs":{"rust":true}}'
     exit 0
     ;;
   *" -c "*) exec python "$@" ;;
@@ -4679,6 +4687,22 @@ exit 0
     if !candidate_status
         || candidate_calls.len() != 1
         || !candidate_calls[0].contains("--candidate-issue 549")
+        || !candidate_target.contains(
+            "cargo check -p projectatlas-lints --bins --examples --tests --all-features --locked",
+        )
+        || !candidate_target.contains(
+            "cargo clippy -p projectatlas-lints --bins --examples --tests --all-features --locked -- -D warnings",
+        )
+        || !candidate_target.contains(
+            "cargo test --locked -p projectatlas-lints --bins --all-features",
+        )
+        || !candidate_target.contains(
+            "cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features",
+        )
+        || candidate_target.contains("cargo test --doc -p projectatlas-lints")
+        || candidate_target.contains("cargo check -p projectatlas-lints --lib")
+        || candidate_target.contains("cargo clippy -p projectatlas-lints --lib")
+        || candidate_target.contains("cargo test -p projectatlas-lints --lib")
     {
         return Err(io::Error::other(format!(
             "ordinary candidate push did not use candidate IssueOps dispatch:\n{candidate_target}"
@@ -5842,8 +5866,10 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         "planner emitted unknown Rust test target",
         "target compile contract has no affected package",
         "cargo check --workspace --all-targets --all-features --locked",
-        "cargo check \"${package_args[@]}\" --lib --bins --examples --all-features --locked",
-        "cargo test \"${package_args[@]}\" --lib --bins --no-run --all-features --locked",
+        "cargo check \"${library_package_args[@]}\" --lib --bins --examples --all-features --locked",
+        "cargo test \"${library_package_args[@]}\" --lib --bins --no-run --all-features --locked",
+        "cargo check --locked -p projectatlas-lints --bins --all-features",
+        "cargo test --locked -p projectatlas-lints --bins --no-run --all-features",
         "cargo check -p projectatlas-cli \"${target_args[@]}\" --all-features --locked",
     ] {
         if !target_compile_run.contains(required) {

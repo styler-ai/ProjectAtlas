@@ -190,9 +190,18 @@ jobs:
           test_only="$(python3 -c 'import json,os; print(str(json.loads(os.environ["PLAN"])["test_only"]).lower())')"
           mode="$(python3 -c 'import json,os; print(json.loads(os.environ["PLAN"])["mode"])')"
           package_args=()
+          library_package_args=()
+          lints_selected=false
           for package in "${packages[@]}"; do
             case "$package" in
-              projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-lints|projectatlas-service|projectatlas-symbols|projectatlas-cli) package_args+=(-p "$package") ;;
+              projectatlas-lints)
+                package_args+=(-p "$package")
+                lints_selected=true
+                ;;
+              projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-service|projectatlas-symbols|projectatlas-cli)
+                package_args+=(-p "$package")
+                library_package_args+=(-p "$package")
+                ;;
               *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
             esac
           done
@@ -221,9 +230,14 @@ jobs:
               cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
               cargo test --workspace --all-features --locked
             else
-              cargo check "${package_args[@]}" --lib --bins --examples --all-features --locked
-              cargo clippy "${package_args[@]}" --lib --bins --examples --all-features --locked -- -D warnings
-              cargo test "${package_args[@]}" --lib --bins --all-features --locked
+              cargo check "${package_args[@]}" --bins --examples --tests --all-features --locked
+              cargo clippy "${package_args[@]}" --bins --examples --tests --all-features --locked -- -D warnings
+              if (( ${#library_package_args[@]} > 0 )); then
+                cargo test "${library_package_args[@]}" --lib --bins --all-features --locked
+              fi
+              if [[ "$lints_selected" == "true" ]]; then
+                cargo test --locked -p projectatlas-lints --bins --all-features
+              fi
               for target in "${targets[@]}"; do
                 cargo check --locked -p projectatlas-cli --all-features --test "$target"
                 cargo clippy --locked -p projectatlas-cli --all-features --test "$target" -- -D warnings
@@ -234,8 +248,13 @@ jobs:
               cargo test --workspace --doc --all-features --locked
               RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
             else
-              cargo test --doc "${package_args[@]}" --all-features --locked
-              RUSTDOCFLAGS="-D warnings" cargo doc "${package_args[@]}" --no-deps --all-features --locked
+              if (( ${#library_package_args[@]} > 0 )); then
+                cargo test --doc "${library_package_args[@]}" --all-features --locked
+                RUSTDOCFLAGS="-D warnings" cargo doc "${library_package_args[@]}" --no-deps --all-features --locked
+              fi
+              if [[ "$lints_selected" == "true" ]]; then
+                RUSTDOCFLAGS="-D warnings" cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features
+              fi
             fi
           fi
           if [[ "$filtered_custom_harness" == "true" ]]; then
@@ -279,9 +298,18 @@ jobs:
           mapfile -t targets < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["test_targets"]).encode())')
           mode="$(python3 -c 'import json,os; print(json.loads(os.environ["PLAN"])["mode"])')"
           package_args=()
+          library_package_args=()
+          lints_selected=false
           for package in "${packages[@]}"; do
             case "$package" in
-              projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-lints|projectatlas-service|projectatlas-symbols|projectatlas-cli) package_args+=(-p "$package") ;;
+              projectatlas-lints)
+                package_args+=(-p "$package")
+                lints_selected=true
+                ;;
+              projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-service|projectatlas-symbols|projectatlas-cli)
+                package_args+=(-p "$package")
+                library_package_args+=(-p "$package")
+                ;;
               *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
             esac
           done
@@ -300,8 +328,14 @@ jobs:
             echo "target compile contract has no affected package" >&2
             exit 1
           fi
-          cargo check "${package_args[@]}" --lib --bins --examples --all-features --locked
-          cargo test "${package_args[@]}" --lib --bins --no-run --all-features --locked
+          if (( ${#library_package_args[@]} > 0 )); then
+            cargo check "${library_package_args[@]}" --lib --bins --examples --all-features --locked
+            cargo test "${library_package_args[@]}" --lib --bins --no-run --all-features --locked
+          fi
+          if [[ "$lints_selected" == "true" ]]; then
+            cargo check --locked -p projectatlas-lints --bins --all-features
+            cargo test --locked -p projectatlas-lints --bins --no-run --all-features
+          fi
           if (( ${#target_args[@]} > 0 )); then
             cargo check -p projectatlas-cli "${target_args[@]}" --all-features --locked
           fi

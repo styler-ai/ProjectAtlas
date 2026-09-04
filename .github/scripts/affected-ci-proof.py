@@ -1363,6 +1363,25 @@ def self_test() -> None:
         for label in MAC_PLATFORM_LABELS
     ]
 
+    target_specific_lints = plan_changes(
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[Change("M", ("crates/projectatlas-lints/src/main.rs",))],
+        graph=graph,
+        source_platforms={"crates/projectatlas-lints/src/main.rs": ("windows",)},
+    )
+    assert target_specific_lints["mode"] == "narrow"
+    assert target_specific_lints["rust_packages"] == ["projectatlas-lints"]
+    assert target_specific_lints["test_targets"] == ["lint_diagnostics"]
+    assert target_specific_lints["platform_matrix"]["include"] == [
+        {
+            "label": "windows",
+            "os": PLATFORM_OS["windows"],
+            "contracts": ["compile"],
+        }
+    ]
+
     shared = plan_changes(
         base="a" * 40,
         head="b" * 40,

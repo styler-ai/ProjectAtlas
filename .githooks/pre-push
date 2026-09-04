@@ -160,10 +160,17 @@ if has_repository_contract cargo-dependency; then
 fi
 
 set --
+library_packages=
+lints_selected=false
 for package in $rust_packages; do
   case "$package" in
-    projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-lints|projectatlas-service|projectatlas-symbols|projectatlas-cli)
+    projectatlas-lints)
       set -- "$@" -p "$package"
+      lints_selected=true
+      ;;
+    projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-service|projectatlas-symbols|projectatlas-cli)
+      set -- "$@" -p "$package"
+      library_packages="${library_packages}${library_packages:+ }$package"
       ;;
     *)
       echo "planner emitted unknown Rust package: $package" >&2
@@ -197,21 +204,39 @@ if [ -n "$rust_packages$test_targets" ]; then
       cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       cargo test --workspace --all-features --locked
     else
-      cargo check "$@" --lib --bins --examples --all-features --locked
-      cargo clippy "$@" --lib --bins --examples --all-features --locked -- -D warnings
-      cargo test "$@" --lib --bins --all-features --locked
+      cargo check "$@" --bins --examples --tests --all-features --locked
+      cargo clippy "$@" --bins --examples --tests --all-features --locked -- -D warnings
+      if [ -n "$library_packages" ]; then
+        set --
+        for package in $library_packages; do
+          set -- "$@" -p "$package"
+        done
+        cargo test "$@" --lib --bins --all-features --locked
+      fi
+      if [ "$lints_selected" = "true" ]; then
+        cargo test --locked -p projectatlas-lints --bins --all-features
+      fi
       for target in $test_targets; do
         cargo check --locked -p projectatlas-cli --all-features --test "$target"
         cargo clippy --locked -p projectatlas-cli --all-features --test "$target" -- -D warnings
         cargo test --locked -p projectatlas-cli --all-features --test "$target"
+      done
+      set --
+      for package in $library_packages; do
+        set -- "$@" -p "$package"
       done
     fi
     if [ "$mode" = "full" ]; then
       cargo test --workspace --doc --all-features --locked
       RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
     else
-      cargo test --doc "$@" --all-features --locked
-      RUSTDOCFLAGS="-D warnings" cargo doc "$@" --no-deps --all-features --locked
+      if [ "$#" -gt 0 ]; then
+        cargo test --doc "$@" --all-features --locked
+        RUSTDOCFLAGS="-D warnings" cargo doc "$@" --no-deps --all-features --locked
+      fi
+      if [ "$lints_selected" = "true" ]; then
+        RUSTDOCFLAGS="-D warnings" cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features
+      fi
     fi
   fi
   if [ "$filtered_custom_harness" = "true" ]; then
