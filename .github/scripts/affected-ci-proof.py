@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -343,6 +344,18 @@ def source_platform_labels(source: bytes) -> tuple[str, ...]:
     return tuple(label for label in PLATFORM_CONTRACTS if label in labels)
 
 
+def source_target_predicates(source: bytes) -> Counter[bytes]:
+    matches = list(CFG_ATTRIBUTE_PATTERN.finditer(source)) + list(
+        CFG_MACRO_PATTERN.finditer(source)
+    )
+    return Counter(
+        body
+        for match in matches
+        if TARGET_KEY_PATTERN.search(body := match.group(1))
+        or re.search(rb"\b(?:windows|unix)\b", body)
+    )
+
+
 def changed_source_platforms(
     root: Path,
     base: str,
@@ -355,10 +368,12 @@ def changed_source_platforms(
     blobs = 0
     total_bytes = 0
     for change in changes:
+        change_predicates: dict[tuple[str, str], Counter[bytes]] = {}
         for path in change.paths:
             if not path.endswith(".rs"):
                 continue
             labels: set[str] = set()
+            revision_predicates: dict[str, Counter[bytes]] = {}
             found = False
             for revision in (base, head):
                 lookups += 1
@@ -372,10 +387,30 @@ def changed_source_platforms(
                 total_bytes += len(source)
                 if blobs > MAX_SOURCE_BLOBS or total_bytes > MAX_TOTAL_SOURCE_BYTES:
                     raise RuntimeError("submitted-tree source aggregate bound exceeded")
-                labels.update(source_platform_labels(source))
+                current_labels = set(source_platform_labels(source))
+                predicates = source_target_predicates(source)
+                revision_predicates[revision] = predicates
+                change_predicates[(revision, path)] = predicates
+                labels.update(current_labels)
             if not found:
                 raise RuntimeError(f"submitted-tree source is unavailable: {path}")
+            if base in revision_predicates and head in revision_predicates and not (
+                revision_predicates[base] <= revision_predicates[head]
+            ):
+                labels.update(PLATFORM_CONTRACTS)
             result[path] = tuple(label for label in PLATFORM_CONTRACTS if label in labels)
+        if change.status.startswith("R") and len(change.paths) == 2:
+            old_path, new_path = change.paths
+            old_predicates = change_predicates.get((base, old_path))
+            new_predicates = change_predicates.get((head, new_path))
+            selected = set(result.get(old_path, ())) | set(result.get(new_path, ()))
+            if (
+                old_predicates is not None
+                and new_predicates is not None
+                and not old_predicates <= new_predicates
+                and selected != set(PLATFORM_CONTRACTS)
+            ):
+                result[new_path] = tuple(PLATFORM_CONTRACTS)
     return result
 
 
@@ -1110,6 +1145,20 @@ def self_test() -> None:
         "macos-x64",
         "macos-arm64",
     )
+
+    def relaxed_platform_blob(_: Path, revision: str, path: str) -> bytes | None:
+        assert path == platform_source
+        retained = b"#[cfg(windows)]\nfn retained() {}\n"
+        changed = b"#[cfg(windows)]\nfn changed() {}\n"
+        return retained + changed if revision == "a" * 40 else retained + b"fn changed() {}\n"
+
+    assert changed_source_platforms(
+        Path.cwd(),
+        "a" * 40,
+        "b" * 40,
+        [Change("M", (platform_source,))],
+        blob_loader=relaxed_platform_blob,
+    )[platform_source] == tuple(PLATFORM_CONTRACTS)
     target_specific = plan_changes(
         base="a" * 40,
         head="b" * 40,
@@ -1158,9 +1207,11 @@ def self_test() -> None:
     new_source = "crates/projectatlas-service/src/new.rs"
 
     def renamed_blob(_: Path, revision: str, path: str) -> bytes | None:
+        retained = b"#[cfg(windows)]\nfn retained() {}\n"
+        changed = b"#[cfg(windows)]\nfn changed() {}\n"
         return {
-            ("a" * 40, old_source): b"#[cfg(windows)]",
-            ("b" * 40, new_source): b"#[cfg(unix)]",
+            ("a" * 40, old_source): retained + changed,
+            ("b" * 40, new_source): retained + b"fn changed() {}\n",
         }.get((revision, path))
 
     renamed_platforms = changed_source_platforms(
@@ -1171,7 +1222,35 @@ def self_test() -> None:
         blob_loader=renamed_blob,
     )
     assert renamed_platforms[old_source] == ("windows",)
-    assert renamed_platforms[new_source] == SOURCE_UNIX_PLATFORM_LABELS
+    assert renamed_platforms[new_source] == tuple(PLATFORM_CONTRACTS)
+
+    def unchanged_rename_blob(_: Path, revision: str, path: str) -> bytes | None:
+        return {
+            ("a" * 40, old_source): b"#[cfg(windows)]\nfn retained() {}\n",
+            ("b" * 40, new_source): b"#[cfg(windows)]\nfn retained() {}\n",
+        }.get((revision, path))
+
+    unchanged_rename = Change("R100", (old_source, new_source))
+    unchanged_platforms = changed_source_platforms(
+        Path.cwd(),
+        "a" * 40,
+        "b" * 40,
+        [unchanged_rename],
+        blob_loader=unchanged_rename_blob,
+    )
+    unchanged_plan = plan_changes(
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[unchanged_rename],
+        graph=graph,
+        source_platforms=unchanged_platforms,
+    )
+    assert {
+        row["label"]
+        for row in unchanged_plan["platform_matrix"]["include"]
+        if "compile" in row["contracts"]
+    } == {"windows"}
 
     try:
         changed_source_platforms(
