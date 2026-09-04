@@ -277,14 +277,14 @@ launched source work.
 | Eligible independent leaf crate | N/A | N/A | No eligible live production path exists: the Cargo-leaf lint crate has only `src/main.rs`, whose target predicates make exact-source classification select complete fallback. No synthetic file or hosted run was created. |
 | CLI test/domain | 2:49 | 3.07 | Retained: at least 90% less wall time and 94% fewer runner-minutes than the best baseline while running only its owning Rust, repository, and test-domain proof. |
 | Shared core / complete fallback | 12:10 | 45.05 | Retained for safety: the identical complete plan used by shared-core, unknown, and workflow-authority changes is at least 58% faster in wall time and inside the 15-minute ceiling. Raw cost improved only 15% against the best baseline, so no material raw-cost claim is made. |
-| Platform-sensitive | 3:16 to fail | 4.25 to fail | The narrow plan selected only Rust plus macOS Intel/ARM and correctly failed on a Bash 3.2 incompatibility. After the fix, the same macOS steps passed in 8:34 and 7:45 inside complete proof. No synthetic rerun was created solely to claim a green narrow duration. |
+| Platform-sensitive | 13:40 | 21.90 | Retained: the corrected narrow plan ran only repository policy, the owning Rust target, macOS Intel/ARM, and the aggregate. It improved wall time by at least 52% and raw runner time by at least 58%, stayed inside the 15-minute ceiling, and identified macOS Intel at 13:08 as the limiter. The earlier failed narrow run caught the Bash 3.2 defect. |
 
 One earlier complete activation run reached 15:22 because its Windows owner took
 15:00, exceeding the ceiling by 22 seconds; the unchanged complete-plan
 representative above finished in 12:10. The variance is recorded rather than
-removing proof. The measured narrow documentation and CLI routes materially
-improve both latency and runner cost; the complete route materially improves
-latency while preserving every causal backstop.
+removing proof. The measured narrow documentation, CLI, and platform-sensitive
+routes materially improve both latency and runner cost; the complete route
+materially improves latency while preserving every causal backstop.
 
 Caching is excluded because the available measurement validated a parser-pack
 dependency cache on Linux but found an immaterial Windows improvement; it does
