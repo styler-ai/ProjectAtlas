@@ -5889,6 +5889,8 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         r#"["rust_packages"]"#,
         r#"["test_targets"]"#,
         r#"["mode"]"#,
+        "while IFS= read -r package; do",
+        "while IFS= read -r target; do",
         "planner emitted unknown Rust package",
         "planner emitted unknown Rust test target",
         "target compile contract has no affected package",
@@ -5906,6 +5908,7 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         }
     }
     for forbidden in [
+        "mapfile",
         "cargo clippy",
         "--tests",
         "cargo check \"${package_args[@]}\" \"${target_args[@]}\"",

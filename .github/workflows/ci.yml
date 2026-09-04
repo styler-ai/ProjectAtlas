@@ -394,8 +394,14 @@ jobs:
           PLAN: ${{ needs.plan.outputs.plan }}
         run: |
           set -euo pipefail
-          mapfile -t packages < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["rust_packages"]).encode())')
-          mapfile -t targets < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["test_targets"]).encode())')
+          packages=()
+          while IFS= read -r package; do
+            [[ -z "$package" ]] || packages+=("$package")
+          done < <(python3 -c 'import json,os,sys; values=json.loads(os.environ["PLAN"])["rust_packages"]; sys.stdout.buffer.write(("\n".join(values) + "\n").encode())')
+          targets=()
+          while IFS= read -r target; do
+            [[ -z "$target" ]] || targets+=("$target")
+          done < <(python3 -c 'import json,os,sys; values=json.loads(os.environ["PLAN"])["test_targets"]; sys.stdout.buffer.write(("\n".join(values) + "\n").encode())')
           mode="$(python3 -c 'import json,os; print(json.loads(os.environ["PLAN"])["mode"])')"
           package_args=()
           library_package_args=()
