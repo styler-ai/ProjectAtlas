@@ -301,6 +301,7 @@ jobs:
             exit 1
           fi
           cargo check "${package_args[@]}" --lib --bins --examples --all-features --locked
+          cargo test "${package_args[@]}" --lib --bins --no-run --all-features --locked
           if (( ${#target_args[@]} > 0 )); then
             cargo check -p projectatlas-cli "${target_args[@]}" --all-features --locked
           fi

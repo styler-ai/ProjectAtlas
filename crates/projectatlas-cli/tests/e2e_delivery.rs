@@ -5843,6 +5843,7 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         "target compile contract has no affected package",
         "cargo check --workspace --all-targets --all-features --locked",
         "cargo check \"${package_args[@]}\" --lib --bins --examples --all-features --locked",
+        "cargo test \"${package_args[@]}\" --lib --bins --no-run --all-features --locked",
         "cargo check -p projectatlas-cli \"${target_args[@]}\" --all-features --locked",
     ] {
         if !target_compile_run.contains(required) {
@@ -5852,8 +5853,8 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         }
     }
     for forbidden in [
-        "cargo test",
         "cargo clippy",
+        "--tests",
         "cargo check \"${package_args[@]}\" \"${target_args[@]}\"",
     ] {
         if target_compile_run.contains(forbidden) {
