@@ -3660,9 +3660,16 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "types: [opened, reopened, synchronize, edited, milestoned, demilestoned]",
-        "group: projectatlas-pr-state-${{ github.event.pull_request.number }}-${{ github.run_id }}",
+        "types: [closed, reopened, milestoned, demilestoned]",
+        "group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}",
         "cancel-in-progress: false",
         "name: pr-state",
+        "if: github.event_name == 'pull_request'",
+        "name: refresh-pr-state",
+        "if: github.event_name == 'issues'",
+        "timeout-minutes: 2",
+        "actions: write",
+        "--refresh-pr-state-for-issue",
         "Validate issue reference and milestone",
         "gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"",
     ] {
@@ -3673,10 +3680,46 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
+    let direct_pr_state_job = workflow_job_block(&pr_state, "pr-state")?;
+    let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
     for forbidden in ["actions/checkout", "cargo ", "codex-pr-review-gate.py"] {
-        if pr_state.contains(forbidden) {
+        if direct_pr_state_job.contains(forbidden) {
             return Err(io::Error::other(format!(
-                "PR-state workflow retained unrelated source work {forbidden:?}"
+                "direct PR-state validation retained unrelated source work {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "cargo ",
+        "github.event.pull_request.head",
+        "continue-on-error: true",
+    ] {
+        if refresh_pr_state_job.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "issue-event PR-state refresh retained unsafe behavior {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in ["checks: write", "--refresh-pr-state-for-issue"] {
+        if issueops_workflow.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "IssueOps retained duplicate PR-state refresh ownership {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "def pr_state_refreshes(",
+        "open pull-request inventory reached the refresh bound",
+        "actions/workflows/pr-state.yml/runs",
+        "actions/runs/{workflow_run['id']}/rerun",
+        "no PR-state workflow run found",
+    ] {
+        if !issueops.contains(required) {
+            return Err(io::Error::other(format!(
+                "PR-state refresh omitted fail-closed behavior {required:?}"
             ))
             .into());
         }
@@ -3740,7 +3783,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "types: [opened, edited, reopened, labeled, unlabeled, milestoned, closed]",
+        "types: [opened, edited, reopened, labeled, unlabeled, milestoned, demilestoned, closed]",
         "--planned-issue \"$ISSUE_NUMBER\"",
         "timeout-minutes: 5",
         "contents: read",

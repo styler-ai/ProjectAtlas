@@ -1064,7 +1064,14 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     }
     let metadata_output = StdCommand::new("cargo")
         .current_dir(&workspace_root)
-        .args(["metadata", "--locked", "--offline", "--format-version", "1"])
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
         .output()?;
     if !metadata_output.status.success() {
         return Err(io::Error::other(format!(

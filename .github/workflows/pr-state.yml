@@ -6,9 +6,11 @@ on:
   pull_request:
     branches: [main, dev]
     types: [opened, reopened, synchronize, edited, milestoned, demilestoned]
+  issues:
+    types: [closed, reopened, milestoned, demilestoned]
 
 concurrency:
-  group: projectatlas-pr-state-${{ github.event.pull_request.number }}-${{ github.run_id }}
+  group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}
   cancel-in-progress: false
 
 permissions:
@@ -19,6 +21,7 @@ permissions:
 jobs:
   pr-state:
     name: pr-state
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Validate issue reference and milestone
@@ -66,3 +69,26 @@ jobs:
             echo "Pull request milestone must match owning issue #$owner_issue." >&2
             exit 1
           fi
+
+  refresh-pr-state:
+    name: refresh-pr-state
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Refresh affected pull-request state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: >-
+          python3 .github/scripts/issue-checklists.py
+          --repo "$GITHUB_REPOSITORY"
+          --refresh-pr-state-for-issue "$ISSUE_NUMBER"

@@ -64,6 +64,27 @@ The `pr-state` concurrency namespace is separate from source CI and automatic
 cancellation is disabled, so metadata activity cannot cancel useful
 compilation, tests, another state check, or an IssueOps run.
 
+Pull-request edits rerun the lightweight workflow normally. Owning issue close,
+reopen, milestone-assignment, and milestone-removal events SHALL enter a trusted
+default-branch job in the same `pr-state` workflow. That job reuses the existing
+issue-reference parser, inspects only affected open pull requests, locates the
+existing workflow run for each exact current PR head, and reruns it through the
+Actions API. The rerun fetches live issue state through the existing validator
+and runs no source build or test. This preserves one Actions-generated
+`pr-state` authority instead of creating a synthetic check or expanding
+IssueOps permissions.
+
+No workflow can change PR-head readiness if GitHub refuses the API calls needed
+to enumerate that head or request its rerun. The issue-event job therefore
+fails visibly on an unreadable inventory, missing run, timeout, or rejected
+rerun and prints the exact failing operation. It does not claim that this
+default-branch failure invalidates an older PR-head check. Final orchestrator
+acceptance already rereads the live owning issue and matching milestone before
+merge; it SHALL block merge and require a manual rerun after service recovery
+when the refresh failed. This honest bounded recovery uses the existing final
+acceptance authority instead of a synthetic check that has the same first-write
+failure and creates a second mutable state owner.
+
 This deliberately supersedes #299's Codex-only GraphQL polling gate. Native
 conversation resolution applies to every review conversation, including human
 threads; that stronger rule matches the repository requirement to disposition
@@ -194,6 +215,11 @@ context being absent, stale, skipped, cancelled, or failed, or any unresolved
 conversation, keeps the pull request blocked. None can satisfy or replace
 another.
 
+That logical AND is the branch-protection boundary. Final merge acceptance also
+rereads the live owning issue and milestone. A failed issue-event refresh is a
+visible operational failure requiring recovery; it is never represented as a
+new green PR-head result or treated as permission to merge on the older check.
+
 This stable aggregate avoids a required-context name per possible plan. The
 existing four `e2e-smoke` job names remain present during migration, and the
 change's own pull request selects the full fallback so current branch
@@ -271,6 +297,12 @@ representation is sufficient; no second task store, hash, or receipt is added.
   native required-conversation-resolution rule instead of polling or an
   Actions event that does not exist; verify both resolve and reopen behavior
   during the controlled branch-protection transition.
+- **Owning issue state could change after a green PR check.** -> Let the existing
+  trusted `pr-state` issue-event job rerun the existing workflow on each
+  affected current PR head, and exercise close, reopen, milestone removal, and
+  restoration without launching source proof. If GitHub refuses enumeration or
+  rerun, keep the issue-event job red and require final acceptance to reread the
+  live issue and milestone before manual recovery and merge.
 - **The native rule broadens the former Codex-only gate to human threads.** ->
   Make that compatibility change explicit, remove the superseded custom gate,
   and prove unresolved and resolved human and Codex conversations in hosted
@@ -298,23 +330,27 @@ representation is sufficient; no second task store, hash, or receipt is added.
 1. Inventory each existing `ci.yml` step and assign it to one closed proof
    contract; unresolved ownership remains full fallback.
 2. Add the planner, bounded report, and self-tests before wiring omission.
-3. Move live issue/reference checks to the separate `pr-state` workflow and use
-   native required conversation resolution for review threads.
+3. Move live issue/reference checks to the separate `pr-state` workflow, refresh
+   exact PR-head state from owning issue close/reopen/milestone events through
+   an isolated job in that workflow, and use native required conversation
+   resolution for review threads.
 4. Give each event and workflow owner its separate cancellation namespace;
    enable cancellation only for an older PR source run superseded by a newer
    source run for the same pull-request number.
 5. Refactor source CI into planner, static concurrent jobs, and final `verify`
    aggregate while forcing the implementation pull request to full fallback.
 6. Prove positive, negative, failure, compatibility, bot, rename/delete, stale
-   binding, three-input readiness, same-PR cancellation, and cross-owner isolation
-   locally and in hosted Actions.
+   binding, three-input readiness, visible issue-refresh failure and manual
+   recovery, same-PR cancellation, and cross-owner isolation locally and in
+   hosted Actions.
 7. Extend planned-issue IssueOps self-tests with equal-count task-text and order
    drift before relying on the issue/task mirror for handoff.
 8. After the implementation is merged, change branch protection from the four
    platform contexts to `pr-state` and `verify` while enabling required
    conversation resolution; immediately exercise thread resolve/reopen, a
-   narrow known plan, and an unknown-input fallback. Roll back by restoring the
-   former required contexts and making every plan select complete proof.
+   owning-issue close/reopen/milestone transitions, a narrow known plan, and an
+   unknown-input fallback. Roll back by restoring the former required contexts
+   and making every plan select complete proof.
 9. Measure all five before/after classes. Remove any narrowing rule that does
    not meet materiality or causal-coverage requirements.
 10. Confirm the next integrated release candidate still runs the complete

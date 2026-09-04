@@ -65,7 +65,7 @@ The local pre-push hook SHALL bind the same closed proof plan to the exact clean
 - **THEN** pre-push fails or selects complete local proof and never guesses a narrower command set
 
 ### Requirement: Live PR state does not repeat unchanged source proof
-Issue-reference and milestone validation SHALL run in a lightweight required `pr-state` workflow. GitHub native required conversation resolution SHALL own live review-thread state so resolving or reopening a thread cannot leave a stale workflow conclusion. Review and review-comment activity SHALL NOT launch `pr-state`, Rust compilation, Rust tests, or platform E2E jobs for an unchanged source tree. Automatic cancellation SHALL be disabled for `pr-state`.
+Issue-reference and milestone validation SHALL run in a lightweight required `pr-state` workflow. An owning issue close, reopen, milestone assignment, or milestone removal SHALL make an isolated issue-event job rerun the existing `pr-state` workflow on every affected open pull request's current head without launching source verification. GitHub native required conversation resolution SHALL own live review-thread state so resolving or reopening a thread cannot leave a stale workflow conclusion. Review and review-comment activity SHALL NOT launch `pr-state`, Rust compilation, Rust tests, or platform E2E jobs for an unchanged source tree. Automatic cancellation SHALL be disabled for `pr-state`.
 
 #### Scenario: Review or review-comment changes
 - **WHEN** a review is submitted, edited, or dismissed or a review comment is created, edited, or deleted without a source change
@@ -78,6 +78,14 @@ Issue-reference and milestone validation SHALL run in a lightweight required `pr
 #### Scenario: PR metadata invalidates readiness
 - **WHEN** the owning issue reference or milestone is invalid
 - **THEN** `pr-state` fails independently of any previously successful source proof
+
+#### Scenario: Owning issue metadata changes after source proof
+- **WHEN** the referenced issue closes, reopens, receives a milestone, or loses its milestone after `pr-state` ran
+- **THEN** the `pr-state` issue-event job reruns the existing exact current-head workflow so live validation writes the new success or failure without running repository, Rust, or platform proof
+
+#### Scenario: Owning issue refresh cannot reach the PR head
+- **WHEN** pull-request enumeration, current-head run lookup, bounded waiting, or the Actions rerun request fails
+- **THEN** the issue-event job fails visibly without publishing a green replacement or running source proof, and final acceptance rereads the live owning issue and milestone and blocks merge until manual recovery succeeds
 
 #### Scenario: Review thread is reopened
 - **WHEN** any pull-request review conversation is reopened after prior source and metadata proof succeeded
@@ -132,6 +140,10 @@ Static quality, Rust test-domain, and platform jobs SHALL run concurrently when 
 #### Scenario: One readiness input is not current and successful
 - **WHEN** either `pr-state` or `verify` is absent, stale, skipped, cancelled, or failed, or a review conversation is unresolved
 - **THEN** the pull request remains blocked and the other inputs cannot replace it
+
+#### Scenario: Final acceptance follows an issue-refresh failure
+- **WHEN** an owning issue event could not request the exact current-head `pr-state` rerun
+- **THEN** the final live issue and milestone read blocks merge until metadata is valid and the failed refresh is recovered, regardless of an older green PR-head check
 
 ### Requirement: Platform proof follows affected behavior
 Ordinary pull-request CI SHALL run each platform job only when that operating system or architecture can add defect-detection value for an affected contract, while retaining complete proof for ambiguous and shared changes.

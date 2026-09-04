@@ -3283,10 +3283,16 @@ Normal pull requests route only the proof contracts that can detect defects in
 the exact change. One closed planner combines the Cargo reverse-dependency graph
 with declared CLI, MCP, integration, and platform ownership; ambiguity selects
 the complete normal-PR proof. Live review-thread state is owned by GitHub's
-native required-conversation-resolution rule, selected jobs run concurrently,
-and one fail-closed aggregate is the stable source-proof context. Pull-request
-readiness is the explicit AND of current `pr-state`, current `verify`, and
-resolved review conversations. Automatic cancellation
+native required-conversation-resolution rule. Pull-request metadata reruns a
+lightweight workflow, while an isolated `pr-state` issue-event job reruns the
+existing workflow on the exact current PR head after an owning issue
+close/reopen/milestone event, without running source proof. Selected jobs run
+concurrently, and one fail-closed aggregate is the stable source-proof context.
+Branch-protection readiness is the explicit AND of current `pr-state`, current
+`verify`, and resolved review conversations. Final merge acceptance rereads the
+live owning issue and milestone, so an issue-refresh API failure stays visibly
+red and requires manual recovery rather than trusting an older green check.
+Automatic cancellation
 applies only when a newer pull-request source run supersedes an older source
 run for the same pull-request number; all other event, governance, and delivery
 owners use isolated namespaces with cancellation disabled. The complete
@@ -3300,7 +3306,9 @@ flowchart TB
     subgraph PR[Pull request]
         direction LR
         Change[Source change] --> Plan[Closed proof-contract planner]
-        Metadata[Issue reference or milestone change] --> State[Required PR-state gate]
+        PRMetadata[PR issue reference or milestone change] --> State[Required PR-state gate]
+        IssueMetadata[Owning issue close, reopen,<br/>or milestone change] --> Refresh[PR-state issue event reruns<br/>exact current-head workflow]
+        Refresh --> State
         Review[Review conversation state] --> Conversation[Native required<br/>conversation resolution]
         Plan --> Known{Narrow plan proven?}
         Known -->|No| Full[Complete normal-PR proof]
@@ -3310,8 +3318,11 @@ flowchart TB
         State --> Gate{{AND: current PR-state,<br/>current verify, and<br/>resolved conversations}}
         Verify --> Gate
         Conversation --> Gate
-        Gate -->|All satisfied| Ready[PR ready]
+        Gate -->|All satisfied| ProtectedReady[Branch protection ready]
         Gate -->|Otherwise| Blocked[PR blocked]
+        ProtectedReady --> FinalRead[Final live issue and<br/>milestone read]
+        FinalRead -->|Valid| Ready[PR ready]
+        FinalRead -->|Invalid or refresh failed| Blocked
     end
 
     Ready --> Main[Protected-branch affected proof]

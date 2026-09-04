@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -609,6 +610,60 @@ def plan_changes(
     )
 
 
+def plan_with_cargo_graph(
+    *,
+    root: Path,
+    base: str,
+    head: str,
+    event: str,
+    changes: list[Change],
+    force_full: bool = False,
+    graph_loader: Callable[[Path], CargoGraph] = load_cargo_graph,
+) -> dict[str, object]:
+    paths = [path for change in changes for path in change.paths]
+    requires_graph = (
+        not force_full
+        and event not in {"schedule", "workflow_dispatch", "merge_group"}
+        and any(path.startswith("crates/") for path in paths)
+        and not any(is_authority(path) for path in paths)
+    )
+    if requires_graph:
+        try:
+            graph = graph_loader(root)
+        except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return full_plan(
+                base=base,
+                head=head,
+                event=event,
+                changes=changes,
+                reason="Cargo metadata unavailable or invalid",
+                dependency_audit=any(
+                    path
+                    in {
+                        ".github/mermaid-parser/package.json",
+                        ".github/mermaid-parser/package-lock.json",
+                    }
+                    for path in paths
+                ),
+                cargo_dependency=any(
+                    path == "Cargo.lock" or path.endswith("Cargo.toml") for path in paths
+                ),
+            )
+    else:
+        graph = CargoGraph(
+            {name: f"crates/{name}" for name in PACKAGE_NAMES},
+            {name: set() for name in PACKAGE_NAMES},
+        )
+    return plan_changes(
+        base=base,
+        head=head,
+        event=event,
+        changes=changes,
+        graph=graph,
+        force_full=force_full,
+    )
+
+
 def decision_reason(plan: dict[str, object], contract: str, selected: bool) -> str:
     if selected and plan["mode"] == "full":
         return f"complete fallback: {plan['reasons'][0]}"
@@ -851,13 +906,20 @@ def self_test() -> None:
         changes=[
             Change(
                 "R100",
-                ("docs/old.md", "crates/projectatlas-lints/src/renamed.rs"),
+                (
+                    "crates/projectatlas-lints/src/renamed.rs",
+                    "crates/projectatlas-cli/tests/e2e_navigation.rs",
+                ),
             )
         ],
         graph=graph,
     )
     assert renamed["mode"] == "narrow"
-    assert renamed["rust_packages"] == ["projectatlas-lints"]
+    assert renamed["rust_packages"] == ["projectatlas-cli", "projectatlas-lints"]
+    assert renamed["test_targets"] == ["e2e_navigation", "lint_diagnostics"]
+    assert renamed["platform_matrix"]["include"] == [
+        {"label": "linux", "os": "ubuntu-latest", "contracts": ["navigation"]}
+    ]
 
     deleted = plan_changes(
         base="a" * 40,
@@ -887,6 +949,20 @@ def self_test() -> None:
     )
     assert ignored_policy["mode"] == "full"
 
+    def fail_metadata(_: Path) -> CargoGraph:
+        raise RuntimeError("deterministic metadata failure")
+
+    metadata_failure = plan_with_cargo_graph(
+        root=Path.cwd(),
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[Change("M", ("crates/projectatlas-lints/src/lib.rs",))],
+        graph_loader=fail_metadata,
+    )
+    assert metadata_failure["mode"] == "full"
+    assert metadata_failure["reasons"] == ["Cargo metadata unavailable or invalid"]
+
     bounded = build_plan(
         base="a" * 40,
         head="b" * 40,
@@ -901,6 +977,27 @@ def self_test() -> None:
         platforms={label: set() for label in PLATFORM_CONTRACTS},
     )
     assert len(bounded["changes"]) == MAX_REPORTED_CHANGES
+    assert len(summary(bounded).encode("utf-8")) <= MAX_SUMMARY_BYTES
+    assert (
+        len(json.dumps(bounded, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        <= MAX_PLAN_BYTES
+    )
+    oversized_summary = dict(bounded)
+    oversized_summary["reasons"] = ["x" * MAX_SUMMARY_BYTES]
+    try:
+        summary(oversized_summary)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("oversized summary was accepted")
+    oversized_plan = dict(bounded)
+    oversized_plan["reasons"] = ["x" * MAX_PLAN_BYTES]
+    try:
+        write_outputs(oversized_plan, None, None)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("oversized plan was accepted")
     aggregate(
         plan,
         "a" * 40,
@@ -936,6 +1033,18 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("stale binding was accepted")
+    try:
+        aggregate(
+            plan,
+            "a" * 40,
+            "c" * 40,
+            "pull_request",
+            {"repository": "success", "rust": "skipped", "platform": "skipped"},
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("stale head binding was accepted")
     try:
         aggregate(
             plan,
@@ -1023,21 +1132,12 @@ def main() -> int:
     changes = parse_name_status(
         git("diff", "--name-status", "-z", "--find-renames", base, head, "--", root=root)
     )
-    paths = [path for change in changes for path in change.paths]
-    crate_paths = [path for path in paths if path.startswith("crates/")]
-    if crate_paths and not any(is_authority(path) for path in paths):
-        graph = load_cargo_graph(root)
-    else:
-        graph = CargoGraph(
-            {name: f"crates/{name}" for name in PACKAGE_NAMES},
-            {name: set() for name in PACKAGE_NAMES},
-        )
-    plan = plan_changes(
+    plan = plan_with_cargo_graph(
+        root=root,
         base=base,
         head=head,
         event=args.event,
         changes=changes,
-        graph=graph,
         force_full=args.force_full,
     )
     write_outputs(plan, args.github_output, args.summary)
