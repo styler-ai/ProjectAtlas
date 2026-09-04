@@ -94,6 +94,19 @@ TARGET_ALL_PATTERN = re.compile(rb"\ball\s*\(")
 CFG_START_PATTERN = re.compile(rb"#\s*!?\s*\[\s*cfg(?:_attr)?\s*\(|\bcfg!\s*\(")
 CFG_ATTRIBUTE_PATTERN = re.compile(rb"#\s*!?\s*\[\s*cfg(?:_attr)?\s*\(([^]]{0,4096})]", re.DOTALL)
 CFG_MACRO_PATTERN = re.compile(rb"\bcfg!\s*\((.{0,4096}?)\)", re.DOTALL)
+CFG_IDENTIFIER_PATTERN = re.compile(rb"\b[A-Za-z_][A-Za-z0-9_]*\b")
+SUPPORTED_TARGET_CFG_IDENTIFIERS = {
+    b"any",
+    b"target_os",
+    b"target_family",
+    b"target_arch",
+    b"linux",
+    b"windows",
+    b"macos",
+    b"unix",
+    b"x86_64",
+    b"aarch64",
+}
 PLATFORM_OS = {
     "linux": "ubuntu-latest",
     "windows": "windows-latest",
@@ -320,6 +333,11 @@ def source_platform_labels(source: bytes) -> tuple[str, ...]:
             raise RuntimeError("unsupported target family requires complete proof")
         if arch_values - {b"x86_64", b"aarch64"}:
             raise RuntimeError("unsupported target architecture requires complete proof")
+        if (
+            set(CFG_IDENTIFIER_PATTERN.findall(body))
+            - SUPPORTED_TARGET_CFG_IDENTIFIERS
+        ):
+            raise RuntimeError("mixed target and non-target predicate requires complete proof")
         operating_systems.update(os_values)
         families.update(family_values)
         architectures.update(arch_values)
@@ -365,6 +383,8 @@ def changed_source_platforms(
     blob_loader: Callable[[Path, str, str], bytes | None] = exact_tree_blob,
 ) -> dict[str, tuple[str, ...]]:
     result: dict[str, tuple[str, ...]] = {}
+    added_sources: list[tuple[str, Counter[bytes]]] = []
+    deleted_sources: list[tuple[str, Counter[bytes]]] = []
     lookups = 0
     blobs = 0
     total_bytes = 0
@@ -400,6 +420,10 @@ def changed_source_platforms(
             ):
                 labels.update(PLATFORM_CONTRACTS)
             result[path] = tuple(label for label in PLATFORM_CONTRACTS if label in labels)
+            if change.status == "A" and head in revision_predicates:
+                added_sources.append((path, revision_predicates[head]))
+            elif change.status == "D" and base in revision_predicates:
+                deleted_sources.append((path, revision_predicates[base]))
         if change.status.startswith("R") and len(change.paths) == 2:
             old_path, new_path = change.paths
             old_predicates = change_predicates.get((base, old_path))
@@ -412,6 +436,9 @@ def changed_source_platforms(
                 and selected != set(PLATFORM_CONTRACTS)
             ):
                 result[new_path] = tuple(PLATFORM_CONTRACTS)
+    if added_sources and any(predicates for _, predicates in deleted_sources):
+        for path, _ in added_sources + deleted_sources:
+            result[path] = tuple(PLATFORM_CONTRACTS)
     return result
 
 
@@ -1196,6 +1223,8 @@ def self_test() -> None:
         b'#[cfg(all(target_os = "linux", target_arch = "x86_64"))]',
         b'#[cfg(all(target_os = "windows", target_arch = "x86_64"))]',
         b'#[cfg(all(target_os = "macos", target_arch = "aarch64"))]',
+        b'#[cfg(any(target_arch = "x86_64", debug_assertions))]',
+        b'#[cfg(any(target_os = "windows", feature = "optional"))]',
         (
             b'#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), '
             b'all(target_os = "macos", target_arch = "aarch64")))]'
@@ -1229,6 +1258,24 @@ def self_test() -> None:
     )
     assert renamed_platforms[old_source] == ("windows",)
     assert renamed_platforms[new_source] == tuple(PLATFORM_CONTRACTS)
+
+    def split_move_blob(_: Path, revision: str, path: str) -> bytes | None:
+        return {
+            ("a" * 40, old_source): b"#[cfg(windows)]\nfn moved() {}\n",
+            ("b" * 40, new_source): (
+                b"#[cfg(windows)]\nfn unrelated() {}\nfn moved() {}\n"
+            ),
+        }.get((revision, path))
+
+    split_move_platforms = changed_source_platforms(
+        Path.cwd(),
+        "a" * 40,
+        "b" * 40,
+        [Change("D", (old_source,)), Change("A", (new_source,))],
+        blob_loader=split_move_blob,
+    )
+    assert split_move_platforms[old_source] == tuple(PLATFORM_CONTRACTS)
+    assert split_move_platforms[new_source] == tuple(PLATFORM_CONTRACTS)
 
     def unchanged_rename_blob(_: Path, revision: str, path: str) -> bytes | None:
         return {
