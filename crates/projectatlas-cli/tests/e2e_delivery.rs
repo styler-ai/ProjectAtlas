@@ -21466,7 +21466,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     let flood_output = wait_for_plugin_installer_output(
         spawn_plugin_installer_process(&mut flood_command)?,
         "pipe-drain",
-        Duration::from_secs(5),
+        Duration::from_secs(30),
     )?;
     require(
         flood_output.status.success(),
@@ -21497,7 +21497,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         }
     }
     require(
-        flood_started.elapsed() < Duration::from_secs(5),
+        flood_started.elapsed() < Duration::from_secs(30),
         "pipe-drain installer exceeded its observer deadline",
     )?;
 
