@@ -217,9 +217,9 @@ jobs:
             done
           else
             if [[ "$mode" == "full" ]]; then
-              cargo check "${package_args[@]}" --all-targets --all-features --locked
-              cargo clippy "${package_args[@]}" --all-targets --all-features --locked -- -D warnings
-              cargo test "${package_args[@]}" --all-features --locked
+              cargo check --workspace --all-targets --all-features --locked
+              cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+              cargo test --workspace --all-features --locked
             else
               cargo check "${package_args[@]}" --lib --bins --examples --all-features --locked
               cargo clippy "${package_args[@]}" --lib --bins --examples --all-features --locked -- -D warnings
@@ -230,8 +230,13 @@ jobs:
                 cargo test --locked -p projectatlas-cli --all-features --test "$target"
               done
             fi
-            cargo test --doc "${package_args[@]}" --all-features --locked
-            RUSTDOCFLAGS="-D warnings" cargo doc "${package_args[@]}" --no-deps --all-features --locked
+            if [[ "$mode" == "full" ]]; then
+              cargo test --workspace --doc --all-features --locked
+              RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+            else
+              cargo test --doc "${package_args[@]}" --all-features --locked
+              RUSTDOCFLAGS="-D warnings" cargo doc "${package_args[@]}" --no-deps --all-features --locked
+            fi
           fi
           if [[ "$filtered_custom_harness" == "true" ]]; then
             cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
@@ -272,6 +277,7 @@ jobs:
           set -euo pipefail
           mapfile -t packages < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["rust_packages"]).encode())')
           mapfile -t targets < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["test_targets"]).encode())')
+          mode="$(python3 -c 'import json,os; print(json.loads(os.environ["PLAN"])["mode"])')"
           package_args=()
           for package in "${packages[@]}"; do
             case "$package" in
@@ -286,11 +292,18 @@ jobs:
               *) echo "planner emitted unknown Rust test target: $target" >&2; exit 1 ;;
             esac
           done
+          if [[ "$mode" == "full" ]]; then
+            cargo check --workspace --all-targets --all-features --locked
+            exit 0
+          fi
           if (( ${#package_args[@]} == 0 )); then
             echo "target compile contract has no affected package" >&2
             exit 1
           fi
-          cargo check "${package_args[@]}" "${target_args[@]}" --lib --bins --examples --all-features --locked
+          cargo check "${package_args[@]}" --lib --bins --examples --all-features --locked
+          if (( ${#target_args[@]} > 0 )); then
+            cargo check -p projectatlas-cli "${target_args[@]}" --all-features --locked
+          fi
 
       - name: macOS all-features warning gate
         if: runner.os == 'macOS' && contains(matrix.contracts, 'mac-quality')

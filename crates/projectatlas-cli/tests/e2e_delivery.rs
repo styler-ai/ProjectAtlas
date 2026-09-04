@@ -3429,7 +3429,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
 
     for required in [
         "affected-ci-proof.py plan",
-        "cargo check \"$@\" --all-targets --all-features --locked",
+        "cargo check --workspace --all-targets --all-features --locked",
         "cargo check \"$@\" --lib --bins --examples --all-features --locked",
         "cargo test \"$@\" --lib --bins --all-features --locked",
         "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
@@ -3480,10 +3480,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo check --locked -p projectatlas-cli --all-features --test \"$target\"",
         "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
         "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled",
-        "cargo check \"${package_args[@]}\" --all-targets --all-features --locked",
+        "cargo check --workspace --all-targets --all-features --locked",
         "cargo check \"${package_args[@]}\" --lib --bins --examples --all-features --locked",
         "cargo test \"${package_args[@]}\" --lib --bins --all-features --locked",
-        "cargo test \"${package_args[@]}\" --all-features --locked",
+        "cargo test --workspace --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
@@ -5837,12 +5837,13 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
     for required in [
         r#"["rust_packages"]"#,
         r#"["test_targets"]"#,
+        r#"["mode"]"#,
         "planner emitted unknown Rust package",
         "planner emitted unknown Rust test target",
         "target compile contract has no affected package",
-        "cargo check",
-        r#"--test "$target""#,
-        "--lib --bins --examples --all-features --locked",
+        "cargo check --workspace --all-targets --all-features --locked",
+        "cargo check \"${package_args[@]}\" --lib --bins --examples --all-features --locked",
+        "cargo check -p projectatlas-cli \"${target_args[@]}\" --all-features --locked",
     ] {
         if !target_compile_run.contains(required) {
             return Err(
@@ -5850,7 +5851,11 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
             );
         }
     }
-    for forbidden in ["cargo test", "cargo clippy", "--workspace", "--all-targets"] {
+    for forbidden in [
+        "cargo test",
+        "cargo clippy",
+        "cargo check \"${package_args[@]}\" \"${target_args[@]}\"",
+    ] {
         if target_compile_run.contains(forbidden) {
             return Err(io::Error::other(format!(
                 "affected target compile repeats unrelated proof {forbidden:?}"

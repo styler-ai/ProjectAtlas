@@ -193,9 +193,9 @@ if [ -n "$rust_packages$test_targets" ]; then
     done
   else
     if [ "$mode" = "full" ]; then
-      cargo check "$@" --all-targets --all-features --locked
-      cargo clippy "$@" --all-targets --all-features --locked -- -D warnings
-      cargo test "$@" --all-features --locked
+      cargo check --workspace --all-targets --all-features --locked
+      cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      cargo test --workspace --all-features --locked
     else
       cargo check "$@" --lib --bins --examples --all-features --locked
       cargo clippy "$@" --lib --bins --examples --all-features --locked -- -D warnings
@@ -206,8 +206,13 @@ if [ -n "$rust_packages$test_targets" ]; then
         cargo test --locked -p projectatlas-cli --all-features --test "$target"
       done
     fi
-    cargo test --doc "$@" --all-features --locked
-    RUSTDOCFLAGS="-D warnings" cargo doc "$@" --no-deps --all-features --locked
+    if [ "$mode" = "full" ]; then
+      cargo test --workspace --doc --all-features --locked
+      RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+    else
+      cargo test --doc "$@" --all-features --locked
+      RUSTDOCFLAGS="-D warnings" cargo doc "$@" --no-deps --all-features --locked
+    fi
   fi
   if [ "$filtered_custom_harness" = "true" ]; then
     cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
