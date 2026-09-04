@@ -18238,15 +18238,16 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
     let mut installer_probe_was_live = false;
     let installer_probe_failure =
         wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
-            StdCommand::new(&executable)
-                .current_dir(&repo)
-                .arg("--db")
-                .arg(&database)
-                .arg("mcp")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?,
+            spawn_plugin_installer_process(
+                StdCommand::new(&executable)
+                    .current_dir(&repo)
+                    .arg("--db")
+                    .arg(&database)
+                    .arg("mcp")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )?,
             "probe-failure",
             OBSERVER_TIMEOUT,
             Some(FIRST_OBSERVATION_DELAY),
@@ -18305,22 +18306,24 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         .into());
     }
     let mut installer_cleanup_packet = None;
-    let mut injected_installer_kill =
-        |_child: &mut Child| Err(io::Error::other("injected installer kill failure"));
+    let mut injected_installer_kill = |_child: &mut PluginInstallerProcess| {
+        Err(io::Error::other("injected installer kill failure"))
+    };
     let injected_installer_failure = {
         let mut installer_cleanup_handoff = |packet: PluginInstallerCleanupPacket| {
             installer_cleanup_packet = Some(packet);
         };
         wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
-            StdCommand::new(&executable)
-                .current_dir(&repo)
-                .arg("--db")
-                .arg(&database)
-                .arg("mcp")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?,
+            spawn_plugin_installer_process(
+                StdCommand::new(&executable)
+                    .current_dir(&repo)
+                    .arg("--db")
+                    .arg(&database)
+                    .arg("mcp")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )?,
             "injected-installer",
             Duration::ZERO,
             None,
@@ -18460,15 +18463,16 @@ fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
             installer_handoff_packet = Some(packet);
         };
         wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
-            StdCommand::new(&executable)
-                .current_dir(&repo)
-                .arg("--db")
-                .arg(&database)
-                .arg("mcp")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?,
+            spawn_plugin_installer_process(
+                StdCommand::new(&executable)
+                    .current_dir(&repo)
+                    .arg("--db")
+                    .arg(&database)
+                    .arg("mcp")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )?,
             "installer post-kill probe",
             Duration::ZERO,
             None,
@@ -18574,15 +18578,16 @@ fn e2e_process_observers_attempt_termination_when_cleanup_reprobe_fails()
     let mut installer_kill_attempted = false;
     let mut installer_was_live = false;
     let installer_result = wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
-        StdCommand::new(&executable)
-            .current_dir(&repo)
-            .arg("--db")
-            .arg(&database)
-            .arg("mcp")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?,
+        spawn_plugin_installer_process(
+            StdCommand::new(&executable)
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&database)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )?,
         "installer pre-termination probe",
         Duration::ZERO,
         None,
@@ -21447,21 +21452,23 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         "descendant installer retained output pipes after tree termination",
     )?;
 
-    let server = new_server()?;
     #[cfg(windows)]
-    let mut completed_parent_command = {
+    let completed_parent_with_descendant = || {
         let mut command = StdCommand::new("powershell");
         command.arg("-NoProfile").arg("-Command").arg(
-            "$child = [Diagnostics.ProcessStartInfo]::new(); $child.FileName = 'ping.exe'; $child.Arguments = '-n 16 127.0.0.1'; $child.UseShellExecute = $false; $child.CreateNoWindow = $true; [void][Diagnostics.Process]::Start($child)",
+            r#"$script = '$child = [Diagnostics.ProcessStartInfo]::new(); $child.FileName = ''ping.exe''; $child.Arguments = ''-n 16 127.0.0.1''; $child.UseShellExecute = $false; $child.CreateNoWindow = $true; [void][Diagnostics.Process]::Start($child)'; $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script)); $middle = [Diagnostics.ProcessStartInfo]::new(); $middle.FileName = 'powershell.exe'; $middle.Arguments = "-NoProfile -EncodedCommand $encoded"; $middle.UseShellExecute = $false; $middle.CreateNoWindow = $true; $middleProcess = [Diagnostics.Process]::Start($middle); $middleProcess.WaitForExit(); if ($middleProcess.ExitCode -ne 0) { exit $middleProcess.ExitCode }"#,
         );
         command
     };
     #[cfg(unix)]
-    let mut completed_parent_command = {
+    let completed_parent_with_descendant = || {
         let mut command = StdCommand::new("sh");
         command.arg("-c").arg("sleep 15 &");
         command
     };
+
+    let server = new_server()?;
+    let mut completed_parent_command = completed_parent_with_descendant();
     completed_parent_command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -21486,6 +21493,39 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     if completed_parent_elapsed >= Duration::from_secs(10) {
         return Err(io::Error::other(format!(
             "completed parent left a descendant holding installer output pipes for {completed_parent_elapsed:?}",
+        ))
+        .into());
+    }
+
+    let server = new_server()?;
+    let mut completed_at_deadline_command = completed_parent_with_descendant();
+    completed_at_deadline_command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let completed_at_deadline_started = Instant::now();
+    let completed_at_deadline_result = wait_for_plugin_installer_output_with_test_delay(
+        spawn_plugin_installer_process(&mut completed_at_deadline_command)?,
+        "fixture-completed-at-deadline-descendant",
+        Duration::from_millis(250),
+        Some(Duration::from_millis(500)),
+    );
+    let Err(completed_at_deadline_error) = server.finish(completed_at_deadline_result) else {
+        return Err(io::Error::other(
+            "completed-at-deadline parent with inherited-pipe descendant unexpectedly passed",
+        )
+        .into());
+    };
+    require(
+        completed_at_deadline_error
+            .to_string()
+            .contains("completed after deadline"),
+        "completed-at-deadline installer classification was not preserved",
+    )?;
+    let completed_at_deadline_elapsed = completed_at_deadline_started.elapsed();
+    if completed_at_deadline_elapsed >= Duration::from_secs(10) {
+        return Err(io::Error::other(format!(
+            "completed-at-deadline parent left a descendant holding installer output pipes for {completed_at_deadline_elapsed:?}",
         ))
         .into());
     }
@@ -23073,7 +23113,7 @@ fn force_stop_windows_fixture_process(
 }
 
 #[cfg(windows)]
-/// Provides the bounded, helper-free exact-process cleanup fallback.
+/// Provides helper-free Windows process identity and installer-job ownership.
 #[allow(unsafe_code)]
 mod windows_native_process {
     use super::WindowsProcessIdentity;
@@ -23081,9 +23121,13 @@ mod windows_native_process {
     use std::fs;
     use std::io;
     use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
+    use std::process::{Child, Command};
     use std::time::Instant;
 
+    const CREATE_SUSPENDED: u32 = 0x0000_0004;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const PROCESS_TERMINATE: u32 = 0x0001;
     const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -23104,7 +23148,9 @@ mod windows_native_process {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
         fn CloseHandle(handle: Handle) -> i32;
+        fn CreateJobObjectW(job_attributes: *const std::ffi::c_void, name: *const u16) -> Handle;
         fn GetExitCodeProcess(handle: Handle, exit_code: *mut u32) -> i32;
         fn GetProcessTimes(
             handle: Handle,
@@ -23121,7 +23167,13 @@ mod windows_native_process {
             path_length: *mut u32,
         ) -> i32;
         fn TerminateProcess(handle: Handle, exit_code: u32) -> i32;
+        fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
         fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    }
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtResumeProcess(process: Handle) -> i32;
     }
 
     /// Owns one exact process handle and closes it on every return path.
@@ -23153,6 +23205,76 @@ mod windows_native_process {
                 let _ = CloseHandle(self.0);
             }
         }
+    }
+
+    pub(super) struct InstallerJob {
+        handle: Handle,
+        terminated: bool,
+    }
+
+    impl InstallerJob {
+        pub(super) fn terminate(&mut self) -> io::Result<()> {
+            if self.terminated {
+                return Ok(());
+            }
+            if unsafe { TerminateJobObject(self.handle, 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.terminated = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for InstallerJob {
+        fn drop(&mut self) {
+            if !self.terminated {
+                unsafe {
+                    let _ = TerminateJobObject(self.handle, 1);
+                }
+            }
+            unsafe {
+                let _ = CloseHandle(self.handle);
+            }
+        }
+    }
+
+    /// Starts the installer suspended so every descendant inherits one retained job owner.
+    pub(super) fn spawn_installer(command: &mut Command) -> io::Result<(Child, InstallerJob)> {
+        command.creation_flags(CREATE_SUSPENDED);
+        let mut child = command.spawn()?;
+        match create_installer_job(&child) {
+            Ok(job) => Ok((child, job)),
+            Err(error) => {
+                let kill_result = child.kill();
+                let wait_result = child.wait();
+                Err(io::Error::other(format!(
+                    "failed to bind plugin installer {} to its Windows job: {error}; cleanup kill={kill_result:?} wait={wait_result:?}",
+                    child.id()
+                )))
+            }
+        }
+    }
+
+    fn create_installer_job(child: &Child) -> io::Result<InstallerJob> {
+        let raw_job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if raw_job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let job = InstallerJob {
+            handle: raw_job,
+            terminated: false,
+        };
+        if unsafe { AssignProcessToJobObject(job.handle, child.as_raw_handle().cast()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let resume_status = unsafe { NtResumeProcess(child.as_raw_handle().cast()) };
+        if resume_status != 0 {
+            return Err(io::Error::other(format!(
+                "NtResumeProcess failed for plugin installer {} with status {resume_status:#x}",
+                child.id()
+            )));
+        }
+        Ok(job)
     }
 
     /// Captures one process identity without starting a helper process.
@@ -24674,18 +24796,58 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     Ok(command)
 }
 
-fn spawn_plugin_installer_process(command: &mut StdCommand) -> io::Result<Child> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
+struct PluginInstallerProcess {
+    child: Child,
+    #[cfg(windows)]
+    job: windows_native_process::InstallerJob,
+}
 
-        command.process_group(0);
+impl std::ops::Deref for PluginInstallerProcess {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.child
     }
-    command.spawn()
+}
+
+impl std::ops::DerefMut for PluginInstallerProcess {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
+}
+
+impl PluginInstallerProcess {
+    fn wait_with_output(mut self) -> io::Result<std::process::Output> {
+        terminate_plugin_installer_process_tree(&mut self)?;
+        self.child.wait_with_output()
+    }
 }
 
 #[cfg(unix)]
-fn terminate_plugin_installer_process_tree(child: &mut Child) -> io::Result<()> {
+fn spawn_plugin_installer_process(command: &mut StdCommand) -> io::Result<PluginInstallerProcess> {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+    command
+        .spawn()
+        .map(|child| PluginInstallerProcess { child })
+}
+
+#[cfg(windows)]
+fn spawn_plugin_installer_process(command: &mut StdCommand) -> io::Result<PluginInstallerProcess> {
+    let (child, job) = windows_native_process::spawn_installer(command)?;
+    Ok(PluginInstallerProcess { child, job })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawn_plugin_installer_process(command: &mut StdCommand) -> io::Result<PluginInstallerProcess> {
+    command
+        .spawn()
+        .map(|child| PluginInstallerProcess { child })
+}
+
+#[cfg(unix)]
+fn terminate_plugin_installer_process_tree(child: &mut PluginInstallerProcess) -> io::Result<()> {
     let process_group = format!("-{}", child.id());
     let output = StdCommand::new("/bin/kill")
         .args(["-KILL", "--", &process_group])
@@ -24703,51 +24865,12 @@ fn terminate_plugin_installer_process_tree(child: &mut Child) -> io::Result<()> 
 }
 
 #[cfg(windows)]
-fn terminate_plugin_installer_process_tree(child: &mut Child) -> io::Result<()> {
-    let taskkill = std::env::var_os("SystemRoot")
-        .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from)
-        .join("System32")
-        .join("taskkill.exe");
-    let process_id = child.id().to_string();
-    let output = StdCommand::new(&taskkill)
-        .args(["/PID", &process_id, "/T", "/F"])
-        .stdin(Stdio::null())
-        .output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    if child.try_wait()?.is_none() {
-        return Err(io::Error::other(format!(
-            "failed to terminate plugin installer process tree {}: {}",
-            child.id(),
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    let descendant_output = StdCommand::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$ErrorActionPreference = 'Stop'; $owner = [uint32]$env:PROJECTATLAS_TEST_INSTALLER_OWNER_PID; $processes = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId -OperationTimeoutSec 5); foreach ($process in $processes) { if ([uint32]$process.ParentProcessId -eq $owner) { & $env:PROJECTATLAS_TEST_TASKKILL /PID ([string][uint32]$process.ProcessId) /T /F | Out-Null; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } }",
-        ])
-        .env("PROJECTATLAS_TEST_INSTALLER_OWNER_PID", process_id)
-        .env("PROJECTATLAS_TEST_TASKKILL", taskkill)
-        .stdin(Stdio::null())
-        .output()?;
-    if descendant_output.status.success() {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "failed to terminate descendants of completed plugin installer {}\nstdout:\n{}\nstderr:\n{}",
-        child.id(),
-        String::from_utf8_lossy(&descendant_output.stdout),
-        String::from_utf8_lossy(&descendant_output.stderr)
-    )))
+fn terminate_plugin_installer_process_tree(child: &mut PluginInstallerProcess) -> io::Result<()> {
+    child.job.terminate()
 }
 
 #[cfg(not(any(unix, windows)))]
-fn terminate_plugin_installer_process_tree(child: &mut Child) -> io::Result<()> {
+fn terminate_plugin_installer_process_tree(child: &mut PluginInstallerProcess) -> io::Result<()> {
     child.kill()
 }
 
@@ -24799,12 +24922,12 @@ impl PluginInstallerOutputReaders {
 }
 
 struct PluginInstallerCleanupPacket {
-    child: Child,
+    child: PluginInstallerProcess,
     readers: PluginInstallerOutputReaders,
 }
 
 fn collect_plugin_installer_output(
-    mut child: Child,
+    mut child: PluginInstallerProcess,
     readers: PluginInstallerOutputReaders,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let wait_result = child.wait();
@@ -24823,15 +24946,13 @@ fn reap_plugin_installer_child(
     mut packet: PluginInstallerCleanupPacket,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     packet.child.stdin.take();
-    if packet.child.try_wait()?.is_none() {
-        packet.child.kill()?;
-    }
+    terminate_plugin_installer_process_tree(&mut packet.child)?;
     collect_plugin_installer_output(packet.child, packet.readers)
 }
 
 /// Collect one coordinated installer process under an explicit deadline.
 fn wait_for_plugin_installer_output(
-    child: Child,
+    child: PluginInstallerProcess,
     label: &str,
     timeout: Duration,
 ) -> Result<std::process::Output, Box<dyn Error>> {
@@ -24839,7 +24960,7 @@ fn wait_for_plugin_installer_output(
 }
 
 fn wait_for_plugin_installer_output_with_test_delay(
-    child: Child,
+    child: PluginInstallerProcess,
     label: &str,
     timeout: Duration,
     observer_delay: Option<Duration>,
@@ -24859,13 +24980,13 @@ fn wait_for_plugin_installer_output_with_test_delay(
 /// Test-only variant that transfers a proven-live child and its readers to the
 /// caller when injected termination cannot safely reap it here.
 fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
-    mut child: Child,
+    mut child: PluginInstallerProcess,
     label: &str,
     timeout: Duration,
     observer_delay: Option<Duration>,
     exit_probe_error: Option<io::Error>,
     cleanup_probe_error: Option<io::Error>,
-    kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
+    kill_child: &mut impl FnMut(&mut PluginInstallerProcess) -> io::Result<()>,
     handoff_live_child: Option<&mut dyn FnMut(PluginInstallerCleanupPacket)>,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let mut exit_probe_error = exit_probe_error;
@@ -24935,6 +25056,9 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             };
             let still_running = status.is_none();
             let mut post_termination_probe_error = None;
+            if !still_running {
+                kill_child(&mut child)?;
+            }
             if still_running {
                 let kill_result = kill_child(&mut child);
                 let status_after_kill = match exit_probe_error.take() {
@@ -24964,7 +25088,7 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                         return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                     }
                 };
-                if let Err(kill_error) = kill_result
+                if let Err(kill_error) = &kill_result
                     && status_after_kill.is_none()
                 {
                     child.stdin.take();
@@ -24977,6 +25101,15 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
                         "{label} plugin installer exceeded {timeout:?}: still running at deadline status=still-running at deadline (termination failed: {kill_error}; cleanup incomplete: operating system refused termination; child was not reaped; child detached)"
                     );
                     return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                }
+                if let Err(kill_error) = &kill_result {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "{label} plugin installer exceeded {timeout:?}: parent exited after tree termination failed: {kill_error}; output was not drained"
+                        ),
+                    )
+                    .into());
                 }
             }
             let output = collect_plugin_installer_output(child, readers)?;
