@@ -58,8 +58,11 @@ if printf '%s\n' "$index_state" | awk '
   exit 1
 fi
 
-if [ "$remote_ref" = "refs/heads/main" ] && [ "$remote_oid" != "0000000000000000000000000000000000000000" ]; then
-  accepted_base="$remote_oid"
+if [ "$remote_ref" = "refs/heads/main" ]; then
+  case "$remote_oid" in
+    "" | *[!0]*) accepted_base="$remote_oid" ;;
+    *) accepted_base="$current_head" ;;
+  esac
   force_full="--force-full"
   issue_scope="global"
 else

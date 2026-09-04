@@ -3682,6 +3682,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--refresh-pr-state-for-issue",
         "Validate issue reference and milestone",
         "gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"",
+        "name: Revalidate IssueOps for owner edits",
+        "if: github.event.action == 'edited'",
+        "ref: ${{ github.event.pull_request.head.sha }}",
+        "--pull-request \"$PR_NUMBER\"",
+        "--base \"$PR_BASE_SHA\"",
     ] {
         if !pr_state.contains(required) {
             return Err(io::Error::other(format!(
@@ -3692,7 +3697,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     let direct_pr_state_job = workflow_job_block(&pr_state, "pr-state")?;
     let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
-    for forbidden in ["actions/checkout", "cargo ", "codex-pr-review-gate.py"] {
+    for forbidden in ["cargo ", "codex-pr-review-gate.py"] {
         if direct_pr_state_job.contains(forbidden) {
             return Err(io::Error::other(format!(
                 "direct PR-state validation retained unrelated source work {forbidden:?}"
@@ -4564,6 +4569,24 @@ exit 0
             "feature-checkout push to refs/heads/main did not use global IssueOps dispatch:\n{main_target}"
         ))
         .into());
+    }
+    for zero_remote_oid in ["0".repeat(40), "0".repeat(64)] {
+        let (new_main_status, new_main_target) = run_hook(
+            &format!("refs/heads/fix/549 {current_head} refs/heads/main {zero_remote_oid}\n"),
+            false,
+        )?;
+        let new_main_calls = final_issueops(&new_main_target);
+        if !new_main_status
+            || new_main_calls.len() != 1
+            || new_main_calls[0].contains("--candidate-issue")
+            || !new_main_target.contains(&format!("--base {current_head}"))
+            || !new_main_target.contains("--force-full")
+        {
+            return Err(io::Error::other(format!(
+                "new main push did not use complete global proof:\n{new_main_target}"
+            ))
+            .into());
+        }
     }
     let (multiple_candidate_status, multiple_candidate_log) = run_hook(
         "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/547 3333333333333333333333333333333333333333 refs/heads/fix/547 4444444444444444444444444444444444444444\n",

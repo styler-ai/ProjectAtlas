@@ -70,6 +70,32 @@ jobs:
             exit 1
           fi
 
+      - name: Check out exact source for owner edits
+        if: github.event.action == 'edited'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Install IssueOps parser for owner edits
+        if: github.event.action == 'edited'
+        run: npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+
+      - name: Revalidate IssueOps for owner edits
+        if: github.event.action == 'edited'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
+          python3 .github/scripts/issue-checklists.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --root . \
+            --issue-map openspec/issue-map.json \
+            --pull-request "$PR_NUMBER" \
+            --base "$PR_BASE_SHA"
+
   refresh-pr-state:
     name: refresh-pr-state
     if: github.event_name == 'issues'

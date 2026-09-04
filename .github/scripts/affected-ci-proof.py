@@ -110,6 +110,7 @@ AUTHORITY_PATHS = (
     ".githooks/pre-push",
     "Cargo.lock",
     "Cargo.toml",
+    "deny.toml",
     "rust-toolchain.toml",
     "openspec/issue-map.json",
     "crates/projectatlas-db/src/schema.rs",
@@ -513,6 +514,10 @@ def is_authority(path: str) -> bool:
     )
 
 
+def is_cargo_dependency(path: str) -> bool:
+    return path in {"Cargo.lock", "deny.toml"} or path.endswith("Cargo.toml")
+
+
 def is_known_repository_path(path: str) -> bool:
     return (
         path in KNOWN_REPOSITORY_FILES
@@ -644,7 +649,7 @@ def plan_changes(
         for path in paths
     )
     cargo_dependency = force_full and not changes or any(
-        path == "Cargo.lock" or path.endswith("Cargo.toml") for path in paths
+        is_cargo_dependency(path) for path in paths
     )
     if force_full or event in {"schedule", "workflow_dispatch", "merge_group"}:
         return full_plan(
@@ -844,9 +849,7 @@ def plan_with_cargo_graph(
                     }
                     for path in paths
                 ),
-                cargo_dependency=any(
-                    path == "Cargo.lock" or path.endswith("Cargo.toml") for path in paths
-                ),
+                cargo_dependency=any(is_cargo_dependency(path) for path in paths),
             )
         try:
             source_platforms = changed_source_platforms(root, base, head, changes)
@@ -865,9 +868,7 @@ def plan_with_cargo_graph(
                     }
                     for path in paths
                 ),
-                cargo_dependency=any(
-                    path == "Cargo.lock" or path.endswith("Cargo.toml") for path in paths
-                ),
+                cargo_dependency=any(is_cargo_dependency(path) for path in paths),
             )
     else:
         graph = CargoGraph(
@@ -1495,6 +1496,15 @@ def self_test() -> None:
     assert full["mode"] == "full" and len(full["platform_matrix"]["include"]) == 4
     assert "dependency-audit" not in full["repository_contracts"]
     assert "cargo-dependency" not in full["repository_contracts"]
+    deny_policy = plan_changes(
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[Change("M", ("deny.toml",))],
+        graph=graph,
+    )
+    assert deny_policy["mode"] == "full"
+    assert "cargo-dependency" in deny_policy["repository_contracts"]
     drift = full_plan(
         base="a" * 40,
         head="b" * 40,
