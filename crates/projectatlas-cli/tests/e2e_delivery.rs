@@ -5845,12 +5845,22 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         ))
         .into());
     }
-    let expected_run = "RUSTFLAGS=\"-D warnings\" cargo check --workspace --all-targets --all-features --locked\ncargo clippy --workspace --all-targets --all-features --locked -- -D warnings";
+    let expected_run =
+        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings";
     if step["run"].as_str().map(str::trim) != Some(expected_run) {
         return Err(io::Error::other(format!(
             "macOS warning gate commands drifted: found {:?}",
             step["run"].as_str()
         ))
+        .into());
+    }
+    if step["run"]
+        .as_str()
+        .is_some_and(|run| run.contains("cargo check"))
+    {
+        return Err(io::Error::other(
+            "macOS warning gate must not compile the workspace before clippy recompiles it",
+        )
         .into());
     }
 

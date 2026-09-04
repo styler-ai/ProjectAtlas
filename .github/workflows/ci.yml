@@ -288,9 +288,7 @@ jobs:
         if: runner.os == 'macOS' && contains(matrix.contracts, 'mac-quality')
         timeout-minutes: 15
         shell: bash
-        run: |
-          RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --all-features --locked
-          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: macOS optional parser worker platform regression
         if: runner.os == 'macOS' && contains(matrix.contracts, 'parser')
