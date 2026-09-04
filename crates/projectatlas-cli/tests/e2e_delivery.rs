@@ -507,7 +507,7 @@ const CLI_E2E_ISOLATION_FACETS_DIGEST: &str =
     "43adc416950bd34765ca41b5d7694a24aed2e749a143a7b1bd3703ce9bad4202";
 
 const CLI_E2E_PACKAGED_FACETS_DIGEST: &str =
-    "0f90100e9b2acf77513ff76b7cfc727e0925d2c0057c090089f102dcfca92e55";
+    "10033529c2f9e3be0e6b47361f005a1c4370a77c00783277b6cd6cb01a1c0bc9";
 
 const CLI_E2E_ATTRIBUTES_FACETS_DIGEST: &str =
     "cdd9b72f5c1ec65285a955a0383a33b7fcac509e38d1889022cb108f41f5423d";
@@ -13776,7 +13776,11 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         ))
         .into());
     }
-    if !installer_output_text.contains("produced an invalid runtime") {
+    if !installer_output_text
+        .split_whitespace()
+        .collect::<String>()
+        .contains("producedaninvalidruntime")
+    {
         return Err(io::Error::other(format!(
             "installer failure did not report invalid release runtime\n{installer_output_text}"
         ))
@@ -21443,6 +21447,49 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         "descendant installer retained output pipes after tree termination",
     )?;
 
+    let server = new_server()?;
+    #[cfg(windows)]
+    let mut completed_parent_command = {
+        let mut command = StdCommand::new("powershell");
+        command.arg("-NoProfile").arg("-Command").arg(
+            "$child = [Diagnostics.ProcessStartInfo]::new(); $child.FileName = 'ping.exe'; $child.Arguments = '-n 16 127.0.0.1'; $child.UseShellExecute = $false; $child.CreateNoWindow = $true; [void][Diagnostics.Process]::Start($child)",
+        );
+        command
+    };
+    #[cfg(unix)]
+    let mut completed_parent_command = {
+        let mut command = StdCommand::new("sh");
+        command.arg("-c").arg("sleep 15 &");
+        command
+    };
+    completed_parent_command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let completed_parent_started = Instant::now();
+    let completed_parent_output = wait_for_plugin_installer_output(
+        spawn_plugin_installer_process(&mut completed_parent_command)?,
+        "fixture-completed-parent-descendant",
+        Duration::from_secs(10),
+    )?;
+    require(
+        completed_parent_output.status.success(),
+        "completed parent did not preserve its successful status",
+    )?;
+    let Err(_completed_parent_error) = server.finish(Ok(completed_parent_output)) else {
+        return Err(io::Error::other(
+            "completed parent with inherited-pipe descendant unexpectedly passed",
+        )
+        .into());
+    };
+    let completed_parent_elapsed = completed_parent_started.elapsed();
+    if completed_parent_elapsed >= Duration::from_secs(10) {
+        return Err(io::Error::other(format!(
+            "completed parent left a descendant holding installer output pipes for {completed_parent_elapsed:?}",
+        ))
+        .into());
+    }
+
     let flood_marker = b"release-asset-observer-flood";
     #[cfg(windows)]
     let mut flood_command = {
@@ -24662,19 +24709,41 @@ fn terminate_plugin_installer_process_tree(child: &mut Child) -> io::Result<()> 
         .join("System32")
         .join("taskkill.exe");
     let process_id = child.id().to_string();
-    let output = StdCommand::new(taskkill)
+    let output = StdCommand::new(&taskkill)
         .args(["/PID", &process_id, "/T", "/F"])
         .stdin(Stdio::null())
         .output()?;
-    if output.status.success() || child.try_wait()?.is_some() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
+    if output.status.success() {
+        return Ok(());
+    }
+    if child.try_wait()?.is_none() {
+        return Err(io::Error::other(format!(
             "failed to terminate plugin installer process tree {}: {}",
             child.id(),
             String::from_utf8_lossy(&output.stderr)
-        )))
+        )));
     }
+
+    let descendant_output = StdCommand::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference = 'Stop'; $owner = [uint32]$env:PROJECTATLAS_TEST_INSTALLER_OWNER_PID; $processes = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId -OperationTimeoutSec 5); foreach ($process in $processes) { if ([uint32]$process.ParentProcessId -eq $owner) { & $env:PROJECTATLAS_TEST_TASKKILL /PID ([string][uint32]$process.ProcessId) /T /F | Out-Null; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } }",
+        ])
+        .env("PROJECTATLAS_TEST_INSTALLER_OWNER_PID", process_id)
+        .env("PROJECTATLAS_TEST_TASKKILL", taskkill)
+        .stdin(Stdio::null())
+        .output()?;
+    if descendant_output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "failed to terminate descendants of completed plugin installer {}\nstdout:\n{}\nstderr:\n{}",
+        child.id(),
+        String::from_utf8_lossy(&descendant_output.stdout),
+        String::from_utf8_lossy(&descendant_output.stderr)
+    )))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -24945,6 +25014,9 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
             (status, observed_at)
         };
         if let Some(_status) = status {
+            // The parent can exit while a background descendant still owns
+            // inherited output pipes, so retire the test-owned tree first.
+            kill_child(&mut child)?;
             if observed_at < deadline {
                 return collect_plugin_installer_output(child, readers);
             }
