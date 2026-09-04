@@ -72,6 +72,7 @@ jobs:
         id: proof
         env:
           EVENT_NAME: ${{ github.event_name }}
+          TARGET_BRANCH: ${{ github.base_ref }}
           INPUT_FORCE_FULL: ${{ steps.inputs.outputs.force_full }}
           BASE: ${{ steps.inputs.outputs.base }}
           HEAD_SHA: ${{ steps.inputs.outputs.head }}
@@ -79,7 +80,7 @@ jobs:
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1
           force_full=()
-          if [[ "$INPUT_FORCE_FULL" == "true" || "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" || "$EVENT_NAME" == "merge_group" ]]; then
+          if [[ "$INPUT_FORCE_FULL" == "true" || "$TARGET_BRANCH" == "dev" || "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" || "$EVENT_NAME" == "merge_group" ]]; then
             force_full+=(--force-full)
           fi
           trusted_planner="$RUNNER_TEMP/affected-ci-proof.py"

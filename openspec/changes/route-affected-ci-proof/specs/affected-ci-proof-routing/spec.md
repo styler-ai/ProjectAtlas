@@ -158,11 +158,15 @@ Static quality, Rust test-domain, and platform jobs SHALL run concurrently when 
 - **THEN** the final live issue and milestone read blocks merge until metadata is valid and the failed refresh is recovered, regardless of an older green PR-head check
 
 ### Requirement: Platform proof follows affected behavior
-Ordinary pull-request CI SHALL run each platform job only when that operating system or architecture can add defect-detection value for an affected contract, while retaining complete proof for ambiguous and shared changes.
+Ordinary pull-request CI SHALL run each platform job only when that operating system or architecture can add defect-detection value for an affected contract, while retaining complete proof for ambiguous and shared changes and for a target branch whose active protection still requires legacy platform contexts.
 
 #### Scenario: Platform-neutral behavior
 - **WHEN** the affected contract's owning tests establish that operating-system and architecture variation cannot change its outcome
 - **THEN** unrelated Windows and macOS jobs are omitted with an explicit rationale
+
+#### Scenario: Target branch retains legacy platform contexts
+- **WHEN** a pull request targets `dev` while its branch protection still requires the four legacy platform contexts
+- **THEN** the plan selects complete proof so every required context is emitted until `dev` is separately synchronized and migrated
 
 #### Scenario: Operating-system-sensitive behavior
 - **WHEN** process, path, filesystem, watcher, installer, packaging, or runtime behavior is owned by multiple operating systems
@@ -200,7 +204,7 @@ The release-candidate boundary SHALL execute the complete installed CLI-command 
 - **THEN** those omissions do not remove, satisfy, or replace any part of the complete release-candidate boundary
 
 ### Requirement: Routing speedup is demonstrated without weakening proof
-The implementation SHALL measure required-check wall time including queueing and aggregate raw runner-minutes before and after for documentation-only, independent leaf-crate, CLI test-domain, shared-core, and platform-sensitive changes.
+The implementation SHALL measure required-check wall time including queueing and aggregate raw runner-minutes before and after for documentation-only, eligible independent leaf-crate, CLI test-domain, shared-core, and platform-sensitive changes. When no real production path is eligible for a named class's narrow plan under exact ownership and source-predicate rules, the implementation SHALL report that class as not applicable instead of manufacturing a source change solely to consume CI.
 
 #### Scenario: Representative ordinary change meets the target
 - **WHEN** a documentation-only, leaf-crate, or ordinary CLI-domain change is measured on hosted Actions
@@ -217,6 +221,10 @@ The implementation SHALL measure required-check wall time including queueing and
 #### Scenario: Measurement is inconclusive or coverage regresses
 - **WHEN** measurements are noisy, below materiality, or reveal loss of a causal proof contract
 - **THEN** the narrowing rule is rejected or returned to complete fallback rather than accepted on assertion
+
+#### Scenario: A named class has no eligible production path
+- **WHEN** live crate, exact-source target-predicate, and cross-contract ownership show that no real production path can receive the class's narrow plan
+- **THEN** the class is reported as not applicable, the real paths fail closed to complete proof, and no synthetic source file or hosted run is required
 
 ### Requirement: Protected-branch merges and drift backstops avoid duplicate work without losing coverage
 An accepted pull-request or merge-group source proof SHALL remain authoritative when that exact tree reaches a protected branch, the resulting push SHALL NOT launch duplicate source CI, scheduled and manual drift checks SHALL run complete normal-pull-request proof, and ambiguous merge-group inputs SHALL fail closed.

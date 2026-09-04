@@ -103,10 +103,11 @@ accepted source tree: strict branch protection applies to administrators and
 requires current source proof against the current base before either `main` or
 `dev` can merge. `main` now requires `pr-state`, `verify`, and resolved
 conversations; `dev` retains `verify` plus the four legacy platform contexts
-until the task 4.3 migration is completed. Splitting the workflows is the
-smallest safe option because it avoids a skipped `verify` check from a
-review-only run being mistaken for source proof. Merely adding job-level
-conditions in one workflow leaves that required-context ambiguity.
+until that branch is separately synchronized and migrated, so pull requests
+targeting `dev` select complete proof and emit those contexts in the meantime. Splitting the
+workflows is the smallest safe option because it avoids a skipped `verify`
+check from a review-only run being mistaken for source proof. Merely adding
+job-level conditions in one workflow leaves that required-context ambiguity.
 
 ### 2. Cancel only an older source run for the same pull request
 
@@ -253,18 +254,38 @@ introduced.
 
 The implementation SHALL record before/after workflow wall time, including
 queue time, and raw runner-minutes for five representative change classes:
-documentation-only, independent leaf crate, CLI test/domain, shared core, and
-platform-sensitive. Claimed routing is retained only when representative
-measurements show at least a 30 percent and 30 second improvement without
-removing a causal contract.
+documentation-only, eligible independent leaf crate, CLI test/domain, shared
+core, and platform-sensitive. If no real production path is eligible for a
+named class's narrow plan under exact ownership and source-predicate rules,
+that class is reported as not applicable instead of manufacturing a source
+change solely to consume CI. Claimed routing is retained only when
+representative measurements show at least a 30 percent and 30 second
+improvement without removing a causal contract.
 
 Documentation-only, leaf-crate, and ordinary CLI-domain required checks target
 ten minutes or less. Shared-core, platform-sensitive, and fail-closed runs have
 a fifteen-minute design ceiling. If runner queueing or an indivisible causal
 job prevents a target, the implementation records the measured cause and
 keeps the proof; it does not omit a test to make the number green. The current
-29-48 minute wall and 53-75 raw runner-minute ranges are baselines, not claims
-about the unimplemented result.
+29-48 minute wall and 53-75 raw runner-minute ranges are the before baseline.
+Raw runner-minutes below sum every non-skipped source-workflow job plus the
+matching required `pr-state` job; skipped `refresh-pr-state` jobs contribute
+zero and no metadata workflow launches source work.
+
+| Change class | Required-check wall after routing | Raw runner-minutes after routing | Disposition |
+| --- | ---: | ---: | --- |
+| Documentation-only | 0:49 | 1.35 | Retained: at least 97% less wall time and 97% fewer runner-minutes than the best baseline. |
+| Eligible independent leaf crate | N/A | N/A | No eligible live production path exists: the Cargo-leaf lint crate has only `src/main.rs`, whose target predicates make exact-source classification select complete fallback. No synthetic file or hosted run was created. |
+| CLI test/domain | 2:49 | 3.40 | Retained: at least 90% less wall time and 93% fewer runner-minutes than the best baseline while running only its owning Rust, repository, and test-domain proof. |
+| Shared core / complete fallback | 12:10 | 45.30 | Retained for safety: the identical complete plan used by shared-core, unknown, and workflow-authority changes is at least 58% faster in wall time and inside the 15-minute ceiling. Raw cost improved only 14% against the best baseline, so no material raw-cost claim is made. |
+| Platform-sensitive | 13:40 | 22.17 | Retained: the corrected narrow plan ran only repository policy, the owning Rust target, macOS Intel/ARM, and the aggregate. It improved wall time by at least 52% and raw runner time by at least 58%, stayed inside the 15-minute ceiling, and identified macOS Intel at 13:08 as the limiter. The earlier failed narrow run caught the Bash 3.2 defect. |
+
+One earlier complete activation run reached 15:22 because its Windows owner took
+15:00, exceeding the ceiling by 22 seconds; the unchanged complete-plan
+representative above finished in 12:10. The variance is recorded rather than
+removing proof. The measured narrow documentation, CLI, and platform-sensitive
+routes materially improve both latency and runner cost; the complete route
+materially improves latency while preserving every causal backstop.
 
 Caching is excluded because the available measurement validated a parser-pack
 dependency cache on Linux but found an immaterial Windows improvement; it does
@@ -356,12 +377,15 @@ representation is sufficient; no second task store, hash, or receipt is added.
    hosted Actions.
 7. Extend planned-issue IssueOps self-tests with equal-count task-text and order
    drift before relying on the issue/task mirror for handoff.
-8. After the implementation is merged, change branch protection from the four
-   platform contexts to `pr-state` and `verify` while enabling required
-   conversation resolution; immediately exercise thread resolve/reopen, a
-   owning-issue close/reopen/milestone transitions, a narrow known plan, and an
-   unknown-input fallback. Roll back by restoring the former required contexts
-   and making every plan select complete proof.
+8. After the implementation is merged, change `main` branch protection from
+   the four platform contexts to `pr-state` and `verify` while enabling required
+   conversation resolution; immediately exercise thread resolve/reopen, owning-
+   issue close/reopen/milestone transitions, a narrow known plan, and an
+   unknown-input fallback. Keep `dev` on its current strict legacy contexts
+   and force pull requests targeting it to complete proof until that branch is
+   separately synchronized and migrated. Roll back by
+   restoring the former `main` contexts and making every plan select complete
+   proof.
 9. Measure all five before/after classes. Remove any narrowing rule that does
    not meet materiality or causal-coverage requirements.
 10. Confirm the next integrated release candidate still runs the complete
