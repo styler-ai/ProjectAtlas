@@ -7,7 +7,7 @@ on:
     branches: [main, dev]
     types: [opened, reopened, synchronize, edited, milestoned, demilestoned]
   issues:
-    types: [closed, reopened, milestoned, demilestoned]
+    types: [closed, reopened, edited, labeled, unlabeled, milestoned, demilestoned]
 
 concurrency:
   group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}
@@ -70,19 +70,16 @@ jobs:
             exit 1
           fi
 
-      - name: Check out exact source for owner edits
-        if: github.event.action == 'edited'
+      - name: Check out exact source for IssueOps
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
-      - name: Install IssueOps parser for owner edits
-        if: github.event.action == 'edited'
+      - name: Install IssueOps parser
         run: npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
 
-      - name: Revalidate IssueOps for owner edits
-        if: github.event.action == 'edited'
+      - name: Validate IssueOps
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

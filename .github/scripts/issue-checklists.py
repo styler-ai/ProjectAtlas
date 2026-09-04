@@ -781,6 +781,8 @@ def pr_state_refreshes(
         raise SystemExit("open pull-request inventory reached the refresh bound")
     refreshes = []
     for pull_request in pull_requests:
+        if pull_request.get("baseRefName") not in ("main", "dev"):
+            continue
         owners = referenced_issue_numbers(
             repo, pull_request.get("title"), pull_request.get("body")
         )
@@ -846,7 +848,7 @@ def refresh_pr_state_for_issue(repo: str, issue_number: int) -> None:
             "--limit",
             str(MAX_PR_STATE_REFRESH_PULL_REQUESTS),
             "--json",
-            "number,title,body,headRefOid",
+            "number,title,body,headRefOid,baseRefName",
         ]
     )
     if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
@@ -2588,6 +2590,7 @@ Mitigations:
         "title": "Implement owner metadata",
         "body": "Refs #517",
         "headRefOid": "a" * 40,
+        "baseRefName": "main",
     }
     valid_refresh = pr_state_refreshes(
         "owner/repo",
@@ -2596,6 +2599,8 @@ Mitigations:
             refresh_pr,
             {**refresh_pr, "number": 601, "body": "Refs #518"},
             {**refresh_pr, "number": 602, "body": "Refs #517 and #518"},
+            {**refresh_pr, "number": 603, "baseRefName": "release", "body": "Refs #517"},
+            {**refresh_pr, "number": "invalid", "baseRefName": "release", "body": "Refs #517"},
         ],
     )
     assert valid_refresh == [

@@ -3704,7 +3704,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "types: [opened, reopened, synchronize, edited, milestoned, demilestoned]",
-        "types: [closed, reopened, milestoned, demilestoned]",
+        "types: [closed, reopened, edited, labeled, unlabeled, milestoned, demilestoned]",
         "group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}",
         "cancel-in-progress: false",
         "name: pr-state",
@@ -3716,8 +3716,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--refresh-pr-state-for-issue",
         "Validate issue reference and milestone",
         "gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"",
-        "name: Revalidate IssueOps for owner edits",
-        "if: github.event.action == 'edited'",
+        "name: Validate IssueOps",
         "ref: ${{ github.event.pull_request.head.sha }}",
         "--pull-request \"$PR_NUMBER\"",
         "--base \"$PR_BASE_SHA\"",
@@ -3738,6 +3737,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+    if direct_pr_state_job.contains("github.event.action == 'edited'") {
+        return Err(io::Error::other(
+            "PR-state IssueOps validation must run for every pull-request event",
+        )
+        .into());
     }
     for forbidden in [
         "cargo ",
@@ -3761,6 +3766,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "def pr_state_refreshes(",
+        "baseRefName",
+        "not in (\"main\", \"dev\")",
         "open pull-request inventory reached the refresh bound",
         "actions/workflows/pr-state.yml/runs",
         "actions/runs/{workflow_run['id']}/rerun",
