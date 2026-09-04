@@ -104,6 +104,7 @@ OS_PLATFORM_LABELS = ("linux", "windows", "macos-arm64")
 UNIX_PLATFORM_LABELS = ("linux", "macos-arm64")
 SOURCE_UNIX_PLATFORM_LABELS = ("linux", "macos-x64", "macos-arm64")
 MAC_PLATFORM_LABELS = ("macos-x64", "macos-arm64")
+CLI_E2E_INVENTORY_PATH = "docs/v050-cli-e2e-inventory.json"
 AUTHORITY_PATHS = (
     ".cargo/",
     ".github/workflows/",
@@ -731,6 +732,11 @@ def plan_changes(
     unknown: str | None = None
     for change in changes:
         for path in change.paths:
+            if path == CLI_E2E_INVENTORY_PATH:
+                packages.add("projectatlas-cli")
+                test_targets.add("e2e_delivery")
+                reasons.append("CLI E2E inventory requires its executable validator")
+                continue
             if is_known_repository_path(path):
                 reasons.append(f"repository documentation/policy owns {path}")
                 if path.startswith("docs/benchmarks/"):
@@ -1281,6 +1287,18 @@ def self_test() -> None:
     assert cli_domain["platform_matrix"]["include"] == [
         {"label": "linux", "os": "ubuntu-latest", "contracts": ["navigation"]}
     ]
+
+    inventory = plan_changes(
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[Change("M", (CLI_E2E_INVENTORY_PATH,))],
+        graph=graph,
+    )
+    assert inventory["test_only"] is True
+    assert inventory["rust_packages"] == ["projectatlas-cli"]
+    assert inventory["test_targets"] == ["e2e_delivery"]
+    assert inventory["platform_matrix"] == {"include": []}
 
     target_specific_test = plan_changes(
         base="a" * 40,
