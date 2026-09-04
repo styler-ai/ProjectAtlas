@@ -33,6 +33,7 @@ jobs:
     outputs:
       base: ${{ steps.inputs.outputs.base }}
       head: ${{ steps.inputs.outputs.head }}
+      force_full: ${{ steps.inputs.outputs.force_full }}
       plan: ${{ steps.proof.outputs.plan }}
       repository: ${{ steps.proof.outputs.repository }}
       rust: ${{ steps.proof.outputs.rust }}
@@ -55,24 +56,29 @@ jobs:
           set -euo pipefail
           base="$EVENT_BASE"
           head="$EVENT_HEAD"
-          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" || -z "$base" || "$base" =~ ^0+$ ]]; then
+          force_full=false
+          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
             base="$(git rev-parse HEAD^)"
+          elif [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            base="$head"
+            force_full=true
           fi
           if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
             git fetch --no-tags --depth=1 origin "$base"
           fi
-          printf 'base=%s\nhead=%s\n' "$base" "$head" >> "$GITHUB_OUTPUT"
+          printf 'base=%s\nhead=%s\nforce_full=%s\n' "$base" "$head" "$force_full" >> "$GITHUB_OUTPUT"
 
       - name: Plan affected proof
         id: proof
         env:
           EVENT_NAME: ${{ github.event_name }}
+          INPUT_FORCE_FULL: ${{ steps.inputs.outputs.force_full }}
           BASE: ${{ steps.inputs.outputs.base }}
           HEAD_SHA: ${{ steps.inputs.outputs.head }}
         run: |
           set -euo pipefail
           force_full=()
-          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" || "$EVENT_NAME" == "merge_group" ]]; then
+          if [[ "$INPUT_FORCE_FULL" == "true" || "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" || "$EVENT_NAME" == "merge_group" ]]; then
             force_full+=(--force-full)
           fi
           python3 .github/scripts/affected-ci-proof.py --self-test

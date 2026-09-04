@@ -114,6 +114,11 @@ AUTHORITY_PATHS = (
     "openspec/issue-map.json",
     "crates/projectatlas-db/src/schema.rs",
 )
+INSTALLER_SCRIPT_PATHS = {
+    "plugins/projectatlas/scripts/install-runtime.ps1",
+    "plugins/projectatlas/scripts/install-runtime.sh",
+}
+OBJECT_ID_LENGTHS = {"sha1": 40, "sha256": 64}
 KNOWN_REPOSITORY_FILES = {
     "AGENTS.md",
     "CHANGELOG.md",
@@ -191,6 +196,14 @@ def parse_name_status(data: bytes) -> list[Change]:
     return changes
 
 
+def parse_planning_changes(
+    data: bytes, *, base: str, head: str, force_full: bool
+) -> list[Change]:
+    if force_full and base == head and not data:
+        return []
+    return parse_name_status(data)
+
+
 def git(*args: str, root: Path, check: bool = True) -> bytes:
     environment = dict(os.environ)
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
@@ -207,10 +220,32 @@ def git(*args: str, root: Path, check: bool = True) -> bytes:
     return result.stdout
 
 
-def exact_commit(value: str, root: Path) -> str:
+def object_id_length(object_format: str) -> int:
+    try:
+        return OBJECT_ID_LENGTHS[object_format]
+    except KeyError as error:
+        raise RuntimeError(f"unsupported Git object format {object_format!r}") from error
+
+
+def repository_object_id_length(root: Path) -> int:
+    object_format = git("rev-parse", "--show-object-format=storage", root=root).decode(
+        "ascii", "strict"
+    ).strip()
+    return object_id_length(object_format)
+
+
+def validate_object_id(value: str, expected_length: int) -> None:
+    if len(value) != expected_length or any(
+        character not in "0123456789abcdefABCDEF" for character in value
+    ):
+        raise RuntimeError(f"unreadable commit {value!r}")
+
+
+def exact_commit(value: str, root: Path, expected_length: int) -> str:
+    validate_object_id(value, expected_length)
     resolved = git("rev-parse", "--verify", f"{value}^{{commit}}", root=root)
     commit = resolved.decode("ascii", "strict").strip()
-    if len(commit) != 40:
+    if len(commit) != expected_length or commit.lower() != value.lower():
         raise RuntimeError(f"unreadable commit {value!r}")
     return commit
 
@@ -512,7 +547,7 @@ def full_plan(
         reasons=[reason],
         repository=repository,
         packages=set(PACKAGE_NAMES),
-        test_targets=set(),
+        test_targets=set(CLI_TEST_TARGETS),
         test_only=False,
         platforms={label: set(contracts) for label, contracts in PLATFORM_CONTRACTS.items()},
     )
@@ -604,11 +639,13 @@ def plan_changes(
 ) -> dict[str, object]:
     source_platforms = source_platforms or {}
     paths = [path for change in changes for path in change.paths]
-    dependency_audit = any(
+    dependency_audit = force_full and not changes or any(
         path in {".github/mermaid-parser/package.json", ".github/mermaid-parser/package-lock.json"}
         for path in paths
     )
-    cargo_dependency = any(path == "Cargo.lock" or path.endswith("Cargo.toml") for path in paths)
+    cargo_dependency = force_full and not changes or any(
+        path == "Cargo.lock" or path.endswith("Cargo.toml") for path in paths
+    )
     if force_full or event in {"schedule", "workflow_dispatch", "merge_group"}:
         return full_plan(
             base=base,
@@ -726,8 +763,14 @@ def plan_changes(
                     unknown = path
                     break
                 continue
-            if path.startswith("plugins/") or path.startswith("install"):
+            if path.startswith("plugins/"):
                 repository.add("source-policy")
+                owning_tests = ["e2e_delivery"]
+                if path in INSTALLER_SCRIPT_PATHS:
+                    owning_tests.append("installer_trust_boundaries")
+                test_targets.update(owning_tests)
+                for target in owning_tests:
+                    test_platform_owners(target, platforms)
                 platform_owners(path, platforms)
                 reasons.append(f"installer/plugin contract owns {path}")
                 continue
@@ -1181,6 +1224,79 @@ def self_test() -> None:
     )
     assert platform["test_targets"] == ["e2e_delivery", "installer_trust_boundaries"]
 
+    for installer_script in INSTALLER_SCRIPT_PATHS:
+        plugin_script = plan_changes(
+            base="a" * 40,
+            head="b" * 40,
+            event="pull_request",
+            changes=[Change("M", (installer_script,))],
+            graph=graph,
+        )
+        assert plugin_script["test_only"] is True
+        assert plugin_script["test_targets"] == [
+            "e2e_delivery",
+            "installer_trust_boundaries",
+        ]
+
+    for plugin_asset in (
+        "plugins/projectatlas/.codex-plugin/plugin.json",
+        "plugins/projectatlas/scripts/install-runtime.md",
+    ):
+        plugin_plan = plan_changes(
+            base="a" * 40,
+            head="b" * 40,
+            event="pull_request",
+            changes=[Change("M", (plugin_asset,))],
+            graph=graph,
+        )
+        assert plugin_plan["test_targets"] == ["e2e_delivery"]
+
+    unknown_install = plan_changes(
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[Change("M", ("installation-notes.md",))],
+        graph=graph,
+    )
+    assert unknown_install["mode"] == "full"
+
+    try:
+        parse_planning_changes(b"", base="a" * 40, head="a" * 40, force_full=False)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("ordinary empty diff did not fail closed")
+    forced_changes = parse_planning_changes(
+        b"", base="a" * 40, head="a" * 40, force_full=True
+    )
+    forced_empty = plan_changes(
+        base="a" * 40,
+        head="a" * 40,
+        event="push",
+        changes=forced_changes,
+        graph=graph,
+        force_full=True,
+    )
+    assert forced_empty["mode"] == "full"
+    assert set(forced_empty["repository_contracts"]) == set(REPOSITORY_CONTRACTS)
+    assert set(forced_empty["rust_packages"]) == set(PACKAGE_NAMES)
+    assert len(forced_empty["platform_matrix"]["include"]) == len(PLATFORM_CONTRACTS)
+    assert set(forced_empty["test_targets"]) == set(CLI_TEST_TARGETS)
+    assert forced_empty["omitted"] == []
+
+    assert OBJECT_ID_LENGTHS == {"sha1": 40, "sha256": 64}
+    assert object_id_length("sha1") == 40
+    assert object_id_length("sha256") == 64
+    validate_object_id("a" * 40, object_id_length("sha1"))
+    validate_object_id("a" * 64, object_id_length("sha256"))
+    for invalid_oid, expected_length in (("a" * 40, 64), ("g" * 64, 64)):
+        try:
+            validate_object_id(invalid_oid, expected_length)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("invalid native object ID was accepted")
+
     shared_cli = plan_changes(
         base="a" * 40,
         head="b" * 40,
@@ -1418,10 +1534,14 @@ def main() -> int:
     if args.command != "plan":
         raise RuntimeError("plan or aggregate command is required")
     root = Path.cwd()
-    base = exact_commit(args.base, root)
-    head = exact_commit(args.head, root)
-    changes = parse_name_status(
-        git("diff", "--name-status", "-z", "--find-renames", base, head, "--", root=root)
+    object_id_length = repository_object_id_length(root)
+    base = exact_commit(args.base, root, object_id_length)
+    head = exact_commit(args.head, root, object_id_length)
+    changes = parse_planning_changes(
+        git("diff", "--name-status", "-z", "--find-renames", base, head, "--", root=root),
+        base=base,
+        head=head,
+        force_full=args.force_full,
     )
     plan = plan_with_cargo_graph(
         root=root,
