@@ -64,15 +64,19 @@ The `pr-state` concurrency namespace is separate from source CI and automatic
 cancellation is disabled, so metadata activity cannot cancel useful
 compilation, tests, another state check, or an IssueOps run.
 
-Pull-request edits rerun the lightweight workflow normally. Owning issue close,
-reopen, milestone-assignment, and milestone-removal events SHALL enter a trusted
-default-branch job in the same `pr-state` workflow. That job reuses the existing
-issue-reference parser, inspects only affected open pull requests, locates the
-existing workflow run for each exact current PR head, and reruns it through the
-Actions API. The rerun fetches live issue state through the existing validator
-and runs no source build or test. This preserves one Actions-generated
-`pr-state` authority instead of creating a synthetic check or expanding
-IssueOps permissions.
+Title and body edits rerun only the lightweight workflow. A base-branch edit
+also reruns source verification because it changes the exact base-to-head diff
+without changing the pull-request head. The metadata-only source-workflow event
+uses a unique non-cancelling namespace, skips every source job, and does not emit
+a check named `verify`, so GitHub cannot treat a skipped aggregate as fresh
+source proof. Owning issue close, reopen, milestone-assignment, and
+milestone-removal events SHALL enter a trusted default-branch job in the same
+`pr-state` workflow. That job reuses the existing issue-reference parser,
+inspects only affected open pull requests, locates the existing workflow run for
+each exact current PR head, and reruns it through the Actions API. The rerun
+fetches live issue state through the existing validator and runs no source build
+or test. This preserves one Actions-generated `pr-state` authority instead of
+creating a synthetic check or expanding IssueOps permissions.
 
 No workflow can change PR-head readiness if GitHub refuses the API calls needed
 to enumerate that head or request its rerun. The issue-event job therefore
@@ -112,6 +116,7 @@ cancellation disabled:
 | Owner or event | Namespace ownership | Automatic cancellation |
 | --- | --- | --- |
 | `pull_request` source verification | Source workflow plus pull-request number | A newer run may cancel only an older run for the same pull-request number |
+| `pull_request` title/body edit | Source workflow plus unique run ID; no source jobs or `verify` context | Never |
 | Protected-branch `push` | Source-push namespace | Never |
 | `merge_group` | Source-merge-group namespace | Never |
 | `workflow_dispatch` and `schedule` | Source event-specific namespaces | Never |

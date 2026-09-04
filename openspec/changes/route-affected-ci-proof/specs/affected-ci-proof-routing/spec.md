@@ -19,6 +19,10 @@ The source CI SHALL derive a bounded proof plan from the event's exact base-to-h
 - **WHEN** the planner records base and head identity to reject stale reuse
 - **THEN** that identity remains an internal run binding and acceptance is reported through behavior, tests, measurements, and required-context conclusions
 
+#### Scenario: Pull request is retargeted without a head change
+- **WHEN** an open pull request changes its base branch while retaining the same head
+- **THEN** source CI replans and verifies the exact new base-to-head diff rather than retaining proof derived from the former base
+
 ### Requirement: Narrowing fails closed
 The planner SHALL select complete normal-pull-request proof whenever it cannot prove that a narrower plan retains every causal defect-detection contract.
 
@@ -71,6 +75,10 @@ Issue-reference and milestone validation SHALL run in a lightweight required `pr
 - **WHEN** a review is submitted, edited, or dismissed or a review comment is created, edited, or deleted without a source change
 - **THEN** native conversation resolution owns thread blockage and no `pr-state`, source-verification, or platform job starts
 
+#### Scenario: Pull-request title or body changes
+- **WHEN** a pull-request `edited` event changes no base ref
+- **THEN** `pr-state` revalidates metadata while source planning, compilation, tests, platform proof, and the required `verify` context do not run or cancel an in-flight source run
+
 #### Scenario: Source and review events overlap
 - **WHEN** source CI is running while a review event arrives
 - **THEN** the native review condition cannot launch or cancel source CI
@@ -105,6 +113,10 @@ Automatic workflow cancellation SHALL apply only when a newer `pull_request` sou
 #### Scenario: Different pull requests overlap
 - **WHEN** source-verification runs for different pull-request numbers overlap
 - **THEN** neither run cancels the other
+
+#### Scenario: Metadata-only edit overlaps source verification
+- **WHEN** a title or body edit occurs while source verification for that pull request is active
+- **THEN** the metadata-only event uses a unique non-cancelling namespace and cannot cancel or satisfy the source run
 
 #### Scenario: Non-PR-source events overlap
 - **WHEN** a pull-request source run overlaps a push, merge-group, workflow-dispatch, or scheduled run

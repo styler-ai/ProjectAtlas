@@ -144,7 +144,10 @@ Commit identity is provenance, not a general test invalidation key. After a comm
   affected Rust package or test-target, and platform contracts concurrently, and
   accepts omissions only through the always-run fail-closed `verify` aggregate.
   Unknown paths and shared workflow, planner, toolchain, lockfile, manifest,
-  schema, or test-support authorities select complete normal-PR proof.
+  schema, or test-support authorities select complete normal-PR proof. A base
+  retarget replans against the new base even when the head is unchanged; a title
+  or body edit runs no source job, emits no `verify` context, and cannot cancel
+  in-flight source proof.
 - The lightweight required `pr-state` workflow owns exactly-one-open-issue
   reference validation and requires the PR milestone to match that issue's
   milestone. GitHub native required conversation resolution owns all

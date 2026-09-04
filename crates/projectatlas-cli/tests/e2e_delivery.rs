@@ -3450,6 +3450,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "only the repository, Rust package",
         "Unknown paths and changes to shared proof authorities",
         "Run the complete local suite only",
+        "retarget replans against the new base",
+        "body edit runs no source job",
     ] {
         if !workflow_docs.contains(required) {
             return Err(io::Error::other(format!(
@@ -3459,11 +3461,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "types: [opened, reopened, synchronize]",
+        "types: [opened, reopened, synchronize, edited]",
         "merge_group:",
         "schedule:",
-        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        "group: projectatlas-ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) && github.event.pull_request.number || github.run_id }}",
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) }}",
         "force_full: ${{ steps.inputs.outputs.force_full }}",
+        "EVENT_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}",
         "elif [[ -z \"$base\" || \"$base\" =~ ^0+$ ]]; then\n            base=\"$head\"\n            force_full=true",
         "if [[ \"$INPUT_FORCE_FULL\" == \"true\"",
         "python3 .github/scripts/affected-ci-proof.py --self-test",
@@ -3489,6 +3493,26 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !ci.contains(required) {
             return Err(io::Error::other(format!(
                 "ordinary CI is missing blocking gate {required:?}"
+            ))
+            .into());
+        }
+    }
+    let source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null";
+    let plan_job = workflow_job_block(&ci, "plan")?;
+    if !plan_job.contains(&format!("if: {source_event}")) {
+        return Err(io::Error::other(
+            "source planning must rerun for a base retarget and skip metadata-only edits",
+        )
+        .into());
+    }
+    let verify_job = workflow_job_block(&ci, "verify")?;
+    for required in [
+        "name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-edit' || 'verify' }}",
+        &format!("if: always() && ({source_event})"),
+    ] {
+        if !verify_job.contains(required) {
+            return Err(io::Error::other(format!(
+                "metadata-only edits must not emit or satisfy source aggregate {required:?}"
             ))
             .into());
         }

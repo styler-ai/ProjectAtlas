@@ -11,15 +11,15 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
-    types: [opened, reopened, synchronize]
+    types: [opened, reopened, synchronize, edited]
   merge_group:
   workflow_dispatch:
   schedule:
     - cron: "17 3 * * 1"
 
 concurrency:
-  group: projectatlas-ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: projectatlas-ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) }}
 
 permissions:
   contents: read
@@ -29,6 +29,8 @@ permissions:
 jobs:
   plan:
     name: plan
+    # A base retarget changes the source diff without changing the head; other edits are metadata-only.
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     outputs:
       base: ${{ steps.inputs.outputs.base }}
@@ -571,8 +573,8 @@ jobs:
         run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e_lifecycle -- --exact --nocapture
 
   verify:
-    name: verify
-    if: always()
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-edit' || 'verify' }}
+    if: always() && (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null)
     needs: [plan, repository, rust, e2e-smoke]
     runs-on: ubuntu-latest
     steps:
