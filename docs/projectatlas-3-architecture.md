@@ -3288,12 +3288,15 @@ lightweight workflow, while an isolated `pr-state` issue-event job reruns the
 existing workflow on the exact current PR head after an owning issue
 close/reopen/milestone event, without running source proof. Selected jobs run
 concurrently, and one fail-closed aggregate is the stable source-proof context.
-Branch-protection readiness is the explicit AND of current `pr-state`, current
-`verify`, and resolved review conversations. Final merge acceptance rereads the
-live owning issue and milestone, so an issue-refresh API failure stays visibly
-red and requires manual recovery rather than trusting an older green check.
-Automatic cancellation
-applies only when a newer pull-request source run supersedes an older source
+`main` branch-protection readiness is the explicit AND of current `pr-state`,
+current `verify`, and resolved review conversations. `dev` remains strictly
+gated by current `verify` plus the four legacy platform contexts until its
+required-context migration. Final merge acceptance rereads the live owning issue
+and milestone, so an issue-refresh API failure stays visibly red and requires
+manual recovery rather than trusting an older green check.
+The accepted pull-request or merge-group tree reaches the protected branch
+without launching duplicate source CI. Automatic cancellation applies only
+when a newer pull-request source run supersedes an older source
 run for the same pull-request number; all other event, governance, and delivery
 owners use isolated namespaces with cancellation disabled. The complete
 installed-product matrix remains an integrated release-candidate boundary on
@@ -3303,7 +3306,7 @@ toolchain, or package behavior is architecture-sensitive.
 
 ```mermaid
 flowchart TB
-    subgraph PR[Pull request]
+    subgraph PR[Pull request and protected merge]
         direction LR
         Change[Source change] --> Plan[Closed proof-contract planner]
         PRMetadata[PR issue reference or milestone change] --> State[Required PR-state gate]
@@ -3315,23 +3318,24 @@ flowchart TB
         Known -->|Yes| Selected[Selected quality, test-domain,<br/>and platform jobs]
         Full --> Verify[Required verify aggregate]
         Selected --> Verify
-        State --> Gate{{AND: current PR-state,<br/>current verify, and<br/>resolved conversations}}
+        State --> Gate{{main AND: current PR-state,<br/>current verify, and<br/>resolved conversations}}
         Verify --> Gate
         Conversation --> Gate
-        Gate -->|All satisfied| ProtectedReady[Branch protection ready]
+        Gate -->|All satisfied| ProtectedReady[main protection ready]
         Gate -->|Otherwise| Blocked[PR blocked]
+        DevGate[Current dev compatibility gate:<br/>verify + four legacy platform contexts] --> FinalRead
         ProtectedReady --> FinalRead[Final live issue and<br/>milestone read]
         FinalRead -->|Valid| Ready[PR ready]
         FinalRead -->|Invalid or refresh failed| Blocked
+        Ready --> Main[Merge to protected branch;<br/>no duplicate source CI]
     end
 
-    Ready --> Main[Protected-branch affected proof]
     Main --> Candidate[Integrated release candidate]
 
     subgraph Cancellation[Cancellation isolation]
         direction LR
         Newer[Newer pull-request source run] -->|Same PR number; cancels only| Older[Older pull-request source run]
-        Others[Push, merge group, dispatch, schedule,<br/>PR-state, IssueOps, release, publish, deploy] --> Isolated[Separate namespaces;<br/>automatic cancellation disabled]
+        Others[Merge group, dispatch, schedule,<br/>PR-state, IssueOps, release, publish, deploy] --> Isolated[Separate namespaces;<br/>automatic cancellation disabled]
     end
 
     subgraph Release[Release acceptance]

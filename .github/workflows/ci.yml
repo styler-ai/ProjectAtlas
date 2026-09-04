@@ -7,8 +7,6 @@ name: 01-CI
 #  */
 
 on:
-  push:
-    branches: [main, dev]
   pull_request:
     branches: [main, dev]
     types: [opened, reopened, synchronize, edited]

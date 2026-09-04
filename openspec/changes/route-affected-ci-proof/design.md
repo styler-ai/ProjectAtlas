@@ -97,11 +97,16 @@ immediately when a thread is resolved or reopened. The obsolete polling script
 and its workflow step are removed rather than retained as duplicate authority.
 
 The existing code workflow remains the source-verification owner and runs for
-pull-request source changes, protected-branch pushes, merge-group candidates
-when enabled, and explicit dispatch. Splitting the workflows is the smallest
-safe option because it avoids a skipped `verify` check from a review-only run
-being mistaken for source proof. Merely adding job-level conditions in one
-workflow leaves that required-context ambiguity.
+pull-request source changes, merge-group candidates when enabled, explicit
+dispatch, and schedule. A merge to a protected branch does not rerun the same
+accepted source tree: strict branch protection applies to administrators and
+requires current source proof against the current base before either `main` or
+`dev` can merge. `main` now requires `pr-state`, `verify`, and resolved
+conversations; `dev` retains `verify` plus the four legacy platform contexts
+until the task 4.3 migration is completed. Splitting the workflows is the
+smallest safe option because it avoids a skipped `verify` check from a
+review-only run being mistaken for source proof. Merely adding job-level
+conditions in one workflow leaves that required-context ambiguity.
 
 ### 2. Cancel only an older source run for the same pull request
 
@@ -117,7 +122,6 @@ cancellation disabled:
 | --- | --- | --- |
 | `pull_request` source verification | Source workflow plus pull-request number | A newer run may cancel only an older run for the same pull-request number |
 | `pull_request` title/body edit | Source workflow plus unique run ID; no source jobs or `verify` context | Never |
-| Protected-branch `push` | Source-push namespace | Never |
 | `merge_group` | Source-merge-group namespace | Never |
 | `workflow_dispatch` and `schedule` | Source event-specific namespaces | Never |
 | `pr-state` and IssueOps | Their own workflow namespaces | Never |
@@ -233,11 +237,12 @@ protection is satisfied before it changes.
 
 ### 6. Backstop classifier mistakes without repeating release work on every PR
 
-Protected-branch pushes run affected proof against the merged change.
-Scheduled and manual drift checks run the complete normal-pull-request proof.
-Merge-group events use an exact merge-group diff if supported; any missing or
-ambiguous input selects the complete fallback. Human and dependency-bot pull
-requests use the same planner and gates.
+The accepted pull-request or merge-group source proof remains authoritative as
+that tree reaches the protected branch; the merge does not launch duplicate
+source CI. Scheduled and manual drift checks run the complete normal-pull-request
+proof. Merge-group events use an exact merge-group diff if supported; any
+missing or ambiguous input selects the complete fallback. Human and
+dependency-bot pull requests use the same planner and gates.
 
 The release workflow remains the only complete installed-product
 four-platform candidate boundary and may continue to reuse input-equivalent

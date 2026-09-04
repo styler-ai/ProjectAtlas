@@ -3512,6 +3512,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
+    if ci.lines().any(|line| line.trim_end() == "  push:") {
+        return Err(io::Error::other(
+            "an accepted pull-request tree must not launch duplicate source CI after merge",
+        )
+        .into());
+    }
     let source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null";
     let plan_job = workflow_job_block(&ci, "plan")?;
     if !plan_job.contains(&format!("if: {source_event}")) {
