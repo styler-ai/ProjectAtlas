@@ -362,6 +362,13 @@ representation is sufficient; no second task store, hash, or receipt is added.
 10. Confirm the next integrated release candidate still runs the complete
    installed-product four-platform boundary and restarts it after any fix.
 
+## Controlled Activation Measurements
+
+The merged bootstrap completed in 14 minutes with 47.8 raw runner-minutes. The
+five post-activation change classes are measured on one reusable pull request;
+each measurement head contains only its named class relative to `main`, and all
+measurement-only edits are removed before closeout.
+
 ## Open Questions
 
 None.
