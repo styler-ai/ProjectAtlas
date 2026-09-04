@@ -200,7 +200,7 @@ The release-candidate boundary SHALL execute the complete installed CLI-command 
 - **THEN** those omissions do not remove, satisfy, or replace any part of the complete release-candidate boundary
 
 ### Requirement: Routing speedup is demonstrated without weakening proof
-The implementation SHALL measure required-check wall time including queueing and aggregate raw runner-minutes before and after for documentation-only, eligible independent leaf-crate, CLI test-domain, shared-core, and platform-sensitive changes. When the current ownership graph has no genuinely independent production owner for a named class, the implementation SHALL report that class as not applicable instead of manufacturing a source change solely to consume CI.
+The implementation SHALL measure required-check wall time including queueing and aggregate raw runner-minutes before and after for documentation-only, eligible independent leaf-crate, CLI test-domain, shared-core, and platform-sensitive changes. When no real production path is eligible for a named class's narrow plan under exact ownership and source-predicate rules, the implementation SHALL report that class as not applicable instead of manufacturing a source change solely to consume CI.
 
 #### Scenario: Representative ordinary change meets the target
 - **WHEN** a documentation-only, leaf-crate, or ordinary CLI-domain change is measured on hosted Actions
@@ -218,9 +218,9 @@ The implementation SHALL measure required-check wall time including queueing and
 - **WHEN** measurements are noisy, below materiality, or reveal loss of a causal proof contract
 - **THEN** the narrowing rule is rejected or returned to complete fallback rather than accepted on assertion
 
-#### Scenario: A named class has no independent owner
-- **WHEN** live crate and contract ownership shows that the apparent leaf also owns repository-wide or platform proof
-- **THEN** the class is reported as not applicable, its change fails closed to complete proof, and no synthetic hosted run is required
+#### Scenario: A named class has no eligible production path
+- **WHEN** live crate, exact-source target-predicate, and cross-contract ownership show that no real production path can receive the class's narrow plan
+- **THEN** the class is reported as not applicable, the real paths fail closed to complete proof, and no synthetic source file or hosted run is required
 
 ### Requirement: Protected-branch merges and drift backstops avoid duplicate work without losing coverage
 An accepted pull-request or merge-group source proof SHALL remain authoritative when that exact tree reaches a protected branch, the resulting push SHALL NOT launch duplicate source CI, scheduled and manual drift checks SHALL run complete normal-pull-request proof, and ambiguous merge-group inputs SHALL fail closed.
