@@ -196,9 +196,11 @@ jobs:
               *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
             esac
           done
+          filtered_custom_harness=false
           for target in "${targets[@]}"; do
             case "$target" in
-              e2e_delivery|e2e_lifecycle|e2e_maintenance|e2e_navigation|e2e_worktrees|installer_trust_boundaries|language_runtime_compatibility|lint_diagnostics|optional_parser_worker_failure|optional_parser_worker_platform|parser_launch_authority|parser_supervisor_adversarial) ;;
+              parser_supervisor_adversarial) filtered_custom_harness=true ;;
+              e2e_delivery|e2e_lifecycle|e2e_maintenance|e2e_navigation|e2e_worktrees|installer_trust_boundaries|language_runtime_compatibility|lint_diagnostics|optional_parser_worker_failure|optional_parser_worker_platform|parser_launch_authority) ;;
               *) echo "planner emitted unknown Rust test target: $target" >&2; exit 1 ;;
             esac
           done
@@ -231,6 +233,9 @@ jobs:
             cargo test --doc "${package_args[@]}" --all-features --locked
             RUSTDOCFLAGS="-D warnings" cargo doc "${package_args[@]}" --no-deps --all-features --locked
           fi
+          if [[ "$filtered_custom_harness" == "true" ]]; then
+            cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
+          fi
 
       - name: Dependency policy
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency')
@@ -257,7 +262,8 @@ jobs:
           python3 .github/scripts/verify-rust-toolchain.py --install
 
       - name: Affected package target compile
-        if: contains(matrix.contracts, 'compile') && fromJSON(needs.plan.outputs.plan).mode == 'narrow'
+        # Full Linux compiles in rust; full macOS compiles in the all-targets warning gate.
+        if: contains(matrix.contracts, 'compile') && (fromJSON(needs.plan.outputs.plan).mode == 'narrow' || runner.os == 'Windows')
         timeout-minutes: 10
         shell: bash
         env:

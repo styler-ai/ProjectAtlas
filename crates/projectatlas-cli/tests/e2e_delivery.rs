@@ -3433,6 +3433,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo check \"$@\" --lib --bins --examples --all-features --locked",
         "cargo test \"$@\" --lib --bins --all-features --locked",
         "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
+        "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled",
         "npm ls --depth=0 --prefix .github/mermaid-parser",
         "has_repository_contract cargo-dependency",
         "has_repository_contract source-policy",
@@ -3478,6 +3479,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo fmt --all --check",
         "cargo check --locked -p projectatlas-cli --all-features --test \"$target\"",
         "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
+        "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled",
         "cargo check \"${package_args[@]}\" --all-targets --all-features --locked",
         "cargo check \"${package_args[@]}\" --lib --bins --examples --all-features --locked",
         "cargo test \"${package_args[@]}\" --lib --bins --all-features --locked",
@@ -5810,13 +5812,13 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
     let target_compile = workflow_job_step(&ci, "e2e-smoke", "Affected package target compile")?;
     if target_compile["if"].as_str()
         != Some(
-            "contains(matrix.contracts, 'compile') && fromJSON(needs.plan.outputs.plan).mode == 'narrow'",
+            "contains(matrix.contracts, 'compile') && (fromJSON(needs.plan.outputs.plan).mode == 'narrow' || runner.os == 'Windows')",
         )
         || target_compile["shell"].as_str() != Some("bash")
         || target_compile["timeout-minutes"].as_i64() != Some(10)
     {
         return Err(io::Error::other(
-            "affected target compile must remain narrow, bounded, and bash-portable",
+            "affected target compile must cover narrow plans and full Windows fallback without duplicating full Linux or macOS proof",
         )
         .into());
     }
