@@ -248,6 +248,28 @@ jobs:
           python3 .github/scripts/verify-rust-toolchain.py --self-test
           python3 .github/scripts/verify-rust-toolchain.py --install
 
+      - name: Affected package target compile
+        if: contains(matrix.contracts, 'compile') && fromJSON(needs.plan.outputs.plan).mode == 'narrow'
+        timeout-minutes: 10
+        shell: bash
+        env:
+          PLAN: ${{ needs.plan.outputs.plan }}
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(python3 -c 'import json,os,sys; sys.stdout.write("\n".join(json.loads(os.environ["PLAN"])["rust_packages"]))')
+          package_args=()
+          for package in "${packages[@]}"; do
+            case "$package" in
+              projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-lints|projectatlas-service|projectatlas-symbols|projectatlas-cli) package_args+=(-p "$package") ;;
+              *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
+            esac
+          done
+          if (( ${#package_args[@]} == 0 )); then
+            echo "target compile contract has no affected package" >&2
+            exit 1
+          fi
+          cargo check "${package_args[@]}" --lib --bins --examples --all-features --locked
+
       - name: macOS all-features warning gate
         if: runner.os == 'macOS' && contains(matrix.contracts, 'mac-quality')
         timeout-minutes: 15

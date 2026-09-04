@@ -105,7 +105,9 @@ has_repository_contract() {
   esac
 }
 
-if has_repository_contract issueops || has_repository_contract mermaid; then
+if has_repository_contract dependency-audit; then
+  npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+elif has_repository_contract issueops || has_repository_contract mermaid; then
   if ! npm ls --depth=0 --prefix .github/mermaid-parser >/dev/null 2>&1; then
     npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
   fi

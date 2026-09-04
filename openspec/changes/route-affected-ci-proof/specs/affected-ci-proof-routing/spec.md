@@ -156,6 +156,14 @@ Ordinary pull-request CI SHALL run each platform job only when that operating sy
 - **WHEN** process, path, filesystem, watcher, installer, packaging, or runtime behavior is owned by multiple operating systems
 - **THEN** the plan selects every owning operating system
 
+#### Scenario: Target-gated production source has a neutral filename
+- **WHEN** an affected Rust production file declares a supported operating-system, target-family, or architecture condition in its exact base or head bytes
+- **THEN** the plan selects a focused affected-package compile on every supported target matching each positive predicate even when the file path carries no platform name
+
+#### Scenario: Target ownership cannot be mapped safely
+- **WHEN** a target-bearing predicate is conjunctive, negated, unsupported, unreadable, unsupported-mode, individually oversized, or exceeds the bounded aggregate blob-read budget
+- **THEN** the plan selects complete proof instead of inferring platform ownership
+
 #### Scenario: macOS architecture-sensitive behavior
 - **WHEN** an affected macOS contract can vary between Intel and ARM
 - **THEN** the plan selects both macOS architectures

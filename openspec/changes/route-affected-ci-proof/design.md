@@ -175,6 +175,7 @@ The initial ownership rules are deliberately conservative:
 | Independent lint crate | Lint-crate compile, lint, and owning tests; no product platform E2E |
 | CLI E2E test/domain | Owning post-#487 E2E binary/domain and its compile prerequisites |
 | Production crate | Owning unit/integration targets, Cargo reverse dependents, and declared CLI/MCP/platform contract edges |
+| Target-gated Rust in a platform-neutral path | Inspect bounded exact base/head blobs and compile the affected package closure on all matching supported targets; conjunctive, negated, unknown, or over-budget predicates select complete proof |
 | OS-sensitive process, path, filesystem, watcher, installer, or packaging behavior | Owning Rust proof plus every operating system named by that contract |
 | Architecture-sensitive macOS runtime or package behavior | Both macOS Intel and ARM owners |
 | Shared core/support, workflow, toolchain, lockfile, manifest, schema, planner/map, or unknown input | Complete normal-pull-request proof |

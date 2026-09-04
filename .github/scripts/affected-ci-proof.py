@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -19,6 +20,10 @@ MAX_PATH_BYTES = 4_096
 MAX_REPORTED_CHANGES = 64
 MAX_PLAN_BYTES = 900_000
 MAX_SUMMARY_BYTES = 64_000
+MAX_SOURCE_BYTES = 2_000_000
+MAX_SOURCE_BLOB_LOOKUPS = 256
+MAX_SOURCE_BLOBS = 128
+MAX_TOTAL_SOURCE_BYTES = 32_000_000
 
 PACKAGE_NAMES = (
     "projectatlas-core",
@@ -65,10 +70,11 @@ REPOSITORY_CONTRACTS = (
     "optional-parser-inputs",
 )
 PLATFORM_CONTRACTS = {
-    "linux": ("worktree", "process", "navigation", "tui", "btrfs", "plugin", "mcp"),
-    "windows": ("worktree", "process", "plugin", "windows", "mcp"),
-    "macos-x64": ("mac-quality", "parser"),
+    "linux": ("compile", "worktree", "process", "navigation", "tui", "btrfs", "plugin", "mcp"),
+    "windows": ("compile", "worktree", "process", "plugin", "windows", "mcp"),
+    "macos-x64": ("compile", "mac-quality", "parser"),
     "macos-arm64": (
+        "compile",
         "mac-quality",
         "parser",
         "worktree",
@@ -78,6 +84,15 @@ PLATFORM_CONTRACTS = {
         "mcp",
     ),
 }
+TARGET_OS_PATTERN = re.compile(rb'\btarget_os\s*=\s*"([^"\r\n]{1,64})"')
+TARGET_FAMILY_PATTERN = re.compile(rb'\btarget_family\s*=\s*"([^"\r\n]{1,64})"')
+TARGET_ARCH_PATTERN = re.compile(rb'\btarget_arch\s*=\s*"([^"\r\n]{1,64})"')
+TARGET_KEY_PATTERN = re.compile(rb"\btarget_[a-z_]+\b")
+TARGET_NOT_PATTERN = re.compile(rb"\bnot\s*\(")
+TARGET_ALL_PATTERN = re.compile(rb"\ball\s*\(")
+CFG_START_PATTERN = re.compile(rb"#\s*!?\s*\[\s*cfg(?:_attr)?\s*\(|\bcfg!\s*\(")
+CFG_ATTRIBUTE_PATTERN = re.compile(rb"#\s*!?\s*\[\s*cfg(?:_attr)?\s*\(([^]]{0,4096})]", re.DOTALL)
+CFG_MACRO_PATTERN = re.compile(rb"\bcfg!\s*\((.{0,4096}?)\)", re.DOTALL)
 PLATFORM_OS = {
     "linux": "ubuntu-latest",
     "windows": "windows-latest",
@@ -86,6 +101,7 @@ PLATFORM_OS = {
 }
 OS_PLATFORM_LABELS = ("linux", "windows", "macos-arm64")
 UNIX_PLATFORM_LABELS = ("linux", "macos-arm64")
+SOURCE_UNIX_PLATFORM_LABELS = ("linux", "macos-x64", "macos-arm64")
 MAC_PLATFORM_LABELS = ("macos-x64", "macos-arm64")
 AUTHORITY_PATHS = (
     ".cargo/",
@@ -199,6 +215,134 @@ def exact_commit(value: str, root: Path) -> str:
     return commit
 
 
+def exact_tree_blob(root: Path, revision: str, path: str) -> bytes | None:
+    tree = git(
+        "ls-tree",
+        "-z",
+        "--full-tree",
+        revision,
+        "--",
+        f":(literal){path}",
+        root=root,
+    )
+    if not tree:
+        return None
+    records = [record for record in tree.split(b"\0") if record]
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise RuntimeError(f"ambiguous submitted-tree source path: {path}")
+    header, _ = records[0].split(b"\t", 1)
+    fields = header.split()
+    if len(fields) != 3 or fields[0] not in {b"100644", b"100755"} or fields[1] != b"blob":
+        raise RuntimeError(f"unsupported submitted-tree source mode: {path}")
+    oid = fields[2].decode("ascii", "strict")
+    source = git("cat-file", "blob", oid, root=root)
+    if len(source) > MAX_SOURCE_BYTES:
+        raise RuntimeError(f"submitted-tree source exceeds byte bound: {path}")
+    return source
+
+
+def source_platform_labels(source: bytes) -> tuple[str, ...]:
+    if len(source) > MAX_SOURCE_BYTES:
+        raise RuntimeError("submitted-tree source exceeds byte bound")
+    cfg_matches = list(CFG_ATTRIBUTE_PATTERN.finditer(source)) + list(
+        CFG_MACRO_PATTERN.finditer(source)
+    )
+    if {match.start() for match in CFG_START_PATTERN.finditer(source)} != {
+        match.start() for match in cfg_matches
+    }:
+        raise RuntimeError("unbounded or malformed cfg expression requires complete proof")
+    cfg_bodies = [match.group(1) for match in cfg_matches]
+    operating_systems: set[bytes] = set()
+    families: set[bytes] = set()
+    architectures: set[bytes] = set()
+    for body in cfg_bodies:
+        os_values = set(TARGET_OS_PATTERN.findall(body))
+        family_values = set(TARGET_FAMILY_PATTERN.findall(body))
+        arch_values = set(TARGET_ARCH_PATTERN.findall(body))
+        shorthand_windows = re.search(rb"\bwindows\b", body) is not None
+        shorthand_unix = re.search(rb"\bunix\b", body) is not None
+        target_bearing = bool(
+            TARGET_KEY_PATTERN.search(body) or shorthand_windows or shorthand_unix
+        )
+        if not target_bearing:
+            continue
+        if TARGET_NOT_PATTERN.search(body):
+            raise RuntimeError("negated target predicate requires complete proof")
+        if TARGET_ALL_PATTERN.search(body):
+            raise RuntimeError("conjunctive target predicate requires complete proof")
+        if set(TARGET_KEY_PATTERN.findall(body)) - {
+            b"target_os",
+            b"target_family",
+            b"target_arch",
+        }:
+            raise RuntimeError("unsupported target predicate requires complete proof")
+        if os_values - {b"linux", b"windows", b"macos"}:
+            raise RuntimeError("unsupported target operating system requires complete proof")
+        if family_values - {b"unix", b"windows"}:
+            raise RuntimeError("unsupported target family requires complete proof")
+        if arch_values - {b"x86_64", b"aarch64"}:
+            raise RuntimeError("unsupported target architecture requires complete proof")
+        operating_systems.update(os_values)
+        families.update(family_values)
+        architectures.update(arch_values)
+        if shorthand_windows:
+            operating_systems.add(b"windows")
+        if shorthand_unix:
+            families.add(b"unix")
+
+    labels: set[str] = set()
+    if b"linux" in operating_systems or b"unix" in families:
+        labels.add("linux")
+    if b"windows" in operating_systems or b"windows" in families:
+        labels.add("windows")
+    if b"macos" in operating_systems:
+        labels.update(MAC_PLATFORM_LABELS)
+    if b"unix" in families:
+        labels.update(SOURCE_UNIX_PLATFORM_LABELS)
+
+    if b"x86_64" in architectures:
+        labels.update(("linux", "windows", "macos-x64"))
+    if b"aarch64" in architectures:
+        labels.add("macos-arm64")
+    return tuple(label for label in PLATFORM_CONTRACTS if label in labels)
+
+
+def changed_source_platforms(
+    root: Path,
+    base: str,
+    head: str,
+    changes: list[Change],
+    blob_loader: Callable[[Path, str, str], bytes | None] = exact_tree_blob,
+) -> dict[str, tuple[str, ...]]:
+    result: dict[str, tuple[str, ...]] = {}
+    lookups = 0
+    blobs = 0
+    total_bytes = 0
+    for change in changes:
+        for path in change.paths:
+            if not path.endswith(".rs"):
+                continue
+            labels: set[str] = set()
+            found = False
+            for revision in (base, head):
+                lookups += 1
+                if lookups > MAX_SOURCE_BLOB_LOOKUPS:
+                    raise RuntimeError("submitted-tree source lookup bound exceeded")
+                source = blob_loader(root, revision, path)
+                if source is None:
+                    continue
+                found = True
+                blobs += 1
+                total_bytes += len(source)
+                if blobs > MAX_SOURCE_BLOBS or total_bytes > MAX_TOTAL_SOURCE_BYTES:
+                    raise RuntimeError("submitted-tree source aggregate bound exceeded")
+                labels.update(source_platform_labels(source))
+            if not found:
+                raise RuntimeError(f"submitted-tree source is unavailable: {path}")
+            result[path] = tuple(label for label in PLATFORM_CONTRACTS if label in labels)
+    return result
+
+
 def validate_package_inventory(packages: list[dict[str, object]]) -> None:
     if {str(package["name"]) for package in packages} != set(PACKAGE_NAMES):
         raise RuntimeError("Cargo workspace package inventory drifted")
@@ -243,7 +387,12 @@ def add_platform(platforms: dict[str, set[str]], labels: tuple[str, ...], *contr
         platforms[label].update(contracts)
 
 
-def platform_owners(path: str, platforms: dict[str, set[str]]) -> None:
+def platform_owners(
+    path: str,
+    platforms: dict[str, set[str]],
+    source_labels: tuple[str, ...] = (),
+) -> None:
+    add_platform(platforms, source_labels, "compile")
     if path.startswith("crates/projectatlas-fs/") or any(
         token in path for token in ("project_root", "project_identity", "worktree_registry")
     ):
@@ -451,7 +600,9 @@ def plan_changes(
     changes: list[Change],
     graph: CargoGraph,
     force_full: bool = False,
+    source_platforms: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, object]:
+    source_platforms = source_platforms or {}
     paths = [path for change in changes for path in change.paths]
     dependency_audit = any(
         path in {".github/mermaid-parser/package.json", ".github/mermaid-parser/package-lock.json"}
@@ -566,8 +717,10 @@ def plan_changes(
                     packages.add(owner)
                     production_packages.add(owner)
                     test_targets.update(owning_tests)
+                    for target in owning_tests:
+                        test_platform_owners(target, platforms)
                     repository.add("source-policy")
-                    platform_owners(path, platforms)
+                    platform_owners(path, platforms, source_platforms.get(path, ()))
                     reasons.append(f"Cargo package {owner} owns {path}")
                 else:
                     unknown = path
@@ -649,11 +802,33 @@ def plan_with_cargo_graph(
                     path == "Cargo.lock" or path.endswith("Cargo.toml") for path in paths
                 ),
             )
+        try:
+            source_platforms = changed_source_platforms(root, base, head, changes)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            return full_plan(
+                base=base,
+                head=head,
+                event=event,
+                changes=changes,
+                reason="target-specific source ownership unavailable or invalid",
+                dependency_audit=any(
+                    path
+                    in {
+                        ".github/mermaid-parser/package.json",
+                        ".github/mermaid-parser/package-lock.json",
+                    }
+                    for path in paths
+                ),
+                cargo_dependency=any(
+                    path == "Cargo.lock" or path.endswith("Cargo.toml") for path in paths
+                ),
+            )
     else:
         graph = CargoGraph(
             {name: f"crates/{name}" for name in PACKAGE_NAMES},
             {name: set() for name in PACKAGE_NAMES},
         )
+        source_platforms = {}
     return plan_changes(
         base=base,
         head=head,
@@ -661,6 +836,7 @@ def plan_with_cargo_graph(
         changes=changes,
         graph=graph,
         force_full=force_full,
+        source_platforms=source_platforms,
     )
 
 
@@ -852,6 +1028,121 @@ def self_test() -> None:
     assert leaf["rust_packages"] == ["projectatlas-lints"]
     assert leaf["test_targets"] == ["lint_diagnostics"]
     assert leaf["platform_matrix"] == {"include": []}
+
+    database = plan_changes(
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[Change("M", ("crates/projectatlas-db/src/queries.rs",))],
+        graph=graph,
+    )
+    assert database["test_targets"] == list(PACKAGE_TEST_TARGETS["projectatlas-db"])
+    assert {
+        row["label"]: row["contracts"] for row in database["platform_matrix"]["include"]
+    } == {
+        "linux": ["btrfs", "mcp", "navigation", "tui", "worktree"],
+        "windows": ["mcp", "worktree"],
+        "macos-x64": ["parser"],
+        "macos-arm64": ["mcp", "parser", "tui", "worktree"],
+    }
+
+    platform_source = "crates/projectatlas-service/src/agent_efficiency.rs"
+
+    def platform_blob(_: Path, revision: str, path: str) -> bytes | None:
+        assert path == platform_source
+        return b"#[cfg(windows)]\n" if revision == "a" * 40 else b"#[cfg(unix)]\n"
+
+    source_platforms = changed_source_platforms(
+        Path.cwd(),
+        "a" * 40,
+        "b" * 40,
+        [Change("M", (platform_source,))],
+        blob_loader=platform_blob,
+    )
+    assert source_platforms[platform_source] == (
+        "linux",
+        "windows",
+        "macos-x64",
+        "macos-arm64",
+    )
+    target_specific = plan_changes(
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[Change("M", (platform_source,))],
+        graph=graph,
+        source_platforms=source_platforms,
+    )
+    assert target_specific["mode"] == "narrow"
+    assert target_specific["rust_packages"] == ["projectatlas-cli", "projectatlas-service"]
+    assert {
+        row["label"]: row["contracts"]
+        for row in target_specific["platform_matrix"]["include"]
+    } == {
+        "linux": ["btrfs", "compile", "mcp", "navigation", "tui"],
+        "windows": ["compile", "mcp"],
+        "macos-x64": ["compile", "parser"],
+        "macos-arm64": ["compile", "mcp", "parser", "tui"],
+    }
+    assert source_platform_labels(b'let note = "target_os = \\"windows\\"";') == ()
+    assert source_platform_labels(b"#[cfg(unix)]") == SOURCE_UNIX_PLATFORM_LABELS
+    assert source_platform_labels(b'cfg!(\n  target_os = "windows"\n)') == ("windows",)
+    for ambiguous_source in (
+        b"#[cfg(not(windows))]",
+        b"#[cfg(not(unix))]",
+        b'#[cfg(not(target_arch = "x86_64"))]',
+        b'#[cfg(not(any(target_os = "windows", target_os = "linux")))]',
+        b'#[cfg(not(all(unix, target_arch = "aarch64")))]',
+        b'#[cfg(all(target_os = "linux", target_arch = "x86_64"))]',
+        b'#[cfg(all(target_os = "windows", target_arch = "x86_64"))]',
+        b'#[cfg(all(target_os = "macos", target_arch = "aarch64"))]',
+        (
+            b'#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), '
+            b'all(target_os = "macos", target_arch = "aarch64")))]'
+        ),
+        b"#[cfg(" + b" " * 4097 + b'target_os = "windows")]',
+    ):
+        try:
+            source_platform_labels(ambiguous_source)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("ambiguous target predicate was accepted as narrow proof")
+
+    old_source = "crates/projectatlas-service/src/old.rs"
+    new_source = "crates/projectatlas-service/src/new.rs"
+
+    def renamed_blob(_: Path, revision: str, path: str) -> bytes | None:
+        return {
+            ("a" * 40, old_source): b"#[cfg(windows)]",
+            ("b" * 40, new_source): b"#[cfg(unix)]",
+        }.get((revision, path))
+
+    renamed_platforms = changed_source_platforms(
+        Path.cwd(),
+        "a" * 40,
+        "b" * 40,
+        [Change("R100", (old_source, new_source))],
+        blob_loader=renamed_blob,
+    )
+    assert renamed_platforms[old_source] == ("windows",)
+    assert renamed_platforms[new_source] == SOURCE_UNIX_PLATFORM_LABELS
+
+    try:
+        changed_source_platforms(
+            Path.cwd(),
+            "a" * 40,
+            "b" * 40,
+            [
+                Change("M", (f"crates/projectatlas-service/src/{index}.rs",))
+                for index in range(MAX_SOURCE_BLOBS // 2 + 1)
+            ],
+            blob_loader=lambda _root, _revision, _path: b"",
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("aggregate submitted-tree source bound was not enforced")
 
     cli_domain = plan_changes(
         base="a" * 40,

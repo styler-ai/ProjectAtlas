@@ -3326,6 +3326,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
+    let lockfile_install = "if has_repository_contract dependency-audit; then\n  npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser\nelif has_repository_contract issueops || has_repository_contract mermaid; then";
+    if !normalized_hook.contains(lockfile_install) {
+        return Err(io::Error::other(
+            "pre-push must install the submitted Mermaid lockfile before its audit",
+        )
+        .into());
+    }
     if normalized_hook.contains("git branch --show-current") {
         return Err(io::Error::other(
             "pre-push hook must select validation from pushed remote refs, not checkout state",
@@ -5748,6 +5755,42 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
     }
     if !e2e_smoke.contains("matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}") {
         return Err(io::Error::other("e2e-smoke omitted its affected platform matrix").into());
+    }
+
+    let target_compile = workflow_job_step(&ci, "e2e-smoke", "Affected package target compile")?;
+    if target_compile["if"].as_str()
+        != Some(
+            "contains(matrix.contracts, 'compile') && fromJSON(needs.plan.outputs.plan).mode == 'narrow'",
+        )
+        || target_compile["shell"].as_str() != Some("bash")
+        || target_compile["timeout-minutes"].as_i64() != Some(10)
+    {
+        return Err(io::Error::other(
+            "affected target compile must remain narrow, bounded, and bash-portable",
+        )
+        .into());
+    }
+    let target_compile_run = target_compile["run"].as_str().unwrap_or_default();
+    for required in [
+        r#"["rust_packages"]"#,
+        "planner emitted unknown Rust package",
+        "target compile contract has no affected package",
+        "cargo check",
+        "--lib --bins --examples --all-features --locked",
+    ] {
+        if !target_compile_run.contains(required) {
+            return Err(
+                io::Error::other(format!("affected target compile omitted {required:?}")).into(),
+            );
+        }
+    }
+    for forbidden in ["cargo test", "cargo clippy", "--workspace", "--all-targets"] {
+        if target_compile_run.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "affected target compile repeats unrelated proof {forbidden:?}"
+            ))
+            .into());
+        }
     }
 
     let step = workflow_job_step(&ci, "e2e-smoke", "macOS all-features warning gate")?;
