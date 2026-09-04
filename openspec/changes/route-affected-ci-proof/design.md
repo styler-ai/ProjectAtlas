@@ -103,7 +103,8 @@ accepted source tree: strict branch protection applies to administrators and
 requires current source proof against the current base before either `main` or
 `dev` can merge. `main` now requires `pr-state`, `verify`, and resolved
 conversations; `dev` retains `verify` plus the four legacy platform contexts
-until that branch is separately synchronized and migrated. Splitting the
+until that branch is separately synchronized and migrated, so pull requests
+targeting `dev` select complete proof and emit those contexts in the meantime. Splitting the
 workflows is the smallest safe option because it avoids a skipped `verify`
 check from a review-only run being mistaken for source proof. Merely adding
 job-level conditions in one workflow leaves that required-context ambiguity.
@@ -381,7 +382,8 @@ representation is sufficient; no second task store, hash, or receipt is added.
    conversation resolution; immediately exercise thread resolve/reopen, owning-
    issue close/reopen/milestone transitions, a narrow known plan, and an
    unknown-input fallback. Keep `dev` on its current strict legacy contexts
-   until that branch is separately synchronized and migrated. Roll back by
+   and force pull requests targeting it to complete proof until that branch is
+   separately synchronized and migrated. Roll back by
    restoring the former `main` contexts and making every plan select complete
    proof.
 9. Measure all five before/after classes. Remove any narrowing rule that does

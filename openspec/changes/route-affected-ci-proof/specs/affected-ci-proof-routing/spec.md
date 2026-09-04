@@ -158,11 +158,15 @@ Static quality, Rust test-domain, and platform jobs SHALL run concurrently when 
 - **THEN** the final live issue and milestone read blocks merge until metadata is valid and the failed refresh is recovered, regardless of an older green PR-head check
 
 ### Requirement: Platform proof follows affected behavior
-Ordinary pull-request CI SHALL run each platform job only when that operating system or architecture can add defect-detection value for an affected contract, while retaining complete proof for ambiguous and shared changes.
+Ordinary pull-request CI SHALL run each platform job only when that operating system or architecture can add defect-detection value for an affected contract, while retaining complete proof for ambiguous and shared changes and for a target branch whose active protection still requires legacy platform contexts.
 
 #### Scenario: Platform-neutral behavior
 - **WHEN** the affected contract's owning tests establish that operating-system and architecture variation cannot change its outcome
 - **THEN** unrelated Windows and macOS jobs are omitted with an explicit rationale
+
+#### Scenario: Target branch retains legacy platform contexts
+- **WHEN** a pull request targets `dev` while its branch protection still requires the four legacy platform contexts
+- **THEN** the plan selects complete proof so every required context is emitted until `dev` is separately synchronized and migrated
 
 #### Scenario: Operating-system-sensitive behavior
 - **WHEN** process, path, filesystem, watcher, installer, packaging, or runtime behavior is owned by multiple operating systems
