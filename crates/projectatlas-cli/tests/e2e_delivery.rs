@@ -507,7 +507,7 @@ const CLI_E2E_ISOLATION_FACETS_DIGEST: &str =
     "43adc416950bd34765ca41b5d7694a24aed2e749a143a7b1bd3703ce9bad4202";
 
 const CLI_E2E_PACKAGED_FACETS_DIGEST: &str =
-    "0a2d634dad641fa3dded1fcb23fc74abc8ff27bc9027f1bf0e3659f542709a4c";
+    "0f90100e9b2acf77513ff76b7cfc727e0925d2c0057c090089f102dcfca92e55";
 
 const CLI_E2E_ATTRIBUTES_FACETS_DIGEST: &str =
     "cdd9b72f5c1ec65285a955a0383a33b7fcac509e38d1889022cb108f41f5423d";
@@ -6454,7 +6454,7 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
                 .env("PROJECTATLAS_NO_TELEMETRY", "1");
             run_release_asset_installer(&release_server, "release-binary installer", &mut command)
         };
-        let output = release_server.finish(installer_result)?;
+        let output = release_server.finish_installer(installer_result)?;
         drop(release_asset_guard);
         let installer_output_text = format!(
             "{}\n{}",
@@ -13397,7 +13397,7 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
             .env("PROJECTATLAS_NO_TELEMETRY", "1");
         run_release_asset_installer(&release_server, "release-binary installer", &mut command)
     };
-    let output = release_server.finish(installer_result)?;
+    let output = release_server.finish_installer(installer_result)?;
     drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
@@ -13660,7 +13660,7 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
         .env("PROJECTATLAS_NO_TELEMETRY", "1");
     let installer_result =
         run_release_asset_installer(&release_server, "release-binary installer", &mut command);
-    let output = release_server.finish(installer_result)?;
+    let output = release_server.finish_installer(installer_result)?;
     drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
@@ -13750,7 +13750,7 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         .env("PROJECTATLAS_NO_TELEMETRY", "1");
     let installer_result =
         run_release_asset_installer(&release_server, "release-binary installer", &mut command);
-    let output = release_server.finish(installer_result)?;
+    let output = release_server.finish_installer(installer_result)?;
     drop(release_asset_guard);
     let installer_output_text = format!(
         "{}\n{}",
@@ -13815,7 +13815,7 @@ fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<
         .env("PROJECTATLAS_NO_TELEMETRY", "1");
     let installer_result =
         run_release_asset_installer(&release_server, "release-binary installer", &mut command);
-    let output = release_server.finish(installer_result)?;
+    let output = release_server.finish_installer(installer_result)?;
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -20769,6 +20769,29 @@ impl ReleaseAssetServer {
             .into()),
         }
     }
+
+    fn finish_installer(
+        mut self,
+        initiating: Result<std::process::Output, Box<dyn Error>>,
+    ) -> Result<std::process::Output, Box<dyn Error>> {
+        let server_result = self.join();
+        match (initiating, server_result) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), Ok(())) => Err(error),
+            (Err(initiating), Err(server)) => Err(io::Error::other(format!(
+                "{initiating}; release asset server also failed: {server}"
+            ))
+            .into()),
+            (Ok(output), Err(server)) if output.status.success() => Err(server),
+            (Ok(output), Err(server)) => {
+                let installer = plugin_installer_failure(&output);
+                Err(io::Error::other(format!(
+                    "{installer}; release asset server also failed: {server}"
+                ))
+                .into())
+            }
+        }
+    }
 }
 
 impl Drop for ReleaseAssetServer {
@@ -21135,6 +21158,43 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         spawn_error.to_string().contains("both requests"),
         "spawn failure did not retain missing request state",
     )?;
+
+    let server = new_server()?;
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = StdCommand::new("powershell");
+        command
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("Write-Output 'installer-stdout'; [Console]::Error.WriteLine('installer-stderr'); exit 23");
+        command
+    };
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = StdCommand::new("sh");
+        command
+            .arg("-c")
+            .arg("printf 'installer-stdout\\n'; printf 'installer-stderr\\n' >&2; exit 23");
+        command
+    };
+    let installer_result = run_release_asset_installer(&server, "fixture-failure", &mut command);
+    let Err(installer_error) = server.finish_installer(installer_result) else {
+        return Err(
+            io::Error::other("failed installer without requests unexpectedly passed").into(),
+        );
+    };
+    let installer_error_text = installer_error.to_string();
+    for expected in [
+        "plugin installer failed with status",
+        "installer-stdout",
+        "installer-stderr",
+        "both requests",
+    ] {
+        require(
+            installer_error_text.contains(expected),
+            "failed installer did not retain its status, output, and missing request state",
+        )?;
+    }
 
     let server = new_server()?;
     let partial_response = request(server.base_url(), &format!("/assets/{asset_name}"))?;
@@ -24896,17 +24956,21 @@ fn wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
     }
 }
 
+fn plugin_installer_failure(output: &std::process::Output) -> io::Error {
+    io::Error::other(format!(
+        "plugin installer failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
 /// Require a plugin installer process to exit successfully and preserve its output.
 fn require_successful_plugin_installer_output(
     output: std::process::Output,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "plugin installer failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ))
-        .into());
+        return Err(plugin_installer_failure(&output).into());
     }
     Ok(output)
 }
