@@ -21175,11 +21175,10 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     let server = new_server()?;
     #[cfg(windows)]
     let mut command = {
-        let mut command = StdCommand::new("powershell");
+        let mut command = StdCommand::new("cmd");
         command
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg("Write-Output 'installer-stdout'; [Console]::Error.WriteLine('installer-stderr'); exit 23");
+            .args(["/D", "/C"])
+            .arg("echo installer-stdout & echo installer-stderr 1>&2 & exit /B 23");
         command
     };
     #[cfg(unix)]
