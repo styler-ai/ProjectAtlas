@@ -21046,6 +21046,7 @@ fn cleanup_codex_owner_processes_after_spawn_failure(
             None,
             None,
             fail_helper_spawns,
+            fail_helper_spawns,
         ),
         None => match read_codex_owner_identity_record(&retained_identity_file) {
             Ok(identity) => stop_windows_fixture_process_until_with_fallback_test_delay(
@@ -21054,6 +21055,7 @@ fn cleanup_codex_owner_processes_after_spawn_failure(
                 child_stop_delay,
                 None,
                 None,
+                fail_helper_spawns,
                 fail_helper_spawns,
             ),
             Err(error) => Err(io::Error::other(format!(
@@ -22566,13 +22568,13 @@ fn windows_fixture_stop_failure_with_fallback(
     fallback_deadline: Instant,
     final_deadline: Instant,
     fallback_test_delay: Option<Duration>,
-    fail_helper_spawn: bool,
+    fail_fallback_helper_spawn: bool,
 ) -> Box<dyn Error> {
     let fallback_result = force_stop_windows_fixture_process(
         identity,
         fallback_deadline,
         fallback_test_delay,
-        fail_helper_spawn,
+        fail_fallback_helper_spawn,
     );
     let fallback_succeeded = fallback_result.is_ok();
     let fallback_detail = match fallback_result.as_ref() {
@@ -22604,6 +22606,7 @@ fn stop_windows_fixture_process_until(
         observation_delay,
         None,
         false,
+        false,
     )
 }
 
@@ -22614,7 +22617,8 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
     test_delay: Option<Duration>,
     observation_delay: Option<Duration>,
     fallback_test_delay: Option<Duration>,
-    fail_helper_spawns: bool,
+    fail_primary_helper_spawn: bool,
+    fail_fallback_helper_spawn: bool,
 ) -> Result<(), Box<dyn Error>> {
     let primary_deadline = deadline
         .checked_sub(CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET)
@@ -22623,23 +22627,23 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
     let fallback_deadline = deadline
         .checked_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET)
         .unwrap_or(deadline);
-    let mut stop = match spawn_windows_fixture_stop_helper(identity, test_delay, fail_helper_spawns)
-    {
-        Ok(stop) => stop,
-        Err(error) => {
-            return Err(windows_fixture_stop_failure_with_fallback(
-                identity,
-                format!(
-                    "failed to start Windows fixture stop helper for {}: {error}",
-                    identity.process_id
-                ),
-                fallback_deadline,
-                deadline,
-                fallback_test_delay,
-                fail_helper_spawns,
-            ));
-        }
-    };
+    let mut stop =
+        match spawn_windows_fixture_stop_helper(identity, test_delay, fail_primary_helper_spawn) {
+            Ok(stop) => stop,
+            Err(error) => {
+                return Err(windows_fixture_stop_failure_with_fallback(
+                    identity,
+                    format!(
+                        "failed to start Windows fixture stop helper for {}: {error}",
+                        identity.process_id
+                    ),
+                    fallback_deadline,
+                    deadline,
+                    fallback_test_delay,
+                    fail_fallback_helper_spawn,
+                ));
+            }
+        };
     let started = Instant::now();
     if let Some(delay) = observation_delay {
         thread::sleep(delay);
@@ -22663,7 +22667,7 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
                         fallback_deadline,
                         deadline,
                         fallback_test_delay,
-                        fail_helper_spawns,
+                        fail_fallback_helper_spawn,
                     ));
                 }
                 break status;
@@ -22687,7 +22691,7 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
                     fallback_deadline,
                     deadline,
                     fallback_test_delay,
-                    fail_helper_spawns,
+                    fail_fallback_helper_spawn,
                 ));
             }
             Ok(None) => {
@@ -22706,7 +22710,7 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
                     fallback_deadline,
                     deadline,
                     fallback_test_delay,
-                    fail_helper_spawns,
+                    fail_fallback_helper_spawn,
                 ));
             }
         }
@@ -22721,7 +22725,7 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
             fallback_deadline,
             deadline,
             fallback_test_delay,
-            fail_helper_spawns,
+            fail_fallback_helper_spawn,
         ));
     }
     Ok(())
@@ -22755,13 +22759,14 @@ fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
         None,
     );
     let elapsed = started.elapsed();
-    let cleanup_result = if windows_process_is_alive(&identity)? {
-        stop_windows_fixture_process(&identity)
-    } else {
-        Ok(())
-    };
-    process.wait()?;
-    cleanup_result?;
+    let kill_result = process.kill();
+    let wait_result = process.wait();
+    if let Err(error) = kill_result
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        return Err(error.into());
+    }
+    wait_result?;
     if result.is_ok()
         || elapsed
             > CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
@@ -22800,14 +22805,14 @@ fn windows_fixture_identity_capture_rejects_late_completion() -> Result<(), Box<
         None,
         Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
     );
-    let child_alive = windows_process_is_alive(&identity)?;
-    let cleanup_result = if child_alive {
-        stop_windows_fixture_process(&identity)
-    } else {
-        Ok(())
-    };
-    process.wait()?;
-    cleanup_result?;
+    let kill_result = process.kill();
+    let wait_result = process.wait();
+    if let Err(error) = kill_result
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        return Err(error.into());
+    }
+    wait_result?;
     let Err(error) = result else {
         return Err(io::Error::other("late identity capture completion was accepted").into());
     };
@@ -22845,11 +22850,8 @@ fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn
         + CODEX_OWNER_CHILD_STOP_BUDGET
         + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
         + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-    let result = stop_windows_fixture_process_until(
-        &identity,
-        deadline,
-        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
-        None,
+    let result = stop_windows_fixture_process_until_with_fallback_test_delay(
+        &identity, deadline, None, None, None, true, false,
     );
     let elapsed = started.elapsed();
     let child_alive_before_cleanup = windows_process_is_alive(&identity)?;
@@ -22919,6 +22921,7 @@ fn windows_fixture_stop_helper_total_cleanup_deadline_is_bounded() -> Result<(),
         Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
         None,
         Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        false,
         false,
     );
     let elapsed = started.elapsed();
@@ -22996,7 +22999,7 @@ fn windows_fixture_stop_helper_primary_spawn_failure_cleans_exact_child()
             + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
             + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
         let result = stop_windows_fixture_process_until_with_fallback_test_delay(
-            &identity, deadline, None, None, None, true,
+            &identity, deadline, None, None, None, true, true,
         );
         let elapsed = started.elapsed();
         let exact_child_alive_before_cleanup = windows_process_is_alive(&identity)?;
@@ -23008,6 +23011,7 @@ fn windows_fixture_stop_helper_primary_spawn_failure_cleans_exact_child()
             None,
             None,
             None,
+            true,
             true,
         );
         let sentinel_alive_after_mismatch = windows_process_is_alive(&sentinel_identity)?;
@@ -23389,6 +23393,7 @@ fn windows_codex_owner_native_cleanup_with_injected_failure(
             None,
             None,
             None,
+            true,
             true,
         );
         let mismatch_elapsed = mismatch_started.elapsed();
