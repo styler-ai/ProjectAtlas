@@ -263,6 +263,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t packages < <(python3 -c 'import json,os,sys; sys.stdout.write("\n".join(json.loads(os.environ["PLAN"])["rust_packages"]))')
+          mapfile -t targets < <(python3 -c 'import json,os,sys; sys.stdout.write("\n".join(json.loads(os.environ["PLAN"])["test_targets"]))')
           package_args=()
           for package in "${packages[@]}"; do
             case "$package" in
@@ -270,11 +271,18 @@ jobs:
               *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
             esac
           done
+          target_args=()
+          for target in "${targets[@]}"; do
+            case "$target" in
+              e2e_delivery|e2e_lifecycle|e2e_maintenance|e2e_navigation|e2e_worktrees|installer_trust_boundaries|language_runtime_compatibility|lint_diagnostics|optional_parser_worker_failure|optional_parser_worker_platform|parser_launch_authority|parser_supervisor_adversarial) target_args+=(--test "$target") ;;
+              *) echo "planner emitted unknown Rust test target: $target" >&2; exit 1 ;;
+            esac
+          done
           if (( ${#package_args[@]} == 0 )); then
             echo "target compile contract has no affected package" >&2
             exit 1
           fi
-          cargo check "${package_args[@]}" --lib --bins --examples --all-features --locked
+          cargo check "${package_args[@]}" "${target_args[@]}" --lib --bins --examples --all-features --locked
 
       - name: macOS all-features warning gate
         if: runner.os == 'macOS' && contains(matrix.contracts, 'mac-quality')

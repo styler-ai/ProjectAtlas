@@ -726,6 +726,9 @@ def plan_changes(
                         packages.add(owner)
                         reasons.append(f"owning CLI test target {target} changed")
                         test_platform_owners(target, platforms)
+                        add_platform(
+                            platforms, source_platforms.get(path, ()), "compile"
+                        )
                     elif relative.startswith("tests/support/"):
                         return full_plan(
                             base=base,
@@ -1198,6 +1201,22 @@ def self_test() -> None:
     assert cli_domain["test_targets"] == ["e2e_navigation"]
     assert cli_domain["platform_matrix"]["include"] == [
         {"label": "linux", "os": "ubuntu-latest", "contracts": ["navigation"]}
+    ]
+
+    target_specific_test = plan_changes(
+        base="a" * 40,
+        head="b" * 40,
+        event="pull_request",
+        changes=[Change("M", ("crates/projectatlas-cli/tests/lint_diagnostics.rs",))],
+        graph=graph,
+        source_platforms={
+            "crates/projectatlas-cli/tests/lint_diagnostics.rs": MAC_PLATFORM_LABELS
+        },
+    )
+    assert target_specific_test["test_targets"] == ["lint_diagnostics"]
+    assert target_specific_test["platform_matrix"]["include"] == [
+        {"label": label, "os": PLATFORM_OS[label], "contracts": ["compile"]}
+        for label in MAC_PLATFORM_LABELS
     ]
 
     shared = plan_changes(

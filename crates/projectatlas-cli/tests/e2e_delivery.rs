@@ -5776,9 +5776,12 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
     let target_compile_run = target_compile["run"].as_str().unwrap_or_default();
     for required in [
         r#"["rust_packages"]"#,
+        r#"["test_targets"]"#,
         "planner emitted unknown Rust package",
+        "planner emitted unknown Rust test target",
         "target compile contract has no affected package",
         "cargo check",
+        r#"--test "$target""#,
         "--lib --bins --examples --all-features --locked",
     ] {
         if !target_compile_run.contains(required) {
