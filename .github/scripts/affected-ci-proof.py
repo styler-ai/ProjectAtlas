@@ -142,6 +142,26 @@ KNOWN_REPOSITORY_FILES = {
     "LICENSE",
     "README.md",
 }
+EXECUTABLE_GUIDANCE_TEST_TARGETS = {
+    "README.md": ("e2e_delivery", "e2e_lifecycle", "e2e_maintenance"),
+    "templates/AGENTS.md": ("e2e_lifecycle", "e2e_maintenance"),
+    "plugins/projectatlas/skills/projectatlas/SKILL.md": (
+        "e2e_delivery",
+        "e2e_lifecycle",
+        "e2e_maintenance",
+    ),
+    "docs/adoption.md": ("e2e_lifecycle", "e2e_maintenance"),
+    "docs/agent-integration.md": (
+        "e2e_delivery",
+        "e2e_lifecycle",
+        "e2e_maintenance",
+    ),
+    "docs/agent-navigation.md": ("e2e_lifecycle",),
+    "docs/index.md": ("e2e_lifecycle",),
+    "docs/projectatlas-3-architecture.md": ("e2e_maintenance",),
+    "docs/projectatlas-3-v0.3.2-hardening-spec.md": ("e2e_maintenance",),
+    "docs/workflow.md": ("e2e_lifecycle", "e2e_maintenance"),
+}
 
 
 @dataclass(frozen=True)
@@ -764,6 +784,11 @@ def plan_changes(
                 test_targets.add("e2e_delivery")
                 reasons.append("CLI E2E inventory requires its executable validator")
                 continue
+            if owning_tests := EXECUTABLE_GUIDANCE_TEST_TARGETS.get(path):
+                packages.add("projectatlas-cli")
+                test_targets.update(owning_tests)
+                reasons.append(f"executable guidance owns {path}")
+                continue
             if is_known_repository_path(path):
                 reasons.append(f"repository documentation/policy owns {path}")
                 if path.startswith("docs/benchmarks/"):
@@ -1346,6 +1371,19 @@ def self_test() -> None:
     assert inventory["rust_packages"] == ["projectatlas-cli"]
     assert inventory["test_targets"] == ["e2e_delivery"]
     assert inventory["platform_matrix"] == {"include": []}
+
+    for path, owning_tests in EXECUTABLE_GUIDANCE_TEST_TARGETS.items():
+        guidance = plan_changes(
+            base="a" * 40,
+            head="b" * 40,
+            event="pull_request",
+            changes=[Change("M", (path,))],
+            graph=graph,
+        )
+        assert guidance["test_only"] is True
+        assert guidance["rust_packages"] == ["projectatlas-cli"]
+        assert guidance["test_targets"] == sorted(owning_tests)
+        assert guidance["platform_matrix"] == {"include": []}
 
     target_specific_test = plan_changes(
         base="a" * 40,

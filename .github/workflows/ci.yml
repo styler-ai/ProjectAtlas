@@ -79,18 +79,118 @@ jobs:
           HEAD_SHA: ${{ steps.inputs.outputs.head }}
         run: |
           set -euo pipefail
+          export GIT_NO_REPLACE_OBJECTS=1
           force_full=()
           if [[ "$INPUT_FORCE_FULL" == "true" || "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" || "$EVENT_NAME" == "merge_group" ]]; then
             force_full+=(--force-full)
           fi
-          python3 .github/scripts/affected-ci-proof.py --self-test
-          python3 .github/scripts/affected-ci-proof.py plan \
-            --base "$BASE" \
-            --head "$HEAD_SHA" \
-            --event "$EVENT_NAME" \
-            --github-output "$GITHUB_OUTPUT" \
-            --summary "$GITHUB_STEP_SUMMARY" \
-            "${force_full[@]}"
+          trusted_planner="$RUNNER_TEMP/affected-ci-proof.py"
+          if git cat-file -e "${BASE}:.github/scripts/affected-ci-proof.py" 2>/dev/null; then
+            git show "${BASE}:.github/scripts/affected-ci-proof.py" > "$trusted_planner"
+            python3 "$trusted_planner" plan \
+              --base "$BASE" \
+              --head "$HEAD_SHA" \
+              --event "$EVENT_NAME" \
+              --github-output "$GITHUB_OUTPUT" \
+              --summary "$GITHUB_STEP_SUMMARY" \
+              "${force_full[@]}"
+          else
+            python3 - "$BASE" "$HEAD_SHA" "$EVENT_NAME" "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          base, head, event, output_path, summary_path = sys.argv[1:]
+          repository = [
+              "benchmark-policy",
+              "cargo-dependency",
+              "dependency-audit",
+              "issueops",
+              "mermaid",
+              "optional-parser-inputs",
+              "source-policy",
+          ]
+          packages = [
+              "projectatlas-cli",
+              "projectatlas-core",
+              "projectatlas-db",
+              "projectatlas-fs",
+              "projectatlas-lints",
+              "projectatlas-service",
+              "projectatlas-symbols",
+          ]
+          targets = [
+              "e2e_delivery",
+              "e2e_lifecycle",
+              "e2e_maintenance",
+              "e2e_navigation",
+              "e2e_worktrees",
+              "installer_trust_boundaries",
+              "language_runtime_compatibility",
+              "lint_diagnostics",
+              "optional_parser_worker_failure",
+              "optional_parser_worker_platform",
+              "parser_launch_authority",
+              "parser_supervisor_adversarial",
+          ]
+          platform_matrix = {
+              "include": [
+                  {
+                      "label": "linux",
+                      "os": "ubuntu-latest",
+                      "contracts": ["btrfs", "compile", "mcp", "navigation", "plugin", "process", "tui", "worktree"],
+                  },
+                  {
+                      "label": "windows",
+                      "os": "windows-latest",
+                      "contracts": ["compile", "mcp", "plugin", "process", "windows", "worktree"],
+                  },
+                  {
+                      "label": "macos-x64",
+                      "os": "macos-15-intel",
+                      "contracts": ["compile", "mac-quality", "parser"],
+                  },
+                  {
+                      "label": "macos-arm64",
+                      "os": "macos-14",
+                      "contracts": ["compile", "mac-quality", "mcp", "parser", "plugin", "process", "tui", "worktree"],
+                  },
+              ]
+          }
+          selected = [*repository]
+          selected.extend(f"rust:{package}" for package in packages)
+          selected.extend(f"test:{target}" for target in targets)
+          selected.extend(
+              f"platform:{row['label']}:{contract}"
+              for row in platform_matrix["include"]
+              for contract in row["contracts"]
+          )
+          plan = {
+              "schema": 1,
+              "binding": {"base": base, "head": head, "event": event},
+              "mode": "full",
+              "reasons": ["trusted planner is absent on the accepted base; complete bootstrap proof required"],
+              "changes": [],
+              "repository_contracts": repository,
+              "rust_packages": packages,
+              "test_targets": targets,
+              "test_only": False,
+              "platform_matrix": platform_matrix,
+              "jobs": {"repository": True, "rust": True, "platform": True},
+              "selected": sorted(selected),
+              "omitted": [],
+          }
+          encoded = json.dumps(plan, separators=(",", ":"), sort_keys=True)
+          with Path(output_path).open("a", encoding="utf-8", newline="\n") as output:
+              output.write(f"plan={encoded}\nrepository=true\nrust=true\nplatform=true\n")
+              output.write(f"platform_matrix={json.dumps(platform_matrix, separators=(',', ':'))}\n")
+          with Path(summary_path).open("a", encoding="utf-8", newline="\n") as summary:
+              summary.write("## Affected CI proof\n\nComplete bootstrap proof: the accepted base has no trusted planner.\n")
+          PY
+          fi
+
+      - name: Self-test submitted planner
+        run: python3 .github/scripts/affected-ci-proof.py --self-test
 
   repository:
     name: repository
@@ -636,6 +736,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.plan.outputs.head || github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 2
 
       - name: Aggregate selected proof
         env:
@@ -653,11 +754,45 @@ jobs:
             echo "proof planning concluded $PLAN_RESULT" >&2
             exit 1
           fi
-          python3 .github/scripts/affected-ci-proof.py aggregate \
-            --plan "$PLAN" \
-            --base "$BASE" \
-            --head "$HEAD_SHA" \
-            --event "$EVENT_NAME" \
-            --repository-result "$REPOSITORY_RESULT" \
-            --rust-result "$RUST_RESULT" \
-            --platform-result "$PLATFORM_RESULT"
+          export GIT_NO_REPLACE_OBJECTS=1
+          if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BASE"
+          fi
+          trusted_planner="$RUNNER_TEMP/affected-ci-proof.py"
+          if git cat-file -e "${BASE}:.github/scripts/affected-ci-proof.py" 2>/dev/null; then
+            git show "${BASE}:.github/scripts/affected-ci-proof.py" > "$trusted_planner"
+            python3 "$trusted_planner" aggregate \
+              --plan "$PLAN" \
+              --base "$BASE" \
+              --head "$HEAD_SHA" \
+              --event "$EVENT_NAME" \
+              --repository-result "$REPOSITORY_RESULT" \
+              --rust-result "$RUST_RESULT" \
+              --platform-result "$PLATFORM_RESULT"
+          else
+            python3 - <<'PY'
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN"])
+          expected_binding = {
+              "base": os.environ["BASE"],
+              "head": os.environ["HEAD_SHA"],
+              "event": os.environ["EVENT_NAME"],
+          }
+          if plan.get("binding") != expected_binding or plan.get("mode") != "full":
+              raise SystemExit("bootstrap proof plan binding or mode is invalid")
+          if plan.get("jobs") != {"repository": True, "rust": True, "platform": True}:
+              raise SystemExit("bootstrap proof did not select every job")
+          if plan.get("omitted") != []:
+              raise SystemExit("bootstrap proof omitted a contract")
+          for name, result in {
+              "repository": os.environ["REPOSITORY_RESULT"],
+              "rust": os.environ["RUST_RESULT"],
+              "platform": os.environ["PLATFORM_RESULT"],
+          }.items():
+              if result != "success":
+                  raise SystemExit(f"selected {name} job concluded {result}")
+          print("complete bootstrap proof aggregate passed")
+          PY
+          fi

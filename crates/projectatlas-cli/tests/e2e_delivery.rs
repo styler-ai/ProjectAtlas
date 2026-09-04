@@ -3475,8 +3475,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "EVENT_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}",
         "elif [[ -z \"$base\" || \"$base\" =~ ^0+$ ]]; then\n            base=\"$head\"\n            force_full=true",
         "if [[ \"$INPUT_FORCE_FULL\" == \"true\"",
+        "git show \"${BASE}:.github/scripts/affected-ci-proof.py\" > \"$trusted_planner\"",
+        "python3 \"$trusted_planner\" plan",
+        "trusted planner is absent on the accepted base; complete bootstrap proof required",
+        "- name: Self-test submitted planner",
         "python3 .github/scripts/affected-ci-proof.py --self-test",
-        "python3 .github/scripts/affected-ci-proof.py plan",
         "if: needs.plan.outputs.repository == 'true'",
         "if: needs.plan.outputs.rust == 'true'",
         "matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}",
@@ -3497,7 +3500,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "--issue-map openspec/issue-map.json",
         "if: always()",
         "needs: [plan, repository, rust, e2e-smoke]",
-        "affected-ci-proof.py aggregate",
+        "python3 \"$trusted_planner\" aggregate",
+        "bootstrap proof did not select every job",
+        "bootstrap proof omitted a contract",
         "--event \"$EVENT_NAME\"",
     ] {
         if !ci.contains(required) {
@@ -3512,6 +3517,18 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if !plan_job.contains(&format!("if: {source_event}")) {
         return Err(io::Error::other(
             "source planning must rerun for a base retarget and skip metadata-only edits",
+        )
+        .into());
+    }
+    let trusted_plan = plan_job
+        .find("python3 \"$trusted_planner\" plan")
+        .ok_or_else(|| io::Error::other("source planning omitted the accepted-base planner"))?;
+    let submitted_self_test = plan_job
+        .find("- name: Self-test submitted planner")
+        .ok_or_else(|| io::Error::other("source planning omitted submitted planner proof"))?;
+    if trusted_plan > submitted_self_test {
+        return Err(io::Error::other(
+            "submitted planner code must not run before accepted-base planning is complete",
         )
         .into());
     }
@@ -3555,6 +3572,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "proof plan binding is stale",
         "binding.get(\"event\")",
         "ordinary change requires mapped issue-state consistency",
+        "EXECUTABLE_GUIDANCE_TEST_TARGETS",
+        "executable guidance owns {path}",
+        "docs/workflow.md\": (\"e2e_lifecycle\", \"e2e_maintenance\")",
         "affected CI proof self-test passed",
     ] {
         if !planner.contains(required) {
