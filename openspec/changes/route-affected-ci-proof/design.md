@@ -253,18 +253,37 @@ introduced.
 
 The implementation SHALL record before/after workflow wall time, including
 queue time, and raw runner-minutes for five representative change classes:
-documentation-only, independent leaf crate, CLI test/domain, shared core, and
-platform-sensitive. Claimed routing is retained only when representative
-measurements show at least a 30 percent and 30 second improvement without
-removing a causal contract.
+documentation-only, eligible independent leaf crate, CLI test/domain, shared
+core, and platform-sensitive. If the current ownership graph has no genuinely
+independent production leaf, that class is reported as not applicable instead
+of manufacturing a source change solely to consume CI. Claimed routing is
+retained only when representative measurements show at least a 30 percent and
+30 second improvement without removing a causal contract.
 
 Documentation-only, leaf-crate, and ordinary CLI-domain required checks target
 ten minutes or less. Shared-core, platform-sensitive, and fail-closed runs have
 a fifteen-minute design ceiling. If runner queueing or an indivisible causal
 job prevents a target, the implementation records the measured cause and
 keeps the proof; it does not omit a test to make the number green. The current
-29-48 minute wall and 53-75 raw runner-minute ranges are baselines, not claims
-about the unimplemented result.
+29-48 minute wall and 53-75 raw runner-minute ranges are the before baseline.
+Raw runner-minutes below sum non-skipped source-workflow job durations; the
+separate required `pr-state` workflow completed in 7-32 seconds and never
+launched source work.
+
+| Change class | Required-check wall after routing | Raw runner-minutes after routing | Disposition |
+| --- | ---: | ---: | --- |
+| Documentation-only | 0:48 | 0.97 | Retained: at least 97% less wall time and 98% fewer runner-minutes than the best baseline. |
+| Eligible independent leaf crate | N/A | N/A | No independently owned production leaf exists: the apparent leaf is the repository-wide source-policy owner and correctly selects complete fallback. No synthetic run was created. |
+| CLI test/domain | 2:49 | 3.07 | Retained: at least 90% less wall time and 94% fewer runner-minutes than the best baseline while running only its owning Rust, repository, and test-domain proof. |
+| Shared core / complete fallback | 12:10 | 45.05 | Retained for safety: the identical complete plan used by shared-core, unknown, and workflow-authority changes is at least 58% faster in wall time and inside the 15-minute ceiling. Raw cost improved only 15% against the best baseline, so no material raw-cost claim is made. |
+| Platform-sensitive | 3:16 to fail | 4.25 to fail | The narrow plan selected only Rust plus macOS Intel/ARM and correctly failed on a Bash 3.2 incompatibility. After the fix, the same macOS steps passed in 8:34 and 7:45 inside complete proof. No synthetic rerun was created solely to claim a green narrow duration. |
+
+One earlier complete activation run reached 15:22 because its Windows owner took
+15:00, exceeding the ceiling by 22 seconds; the unchanged complete-plan
+representative above finished in 12:10. The variance is recorded rather than
+removing proof. The measured narrow documentation and CLI routes materially
+improve both latency and runner cost; the complete route materially improves
+latency while preserving every causal backstop.
 
 Caching is excluded because the available measurement validated a parser-pack
 dependency cache on Linux but found an immaterial Windows improvement; it does

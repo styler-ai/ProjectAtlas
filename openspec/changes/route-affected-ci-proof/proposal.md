@@ -10,7 +10,7 @@ ProjectAtlas currently spends roughly 29-47 minutes of pull-request wall time an
 - Run only selected Rust, integration, and platform proof in local pre-push and concurrently in hosted CI behind one fail-closed required aggregate; unknown, shared, workflow, toolchain, lockfile, schema, planner, or contract-map changes select the complete normal-PR proof.
 - Require planned-issue IssueOps to compare the live implementation-task text, order, and checked state literally with the mapped `tasks.md`, including equal-count drift.
 - Preserve the complete four-platform installed-product matrix at the integrated release-candidate boundary, with the whole boundary restarted after a confirmed defect is fixed.
-- Measure wall time and raw runner-minutes before and after for docs-only, leaf-crate, CLI test-domain, shared-core, and platform-sensitive changes; retain only routing that produces a significant improvement without losing causal proof.
+- Measure wall time and raw runner-minutes before and after for docs-only, eligible independent leaf-crate, CLI test-domain, shared-core, and platform-sensitive changes; report an ownership-derived N/A instead of manufacturing a source change when a named class has no independent owner, and retain only routing that produces a significant improvement without losing causal proof.
 
 ## Capabilities
 
