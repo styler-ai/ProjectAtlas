@@ -2194,6 +2194,19 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         .into());
     }
     for required in [
+        "release_asset_server_lifecycle_is_causal_and_bounded",
+        "windows_release_binary_installer_rejects_checksum_mismatch",
+        "windows_release_binary_only_rejects_invalid_runtime_without_fallback",
+        "posix_release_binary_installer_rejects_checksum_mismatch",
+    ] {
+        if !e2e_smoke.contains(required) {
+            return Err(io::Error::other(format!(
+                "multi-OS CI smoke omitted release-asset lifecycle regression {required}"
+            ))
+            .into());
+        }
+    }
+    for required in [
         "posix_plugin_inventory_without_jq_rejects_split_object_fields",
         "posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state",
         "windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot",

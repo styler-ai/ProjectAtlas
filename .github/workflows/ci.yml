@@ -467,6 +467,26 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e_delivery e2e_process_observers_ -- --nocapture
 
+      - name: Release asset server causal lifecycle regression
+        if: contains(matrix.contracts, 'process')
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli --test e2e_delivery release_asset_server_lifecycle_is_causal_and_bounded -- --exact --nocapture
+
+      - name: POSIX release asset checksum regression
+        if: matrix.label != 'windows' && contains(matrix.contracts, 'process')
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli --test e2e_delivery posix_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture
+
+      - name: Windows release asset failure regressions
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_only_rejects_invalid_runtime_without_fallback -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Graph, symbol, purpose, and viewport regressions
         if: contains(matrix.contracts, 'navigation')
         timeout-minutes: 10
