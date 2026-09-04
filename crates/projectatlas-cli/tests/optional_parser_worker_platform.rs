@@ -1,4 +1,5 @@
 //! Exercise the unsupported-host parser-worker entrypoint as a real process.
+//! Measurement-only platform-domain change; removed before merge.
 
 #![cfg(target_os = "macos")]
 
