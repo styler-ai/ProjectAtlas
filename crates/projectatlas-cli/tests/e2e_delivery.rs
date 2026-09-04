@@ -3044,10 +3044,20 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let mermaid_package = fs::read_to_string(mermaid_parser.join(PACKAGE_JSON_FILE_NAME))?;
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
     let ci = fs::read_to_string(workflows.join("ci.yml"))?;
+    let pr_state = fs::read_to_string(workflows.join("pr-state.yml"))?;
+    let planner = fs::read_to_string(github.join("scripts").join("affected-ci-proof.py"))?;
     let docs_workflow = fs::read_to_string(workflows.join(DOCS_WORKFLOW_FILE_NAME))?;
+    let auto_release_workflow = fs::read_to_string(workflows.join("03-auto-release.yml"))?;
     let optional_parser_workflow = fs::read_to_string(workflows.join("optional-parser-pack.yml"))?;
     let release = fs::read_to_string(workflows.join("release.yml"))?;
     let issueops_workflow = fs::read_to_string(workflows.join("issueops.yml"))?;
+    if github
+        .join("scripts")
+        .join("codex-pr-review-gate.py")
+        .exists()
+    {
+        return Err(io::Error::other("superseded Codex-only review poller still exists").into());
+    }
     let hook = fs::read_to_string(
         workspace_root
             .join(GITHOOKS_DIR_NAME)
@@ -3108,7 +3118,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     for (name, workflow) in [
-        ("CI", ci.as_str()),
         ("release", release.as_str()),
         ("IssueOps", issueops_workflow.as_str()),
     ] {
@@ -3124,7 +3133,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             }
         }
     }
-    for (name, workflow) in [("release", release.as_str()), ("pre-push", hook.as_str())] {
+    for (name, workflow) in [("release", release.as_str())] {
         let first_cargo_test = workflow
             .find("cargo test")
             .ok_or_else(|| io::Error::other(format!("{name} omitted cargo tests")))?;
@@ -3138,6 +3147,19 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             if gate_position > first_cargo_test {
                 return Err(io::Error::other(format!(
                     "{name} Mermaid gate {gate:?} must precede its first cargo test"
+                ))
+                .into());
+            }
+        }
+    }
+    for (name, owner) in [("CI", ci.as_str()), ("pre-push", hook.as_str())] {
+        for command in [
+            "npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+        ] {
+            if !owner.contains(command) {
+                return Err(io::Error::other(format!(
+                    "{name} omitted affected Mermaid dependency gate {command:?}"
                 ))
                 .into());
             }
@@ -3243,20 +3265,27 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     let normalized_hook = hook.replace("\r\n", "\n");
     for required in [
-        "push_scope=\"$(\n  awk '",
+        "if ! push_record=\"$(",
         "NF != 4",
         "if ($2 ~ /^0+$/ || $3 !~",
         "if (!seen || invalid || updates != 1) exit 1",
         "updates += 1",
         "local_oid = $2",
-        "else print \"candidate:\" local_oid",
+        "print remote_ref \"|\" local_oid \"|\" remote_oid",
+        "IFS='|' read -r remote_ref candidate_local_oid remote_oid",
         "refs/heads/main",
-        "if [ \"$push_scope\" = \"global\" ]; then",
-        "elif [ \"${push_scope#candidate:}\" != \"$push_scope\" ]; then",
-        "candidate_local_oid=\"${push_scope#candidate:}\"",
         "git rev-parse --verify 'HEAD^{commit}'",
-        "candidate branch local object does not match checked-out HEAD",
+        "pushed local object must match the checked-out HEAD",
+        "git status --porcelain=v1 --untracked-files=all",
+        "git ls-files -v",
         "git merge-base origin/main HEAD",
+        "affected-ci-proof.py --self-test",
+        "affected-ci-proof.py plan",
+        "--base \"$accepted_base\"",
+        "--head \"$current_head\"",
+        "--event pre_push",
+        "npm ls --depth=0 --prefix .github/mermaid-parser",
+        "has_repository_contract dependency-audit",
         "git log --format=%s",
         "--owner-from-commits",
         "--candidate-issue \"$owner_issue\"",
@@ -3271,7 +3300,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     let main_route = normalized_hook
-        .find("if [ \"$push_scope\" = \"global\" ]; then")
+        .find("if [ \"$remote_ref\" = \"refs/heads/main\" ]")
         .ok_or_else(|| io::Error::other("pre-push hook omitted main route"))?;
     let global_route = normalized_hook
         .find("--repo \"$repo\" --root . --issue-map openspec/issue-map.json")
@@ -3282,6 +3311,25 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if !(main_route < global_route && global_route < candidate_route) {
         return Err(io::Error::other(
             "pre-push hook must keep global and candidate IssueOps routes in their target scopes",
+        )
+        .into());
+    }
+    let planner_position = normalized_hook
+        .find("affected-ci-proof.py plan")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted affected planner"))?;
+    let first_expensive_position = normalized_hook
+        .find("npm ls --depth=0")
+        .ok_or_else(|| io::Error::other("pre-push hook omitted dependency reuse check"))?;
+    if planner_position > first_expensive_position {
+        return Err(io::Error::other(
+            "pre-push hook must bind its affected plan before dependency or build work",
+        )
+        .into());
+    }
+    let lockfile_install = "if has_repository_contract dependency-audit; then\n  npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser\nelif has_repository_contract issueops || has_repository_contract mermaid; then";
+    if !normalized_hook.contains(lockfile_install) {
+        return Err(io::Error::other(
+            "pre-push must install the submitted Mermaid lockfile before its audit",
         )
         .into());
     }
@@ -3380,39 +3428,158 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
 
     for required in [
-        "cargo fmt --all --check",
+        "affected-ci-proof.py plan",
         "cargo check --workspace --all-targets --all-features --locked",
-        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
-        "cargo test --workspace --all-features --locked",
-        "cargo test --doc --workspace --all-features --locked",
-        "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features --locked",
-        "cargo deny --locked --all-features check -D warnings",
-        "npm ci --ignore-scripts --prefix .github/mermaid-parser",
-        "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
-        "issue-checklists.py --self-test",
-        "test-optional-parser-proof-inputs.py",
+        "cargo check \"$@\" --bins --examples --tests --all-features --locked",
+        "cargo clippy \"$@\" --bins --examples --tests --all-features --locked -- -D warnings",
+        "cargo test \"$@\" --lib --bins --all-features --locked",
+        "cargo test --locked -p projectatlas-lints --bins --all-features",
+        "cargo test --doc \"$@\" --all-features --locked",
+        "cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features",
+        "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
+        "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled",
+        "npm ls --depth=0 --prefix .github/mermaid-parser",
+        "has_repository_contract cargo-dependency",
+        "has_repository_contract source-policy",
     ] {
-        if !hook.contains(required) || !workflow_docs.contains(required) {
+        if !hook.contains(required) {
             return Err(io::Error::other(format!(
-                "hook and workflow docs must share ordinary gate {required:?}"
+                "pre-push hook omitted affected proof gate {required:?}"
             ))
             .into());
         }
     }
     for required in [
+        "exact clean candidate",
+        "affected-ci-proof.py",
+        "only the repository, Rust package",
+        "Unknown paths and changes to shared proof authorities",
+        "Run the complete local suite only",
+        "retarget replans against the new base",
+        "body edit runs no source job",
+    ] {
+        if !workflow_docs.contains(required) {
+            return Err(io::Error::other(format!(
+                "workflow guidance omitted affected proof boundary {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "types: [opened, reopened, synchronize, edited]",
+        "merge_group:",
+        "schedule:",
+        "group: projectatlas-ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) && github.event.pull_request.number || github.run_id }}",
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) }}",
+        "force_full: ${{ steps.inputs.outputs.force_full }}",
+        "EVENT_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}",
+        "elif [[ -z \"$base\" || \"$base\" =~ ^0+$ ]]; then\n            base=\"$head\"\n            force_full=true",
+        "if [[ \"$INPUT_FORCE_FULL\" == \"true\"",
+        "git show \"${BASE}:.github/scripts/affected-ci-proof.py\" > \"$trusted_planner\"",
+        "python3 \"$trusted_planner\" plan",
+        "trusted planner is absent on the accepted base; complete bootstrap proof required",
+        "- name: Self-test submitted planner",
+        "python3 .github/scripts/affected-ci-proof.py --self-test",
+        "if: needs.plan.outputs.repository == 'true'",
+        "if: needs.plan.outputs.rust == 'true'",
+        "matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}",
         "cargo fmt --all --check",
+        "cargo check --locked -p projectatlas-cli --all-features --test \"$target\"",
+        "cargo test --locked -p projectatlas-cli --all-features --test \"$target\"",
+        "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled",
         "cargo check --workspace --all-targets --all-features --locked",
-        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+        "cargo check \"${package_args[@]}\" --bins --examples --tests --all-features --locked",
+        "cargo clippy \"${package_args[@]}\" --bins --examples --tests --all-features --locked -- -D warnings",
+        "cargo test \"${library_package_args[@]}\" --lib --bins --all-features --locked",
+        "cargo test --locked -p projectatlas-lints --bins --all-features",
+        "cargo test --doc \"${library_package_args[@]}\" --all-features --locked",
+        "cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features",
         "cargo test --workspace --all-features --locked",
-        "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled",
-        "cargo test --doc --workspace --all-features --locked",
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
+        "if: always()",
+        "needs: [plan, repository, rust, e2e-smoke]",
+        "python3 \"$trusted_planner\" aggregate",
+        "bootstrap proof did not select every job",
+        "bootstrap proof omitted a contract",
+        "--event \"$EVENT_NAME\"",
     ] {
         if !ci.contains(required) {
             return Err(io::Error::other(format!(
                 "ordinary CI is missing blocking gate {required:?}"
+            ))
+            .into());
+        }
+    }
+    let source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null";
+    let plan_job = workflow_job_block(&ci, "plan")?;
+    if !plan_job.contains(&format!("if: {source_event}")) {
+        return Err(io::Error::other(
+            "source planning must rerun for a base retarget and skip metadata-only edits",
+        )
+        .into());
+    }
+    let trusted_plan = plan_job
+        .find("python3 \"$trusted_planner\" plan")
+        .ok_or_else(|| io::Error::other("source planning omitted the accepted-base planner"))?;
+    let submitted_self_test = plan_job
+        .find("- name: Self-test submitted planner")
+        .ok_or_else(|| io::Error::other("source planning omitted submitted planner proof"))?;
+    if trusted_plan > submitted_self_test {
+        return Err(io::Error::other(
+            "submitted planner code must not run before accepted-base planning is complete",
+        )
+        .into());
+    }
+    let verify_job = workflow_job_block(&ci, "verify")?;
+    for required in [
+        "name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-edit' || 'verify' }}",
+        &format!("if: always() && ({source_event})"),
+    ] {
+        if !verify_job.contains(required) {
+            return Err(io::Error::other(format!(
+                "metadata-only edits must not emit or satisfy source aggregate {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "pull request must reference exactly one owning issue",
+        "pull request owner must be an open issue",
+        "Pull request milestone must match owning issue",
+    ] {
+        if !pr_state.contains(required) {
+            return Err(io::Error::other(format!(
+                "pr-state omitted ownership boundary {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "MAX_DIFF_BYTES",
+        "MAX_PATHS",
+        "GIT_NO_REPLACE_OBJECTS",
+        "[\"cargo\", \"metadata\"",
+        "Cargo workspace package inventory drifted",
+        "shared core changed",
+        "shared CLI test support changed",
+        "unknown or incompletely owned path",
+        "dependency-audit",
+        "cargo-dependency",
+        "selected {name} job concluded",
+        "omitted {name} job concluded",
+        "proof plan binding is stale",
+        "binding.get(\"event\")",
+        "ordinary change requires mapped issue-state consistency",
+        "EXECUTABLE_GUIDANCE_TEST_TARGETS",
+        "executable guidance owns {path}",
+        "docs/workflow.md\": (\"e2e_lifecycle\", \"e2e_maintenance\")",
+        "affected CI proof self-test passed",
+    ] {
+        if !planner.contains(required) {
+            return Err(io::Error::other(format!(
+                "affected CI planner omitted fail-closed contract {required:?}"
             ))
             .into());
         }
@@ -3458,13 +3625,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if ci.matches("- name: Issue checklist self-test").count() != 1 {
         return Err(io::Error::other("CI must run the IssueOps self-test exactly once").into());
     }
-    if checklist_self_test_step.contains("\n        if:") {
-        return Err(io::Error::other("CI IssueOps self-test must be unconditional").into());
+    if !checklist_self_test_step.contains(
+        "if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'issueops')",
+    ) {
+        return Err(io::Error::other("CI IssueOps self-test must follow the affected plan").into());
     }
-    for required in [
-        issueops_self_test_command,
-        "test-optional-parser-proof-inputs.py",
-    ] {
+    for required in [issueops_self_test_command] {
         if !checklist_self_test_step.contains(required) {
             return Err(io::Error::other(format!(
                 "CI IssueOps self-test omitted gate {required:?}"
@@ -3494,31 +3660,36 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if mermaid_setup_position > first_cargo_test {
         return Err(io::Error::other("CI Mermaid setup must precede its first cargo test").into());
     }
-    if mermaid_setup_step.contains("\n        if:") {
-        return Err(io::Error::other("CI Mermaid setup must be unconditional").into());
+    if !mermaid_setup_step
+        .contains("if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'mermaid')")
+    {
+        return Err(io::Error::other("CI Mermaid setup must follow the affected plan").into());
     }
-    for event in [
-        "pull_request_review:",
-        "pull_request_review_comment:",
-        "workflow_dispatch:",
-    ] {
-        if !ci.contains(event) {
+    for event in ["pull_request_review:", "pull_request_review_comment:"] {
+        if ci.contains(event) || pr_state.contains(event) {
             return Err(io::Error::other(format!(
-                "CI must retain review-event coverage for {event:?}"
+                "review activity must not launch source or metadata workflow {event:?}"
             ))
             .into());
         }
     }
-    for gate in [
-        "npm ci --ignore-scripts --prefix .github/mermaid-parser",
+    if !mermaid_setup_step
+        .contains("npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser")
+    {
+        return Err(io::Error::other("CI Mermaid setup must avoid an implicit audit").into());
+    }
+    let dependency_audit_step = ci
+        .split("- name: Audit Mermaid dependencies")
+        .nth(1)
+        .and_then(|tail| tail.split("- name:").next())
+        .ok_or_else(|| io::Error::other("CI dependency-audit step is missing"))?;
+    for required in [
+        "contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'dependency-audit')",
         "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
     ] {
-        if !mermaid_setup_step.contains(gate) {
-            return Err(io::Error::other(format!("CI Mermaid setup omitted gate {gate:?}")).into());
-        }
-        if checklist_step.contains(gate) {
+        if !dependency_audit_step.contains(required) {
             return Err(io::Error::other(format!(
-                "CI IssueOps step must not own Mermaid setup gate {gate:?}"
+                "CI dependency audit omitted affected gate {required:?}"
             ))
             .into());
         }
@@ -3537,7 +3708,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     for required in [
-        "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+        "PR_BASE_SHA: ${{ needs.plan.outputs.base }}",
         "if [ \"$GITHUB_EVENT_NAME\" = \"pull_request\" ]; then",
         "git fetch --no-tags --depth=1 origin \"$PR_BASE_SHA\"",
         "--pull-request \"$PR_NUMBER\"",
@@ -3547,6 +3718,113 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         if !checklist_step.contains(required) {
             return Err(io::Error::other(format!(
                 "pull-request IssueOps step is missing branch-aware gate {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "types: [opened, reopened, synchronize, edited, milestoned, demilestoned]",
+        "types: [closed, reopened, edited, labeled, unlabeled, milestoned, demilestoned]",
+        "group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}",
+        "cancel-in-progress: false",
+        "name: pr-state",
+        "if: github.event_name == 'pull_request'",
+        "name: refresh-pr-state",
+        "if: github.event_name == 'issues'",
+        "timeout-minutes: 2",
+        "actions: write",
+        "--refresh-pr-state-for-issue",
+        "Validate issue reference and milestone",
+        "gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"",
+        "name: Validate IssueOps",
+        "ref: ${{ github.event.pull_request.head.sha }}",
+        "--pull-request \"$PR_NUMBER\"",
+        "--base \"$PR_BASE_SHA\"",
+    ] {
+        if !pr_state.contains(required) {
+            return Err(io::Error::other(format!(
+                "PR-state workflow omitted live metadata contract {required:?}"
+            ))
+            .into());
+        }
+    }
+    let direct_pr_state_job = workflow_job_block(&pr_state, "pr-state")?;
+    let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
+    for forbidden in ["cargo ", "codex-pr-review-gate.py"] {
+        if direct_pr_state_job.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "direct PR-state validation retained unrelated source work {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    if direct_pr_state_job.contains("github.event.action == 'edited'") {
+        return Err(io::Error::other(
+            "PR-state IssueOps validation must run for every pull-request event",
+        )
+        .into());
+    }
+    for forbidden in [
+        "cargo ",
+        "github.event.pull_request.head",
+        "continue-on-error: true",
+    ] {
+        if refresh_pr_state_job.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "issue-event PR-state refresh retained unsafe behavior {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in ["checks: write", "--refresh-pr-state-for-issue"] {
+        if issueops_workflow.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "IssueOps retained duplicate PR-state refresh ownership {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "def pr_state_refreshes(",
+        "baseRefName",
+        "not in (\"main\", \"dev\")",
+        "open pull-request inventory reached the refresh bound",
+        "actions/workflows/pr-state.yml/runs",
+        "actions/runs/{workflow_run['id']}/rerun",
+        "no PR-state workflow run found",
+    ] {
+        if !issueops.contains(required) {
+            return Err(io::Error::other(format!(
+                "PR-state refresh omitted fail-closed behavior {required:?}"
+            ))
+            .into());
+        }
+    }
+    for (name, workflow, group) in [
+        (
+            "IssueOps",
+            issueops_workflow.as_str(),
+            "projectatlas-issueops-${{ github.run_id }}",
+        ),
+        (
+            "publish",
+            auto_release_workflow.as_str(),
+            "projectatlas-publish-${{ github.run_id }}",
+        ),
+        (
+            "deploy",
+            docs_workflow.as_str(),
+            "projectatlas-deploy-${{ github.run_id }}",
+        ),
+        (
+            "release",
+            release.as_str(),
+            "projectatlas-release-${{ inputs.version }}",
+        ),
+    ] {
+        if !workflow.contains(group) || !workflow.contains("cancel-in-progress: false") {
+            return Err(io::Error::other(format!(
+                "{name} workflow omitted its non-cancelling namespace"
             ))
             .into());
         }
@@ -3581,7 +3859,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
-        "types: [opened, edited, reopened, labeled, unlabeled, milestoned, closed]",
+        "types: [opened, edited, reopened, labeled, unlabeled, milestoned, demilestoned, closed]",
         "--planned-issue \"$ISSUE_NUMBER\"",
         "timeout-minutes: 5",
         "contents: read",
@@ -4190,6 +4468,11 @@ fn pre_push_dispatch_follows_pushed_remote_targets() -> Result<(), Box<dyn Error
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
+  *"affected-ci-proof.py plan "*)
+    printf '%s\n' '{"mode":"narrow","repository_contracts":["issueops","mermaid"],"rust_packages":["projectatlas-lints"],"test_targets":["lint_diagnostics"],"test_only":false,"jobs":{"rust":true}}'
+    exit 0
+    ;;
+  *" -c "*) exec python "$@" ;;
   *" --owner-from-commits "*)
     awk '
       {
@@ -4336,7 +4619,9 @@ exit 0
         .into());
     }
     let (main_status, main_target) = run_hook(
-        "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n",
+        &format!(
+            "refs/heads/fix/549 {current_head} refs/heads/main 2222222222222222222222222222222222222222\n"
+        ),
         false,
     )?;
     let main_calls = final_issueops(&main_target);
@@ -4345,6 +4630,24 @@ exit 0
             "feature-checkout push to refs/heads/main did not use global IssueOps dispatch:\n{main_target}"
         ))
         .into());
+    }
+    for zero_remote_oid in ["0".repeat(40), "0".repeat(64)] {
+        let (new_main_status, new_main_target) = run_hook(
+            &format!("refs/heads/fix/549 {current_head} refs/heads/main {zero_remote_oid}\n"),
+            false,
+        )?;
+        let new_main_calls = final_issueops(&new_main_target);
+        if !new_main_status
+            || new_main_calls.len() != 1
+            || new_main_calls[0].contains("--candidate-issue")
+            || !new_main_target.contains(&format!("--base {current_head}"))
+            || !new_main_target.contains("--force-full")
+        {
+            return Err(io::Error::other(format!(
+                "new main push did not use complete global proof:\n{new_main_target}"
+            ))
+            .into());
+        }
     }
     let (multiple_candidate_status, multiple_candidate_log) = run_hook(
         "refs/heads/fix/549 1111111111111111111111111111111111111111 refs/heads/fix/549 2222222222222222222222222222222222222222\nrefs/heads/fix/547 3333333333333333333333333333333333333333 refs/heads/fix/547 4444444444444444444444444444444444444444\n",
@@ -4411,6 +4714,22 @@ exit 0
     if !candidate_status
         || candidate_calls.len() != 1
         || !candidate_calls[0].contains("--candidate-issue 549")
+        || !candidate_target.contains(
+            "cargo check -p projectatlas-lints --bins --examples --tests --all-features --locked",
+        )
+        || !candidate_target.contains(
+            "cargo clippy -p projectatlas-lints --bins --examples --tests --all-features --locked -- -D warnings",
+        )
+        || !candidate_target.contains(
+            "cargo test --locked -p projectatlas-lints --bins --all-features",
+        )
+        || !candidate_target.contains(
+            "cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features",
+        )
+        || candidate_target.contains("cargo test --doc -p projectatlas-lints")
+        || candidate_target.contains("cargo check -p projectatlas-lints --lib")
+        || candidate_target.contains("cargo clippy -p projectatlas-lints --lib")
+        || candidate_target.contains("cargo test -p projectatlas-lints --lib")
     {
         return Err(io::Error::other(format!(
             "ordinary candidate push did not use candidate IssueOps dispatch:\n{candidate_target}"
@@ -4717,6 +5036,11 @@ Mitigations:
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
+  *"affected-ci-proof.py plan "*)
+    printf '%s\n' '{"mode":"narrow","repository_contracts":["issueops","mermaid"],"rust_packages":[],"test_targets":[],"test_only":false,"jobs":{"rust":false}}'
+    exit 0
+    ;;
+  *" -c "*) exec python "$@" ;;
   *" --owner-from-commits "*) exec python "$@" ;;
   *" --candidate-issue "*) exec python -c '
 import os
@@ -5396,6 +5720,11 @@ fn pre_push_candidate_rejects_dirty_worktree_before_issueops() -> Result<(), Box
     let python_stub = r#"#!/bin/sh
 printf 'python3 %s\n' "$*" >> "$PROJECTATLAS_HOOK_DISPATCH_LOG"
 case " $* " in
+  *"affected-ci-proof.py plan "*)
+    printf '%s\n' '{"mode":"narrow","repository_contracts":["issueops","mermaid"],"rust_packages":[],"test_targets":[],"test_only":false,"jobs":{"rust":false}}'
+    exit 0
+    ;;
+  *" -c "*) exec python "$@" ;;
   *" --owner-from-commits "*) printf '%s\n' 549 ;;
 esac
 exit 0
@@ -5514,14 +5843,76 @@ exit 0
 fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
     let ci = fs::read_to_string(workspace_root.join(".github/workflows/ci.yml"))?;
+    let planner = fs::read_to_string(workspace_root.join(".github/scripts/affected-ci-proof.py"))?;
     let e2e_smoke = workflow_job_block(&ci, "e2e-smoke")?;
     for required in [
-        "label: macos-x64\n            os: macos-15-intel",
-        "label: macos-arm64\n            os: macos-14",
+        r#""macos-x64": "macos-15-intel""#,
+        r#""macos-arm64": "macos-14""#,
     ] {
-        if !e2e_smoke.contains(required) {
+        if !planner.contains(required) {
             return Err(io::Error::other(format!(
-                "e2e-smoke macOS matrix omitted required runner row {required:?}"
+                "affected planner omitted required macOS runner row {required:?}"
+            ))
+            .into());
+        }
+    }
+    if !e2e_smoke.contains("matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}") {
+        return Err(io::Error::other("e2e-smoke omitted its affected platform matrix").into());
+    }
+
+    let target_compile = workflow_job_step(&ci, "e2e-smoke", "Affected package target compile")?;
+    if target_compile["if"].as_str()
+        != Some(
+            "contains(matrix.contracts, 'compile') && (fromJSON(needs.plan.outputs.plan).mode == 'narrow' || runner.os == 'Windows')",
+        )
+        || target_compile["shell"].as_str() != Some("bash")
+        || target_compile["timeout-minutes"].as_i64() != Some(10)
+    {
+        return Err(io::Error::other(
+            "affected target compile must cover narrow plans and full Windows fallback without duplicating full Linux or macOS proof",
+        )
+        .into());
+    }
+    let target_compile_run = target_compile["run"].as_str().unwrap_or_default();
+    if target_compile_run
+        .matches("sys.stdout.buffer.write")
+        .count()
+        != 2
+        || target_compile_run.contains("sys.stdout.write")
+    {
+        return Err(io::Error::other(
+            "affected target compile must emit planner lists without Windows CRLF translation",
+        )
+        .into());
+    }
+    for required in [
+        r#"["rust_packages"]"#,
+        r#"["test_targets"]"#,
+        r#"["mode"]"#,
+        "planner emitted unknown Rust package",
+        "planner emitted unknown Rust test target",
+        "target compile contract has no affected package",
+        "cargo check --workspace --all-targets --all-features --locked",
+        "cargo check \"${library_package_args[@]}\" --lib --bins --examples --all-features --locked",
+        "cargo test \"${library_package_args[@]}\" --lib --bins --no-run --all-features --locked",
+        "cargo check --locked -p projectatlas-lints --bins --all-features",
+        "cargo test --locked -p projectatlas-lints --bins --no-run --all-features",
+        "cargo check -p projectatlas-cli \"${target_args[@]}\" --all-features --locked",
+    ] {
+        if !target_compile_run.contains(required) {
+            return Err(
+                io::Error::other(format!("affected target compile omitted {required:?}")).into(),
+            );
+        }
+    }
+    for forbidden in [
+        "cargo clippy",
+        "--tests",
+        "cargo check \"${package_args[@]}\" \"${target_args[@]}\"",
+    ] {
+        if target_compile_run.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "affected target compile repeats unrelated proof {forbidden:?}"
             ))
             .into());
         }
@@ -5529,7 +5920,11 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
 
     let step = workflow_job_step(&ci, "e2e-smoke", "macOS all-features warning gate")?;
     for (field, actual, expected) in [
-        ("if", step["if"].as_str(), Some("runner.os == 'macOS'")),
+        (
+            "if",
+            step["if"].as_str(),
+            Some("runner.os == 'macOS' && contains(matrix.contracts, 'mac-quality')"),
+        ),
         ("shell", step["shell"].as_str(), Some("bash")),
     ] {
         if actual != expected {
@@ -5546,12 +5941,22 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         ))
         .into());
     }
-    let expected_run = "RUSTFLAGS=\"-D warnings\" cargo check --workspace --all-targets --all-features --locked\ncargo clippy --workspace --all-targets --all-features --locked -- -D warnings";
+    let expected_run =
+        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings";
     if step["run"].as_str().map(str::trim) != Some(expected_run) {
         return Err(io::Error::other(format!(
             "macOS warning gate commands drifted: found {:?}",
             step["run"].as_str()
         ))
+        .into());
+    }
+    if step["run"]
+        .as_str()
+        .is_some_and(|run| run.contains("cargo check"))
+    {
+        return Err(io::Error::other(
+            "macOS warning gate must not compile the workspace before clippy recompiles it",
+        )
         .into());
     }
 
@@ -5564,7 +5969,7 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
         (
             "if",
             platform_regression["if"].as_str(),
-            Some("runner.os == 'macOS'"),
+            Some("runner.os == 'macOS' && contains(matrix.contracts, 'parser')"),
         ),
         ("shell", platform_regression["shell"].as_str(), Some("bash")),
         (
@@ -20695,6 +21100,7 @@ fn cleanup_codex_owner_processes_after_spawn_failure(
             None,
             None,
             fail_helper_spawns,
+            fail_helper_spawns,
         ),
         None => match read_codex_owner_identity_record(&retained_identity_file) {
             Ok(identity) => stop_windows_fixture_process_until_with_fallback_test_delay(
@@ -20703,6 +21109,7 @@ fn cleanup_codex_owner_processes_after_spawn_failure(
                 child_stop_delay,
                 None,
                 None,
+                fail_helper_spawns,
                 fail_helper_spawns,
             ),
             Err(error) => Err(io::Error::other(format!(
@@ -22215,13 +22622,13 @@ fn windows_fixture_stop_failure_with_fallback(
     fallback_deadline: Instant,
     final_deadline: Instant,
     fallback_test_delay: Option<Duration>,
-    fail_helper_spawn: bool,
+    fail_fallback_helper_spawn: bool,
 ) -> Box<dyn Error> {
     let fallback_result = force_stop_windows_fixture_process(
         identity,
         fallback_deadline,
         fallback_test_delay,
-        fail_helper_spawn,
+        fail_fallback_helper_spawn,
     );
     let fallback_succeeded = fallback_result.is_ok();
     let fallback_detail = match fallback_result.as_ref() {
@@ -22253,6 +22660,7 @@ fn stop_windows_fixture_process_until(
         observation_delay,
         None,
         false,
+        false,
     )
 }
 
@@ -22263,7 +22671,8 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
     test_delay: Option<Duration>,
     observation_delay: Option<Duration>,
     fallback_test_delay: Option<Duration>,
-    fail_helper_spawns: bool,
+    fail_primary_helper_spawn: bool,
+    fail_fallback_helper_spawn: bool,
 ) -> Result<(), Box<dyn Error>> {
     let primary_deadline = deadline
         .checked_sub(CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET)
@@ -22272,23 +22681,23 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
     let fallback_deadline = deadline
         .checked_sub(CODEX_OWNER_CHILD_STOP_FINAL_BUDGET)
         .unwrap_or(deadline);
-    let mut stop = match spawn_windows_fixture_stop_helper(identity, test_delay, fail_helper_spawns)
-    {
-        Ok(stop) => stop,
-        Err(error) => {
-            return Err(windows_fixture_stop_failure_with_fallback(
-                identity,
-                format!(
-                    "failed to start Windows fixture stop helper for {}: {error}",
-                    identity.process_id
-                ),
-                fallback_deadline,
-                deadline,
-                fallback_test_delay,
-                fail_helper_spawns,
-            ));
-        }
-    };
+    let mut stop =
+        match spawn_windows_fixture_stop_helper(identity, test_delay, fail_primary_helper_spawn) {
+            Ok(stop) => stop,
+            Err(error) => {
+                return Err(windows_fixture_stop_failure_with_fallback(
+                    identity,
+                    format!(
+                        "failed to start Windows fixture stop helper for {}: {error}",
+                        identity.process_id
+                    ),
+                    fallback_deadline,
+                    deadline,
+                    fallback_test_delay,
+                    fail_fallback_helper_spawn,
+                ));
+            }
+        };
     let started = Instant::now();
     if let Some(delay) = observation_delay {
         thread::sleep(delay);
@@ -22312,7 +22721,7 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
                         fallback_deadline,
                         deadline,
                         fallback_test_delay,
-                        fail_helper_spawns,
+                        fail_fallback_helper_spawn,
                     ));
                 }
                 break status;
@@ -22336,7 +22745,7 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
                     fallback_deadline,
                     deadline,
                     fallback_test_delay,
-                    fail_helper_spawns,
+                    fail_fallback_helper_spawn,
                 ));
             }
             Ok(None) => {
@@ -22355,7 +22764,7 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
                     fallback_deadline,
                     deadline,
                     fallback_test_delay,
-                    fail_helper_spawns,
+                    fail_fallback_helper_spawn,
                 ));
             }
         }
@@ -22370,7 +22779,7 @@ fn stop_windows_fixture_process_until_with_fallback_test_delay(
             fallback_deadline,
             deadline,
             fallback_test_delay,
-            fail_helper_spawns,
+            fail_fallback_helper_spawn,
         ));
     }
     Ok(())
@@ -22404,13 +22813,14 @@ fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
         None,
     );
     let elapsed = started.elapsed();
-    let cleanup_result = if windows_process_is_alive(&identity)? {
-        stop_windows_fixture_process(&identity)
-    } else {
-        Ok(())
-    };
-    process.wait()?;
-    cleanup_result?;
+    let kill_result = process.kill();
+    let wait_result = process.wait();
+    if let Err(error) = kill_result
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        return Err(error.into());
+    }
+    wait_result?;
     if result.is_ok()
         || elapsed
             > CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
@@ -22449,14 +22859,14 @@ fn windows_fixture_identity_capture_rejects_late_completion() -> Result<(), Box<
         None,
         Some(CODEX_OWNER_LATE_COMPLETION_TEST_DELAY),
     );
-    let child_alive = windows_process_is_alive(&identity)?;
-    let cleanup_result = if child_alive {
-        stop_windows_fixture_process(&identity)
-    } else {
-        Ok(())
-    };
-    process.wait()?;
-    cleanup_result?;
+    let kill_result = process.kill();
+    let wait_result = process.wait();
+    if let Err(error) = kill_result
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        return Err(error.into());
+    }
+    wait_result?;
     let Err(error) = result else {
         return Err(io::Error::other("late identity capture completion was accepted").into());
     };
@@ -22494,11 +22904,8 @@ fn windows_fixture_stop_helper_is_bounded_and_child_safe() -> Result<(), Box<dyn
         + CODEX_OWNER_CHILD_STOP_BUDGET
         + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
         + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-    let result = stop_windows_fixture_process_until(
-        &identity,
-        deadline,
-        Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
-        None,
+    let result = stop_windows_fixture_process_until_with_fallback_test_delay(
+        &identity, deadline, None, None, None, true, false,
     );
     let elapsed = started.elapsed();
     let child_alive_before_cleanup = windows_process_is_alive(&identity)?;
@@ -22568,6 +22975,7 @@ fn windows_fixture_stop_helper_total_cleanup_deadline_is_bounded() -> Result<(),
         Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
         None,
         Some(CODEX_OWNER_STOP_HELPER_TEST_DELAY),
+        false,
         false,
     );
     let elapsed = started.elapsed();
@@ -22645,7 +23053,7 @@ fn windows_fixture_stop_helper_primary_spawn_failure_cleans_exact_child()
             + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
             + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
         let result = stop_windows_fixture_process_until_with_fallback_test_delay(
-            &identity, deadline, None, None, None, true,
+            &identity, deadline, None, None, None, true, true,
         );
         let elapsed = started.elapsed();
         let exact_child_alive_before_cleanup = windows_process_is_alive(&identity)?;
@@ -22657,6 +23065,7 @@ fn windows_fixture_stop_helper_primary_spawn_failure_cleans_exact_child()
             None,
             None,
             None,
+            true,
             true,
         );
         let sentinel_alive_after_mismatch = windows_process_is_alive(&sentinel_identity)?;
@@ -23038,6 +23447,7 @@ fn windows_codex_owner_native_cleanup_with_injected_failure(
             None,
             None,
             None,
+            true,
             true,
         );
         let mismatch_elapsed = mismatch_started.elapsed();

@@ -128,6 +128,7 @@ REQUIRED_DESIGN_HEADINGS = {
 ISSUE_REFERENCE_RE = re.compile(
     r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)"
 )
+MAX_PR_STATE_REFRESH_PULL_REQUESTS = 1_000
 COMMIT_ISSUE_REFERENCE_RE = re.compile(r"\(#([1-9][0-9]*)\)")
 COMMIT_ISSUE_MARKER_RE = re.compile(r"\(#([^)]*)\)")
 ISSUE_STATE_QUERY = """
@@ -769,6 +770,133 @@ def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
             f"found {len(candidates)} candidates"
         )
     return candidates[0]
+
+
+def pr_state_refreshes(
+    repo: str,
+    issue_number: int,
+    pull_requests: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if len(pull_requests) >= MAX_PR_STATE_REFRESH_PULL_REQUESTS:
+        raise SystemExit("open pull-request inventory reached the refresh bound")
+    refreshes = []
+    for pull_request in pull_requests:
+        owners = referenced_issue_numbers(
+            repo, pull_request.get("title"), pull_request.get("body")
+        )
+        if issue_number not in owners:
+            continue
+        base = pull_request.get("baseRefName")
+        if not isinstance(base, str) or not base:
+            raise SystemExit("GitHub returned an invalid pull-request base branch")
+        if base not in ("main", "dev"):
+            continue
+        number = pull_request.get("number")
+        head = pull_request.get("headRefOid")
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number < 1
+            or not isinstance(head, str)
+            or re.fullmatch(r"[0-9a-f]{40}", head) is None
+        ):
+            raise SystemExit("GitHub returned an invalid pull-request refresh identity")
+        refreshes.append(
+            {
+                "number": number,
+                "head": head,
+            }
+        )
+    return refreshes
+
+
+def matching_pr_state_run(
+    pull_request: int, head: str, workflow_runs: object
+) -> dict[str, object]:
+    if not isinstance(workflow_runs, list):
+        raise SystemExit("PR-state workflow runs did not return a list")
+    for workflow_run in workflow_runs:
+        if not isinstance(workflow_run, dict):
+            raise SystemExit("PR-state workflow run was not an object")
+        pull_requests = workflow_run.get("pull_requests")
+        if (
+            workflow_run.get("event") != "pull_request"
+            or workflow_run.get("head_sha") != head
+            or not isinstance(pull_requests, list)
+            or not any(
+                isinstance(item, dict) and item.get("number") == pull_request
+                for item in pull_requests
+            )
+        ):
+            continue
+        identifier = workflow_run.get("id")
+        status = workflow_run.get("status")
+        if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier < 1:
+            raise SystemExit("PR-state workflow run had an invalid identity")
+        if not isinstance(status, str):
+            raise SystemExit("PR-state workflow run had an invalid status")
+        return {"id": identifier, "status": status}
+    raise SystemExit(f"no PR-state workflow run found for pull request #{pull_request}")
+
+
+def refresh_pr_state_for_issue(repo: str, issue_number: int) -> None:
+    payload = gh_json(
+        [
+            "pr",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(MAX_PR_STATE_REFRESH_PULL_REQUESTS),
+            "--json",
+            "number,title,body,headRefOid,baseRefName",
+        ]
+    )
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        raise SystemExit("GitHub open pull requests did not return an object list")
+    refreshes = pr_state_refreshes(repo, issue_number, payload)
+    for refresh in refreshes:
+        for attempt in range(30):
+            runs_payload = gh_api_json(
+                [
+                    "--method",
+                    "GET",
+                    f"repos/{repo}/actions/workflows/pr-state.yml/runs",
+                    "-f",
+                    "event=pull_request",
+                    "-f",
+                    f"head_sha={refresh['head']}",
+                    "-f",
+                    "per_page=100",
+                ]
+            )
+            if not isinstance(runs_payload, dict):
+                raise SystemExit("PR-state workflow-run query did not return an object")
+            workflow_run = matching_pr_state_run(
+                int(refresh["number"]),
+                str(refresh["head"]),
+                runs_payload.get("workflow_runs"),
+            )
+            if workflow_run["status"] == "completed":
+                break
+            if attempt == 29:
+                raise SystemExit(
+                    f"latest PR-state workflow run for pull request #{refresh['number']} "
+                    "did not complete within the refresh bound"
+                )
+            time.sleep(2)
+        run(
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                f"repos/{repo}/actions/runs/{workflow_run['id']}/rerun",
+            ]
+        )
+    print(f"re-ran pr-state for {len(refreshes)} pull request(s)")
 
 
 def candidate_owner_issue_from_subjects(subjects: str) -> int:
@@ -2460,6 +2588,58 @@ Mitigations:
     assert pull_request_owner_issue(
         "owner/repo", {"title": "Work for OWNER/rePO#517", "body": ""}
     ) == 517
+    refresh_pr = {
+        "number": 600,
+        "title": "Implement owner metadata",
+        "body": "Refs #517",
+        "headRefOid": "a" * 40,
+        "baseRefName": "main",
+    }
+    valid_refresh = pr_state_refreshes(
+        "owner/repo",
+        517,
+        [
+            refresh_pr,
+            {**refresh_pr, "number": 601, "body": "Refs #518"},
+            {**refresh_pr, "number": 602, "body": "Refs #517 and #518"},
+            {**refresh_pr, "number": 603, "baseRefName": "release", "body": "Refs #517"},
+            {**refresh_pr, "number": "invalid", "baseRefName": "release", "body": "Refs #517"},
+        ],
+    )
+    assert valid_refresh == [
+        {"number": 600, "head": "a" * 40},
+        {"number": 602, "head": "a" * 40},
+    ]
+    for invalid_base in (None, 3, ""):
+        try:
+            pr_state_refreshes(
+                "owner/repo",
+                517,
+                [{**refresh_pr, "baseRefName": invalid_base}],
+            )
+        except SystemExit as error:
+            assert "invalid pull-request base branch" in str(error)
+        else:
+            raise AssertionError("an invalid pull-request base branch was skipped")
+    assert matching_pr_state_run(
+        600,
+        "a" * 40,
+        [
+            {
+                "id": 77,
+                "status": "completed",
+                "event": "pull_request",
+                "head_sha": "a" * 40,
+                "pull_requests": [{"number": 600}],
+            }
+        ],
+    ) == {"id": 77, "status": "completed"}
+    try:
+        matching_pr_state_run(601, "a" * 40, [])
+    except SystemExit as error:
+        assert "no PR-state workflow run found" in str(error)
+    else:
+        raise AssertionError("a missing PR-state workflow run was accepted")
     assert candidate_owner_issue_from_subjects(
         "Implement candidate (#517)\nFollow-up candidate (#517)"
     ) == 517
@@ -3451,6 +3631,9 @@ Timeout --> Recovery
     else:
         raise AssertionError("overlapping owner ranges were accepted")
     assert first_task_difference(expected, expected[:-1]) == "task count differs: expected 2, found 1"
+    assert "task 1 differs" in first_task_difference(expected, [(False, "Changed text"), expected[1]])
+    assert "task 1 differs" in first_task_difference(expected, list(reversed(expected)))
+    assert "task 1 differs" in first_task_difference(expected, [(False, expected[0][1]), expected[1]])
     with tempfile.TemporaryDirectory() as temporary:
         branch_root = Path(temporary)
         branch_tasks = "- [x] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n"
@@ -4523,11 +4706,38 @@ def main() -> None:
     parser.add_argument("--pull-request", type=int)
     parser.add_argument("--candidate-issue", type=int)
     parser.add_argument("--candidate-local-oid")
+    parser.add_argument("--refresh-pr-state-for-issue", type=int)
     parser.add_argument("--base", default="")
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--owner-from-commits", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+
+    if args.refresh_pr_state_for_issue is not None:
+        if (
+            not args.repo
+            or args.root != "."
+            or args.issue_map != "openspec/issue-map.json"
+            or args.skip_openspec
+            or args.self_test
+            or args.owner_from_commits
+            or any(
+                value is not None
+                for value in (
+                    args.planned_issue,
+                    args.pull_request,
+                    args.candidate_issue,
+                    args.candidate_local_oid,
+                )
+            )
+            or args.base
+            or args.milestone
+        ):
+            raise SystemExit(
+                "--refresh-pr-state-for-issue accepts only --repo and an issue number"
+            )
+        refresh_pr_state_for_issue(args.repo, args.refresh_pr_state_for_issue)
+        return
 
     if args.owner_from_commits:
         if (

@@ -8,6 +8,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: projectatlas-publish-${{ github.run_id }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   actions: write

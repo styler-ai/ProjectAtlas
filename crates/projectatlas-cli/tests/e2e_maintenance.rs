@@ -395,34 +395,42 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         ))
         .into());
     }
-    for (workflow_name, workflow) in [("ci", &ci_workflow), ("release", &release_workflow)] {
-        let verify = workflow_job_block(workflow, "verify")?;
-        if verify.contains("projectatlas.toon") || verify.contains("map --force") {
+    for (workflow_name, workflow, job, first_product_build) in [
+        ("ci", &ci_workflow, "rust", "cargo check "),
+        (
+            "release",
+            &release_workflow,
+            "verify",
+            "cargo check --workspace",
+        ),
+    ] {
+        let proof_job = workflow_job_block(workflow, job)?;
+        if proof_job.contains("projectatlas.toon") || proof_job.contains("map --force") {
             return Err(io::Error::other(format!(
-                "{workflow_name} verify job must not require the legacy committed TOON map artifact"
+                "{workflow_name} {job} job must not require the legacy committed TOON map artifact"
             ))
             .into());
         }
-        if verify.contains("--strict-folders") {
+        if proof_job.contains("--strict-folders") {
             return Err(io::Error::other(format!(
-                "{workflow_name} verify job must not require legacy folder .purpose linting"
+                "{workflow_name} {job} job must not require legacy folder .purpose linting"
             ))
             .into());
         }
-        if !verify.contains("projectatlas-lints") || !verify.contains("strict-strings") {
+        if !proof_job.contains("projectatlas-lints") || !proof_job.contains("strict-strings") {
             return Err(io::Error::other(format!(
-                "{workflow_name} verify job must run repository source policy lints"
+                "{workflow_name} {job} job must run repository source policy lints"
             ))
             .into());
         }
-        let source_policy_position = verify.find("strict-strings").ok_or_else(|| {
+        let source_policy_position = proof_job.find("strict-strings").ok_or_else(|| {
             io::Error::other(format!(
-                "{workflow_name} verify job has no repository source policy position"
+                "{workflow_name} {job} job has no repository source policy position"
             ))
         })?;
-        let workspace_build_position = verify.find("cargo check --workspace").ok_or_else(|| {
+        let workspace_build_position = proof_job.find(first_product_build).ok_or_else(|| {
             io::Error::other(format!(
-                "{workflow_name} verify job has no workspace check position"
+                "{workflow_name} {job} job has no expected product build {first_product_build:?}"
             ))
         })?;
         if source_policy_position > workspace_build_position {
@@ -439,10 +447,10 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
                 .into());
             }
         }
-        for run in workflow_job_runs(workflow, "verify")? {
+        for run in workflow_job_runs(workflow, job)? {
             if command_runs_projectatlas_maintenance(&run) {
                 return Err(io::Error::other(format!(
-                    "{workflow_name} verify job must keep ProjectAtlas init, scan, purpose, parity, and lint maintenance local"
+                    "{workflow_name} {job} job must keep ProjectAtlas init, scan, purpose, parity, and lint maintenance local"
                 ))
                 .into());
             }
@@ -495,10 +503,15 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
         )
         .into());
     }
-    let pre_push_build = pre_push.find("cargo check --workspace");
-    if pre_push.find("strict-strings") > pre_push_build {
+    let pre_push_source_policy = pre_push
+        .find("strict-strings")
+        .ok_or_else(|| io::Error::other("pre-push has no repository source policy position"))?;
+    let pre_push_build = pre_push
+        .find("cargo check ")
+        .ok_or_else(|| io::Error::other("pre-push has no selected Rust check position"))?;
+    if pre_push_source_policy > pre_push_build {
         return Err(io::Error::other(
-            "pre-push must reject private source before compiling the workspace",
+            "pre-push must reject private source before selected Rust compilation",
         )
         .into());
     }
@@ -1051,7 +1064,14 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     }
     let metadata_output = StdCommand::new("cargo")
         .current_dir(&workspace_root)
-        .args(["metadata", "--locked", "--offline", "--format-version", "1"])
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
         .output()?;
     if !metadata_output.status.success() {
         return Err(io::Error::other(format!(

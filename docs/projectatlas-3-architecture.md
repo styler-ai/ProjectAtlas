@@ -3277,6 +3277,77 @@ normalization with keyed lookups, and use persisted import/call relations for
 deterministic import-alias `called_by` summaries while preserving ambiguity
 rejection.
 
+### Affected CI proof routing and release backstop
+
+Normal pull requests route only the proof contracts that can detect defects in
+the exact change. One closed planner combines the Cargo reverse-dependency graph
+with declared CLI, MCP, integration, and platform ownership; ambiguity selects
+the complete normal-PR proof. Live review-thread state is owned by GitHub's
+native required-conversation-resolution rule. Pull-request metadata reruns a
+lightweight workflow, while an isolated `pr-state` issue-event job reruns the
+existing workflow on the exact current PR head after an owning issue
+close/reopen/milestone event, without running source proof. Selected jobs run
+concurrently, and one fail-closed aggregate is the stable source-proof context.
+Branch-protection readiness is the explicit AND of current `pr-state`, current
+`verify`, and resolved review conversations. Final merge acceptance rereads the
+live owning issue and milestone, so an issue-refresh API failure stays visibly
+red and requires manual recovery rather than trusting an older green check.
+Automatic cancellation
+applies only when a newer pull-request source run supersedes an older source
+run for the same pull-request number; all other event, governance, and delivery
+owners use isolated namespaces with cancellation disabled. The complete
+installed-product matrix remains an integrated release-candidate boundary on
+all four supported runner targets. Ordinary OS-sensitive proof uses Linux,
+Windows, and one macOS runner; both macOS architectures run only when parser,
+toolchain, or package behavior is architecture-sensitive.
+
+```mermaid
+flowchart TB
+    subgraph PR[Pull request]
+        direction LR
+        Change[Source change] --> Plan[Closed proof-contract planner]
+        PRMetadata[PR issue reference or milestone change] --> State[Required PR-state gate]
+        IssueMetadata[Owning issue close, reopen,<br/>or milestone change] --> Refresh[PR-state issue event reruns<br/>exact current-head workflow]
+        Refresh --> State
+        Review[Review conversation state] --> Conversation[Native required<br/>conversation resolution]
+        Plan --> Known{Narrow plan proven?}
+        Known -->|No| Full[Complete normal-PR proof]
+        Known -->|Yes| Selected[Selected quality, test-domain,<br/>and platform jobs]
+        Full --> Verify[Required verify aggregate]
+        Selected --> Verify
+        State --> Gate{{AND: current PR-state,<br/>current verify, and<br/>resolved conversations}}
+        Verify --> Gate
+        Conversation --> Gate
+        Gate -->|All satisfied| ProtectedReady[Branch protection ready]
+        Gate -->|Otherwise| Blocked[PR blocked]
+        ProtectedReady --> FinalRead[Final live issue and<br/>milestone read]
+        FinalRead -->|Valid| Ready[PR ready]
+        FinalRead -->|Invalid or refresh failed| Blocked
+    end
+
+    Ready --> Main[Protected-branch affected proof]
+    Main --> Candidate[Integrated release candidate]
+
+    subgraph Cancellation[Cancellation isolation]
+        direction LR
+        Newer[Newer pull-request source run] -->|Same PR number; cancels only| Older[Older pull-request source run]
+        Others[Push, merge group, dispatch, schedule,<br/>PR-state, IssueOps, release, publish, deploy] --> Isolated[Separate namespaces;<br/>automatic cancellation disabled]
+    end
+
+    subgraph Release[Release acceptance]
+        direction LR
+        Candidate --> Matrix[Complete installed-product proof:<br/>Linux, Windows, macOS Intel, macOS ARM]
+        Matrix -->|Defect| Fix[Owning issue fix]
+        Fix --> Candidate
+        Matrix -->|Green| Accept[Candidate accepted]
+    end
+```
+
+The planner reports why each proof contract was selected or omitted, but the
+report is diagnostic rather than an evidence ledger. Internal event identity
+prevents stale-result reuse; behavior tests, measured latency and runner cost,
+review, and green required contexts are the public acceptance boundary.
+
 ## Quality Gates
 
 Rust gates:

@@ -11,11 +11,15 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
-  pull_request_review_comment:
-    types: [created, edited, deleted]
+    types: [opened, reopened, synchronize, edited]
+  merge_group:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+concurrency:
+  group: projectatlas-ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) }}
 
 permissions:
   contents: read
@@ -23,62 +27,203 @@ permissions:
   pull-requests: read
 
 jobs:
-  verify:
-    name: verify
+  plan:
+    name: plan
+    # A base retarget changes the source diff without changing the head; other edits are metadata-only.
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
+    outputs:
+      base: ${{ steps.inputs.outputs.base }}
+      head: ${{ steps.inputs.outputs.head }}
+      force_full: ${{ steps.inputs.outputs.force_full }}
+      plan: ${{ steps.proof.outputs.plan }}
+      repository: ${{ steps.proof.outputs.repository }}
+      rust: ${{ steps.proof.outputs.rust }}
+      platform: ${{ steps.proof.outputs.platform }}
+      platform_matrix: ${{ steps.proof.outputs.platform_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Rust toolchain preflight
-        run: |
-          python3 .github/scripts/verify-rust-toolchain.py --self-test
-          python3 .github/scripts/verify-rust-toolchain.py --install
-
-      - name: Repository source policy lints
-        timeout-minutes: 2
-        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2
         with:
-          tool: cargo-deny@0.20.2
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 2
 
-      - name: Issue reference check
-        if: github.event_name == 'pull_request'
+      - name: Bind exact change
+        id: inputs
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: |
-          PR_TITLE="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.title // ""')"
-          PR_BODY="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""')"
-          PR_MILESTONE="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.milestone.number // ""')"
-          text="$PR_TITLE $PR_BODY"
-          if ! [[ "$text" =~ (#[0-9]+|GH-[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+) ]]; then
-            echo "Pull request title or body must reference a GitHub issue." >&2
-            exit 1
+          set -euo pipefail
+          base="$EVENT_BASE"
+          head="$EVENT_HEAD"
+          force_full=false
+          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            base="$(git rev-parse HEAD^)"
+          elif [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            base="$head"
+            force_full=true
           fi
-          if [[ -z "$PR_MILESTONE" ]]; then
-            echo "Pull request must be assigned to a milestone." >&2
-            exit 1
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$base"
           fi
+          printf 'base=%s\nhead=%s\nforce_full=%s\n' "$base" "$head" "$force_full" >> "$GITHUB_OUTPUT"
+
+      - name: Plan affected proof
+        id: proof
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_FORCE_FULL: ${{ steps.inputs.outputs.force_full }}
+          BASE: ${{ steps.inputs.outputs.base }}
+          HEAD_SHA: ${{ steps.inputs.outputs.head }}
+        run: |
+          set -euo pipefail
+          export GIT_NO_REPLACE_OBJECTS=1
+          force_full=()
+          if [[ "$INPUT_FORCE_FULL" == "true" || "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" || "$EVENT_NAME" == "merge_group" ]]; then
+            force_full+=(--force-full)
+          fi
+          trusted_planner="$RUNNER_TEMP/affected-ci-proof.py"
+          if git cat-file -e "${BASE}:.github/scripts/affected-ci-proof.py" 2>/dev/null; then
+            git show "${BASE}:.github/scripts/affected-ci-proof.py" > "$trusted_planner"
+            python3 "$trusted_planner" plan \
+              --base "$BASE" \
+              --head "$HEAD_SHA" \
+              --event "$EVENT_NAME" \
+              --github-output "$GITHUB_OUTPUT" \
+              --summary "$GITHUB_STEP_SUMMARY" \
+              "${force_full[@]}"
+          else
+            python3 - "$BASE" "$HEAD_SHA" "$EVENT_NAME" "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          base, head, event, output_path, summary_path = sys.argv[1:]
+          repository = [
+              "benchmark-policy",
+              "cargo-dependency",
+              "dependency-audit",
+              "issueops",
+              "mermaid",
+              "optional-parser-inputs",
+              "source-policy",
+          ]
+          packages = [
+              "projectatlas-cli",
+              "projectatlas-core",
+              "projectatlas-db",
+              "projectatlas-fs",
+              "projectatlas-lints",
+              "projectatlas-service",
+              "projectatlas-symbols",
+          ]
+          targets = [
+              "e2e_delivery",
+              "e2e_lifecycle",
+              "e2e_maintenance",
+              "e2e_navigation",
+              "e2e_worktrees",
+              "installer_trust_boundaries",
+              "language_runtime_compatibility",
+              "lint_diagnostics",
+              "optional_parser_worker_failure",
+              "optional_parser_worker_platform",
+              "parser_launch_authority",
+              "parser_supervisor_adversarial",
+          ]
+          platform_matrix = {
+              "include": [
+                  {
+                      "label": "linux",
+                      "os": "ubuntu-latest",
+                      "contracts": ["btrfs", "compile", "mcp", "navigation", "plugin", "process", "tui", "worktree"],
+                  },
+                  {
+                      "label": "windows",
+                      "os": "windows-latest",
+                      "contracts": ["compile", "mcp", "plugin", "process", "windows", "worktree"],
+                  },
+                  {
+                      "label": "macos-x64",
+                      "os": "macos-15-intel",
+                      "contracts": ["compile", "mac-quality", "parser"],
+                  },
+                  {
+                      "label": "macos-arm64",
+                      "os": "macos-14",
+                      "contracts": ["compile", "mac-quality", "mcp", "parser", "plugin", "process", "tui", "worktree"],
+                  },
+              ]
+          }
+          selected = [*repository]
+          selected.extend(f"rust:{package}" for package in packages)
+          selected.extend(f"test:{target}" for target in targets)
+          selected.extend(
+              f"platform:{row['label']}:{contract}"
+              for row in platform_matrix["include"]
+              for contract in row["contracts"]
+          )
+          plan = {
+              "schema": 1,
+              "binding": {"base": base, "head": head, "event": event},
+              "mode": "full",
+              "reasons": ["trusted planner is absent on the accepted base; complete bootstrap proof required"],
+              "changes": [],
+              "repository_contracts": repository,
+              "rust_packages": packages,
+              "test_targets": targets,
+              "test_only": False,
+              "platform_matrix": platform_matrix,
+              "jobs": {"repository": True, "rust": True, "platform": True},
+              "selected": sorted(selected),
+              "omitted": [],
+          }
+          encoded = json.dumps(plan, separators=(",", ":"), sort_keys=True)
+          with Path(output_path).open("a", encoding="utf-8", newline="\n") as output:
+              output.write(f"plan={encoded}\nrepository=true\nrust=true\nplatform=true\n")
+              output.write(f"platform_matrix={json.dumps(platform_matrix, separators=(',', ':'))}\n")
+          with Path(summary_path).open("a", encoding="utf-8", newline="\n") as summary:
+              summary.write("## Affected CI proof\n\nComplete bootstrap proof: the accepted base has no trusted planner.\n")
+          PY
+          fi
+
+      - name: Self-test submitted planner
+        run: python3 .github/scripts/affected-ci-proof.py --self-test
+
+  repository:
+    name: repository
+    needs: plan
+    if: needs.plan.outputs.repository == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.head }}
 
       - name: Install Mermaid parser
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'mermaid')
         run: |
-          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+
+      - name: Audit Mermaid dependencies
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'dependency-audit')
+        run: |
           npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
 
       - name: Issue checklist self-test
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'issueops')
         run: |
           python3 .github/scripts/issue-checklists.py --self-test
-          python3 .github/scripts/test-optional-parser-proof-inputs.py
 
       - name: Issue checklist check
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'issueops')
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BASE_SHA: ${{ needs.plan.outputs.base }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
@@ -96,65 +241,143 @@ jobs:
           fi
 
       - name: Manual-only full benchmark policy
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'benchmark-policy')
         run: python3 .github/scripts/verify-manual-benchmark-policy.py
 
       - name: Published benchmark measurement locks
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'benchmark-policy')
         run: python3 .github/scripts/verify-published-benchmark-locks.py
 
-      - name: Codex PR review thread gate
-        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+      - name: Optional-parser proof inputs
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'optional-parser-inputs')
+        run: python3 .github/scripts/test-optional-parser-proof-inputs.py
+
+  rust:
+    name: rust
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.head }}
+
+      - name: Rust toolchain preflight
         run: |
-          python3 .github/scripts/codex-pr-review-gate.py --self-test
-          python3 .github/scripts/codex-pr-review-gate.py \
-            --repo "$GITHUB_REPOSITORY" \
-            --pr "$PR_NUMBER"
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          python3 .github/scripts/verify-rust-toolchain.py --install
 
-      - name: Format
-        run: cargo fmt --all --check
+      - name: Repository source policy lints
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'source-policy')
+        timeout-minutes: 2
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
-      - name: Check
-        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Install cargo-deny
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency')
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2
+        with:
+          tool: cargo-deny@0.20.2
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Selected Rust proof
+        timeout-minutes: 15
+        env:
+          PLAN: ${{ needs.plan.outputs.plan }}
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(python3 -c 'import json,os,sys; sys.stdout.write("\n".join(json.loads(os.environ["PLAN"])["rust_packages"]))')
+          mapfile -t targets < <(python3 -c 'import json,os,sys; sys.stdout.write("\n".join(json.loads(os.environ["PLAN"])["test_targets"]))')
+          test_only="$(python3 -c 'import json,os; print(str(json.loads(os.environ["PLAN"])["test_only"]).lower())')"
+          mode="$(python3 -c 'import json,os; print(json.loads(os.environ["PLAN"])["mode"])')"
+          package_args=()
+          library_package_args=()
+          lints_selected=false
+          for package in "${packages[@]}"; do
+            case "$package" in
+              projectatlas-lints)
+                package_args+=(-p "$package")
+                lints_selected=true
+                ;;
+              projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-service|projectatlas-symbols|projectatlas-cli)
+                package_args+=(-p "$package")
+                library_package_args+=(-p "$package")
+                ;;
+              *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
+            esac
+          done
+          filtered_custom_harness=false
+          for target in "${targets[@]}"; do
+            case "$target" in
+              parser_supervisor_adversarial) filtered_custom_harness=true ;;
+              e2e_delivery|e2e_lifecycle|e2e_maintenance|e2e_navigation|e2e_worktrees|installer_trust_boundaries|language_runtime_compatibility|lint_diagnostics|optional_parser_worker_failure|optional_parser_worker_platform|parser_launch_authority) ;;
+              *) echo "planner emitted unknown Rust test target: $target" >&2; exit 1 ;;
+            esac
+          done
+          if (( ${#packages[@]} == 0 && ${#targets[@]} == 0 )); then
+            echo "No Rust compile or test contract selected."
+            exit 0
+          fi
+          cargo fmt --all --check
+          if [[ "$test_only" == "true" ]]; then
+            for target in "${targets[@]}"; do
+              cargo check --locked -p projectatlas-cli --all-features --test "$target"
+              cargo clippy --locked -p projectatlas-cli --all-features --test "$target" -- -D warnings
+              cargo test --locked -p projectatlas-cli --all-features --test "$target"
+            done
+          else
+            if [[ "$mode" == "full" ]]; then
+              cargo check --workspace --all-targets --all-features --locked
+              cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+              cargo test --workspace --all-features --locked
+            else
+              cargo check "${package_args[@]}" --bins --examples --tests --all-features --locked
+              cargo clippy "${package_args[@]}" --bins --examples --tests --all-features --locked -- -D warnings
+              if (( ${#library_package_args[@]} > 0 )); then
+                cargo test "${library_package_args[@]}" --lib --bins --all-features --locked
+              fi
+              if [[ "$lints_selected" == "true" ]]; then
+                cargo test --locked -p projectatlas-lints --bins --all-features
+              fi
+              for target in "${targets[@]}"; do
+                cargo check --locked -p projectatlas-cli --all-features --test "$target"
+                cargo clippy --locked -p projectatlas-cli --all-features --test "$target" -- -D warnings
+                cargo test --locked -p projectatlas-cli --all-features --test "$target"
+              done
+            fi
+            if [[ "$mode" == "full" ]]; then
+              cargo test --workspace --doc --all-features --locked
+              RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+            else
+              if (( ${#library_package_args[@]} > 0 )); then
+                cargo test --doc "${library_package_args[@]}" --all-features --locked
+                RUSTDOCFLAGS="-D warnings" cargo doc "${library_package_args[@]}" --no-deps --all-features --locked
+              fi
+              if [[ "$lints_selected" == "true" ]]; then
+                RUSTDOCFLAGS="-D warnings" cargo doc --locked -p projectatlas-lints --no-deps --bins --all-features
+              fi
+            fi
+          fi
+          if [[ "$filtered_custom_harness" == "true" ]]; then
+            cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
+          fi
 
       - name: Dependency policy
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency')
         run: cargo deny --locked --all-features check -D warnings
-
-      - name: Tests
-        run: cargo test --workspace --all-features --locked
-
-      - name: Filtered custom harness compatibility
-        run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
-
-      - name: Doc tests
-        run: cargo test --doc --workspace --all-features --locked
-
-      - name: Rustdoc
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 
   e2e-smoke:
     name: e2e-smoke ${{ matrix.label }}
-    needs: verify
+    needs: plan
+    if: needs.plan.outputs.platform == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - label: linux
-            os: ubuntu-latest
-          - label: windows
-            os: windows-latest
-          - label: macos-x64
-            os: macos-15-intel
-          - label: macos-arm64
-            os: macos-14
+      matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.head }}
 
       - name: Rust toolchain preflight
         shell: bash
@@ -162,29 +385,85 @@ jobs:
           python3 .github/scripts/verify-rust-toolchain.py --self-test
           python3 .github/scripts/verify-rust-toolchain.py --install
 
+      - name: Affected package target compile
+        # Full Linux compiles in rust; full macOS compiles in the all-targets warning gate.
+        if: contains(matrix.contracts, 'compile') && (fromJSON(needs.plan.outputs.plan).mode == 'narrow' || runner.os == 'Windows')
+        timeout-minutes: 10
+        shell: bash
+        env:
+          PLAN: ${{ needs.plan.outputs.plan }}
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["rust_packages"]).encode())')
+          mapfile -t targets < <(python3 -c 'import json,os,sys; sys.stdout.buffer.write("\n".join(json.loads(os.environ["PLAN"])["test_targets"]).encode())')
+          mode="$(python3 -c 'import json,os; print(json.loads(os.environ["PLAN"])["mode"])')"
+          package_args=()
+          library_package_args=()
+          lints_selected=false
+          for package in "${packages[@]}"; do
+            case "$package" in
+              projectatlas-lints)
+                package_args+=(-p "$package")
+                lints_selected=true
+                ;;
+              projectatlas-core|projectatlas-db|projectatlas-fs|projectatlas-service|projectatlas-symbols|projectatlas-cli)
+                package_args+=(-p "$package")
+                library_package_args+=(-p "$package")
+                ;;
+              *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
+            esac
+          done
+          target_args=()
+          for target in "${targets[@]}"; do
+            case "$target" in
+              e2e_delivery|e2e_lifecycle|e2e_maintenance|e2e_navigation|e2e_worktrees|installer_trust_boundaries|language_runtime_compatibility|lint_diagnostics|optional_parser_worker_failure|optional_parser_worker_platform|parser_launch_authority|parser_supervisor_adversarial) target_args+=(--test "$target") ;;
+              *) echo "planner emitted unknown Rust test target: $target" >&2; exit 1 ;;
+            esac
+          done
+          if [[ "$mode" == "full" ]]; then
+            cargo check --workspace --all-targets --all-features --locked
+            exit 0
+          fi
+          if (( ${#package_args[@]} == 0 )); then
+            echo "target compile contract has no affected package" >&2
+            exit 1
+          fi
+          if (( ${#library_package_args[@]} > 0 )); then
+            cargo check "${library_package_args[@]}" --lib --bins --examples --all-features --locked
+            cargo test "${library_package_args[@]}" --lib --bins --no-run --all-features --locked
+          fi
+          if [[ "$lints_selected" == "true" ]]; then
+            cargo check --locked -p projectatlas-lints --bins --all-features
+            cargo test --locked -p projectatlas-lints --bins --no-run --all-features
+          fi
+          if (( ${#target_args[@]} > 0 )); then
+            cargo check -p projectatlas-cli "${target_args[@]}" --all-features --locked
+          fi
+
       - name: macOS all-features warning gate
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && contains(matrix.contracts, 'mac-quality')
         timeout-minutes: 15
         shell: bash
-        run: |
-          RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --all-features --locked
-          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: macOS optional parser worker platform regression
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && contains(matrix.contracts, 'parser')
         timeout-minutes: 15
         shell: bash
         run: cargo test --locked -p projectatlas-cli --all-features --test optional_parser_worker_platform
 
       - name: Holistic classified worktree agent E2E
+        if: contains(matrix.contracts, 'worktree')
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
 
       - name: Causal E2E process observer deadline regression
+        if: contains(matrix.contracts, 'process')
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e_delivery e2e_process_observers_ -- --nocapture
 
       - name: Graph, symbol, purpose, and viewport regressions
+        if: contains(matrix.contracts, 'navigation')
         timeout-minutes: 10
         shell: bash
         run: |
@@ -200,7 +479,7 @@ jobs:
           cargo test --locked -p projectatlas-cli token_tui::tests -- --nocapture
 
       - name: Capture hosted PTY token dashboards
-        if: matrix.label != 'windows'
+        if: matrix.label != 'windows' && contains(matrix.contracts, 'tui')
         timeout-minutes: 5
         shell: bash
         run: |
@@ -247,7 +526,7 @@ jobs:
             > "$evidence/manifest.txt"
 
       - name: Upload hosted PTY token dashboards
-        if: matrix.label != 'windows'
+        if: matrix.label != 'windows' && contains(matrix.contracts, 'tui')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: token-tui-pty-${{ matrix.label }}
@@ -258,7 +537,7 @@ jobs:
           retention-days: 7
 
       - name: Native Btrfs database placement contract
-        if: matrix.label == 'linux'
+        if: matrix.label == 'linux' && contains(matrix.contracts, 'btrfs')
         timeout-minutes: 10
         shell: bash
         run: |
@@ -286,6 +565,7 @@ jobs:
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle linux_btrfs_subvolume_database_supports_cli_and_persistent_mcp_reopen -- --exact --include-ignored --nocapture
 
       - name: Worktree lifecycle race regressions
+        if: contains(matrix.contracts, 'worktree')
         timeout-minutes: 10
         shell: bash
         run: |
@@ -296,71 +576,82 @@ jobs:
           cargo test --locked -p projectatlas-cli registered_reset_and_binding_linearize_without_recreating_a_reset_winner -- --nocapture
 
       - name: Plugin installer E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e_delivery
 
       - name: Installer RC pin E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli installer_workflow_pin_reports_preserve_exact_rc_identity --test e2e_delivery
 
       - name: Plugin update E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp --test e2e_delivery
 
       - name: Plugin update non-official marketplace E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_skips_non_official_codex_marketplace --test e2e_delivery
 
       - name: Plugin update already-current marketplace E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_leaves_current_codex_marketplace_untouched --test e2e_delivery
 
       - name: Plugin update stale source manifest E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_repairs_current_codex_plugin_with_stale_source_manifest --test e2e_delivery
 
       - name: Plugin update restore-on-failure E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails --test e2e_delivery
 
       - name: Plugin update total-offline preservation E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_preserves_prior_integration_when_all_replacement_adds_fail --test e2e_delivery
 
       - name: Plugin update strict inventory E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_refuses_unavailable_or_ambiguous_inventory --test e2e_delivery
 
       - name: POSIX plugin inventory no-jq E2E
-        if: matrix.label != 'windows'
+        if: matrix.label != 'windows' && contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli posix_plugin_inventory_without_jq_rejects_split_object_fields --test e2e_delivery -- --exact
 
       - name: Plugin update concurrent rollback serialization E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_serializes_restore_before_the_next_installer_reads_state --test e2e_delivery
 
       - name: Windows plugin lock canonicalization failure E2E
-        if: matrix.label == 'windows'
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized --test e2e_delivery -- --exact
 
       - name: Plugin update retained recovery refusal E2E
+        if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_refuses_retained_recovery_state_before_mutation --test e2e_delivery
 
       - name: POSIX plugin restore trust-boundary E2E
-        if: matrix.label != 'windows'
+        if: matrix.label != 'windows' && contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state --test e2e_delivery -- --exact
 
       - name: POSIX plugin lock crash and trust-boundary E2E
-        if: matrix.label != 'windows'
+        if: matrix.label != 'windows' && contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli posix_plugin_lock_rejects_indirection_and_survives_crash --test e2e_delivery -- --exact
 
       - name: Windows plugin snapshot trust-boundary E2E
-        if: matrix.label == 'windows'
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'plugin')
         timeout-minutes: 5
         shell: pwsh
         run: |
@@ -376,19 +667,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Windows recovery config selection E2E
-        if: matrix.label == 'windows'
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_installer_recovery_operation_preserves_config_selection --test e2e_delivery -- --exact
 
       - name: Windows locked runtime update E2E
-        if: matrix.label == 'windows'
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
         timeout-minutes: 5
         env:
           PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}
         run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e_delivery -- --exact
 
       - name: Windows persisted User PATH E2E
-        if: matrix.label == 'windows'
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
         timeout-minutes: 5
         env:
           PROJECTATLAS_TEST_DISPOSABLE_RUNNER: ${{ runner.environment }}
@@ -396,37 +687,112 @@ jobs:
         run: cargo test --locked -p projectatlas-cli windows_installer_fresh_path_probe_respects_machine_precedence --test e2e_delivery -- --exact
 
       - name: Windows stale MCP registry update E2E
-        if: matrix.label == 'windows'
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e_delivery
 
       - name: Windows installer trust boundaries
-        if: matrix.label == 'windows'
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --all-features --test installer_trust_boundaries
 
       - name: Windows obsolete MCP handoff E2E
-        if: matrix.label == 'windows'
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'windows')
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_installer_obsolete_mcp_handoff_ -- --test-threads=1
 
       - name: macOS unsupported parser-pack boundary E2E
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && contains(matrix.contracts, 'parser')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access --test e2e_lifecycle
 
       - name: MCP project binding E2E
+        if: contains(matrix.contracts, 'mcp')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e_lifecycle
 
       - name: Persistent MCP Git config stdin E2E
+        if: contains(matrix.contracts, 'mcp')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli persistent_mcp_stdin_does_not_block_repository_startup_probes --test e2e_lifecycle
 
       - name: Bare-root database preflight E2E
+        if: contains(matrix.contracts, 'mcp')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli implicit_bare_root --test e2e_lifecycle -- --nocapture
 
       - name: Generated MCP database authority E2E
+        if: contains(matrix.contracts, 'mcp')
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e_lifecycle -- --exact --nocapture
+
+  verify:
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-edit' || 'verify' }}
+    if: always() && (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null)
+    needs: [plan, repository, rust, e2e-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.head || github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Aggregate selected proof
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN: ${{ needs.plan.outputs.plan }}
+          BASE: ${{ needs.plan.outputs.base }}
+          HEAD_SHA: ${{ needs.plan.outputs.head }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY_RESULT: ${{ needs.repository.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          PLATFORM_RESULT: ${{ needs.e2e-smoke.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$PLAN_RESULT" != "success" ]]; then
+            echo "proof planning concluded $PLAN_RESULT" >&2
+            exit 1
+          fi
+          export GIT_NO_REPLACE_OBJECTS=1
+          if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BASE"
+          fi
+          trusted_planner="$RUNNER_TEMP/affected-ci-proof.py"
+          if git cat-file -e "${BASE}:.github/scripts/affected-ci-proof.py" 2>/dev/null; then
+            git show "${BASE}:.github/scripts/affected-ci-proof.py" > "$trusted_planner"
+            python3 "$trusted_planner" aggregate \
+              --plan "$PLAN" \
+              --base "$BASE" \
+              --head "$HEAD_SHA" \
+              --event "$EVENT_NAME" \
+              --repository-result "$REPOSITORY_RESULT" \
+              --rust-result "$RUST_RESULT" \
+              --platform-result "$PLATFORM_RESULT"
+          else
+            python3 - <<'PY'
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN"])
+          expected_binding = {
+              "base": os.environ["BASE"],
+              "head": os.environ["HEAD_SHA"],
+              "event": os.environ["EVENT_NAME"],
+          }
+          if plan.get("binding") != expected_binding or plan.get("mode") != "full":
+              raise SystemExit("bootstrap proof plan binding or mode is invalid")
+          if plan.get("jobs") != {"repository": True, "rust": True, "platform": True}:
+              raise SystemExit("bootstrap proof did not select every job")
+          if plan.get("omitted") != []:
+              raise SystemExit("bootstrap proof omitted a contract")
+          for name, result in {
+              "repository": os.environ["REPOSITORY_RESULT"],
+              "rust": os.environ["RUST_RESULT"],
+              "platform": os.environ["PLATFORM_RESULT"],
+          }.items():
+              if result != "success":
+                  raise SystemExit(f"selected {name} job concluded {result}")
+          print("complete bootstrap proof aggregate passed")
+          PY
+          fi

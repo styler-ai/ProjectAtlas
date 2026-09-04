@@ -13,9 +13,9 @@ If you spot a bug or have a suggestion, please open an issue with clear reproduc
 - Release tags must match the Cargo version, for example `v0.3.1`.
 - Use the `02-Release` workflow for release publication; it validates the Rust workspace, builds Linux/macOS/Windows archives, creates the tag, and uploads the artifacts to the GitHub Release.
 - CI checks must pass before merge.
-- PR titles or bodies must reference a GitHub issue (for example `#123`).
+- PR titles or bodies must reference exactly one open GitHub issue (for example `#123`), and the PR milestone must match that issue.
 - Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
 - Apply `type:*`, `priority:*`, and `status:*` labels to every issue.
 - Keep public issues/PRs/release notes free of private or internal-only details.
 - Anonymize benchmark corpora, fixtures, reproduction paths, and public issue examples before committing or referencing them publicly.
-- The pre-push hook runs the Rust verification stack: format, check, clippy, tests, rustdoc, map, and lint.
+- The pre-push hook validates the exact clean candidate and runs only the affected repository, Rust package or test-target, dependency, and ProjectAtlas checks; unknown or shared authority changes select the complete fallback.
