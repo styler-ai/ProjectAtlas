@@ -1089,7 +1089,7 @@ jobs:
           $env:PROJECTATLAS_OPTIONAL_PARSER_ARCHIVE = $archive
           cargo test `
             -p projectatlas-cli `
-            --test e2e `
+            --test e2e_lifecycle `
             --locked `
             optional_parser_pack_real_archive_normal_runtime_lifecycle `
             -- `

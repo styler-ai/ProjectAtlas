@@ -23,7 +23,7 @@ The repair must keep the test fail-closed. A larger wait is acceptable only when
 
 ## Dependencies / Cross-Issue Impact
 
-#518 has no implementation prerequisite and is a direct child and blocker of release owner #492. It must land before #476 is republished and before #487 is accepted because both required Windows gates exercise this fixture owner. The change introduces no product, schema, crate, package, or public compatibility dependency; after it is accepted on `main`, #476 and #487 refresh onto that baseline and rerun their affected proof.
+#547 is the only implementation prerequisite for #518 and is accepted on `main`; #518 remains a direct child and blocker of release owner #492. It must land before #487 is accepted because that delivery-test owner exercises this fixture boundary. The change introduces no product, schema, crate, package, or public compatibility dependency; after it is accepted on `main`, #487 refreshes onto that baseline and reruns its affected proof.
 
 ## Decisions
 
@@ -51,7 +51,7 @@ The delay seam must not relax malformed/mismatched identity rejection or allow u
 
 ### Land before refreshing dependent delivery branches
 
-#518 lands on `main` first. #476 and #487 then refresh onto that exact accepted head; #487 preserves one delivery-suite helper and updates its frozen source/support inventory only as required by the real change. This avoids implementing the same repair in two divergent test layouts.
+#518 lands on `main` first. #487 then refreshes onto that exact accepted head, preserves one delivery-suite helper, and updates its frozen source/support inventory only as required by the real change. This avoids implementing the same repair in two divergent test layouts.
 
 ## Risks / Trade-offs
 
@@ -63,7 +63,7 @@ The delay seam must not relax malformed/mismatched identity rejection or allow u
 ## Migration Plan
 
 1. Land the accepted test-only helper, deterministic delayed-publication proof, diagram, and gates on `main` through #518.
-2. Refresh #476 and #487 onto the accepted #518 head; preserve one final helper owner and rerun their affected proof.
+2. Refresh #487 onto the accepted #518 head; preserve one final helper owner and rerun its affected proof.
 3. Roll back #518 as one test-only commit series if the causal regression or broad workspace gate fails; no product or persistent-data migration exists.
 
 ## Open Questions

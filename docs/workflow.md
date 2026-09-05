@@ -27,9 +27,17 @@ Exact line slices validate the file through the atlas database, then read the cu
 use the stored symbol ranges, then read current disk content, so keep the watcher running during active edits if
 symbol-level slices matter.
 
-## One-command local verification
+## Local and complete verification
 
-Run the full local check suite with Cargo:
+The pre-push hook validates the exact clean candidate first, then uses
+`.github/scripts/affected-ci-proof.py` to run only the repository, Rust package
+or test target, dependency, and local ProjectAtlas checks that can detect a
+defect in that change. Unknown paths and changes to shared proof authorities
+select the complete local fallback. Installed Mermaid dependencies are reused;
+`npm audit` runs only when its package manifests change or during explicit
+drift proof.
+
+Run the complete local suite only for an explicit drift or release boundary:
 
 ```bash
 cargo fmt --all --check
@@ -40,7 +48,7 @@ cargo test --doc --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 cargo deny --locked --all-features check -D warnings
-npm ci --ignore-scripts --prefix .github/mermaid-parser
+npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
 npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
 python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
@@ -94,6 +102,8 @@ Ordinary pull requests require exact local/GitHub checklist synchronization but 
 
 Pull-request IssueOps resolves exactly one owning issue from the existing PR reference syntax. It compares that open issue's candidate implementation-task slice with mutable live state, while requiring every unrelated open mapped task slice to remain identical to the accepted PR base and excluding closed unrelated history; missing or ambiguous ownership and unreadable base authority fail closed. Pushes to `main` and milestone/release validation retain the complete active live-state comparison plus native closed-state gating, while ordinary issue events retain their affected-issue `--planned-issue` scope.
 
+Local candidate-branch IssueOps consumes Git's four-field pre-push ref-update records. Exactly one update targeting `refs/heads/main` selects global validation regardless of the checkout branch; exactly one non-main `refs/heads/*` target may select candidate mode when its non-zero local object ID equals the validated checked-out `HEAD`. Zero or multiple updates, including mixed main/candidate pushes, plus deletions, malformed, or unsupported records fail closed before owner or base extraction. A candidate worktree must also have no tracked, staged, or non-ignored untracked changes and no tracked index entries marked `assume-unchanged` or `skip-worktree` as early mutation guards. Candidate content authority is the submitted Git tree: the checker validates object IDs against the repository's SHA-1 or SHA-256 object format and reads the issue map, mapped task files, and linked regular Markdown architecture documents directly from their exact tree blobs. The candidate route then validates every post-base commit subject, including issue-owned merge commits, requiring exactly one well-formed same-owner `(#NNN)` reference with no unmatched `(#` fragment before resolving exactly one mapped open owner and running the same owner/live and unrelated/base comparison with `--candidate-issue`. Empty, blank, unreferenced, malformed, unmatched, multiple, or different references, closed or unmapped ownership, missing or unreadable accepted-base authority, dirty candidate state, hidden tracked index state, or a linked document absent from the candidate tree fail closed. The hook keeps the planner self-test, IssueOps, and every selected quality gate mandatory; it does not run unrelated builds or tests.
+
 Commit identity is provenance, not a general test invalidation key. After a commit-only or metadata-only change, rerun cheap OpenSpec, IssueOps, review, topology, and release-policy checks, then reuse passed expensive proof whose behavior-relevant source, dependency, lockfile, toolchain, workflow, packaging, configuration, platform, and immutable artifact identities are unchanged. Unknown changes fail closed and every affected test or construction reruns.
 
 ## Issue hygiene
@@ -130,10 +140,31 @@ Commit identity is provenance, not a general test invalidation key. After a comm
 
 ## CI behavior
 
-- GitHub Actions runs Rust source, dependency, unit, E2E, documentation, and packaging checks. ProjectAtlas scan, purpose, parity, and lint maintenance run locally against the developer or agent's current source state, not against the hosted Actions checkout.
+- `01-CI` plans from the exact base-to-head diff, runs selected repository,
+  affected Rust package or test-target, and platform contracts concurrently, and
+  accepts omissions only through the always-run fail-closed `verify` aggregate.
+  Unknown paths and shared workflow, planner, toolchain, lockfile, manifest,
+  schema, or test-support authorities select complete normal-PR proof. A base
+  retarget replans against the new base even when the head is unchanged; a title
+  or body edit runs no source job, emits no `verify` context, and cannot cancel
+  in-flight source proof.
+- The lightweight required `pr-state` workflow owns exactly-one-open-issue
+  reference validation and requires the PR milestone to match that issue's
+  milestone. GitHub native required conversation resolution owns all
+  human and automated review threads. Review activity starts neither workflow
+  and cannot launch or cancel unchanged source proof.
+- Automatic cancellation applies only to an older source-verification run
+  superseded by a newer run for the same pull-request number. Push, merge-group,
+  dispatch, schedule, `pr-state`, IssueOps, release, publish, and deploy use
+  isolated non-cancelling namespaces.
+- Normal CI deliberately has no mutation, coverage, or nextest campaign.
+  Dependency audits run for changed dependency manifests and scheduled/manual
+  drift proof. The release-candidate workflow retains complete installed-product
+  proof on Linux, Windows, macOS Intel, and macOS ARM.
+- ProjectAtlas scan, purpose, parity, and lint maintenance run locally against the developer or agent's current source state, not against the hosted Actions checkout.
 - `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
 - `projectatlas lint --purpose-level low` is the default first-pass agent gate: duplicate and repeated temporary-folder findings fail, while missing/suggested purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
-- PRs must reference a GitHub issue and have a milestone.
+- PRs must reference exactly one open GitHub issue and use that issue's milestone.
 - Ordinary PRs may reference an issue without closing it; use `Closes #NNN` only when the issue's complete checklist is ready to close.
 - Active OpenSpec task lists must be mapped in `openspec/issue-map.json`, and their authoritative GitHub task sections must exactly mirror local text, order, ownership, and checked state.
 - CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
