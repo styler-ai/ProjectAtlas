@@ -200,6 +200,63 @@ class ReverseCallerHarnessTests(unittest.TestCase):
         self.assertFalse(evidence["timed"])
         self.assertEqual(evidence["allocation_metrics"]["allocation_calls"], 0)
 
+    def test_failure_case_replays_query_evidence_outside_ordinary_binary(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_process(
+            command: list[str],
+            cwd: Path,
+            *,
+            trace_path: Path | None = None,
+            allocation_path: Path | None = None,
+        ) -> dict[str, object]:
+            del cwd, allocation_path
+            calls.append({"binary": command[0], "trace_path": trace_path})
+            if trace_path is not None:
+                trace_path.write_text(
+                    json.dumps(
+                        {
+                            "queries": [],
+                            "engine": {"sqlite_version": "3"},
+                            "plan_provenance": (
+                                "projectatlas-db::AtlasStore::connection"
+                            ),
+                            "allocations": None,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            return {
+                "returncode": 1,
+                "wall_ms": 1.0,
+                "cpu_ms": 1.0,
+                "peak_rss_bytes": 1,
+                "stdout": b"",
+                "stderr": b"missing",
+            }
+
+        target = {
+            "path": "src/target.rs",
+            "language": "rust",
+            "caller_suffix": ".rs",
+            "symbol_count": 1,
+            "caller_count": 1,
+        }
+        with (
+            patch.object(reverse_caller, "write_fixture", return_value=[target]),
+            patch.object(reverse_caller, "setup_fixture"),
+            patch.object(reverse_caller, "run_process", side_effect=fake_process),
+        ):
+            result = reverse_caller.failure_case(
+                Path("ordinary"), Path("evidence"), "missing-summary", "baseline"
+            )
+
+        self.assertEqual(calls[0], {"binary": "ordinary", "trace_path": None})
+        self.assertEqual(calls[1]["binary"], "evidence")
+        self.assertIsNotNone(calls[1]["trace_path"])
+        self.assertTrue(result["trace_observed"])
+        self.assertEqual(result["query_engine"], {"sqlite_version": "3"})
+
     def test_compact_evidence_drops_raw_process_streams(self) -> None:
         process = {
             "returncode": 0,

@@ -967,8 +967,10 @@ def cancellation_case(binary: Path, arm: str) -> dict[str, Any]:
         return result
 
 
-def failure_case(binary: Path, name: str, arm: str) -> dict[str, Any]:
-    """Capture one negative or failure result through the same CLI boundary."""
+def failure_case(
+    binary: Path, evidence_binary: Path, name: str, arm: str
+) -> dict[str, Any]:
+    """Capture ordinary behavior and an untimed query-evidence replay."""
 
     with tempfile.TemporaryDirectory(prefix=f"projectatlas-failure-{name}-") as directory:
         root = Path(directory)
@@ -988,36 +990,31 @@ def failure_case(binary: Path, name: str, arm: str) -> dict[str, Any]:
             )
         else:
             raise ValueError(name)
+        command = summary_command({"path": target_path}, SUMMARY_LIMIT)
+        measured = run_process([str(binary), *command], root)
         trace_path = root.parent / f"{root.name}-trace-failure-{arm}.json"
-        measured = run_process(
-            [
-                str(binary),
-                "--format",
-                "json",
-                "summary",
-                target_path,
-                "--limit",
-                str(SUMMARY_LIMIT),
-            ],
+        evidence_measured = run_process(
+            [str(evidence_binary), *command],
             root,
             trace_path=trace_path,
         )
         result = serialize_process(measured, root)
+        evidence_result = serialize_process(evidence_measured, root)
+        for field in ("returncode", "stdout_base64", "stderr_base64"):
+            if result[field] != evidence_result[field]:
+                raise AssertionError(f"{arm} {name} evidence replay {field} drift")
         result["case"] = name
         result["target"] = target_path
-        trace = {"queries": [], "allocations": None}
-        trace_observed = False
-        if trace_path.is_file():
-            trace = json.loads(trace_path.read_text(encoding="utf-8"))
-            trace_path.unlink()
-            trace_observed = True
-            if trace.get("queries"):
-                require_production_trace_evidence(trace, f"{arm} {name}")
+        if not trace_path.is_file():
+            raise AssertionError(f"{arm} {name} evidence replay emitted no trace")
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        trace_path.unlink()
+        require_production_trace_evidence(trace, f"{arm} {name}")
         result["allocation_metrics"] = trace.get("allocations")
         result["query_observations"] = trace.get("queries", [])
         result["query_engine"] = trace.get("engine")
         result["plan_provenance"] = trace.get("plan_provenance")
-        result["trace_observed"] = trace_observed
+        result["trace_observed"] = True
         result["timed"] = False
         if name == "corrupt-relation":
             if measured["returncode"] == 0:
@@ -1520,8 +1517,12 @@ def main() -> None:
     failures: dict[str, dict[str, Any]] = {}
     for case in ("missing-summary", "corrupt-relation", "stale-source"):
         failures[case] = {
-            "baseline": failure_case(baseline_binary, case, "baseline"),
-            "candidate": failure_case(candidate_binary, case, "candidate"),
+            "baseline": failure_case(
+                baseline_binary, baseline_evidence_binary, case, "baseline"
+            ),
+            "candidate": failure_case(
+                candidate_binary, candidate_evidence_binary, case, "candidate"
+            ),
         }
         semantic_findings.extend(
             f"{case}: {finding}"

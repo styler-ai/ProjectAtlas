@@ -2006,8 +2006,6 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             #[cfg(feature = "reverse-caller-benchmark")]
             let benchmark_allocation_path =
                 std::env::var_os("PROJECTATLAS_REVERSE_CALLER_ALLOCATIONS").map(PathBuf::from);
-            let file_key = validated_indexed_file_key(&store, file)?;
-            let content = read_indexed_file_content(&store, &file_key)?;
             #[cfg(feature = "reverse-caller-benchmark")]
             if benchmark_trace_path.is_some() || benchmark_allocation_path.is_some() {
                 if benchmark_trace_path.is_some() {
@@ -2015,13 +2013,18 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 }
                 reverse_caller_benchmark::reset();
             }
-            let report_result = build_file_summary_from_source_with_selection(
-                &store,
-                Path::new(&file_key),
-                *limit,
-                &content,
-                content_selection.unwrap_or_default(),
-            );
+            let report_result: Result<_, CliError> = (|| {
+                let file_key = validated_indexed_file_key(&store, file)?;
+                let content = read_indexed_file_content(&store, &file_key)?;
+                let report = build_file_summary_from_source_with_selection(
+                    &store,
+                    Path::new(&file_key),
+                    *limit,
+                    &content,
+                    content_selection.unwrap_or_default(),
+                )?;
+                Ok((content, report))
+            })();
             #[cfg(feature = "reverse-caller-benchmark")]
             if benchmark_trace_path.is_some() || benchmark_allocation_path.is_some() {
                 let allocation_metrics = reverse_caller_benchmark::snapshot();
@@ -2040,7 +2043,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     fs::write(&path, encoded).map_err(|source| CliError::Io { path, source })?;
                 }
             }
-            let report = report_result?;
+            let (content, report) = report_result?;
             let toon = render_file_summary(&report);
             print_tracked_output_text(
                 cli.format,

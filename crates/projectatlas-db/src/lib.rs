@@ -4242,24 +4242,24 @@ impl AtlasStore {
                 params![pattern, usize_to_i64(limit)],
                 stored_import_relation_from_row,
             )?;
-            let mut term_relations = Vec::new();
+            #[cfg(feature = "reverse-caller-benchmark")]
+            let relation_start = relations.len();
             for row in rows {
-                term_relations.push(row?);
+                relations.push(row?);
             }
             #[cfg(feature = "reverse-caller-benchmark")]
             record_reverse_caller_benchmark_query(
                 "import-targets",
                 term.clone(),
                 limit,
-                term_relations.len(),
-                term_relations
+                relations.len() - relation_start,
+                relations[relation_start..]
                     .iter()
                     .map(stored_import_relation_bytes)
                     .sum(),
                 IMPORT_RELATIONS_MATCHING_TARGETS_SQL,
                 &benchmark_values,
             );
-            relations.extend(term_relations);
         }
         relations.sort_by(|left, right| {
             left.path
