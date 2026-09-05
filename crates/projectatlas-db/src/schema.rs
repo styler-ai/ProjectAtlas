@@ -5,8 +5,8 @@ use crate::sqlite_profile::{
     open_read_only_connection, verify_current_read_profile,
 };
 use crate::{DbError, DbResult};
-use projectatlas_core::CanonicalProjectRoot;
 use projectatlas_core::graph::{GraphLimitKind, ProjectInstanceId};
+use projectatlas_core::{CanonicalProjectRoot, CoreError};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -2507,10 +2507,18 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
         rows.collect::<Result<Vec<_>, _>>()?
     };
     for (registration_id, common, administrative, root) in rows {
-        let common = CanonicalProjectRoot::from_persisted_path(PathBuf::from(common))?;
-        let administrative =
-            CanonicalProjectRoot::from_persisted_path(PathBuf::from(administrative))?;
-        let root = CanonicalProjectRoot::from_persisted_path(PathBuf::from(root))?;
+        let common = legacy_worktree_native_identity(
+            registration_id,
+            "git_common_directory",
+            PathBuf::from(common),
+        )?;
+        let administrative = legacy_worktree_native_identity(
+            registration_id,
+            "git_administrative_directory",
+            PathBuf::from(administrative),
+        )?;
+        let root =
+            legacy_worktree_native_identity(registration_id, "last_root", PathBuf::from(root))?;
         connection.execute(
             "UPDATE worktree_registrations
              SET git_common_directory_identity = ?1,
@@ -2526,6 +2534,29 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
         )?;
     }
     Ok(())
+}
+
+/// Recover native authority from a legacy display path when the filesystem can prove it.
+fn legacy_worktree_native_identity(
+    registration_id: i64,
+    field: &'static str,
+    path: PathBuf,
+) -> DbResult<CanonicalProjectRoot> {
+    match CanonicalProjectRoot::from_path(&path) {
+        Ok(identity) => Ok(identity),
+        Err(CoreError::CanonicalProjectRootIo { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            if projectatlas_core::windows_path_requires_verbatim_semantics(&path) {
+                return Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
+                    field,
+                    registration_id,
+                });
+            }
+            CanonicalProjectRoot::from_persisted_path(path).map_err(DbError::from)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Remove the worktree identity extension from test fixtures that model a

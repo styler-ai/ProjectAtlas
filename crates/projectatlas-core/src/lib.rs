@@ -678,10 +678,7 @@ fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
     if !value.starts_with("\\\\?\\") {
         return false;
     }
-
     // A project root is immediately extended with ProjectAtlas children.
-    // Preserve the namespace before the ordinary Win32 limit is reached so
-    // that the child path remains usable without changing its semantics.
     let normalized = normalize_native_path_display_str(value);
     let project_atlas_suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
     if normalized
@@ -692,20 +689,27 @@ fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
     {
         return true;
     }
-
     windows_path_requires_verbatim_semantics(path)
 }
 
-/// Return whether a Windows path contains a component that requires verbatim semantics.
+/// Return whether a Windows path requires a verbatim native spelling.
 ///
-/// This predicate deliberately operates on native path components rather than display text
-/// normalization. The database crate also uses it to reject historical display projections that
-/// cannot establish native authority after verbatim semantics were stripped.
+/// The database crate uses this predicate to reject historical display
+/// projections that cannot establish native authority after a required
+/// extended prefix was stripped.
 #[must_use]
 pub fn windows_path_requires_verbatim_semantics(path: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::path::Component;
+
+        let Some(value) = path.to_str() else {
+            return true;
+        };
+        let normalized = normalize_native_path_display_str(value);
+        if normalized.encode_utf16().count() >= 260 {
+            return true;
+        }
 
         path.components().any(|component| {
             let Component::Normal(component) = component else {
@@ -1039,6 +1043,10 @@ mod tests {
                     format!("ordinary component was classified as verbatim: {path}").into(),
                 );
             }
+        }
+        let long_path = format!(r"C:\{}", "a".repeat(260));
+        if !super::windows_path_requires_verbatim_semantics(Path::new(&long_path)) {
+            return Err("long path was not classified as verbatim".into());
         }
         Ok(())
     }

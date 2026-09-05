@@ -1214,7 +1214,6 @@ mod tests {
     use std::io;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
-    use std::path::PathBuf;
     use std::time::Duration;
 
     /// Return a test error instead of panicking inside a fallible test.
@@ -2122,19 +2121,17 @@ mod tests {
         let registration = migrated.worktree_registration(&WorktreeAlias::parse("legacy")?)?;
         require_eq(
             &registration.git_common_directory_identity,
-            &CanonicalProjectRoot::from_persisted_path(PathBuf::from(common_display.clone()))?,
+            &CanonicalProjectRoot::from_path(&common)?,
             "migrated common identity",
         )?;
         require_eq(
             &registration.git_administrative_directory_identity,
-            &CanonicalProjectRoot::from_persisted_path(PathBuf::from(
-                administrative_display.clone(),
-            ))?,
+            &CanonicalProjectRoot::from_path(&administrative)?,
             "migrated administrative identity",
         )?;
         require_eq(
             &registration.last_root_identity,
-            &CanonicalProjectRoot::from_persisted_path(PathBuf::from(root_display.clone()))?,
+            &CanonicalProjectRoot::from_path(&root)?,
             "migrated root identity",
         )?;
         drop(migrated);
@@ -2195,6 +2192,165 @@ mod tests {
             &1,
             "retried migration registration",
         )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn schema_twentytwo_worktree_identity_migration_rejects_unprovable_verbatim_paths()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control = temp.path().join("control");
+        let common = temp.path().join("common.git");
+        let administrative = common.join("worktrees/legacy");
+        let root = temp.path().join("legacy");
+        for path in [&control, &common, &administrative, &root] {
+            fs::create_dir_all(path)?;
+        }
+        let common_display = projectatlas_core::normalize_native_path_display(&common);
+        let administrative_display =
+            projectatlas_core::normalize_native_path_display(&administrative);
+        let root_display = projectatlas_core::normalize_native_path_display(&root);
+        let missing_display =
+            projectatlas_core::normalize_native_path_display(temp.path().join("a".repeat(240)));
+
+        for (case, field) in [
+            ("common", "git_common_directory"),
+            ("administrative", "git_administrative_directory"),
+            ("root", "last_root"),
+        ] {
+            let database = control.join(format!("unprovable-{case}.db"));
+            let store = AtlasStore::open_for_project(&database, &control)?;
+            let common_value = if field == "git_common_directory" {
+                &missing_display
+            } else {
+                &common_display
+            };
+            let administrative_value = if field == "git_administrative_directory" {
+                &missing_display
+            } else {
+                &administrative_display
+            };
+            let root_value = if field == "last_root" {
+                &missing_display
+            } else {
+                &root_display
+            };
+            store.connection.execute(
+                "INSERT INTO worktree_registrations(
+                    alias, state, git_common_directory, git_administrative_directory,
+                    git_administrative_identity, last_root, created_at_epoch
+                 ) VALUES('legacy', 'active', ?1, ?2, ?3, ?4, 1)",
+                params![
+                    common_value,
+                    administrative_value,
+                    administrative_identity(20),
+                    root_value,
+                ],
+            )?;
+            crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
+            store.connection.execute(
+                "UPDATE metadata SET value = '22' WHERE key = 'schema_version'",
+                [],
+            )?;
+            drop(store);
+
+            let migration_result = AtlasStore::open_for_project(&database, &control);
+            require(
+                matches!(
+                    &migration_result,
+                    Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
+                        field: failed_field,
+                        registration_id: 1,
+                    }) if failed_field == &field
+                ),
+                &format!(
+                    "unprovable {field} migration returned the wrong result: {:?}",
+                    migration_result.as_ref().err().map(ToString::to_string)
+                ),
+            )?;
+
+            let inspect = Connection::open(&database)?;
+            let marker = inspect.query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?;
+            require_eq(&marker, &"22".to_string(), "failed migration marker")?;
+            require_eq(
+                &inspect.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('worktree_registrations')
+                     WHERE name IN (
+                         'git_common_directory_identity',
+                         'git_administrative_directory_identity',
+                         'last_root_identity'
+                     )",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                &0,
+                "failed migration native columns",
+            )?;
+            require_eq(
+                &inspect.query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema
+                     WHERE type = 'index' AND name IN (
+                         'idx_worktree_registrations_active_native_administrative_directory',
+                         'idx_worktree_registrations_active_native_root'
+                     )",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                &0,
+                "failed migration native indexes",
+            )?;
+            let legacy_paths = inspect.query_row(
+                "SELECT git_common_directory, git_administrative_directory, last_root
+                 FROM worktree_registrations WHERE registration_id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?;
+            require(
+                [&legacy_paths.0, &legacy_paths.1, &legacy_paths.2]
+                    .into_iter()
+                    .any(|path| path == &missing_display),
+                "failed migration changed the unprovable legacy path",
+            )?;
+            let repair = match field {
+                "git_common_directory" => common_display.as_str(),
+                "git_administrative_directory" => administrative_display.as_str(),
+                _ => root_display.as_str(),
+            };
+            inspect.execute(
+                &format!("UPDATE worktree_registrations SET {field} = ?1"),
+                [repair],
+            )?;
+            drop(inspect);
+
+            let retried = AtlasStore::open_for_project(&database, &control)?;
+            let registration = retried.worktree_registration(&WorktreeAlias::parse("legacy")?)?;
+            require_eq(
+                &registration.git_common_directory_identity,
+                &CanonicalProjectRoot::from_path(&common)?,
+                "repaired common identity",
+            )?;
+            require_eq(
+                &registration.git_administrative_directory_identity,
+                &CanonicalProjectRoot::from_path(&administrative)?,
+                "repaired administrative identity",
+            )?;
+            require_eq(
+                &registration.last_root_identity,
+                &CanonicalProjectRoot::from_path(&root)?,
+                "repaired root identity",
+            )?;
+        }
         Ok(())
     }
 

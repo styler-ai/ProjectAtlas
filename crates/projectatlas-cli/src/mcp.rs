@@ -5790,16 +5790,18 @@ impl ProjectAtlasMcpServer {
 
     /// Derive one stable, short candidate selector from Git administrative identity.
     fn worktree_candidate_selector(entry: &GitWorktreeEntry) -> String {
-        if let Some(identity) = entry.administrative_directory.to_str() {
+        Self::worktree_candidate_selector_from_path(&entry.administrative_directory)
+    }
+
+    /// Derive one stable selector from a native administrative-directory path.
+    fn worktree_candidate_selector_from_path(identity: &Path) -> String {
+        if let Some(identity) = identity.to_str() {
             return Self::worktree_candidate_selector_from_identity(
                 &normalize_native_path_display_str(identity),
             );
         }
         Self::worktree_candidate_selector_from_native_identity(
-            entry
-                .administrative_directory
-                .as_os_str()
-                .as_encoded_bytes(),
+            identity.as_os_str().as_encoded_bytes(),
         )
     }
 
@@ -5825,14 +5827,7 @@ impl ProjectAtlasMcpServer {
     fn worktree_candidate_selector_from_canonical_identity(
         identity: &CanonicalProjectRoot,
     ) -> String {
-        identity.display_string().map_or_else(
-            |_| {
-                Self::worktree_candidate_selector_from_native_identity(
-                    identity.as_path().as_os_str().as_encoded_bytes(),
-                )
-            },
-            |display| Self::worktree_candidate_selector_from_identity(&display),
-        )
+        Self::worktree_candidate_selector_from_path(identity.as_path())
     }
 
     /// Borrow one active source root from structural worktree evidence.
@@ -12172,6 +12167,61 @@ mod tests {
                 "Git-known missing worktree retirement lost its retained display identity: {removed}"
             ),
         )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_worktree_selector_survives_live_to_retained_transition()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let common = PathBuf::from(r"C:\repo\.git");
+        let root = PathBuf::from(r"C:\repo\linked");
+        for (index, administrative_directory) in [
+            PathBuf::from(r"C:\repo\.git\worktrees\linked"),
+            PathBuf::from(r"\\?\C:\repo\.git\worktrees\CON"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let entry = GitWorktreeEntry {
+                role: GitWorktreeRole::Linked,
+                administrative_directory: administrative_directory.clone(),
+                state: GitWorktreeState::Active {
+                    git_control_path: root.join(".git"),
+                    root: root.clone(),
+                },
+            };
+            let selector = ProjectAtlasMcpServer::worktree_candidate_selector(&entry);
+            let alias = WorktreeAlias::parse(&format!("retained-{index}"))?;
+            let registration = WorktreeRegistration {
+                registration_id: i64::try_from(index + 1)?,
+                alias: alias.clone(),
+                state: WorktreeRegistrationState::Active,
+                git_common_directory: normalize_native_path_display(&common),
+                git_common_directory_identity: CanonicalProjectRoot::from_persisted_path(
+                    common.clone(),
+                )?,
+                git_administrative_directory: normalize_native_path_display(
+                    &administrative_directory,
+                ),
+                git_administrative_directory_identity: CanonicalProjectRoot::from_persisted_path(
+                    administrative_directory,
+                )?,
+                git_administrative_identity: "ab".repeat(32),
+                last_root: normalize_native_path_display(&root),
+                last_root_identity: CanonicalProjectRoot::from_persisted_path(root.clone())?,
+                project_instance_id: None,
+                accepted_telemetry_revision: 0,
+                created_at_epoch: 1,
+                retired_at_epoch: None,
+            };
+            let retained = ProjectAtlasMcpServer::missing_registered_worktree_row(&registration);
+            require(
+                retained.selector.as_deref() == Some(selector.as_str())
+                    && retained.alias.as_deref() == Some(alias.as_str()),
+                "live-to-retained transition changed the selector or lost the removal alias",
+            )?;
+        }
         Ok(())
     }
 
