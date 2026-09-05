@@ -1234,6 +1234,44 @@ fn stored_import_relation_bytes(relation: &StoredImportRelation) -> usize {
 }
 
 #[cfg(feature = "reverse-caller-benchmark")]
+/// Run one import read while retaining either its rows or its propagated failure.
+fn query_import_relations_for_reverse_caller_benchmark(
+    connection: &Connection,
+    family: &'static str,
+    binding: String,
+    limit: usize,
+    sql: &str,
+    values: &[Value],
+) -> DbResult<Vec<StoredImportRelation>> {
+    let result: DbResult<Vec<StoredImportRelation>> = (|| {
+        let mut statement = connection.prepare_cached(sql)?;
+        let rows = statement.query_map(
+            params_from_iter(values.iter()),
+            stored_import_relation_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    })();
+    let (rows, row_bytes, outcome) = match &result {
+        Ok(relations) => (
+            relations.len(),
+            relations.iter().map(stored_import_relation_bytes).sum(),
+            ReverseCallerBenchmarkQueryOutcome::Succeeded,
+        ),
+        Err(error) => (
+            0,
+            0,
+            ReverseCallerBenchmarkQueryOutcome::Failed {
+                error: error.to_string(),
+            },
+        ),
+    };
+    record_reverse_caller_benchmark_query(
+        family, binding, limit, rows, row_bytes, outcome, sql, values,
+    );
+    result
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
 /// Count the bounded symbol-relation bytes retained by one query.
 fn symbol_relation_bytes(relation: &SymbolRelation) -> usize {
     relation.path.len()
@@ -4274,32 +4312,28 @@ impl AtlasStore {
                 Value::Text(pattern.clone()),
                 Value::Integer(usize_to_i64(limit)),
             ];
-            let mut statement = self
-                .connection
-                .prepare_cached(IMPORT_RELATIONS_MATCHING_TARGETS_SQL)?;
-            let rows = statement.query_map(
-                params![pattern, usize_to_i64(limit)],
-                stored_import_relation_from_row,
-            )?;
             #[cfg(feature = "reverse-caller-benchmark")]
-            let relation_start = relations.len();
-            for row in rows {
-                relations.push(row?);
-            }
-            #[cfg(feature = "reverse-caller-benchmark")]
-            record_reverse_caller_benchmark_query(
+            relations.extend(query_import_relations_for_reverse_caller_benchmark(
+                &self.connection,
                 "import-targets",
                 term.clone(),
                 limit,
-                relations.len() - relation_start,
-                relations[relation_start..]
-                    .iter()
-                    .map(stored_import_relation_bytes)
-                    .sum(),
-                ReverseCallerBenchmarkQueryOutcome::Succeeded,
                 IMPORT_RELATIONS_MATCHING_TARGETS_SQL,
                 &benchmark_values,
-            );
+            )?);
+            #[cfg(not(feature = "reverse-caller-benchmark"))]
+            {
+                let mut statement = self
+                    .connection
+                    .prepare_cached(IMPORT_RELATIONS_MATCHING_TARGETS_SQL)?;
+                let rows = statement.query_map(
+                    params![pattern, usize_to_i64(limit)],
+                    stored_import_relation_from_row,
+                )?;
+                for row in rows {
+                    relations.push(row?);
+                }
+            }
         }
         relations.sort_by(|left, right| {
             left.path
@@ -4333,28 +4367,30 @@ impl AtlasStore {
             Value::Text(path.to_string()),
             Value::Integer(usize_to_i64(bounded_limit)),
         ];
-        let mut statement = self
-            .connection
-            .prepare_cached(IMPORT_RELATIONS_FOR_PATH_SQL)?;
-        let rows = statement.query_map(
-            params![path, usize_to_i64(bounded_limit)],
-            stored_import_relation_from_row,
-        )?;
-        let mut relations = Vec::new();
-        for row in rows {
-            relations.push(row?);
-        }
         #[cfg(feature = "reverse-caller-benchmark")]
-        record_reverse_caller_benchmark_query(
+        let relations = query_import_relations_for_reverse_caller_benchmark(
+            &self.connection,
             "import-caller-path",
             path.to_string(),
             bounded_limit,
-            relations.len(),
-            relations.iter().map(stored_import_relation_bytes).sum(),
-            ReverseCallerBenchmarkQueryOutcome::Succeeded,
             IMPORT_RELATIONS_FOR_PATH_SQL,
             &benchmark_values,
-        );
+        )?;
+        #[cfg(not(feature = "reverse-caller-benchmark"))]
+        let relations = {
+            let mut statement = self
+                .connection
+                .prepare_cached(IMPORT_RELATIONS_FOR_PATH_SQL)?;
+            let rows = statement.query_map(
+                params![path, usize_to_i64(bounded_limit)],
+                stored_import_relation_from_row,
+            )?;
+            let mut relations = Vec::new();
+            for row in rows {
+                relations.push(row?);
+            }
+            relations
+        };
         Ok(relations)
     }
 
@@ -8944,6 +8980,66 @@ mod tests {
             !query.query_plan.is_empty(),
             "failed query plan was not replayed",
         )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "reverse-caller-benchmark")]
+    #[test]
+    fn reverse_caller_benchmark_records_failed_import_queries() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/caller.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: vec![SymbolRelation {
+                path: "src/caller.rs".to_string(),
+                source_name: "caller".to_string(),
+                target_name: "use crate::target".to_string(),
+                kind: RelationKind::Imports,
+                line: 1,
+                context: "use crate::target;".to_string(),
+                parser: ParserKind::TreeSitter,
+            }],
+        })?;
+        store.connection.execute(
+            "UPDATE symbol_relations SET line = 'invalid' WHERE kind = 'imports'",
+            [],
+        )?;
+
+        store.start_reverse_caller_benchmark_trace();
+        let target_result =
+            store.load_import_relations_matching_targets(&["target".to_string()], 20);
+        let target_trace = store.take_reverse_caller_benchmark_trace()?;
+        store.start_reverse_caller_benchmark_trace();
+        let path_result = store.load_import_relations_for_path("src/caller.rs", 20);
+        let path_trace = store.take_reverse_caller_benchmark_trace()?;
+
+        for (family, result, trace) in [
+            ("import-targets", target_result, target_trace),
+            ("import-caller-path", path_result, path_trace),
+        ] {
+            require(
+                result.is_err(),
+                &format!("corrupt {family} query unexpectedly succeeded"),
+            )?;
+            require_eq(&trace.queries.len(), &1, "failed query observation count")?;
+            let query = &trace.queries[0];
+            require_eq(&query.family, &family, "failed query family")?;
+            require_eq(&query.rows, &0, "failed query accepted rows")?;
+            require(
+                matches!(
+                    &query.outcome,
+                    ReverseCallerBenchmarkQueryOutcome::Failed { error }
+                        if error.contains("Invalid column type Text")
+                ),
+                "failed query outcome did not retain the propagated SQLite error",
+            )?;
+            require(
+                !query.query_plan.is_empty(),
+                "failed query plan was not replayed",
+            )?;
+        }
         Ok(())
     }
 
