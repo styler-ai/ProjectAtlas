@@ -12634,7 +12634,8 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid UTF-8 filenames before Git or ProjectAtlas can use them.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn real_non_utf8_worktree_lifecycle_routes_alias_and_preserves_native_identities()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -12665,14 +12666,6 @@ mod tests {
                 )),
                 (true, true, false),
             ),
-            (
-                "valid-unicode",
-                std::ffi::OsString::from("unicode-control-λ"),
-                None,
-                std::ffi::OsString::from("unicode-linked-工作树"),
-                None,
-                (true, true, true),
-            ),
         ] {
             require_real_native_worktree_lifecycle(
                 case,
@@ -12684,6 +12677,20 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_unicode_worktree_lifecycle_routes_alias_and_preserves_native_identities()
+    -> Result<(), Box<dyn std::error::Error>> {
+        require_real_native_worktree_lifecycle(
+            "valid-unicode",
+            std::ffi::OsString::from("unicode-control-λ"),
+            Some(std::ffi::OsString::from("unicode-common-共同")),
+            std::ffi::OsString::from("unicode-linked-工作树"),
+            Some(std::ffi::OsString::from("unicode-administrative-管理")),
+            (true, true, true),
+        )
     }
 
     #[test]

@@ -678,17 +678,6 @@ fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
     if !value.starts_with("\\\\?\\") {
         return false;
     }
-    // A project root is immediately extended with ProjectAtlas children.
-    let normalized = normalize_native_path_display_str(value);
-    let project_atlas_suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
-    if normalized
-        .encode_utf16()
-        .count()
-        .saturating_add(project_atlas_suffix_units)
-        >= 260
-    {
-        return true;
-    }
     windows_path_requires_verbatim_semantics(path)
 }
 
@@ -696,7 +685,8 @@ fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
 ///
 /// The database crate uses this predicate to reject historical display
 /// projections that cannot establish native authority after a required
-/// extended prefix was stripped.
+/// extended prefix was stripped. The length threshold includes the database
+/// suffix used by live project-root identities.
 #[must_use]
 pub fn windows_path_requires_verbatim_semantics(path: &Path) -> bool {
     #[cfg(windows)]
@@ -705,7 +695,14 @@ pub fn windows_path_requires_verbatim_semantics(path: &Path) -> bool {
             return true;
         };
         let normalized = normalize_native_path_display_str(value);
-        if normalized.encode_utf16().count() >= 260 {
+        // A project root is immediately extended with ProjectAtlas children.
+        let project_atlas_suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
+        if normalized
+            .encode_utf16()
+            .count()
+            .saturating_add(project_atlas_suffix_units)
+            >= 260
+        {
             return true;
         }
         windows_path_has_verbatim_only_components(path)
@@ -1063,6 +1060,18 @@ mod tests {
         let long_path = format!(r"C:\{}", "a".repeat(260));
         if !super::windows_path_requires_verbatim_semantics(Path::new(&long_path)) {
             return Err("long path was not classified as verbatim".into());
+        }
+        let suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
+        for units in [260 - suffix_units - 1, 260 - suffix_units] {
+            let path = format!(r"C:\{}", "a".repeat(units - 3));
+            let required = units + suffix_units >= 260;
+            if super::windows_path_requires_verbatim_semantics(Path::new(&path)) != required {
+                return Err("legacy classifier differs from the live root suffix threshold".into());
+            }
+            let extended = format!(r"\\?\{path}");
+            if super::windows_verbatim_semantics_require_prefix(Path::new(&extended)) != required {
+                return Err("live root prefix threshold differs from the legacy classifier".into());
+            }
         }
         Ok(())
     }

@@ -2492,7 +2492,7 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
     let rows = {
         let mut statement = connection.prepare(
             "SELECT registration_id, git_common_directory,
-                    git_administrative_directory, last_root
+                    git_administrative_directory, last_root, state = 'retired'
              FROM worktree_registrations
              ORDER BY registration_id",
         )?;
@@ -2502,23 +2502,30 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
-    for (registration_id, common, administrative, root) in rows {
+    for (registration_id, common, administrative, root, retired) in rows {
         let common = legacy_worktree_native_identity(
             registration_id,
             "git_common_directory",
             PathBuf::from(common),
+            retired,
         )?;
         let administrative = legacy_worktree_native_identity(
             registration_id,
             "git_administrative_directory",
             PathBuf::from(administrative),
+            retired,
         )?;
-        let root =
-            legacy_worktree_native_identity(registration_id, "last_root", PathBuf::from(root))?;
+        let root = legacy_worktree_native_identity(
+            registration_id,
+            "last_root",
+            PathBuf::from(root),
+            retired,
+        )?;
         connection.execute(
             "UPDATE worktree_registrations
              SET git_common_directory_identity = ?1,
@@ -2536,11 +2543,12 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
     Ok(())
 }
 
-/// Recover native authority from a legacy display path when the filesystem can prove it.
+/// Recover active native authority or retain a retired row's lexical history.
 fn legacy_worktree_native_identity(
     registration_id: i64,
     field: &'static str,
     path: PathBuf,
+    retired: bool,
 ) -> DbResult<CanonicalProjectRoot> {
     if projectatlas_core::windows_path_has_verbatim_only_components(&path) {
         return Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
@@ -2548,21 +2556,22 @@ fn legacy_worktree_native_identity(
             registration_id,
         });
     }
-    match CanonicalProjectRoot::from_path(&path) {
-        Ok(identity) => Ok(identity),
-        Err(CoreError::CanonicalProjectRootIo { source, .. })
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            if projectatlas_core::windows_path_requires_verbatim_semantics(&path) {
-                return Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
-                    field,
-                    registration_id,
-                });
-            }
-            CanonicalProjectRoot::from_persisted_path(path).map_err(DbError::from)
+    if !retired {
+        match CanonicalProjectRoot::from_path(&path) {
+            Ok(identity) => return Ok(identity),
+            Err(CoreError::CanonicalProjectRootIo { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-        Err(error) => Err(error.into()),
     }
+    // Retired paths may now name unrelated files, directories, or symlinks.
+    if projectatlas_core::windows_path_requires_verbatim_semantics(&path) {
+        return Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
+            field,
+            registration_id,
+        });
+    }
+    CanonicalProjectRoot::from_persisted_path(path).map_err(DbError::from)
 }
 
 /// Remove the worktree identity extension from test fixtures that model a

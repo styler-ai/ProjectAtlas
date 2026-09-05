@@ -2195,6 +2195,117 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn schema_twentytwo_retired_history_survives_path_reuse_as_files() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = CanonicalProjectRoot::from_path(temp.path())?.into_path();
+        let control = base.join("control");
+        let common = base.join("common.git");
+        let administrative = common.join("worktrees/legacy");
+        let root = base.join("legacy");
+        for path in [&control, &common, &administrative, &root] {
+            fs::create_dir_all(path)?;
+        }
+        for field in [
+            "git_common_directory",
+            "git_administrative_directory",
+            "last_root",
+        ] {
+            let reused = base.join(field);
+            fs::create_dir(&reused)?;
+            let historical = CanonicalProjectRoot::from_path(&reused)?;
+            fs::remove_dir(&reused)?;
+            fs::write(&reused, "unrelated replacement file")?;
+            let paths = [
+                if field == "git_common_directory" {
+                    &reused
+                } else {
+                    &common
+                },
+                if field == "git_administrative_directory" {
+                    &reused
+                } else {
+                    &administrative
+                },
+                if field == "last_root" { &reused } else { &root },
+            ];
+            let database = control.join(format!("reused-{field}.db"));
+            let store = AtlasStore::open_for_project(&database, &control)?;
+            store.connection.execute(
+                "INSERT INTO worktree_registrations(
+                    alias, state, git_common_directory, git_administrative_directory,
+                    git_administrative_identity, last_root, created_at_epoch
+                 ) VALUES('legacy', 'active', ?1, ?2, ?3, ?4, 1)",
+                params![
+                    projectatlas_core::normalize_native_path_display(paths[0]),
+                    projectatlas_core::normalize_native_path_display(paths[1]),
+                    administrative_identity(21),
+                    projectatlas_core::normalize_native_path_display(paths[2]),
+                ],
+            )?;
+            crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
+            store.connection.execute(
+                "UPDATE metadata SET value = '22' WHERE key = 'schema_version'",
+                [],
+            )?;
+            drop(store);
+            require(
+                matches!(
+                    AtlasStore::open_for_project(&database, &control),
+                    Err(DbError::ProjectRootIdentity(_))
+                ),
+                "active registration admitted a replacement file",
+            )?;
+            let inspect = Connection::open(&database)?;
+            require_eq(
+                &inspect.query_row(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?,
+                &"22".to_string(),
+                "active path failure rolled back migration",
+            )?;
+            inspect.execute_batch(
+                "UPDATE worktree_registrations SET state = 'retired', retired_at_epoch = 2;",
+            )?;
+            drop(inspect);
+            let migrated = AtlasStore::open_for_project(&database, &control)?;
+            let rows = migrated.worktree_registrations(true)?;
+            require_eq(&rows.len(), &1, "retained historical row")?;
+            let row = &rows[0];
+            let recovered = match field {
+                "git_common_directory" => &row.git_common_directory_identity,
+                "git_administrative_directory" => &row.git_administrative_directory_identity,
+                _ => &row.last_root_identity,
+            };
+            require_eq(
+                recovered,
+                &historical,
+                "historical native identity after path reuse",
+            )?;
+            require_eq(
+                &row.state,
+                &WorktreeRegistrationState::Retired,
+                "retained retirement state",
+            )?;
+            require_eq(
+                &fs::read_to_string(&reused)?,
+                &"unrelated replacement file".to_string(),
+                "replacement file untouched",
+            )?;
+            drop(migrated);
+            let reopened = AtlasStore::open_for_project(&database, &control)?;
+            require_eq(
+                &reopened.worktree_registrations(true)?,
+                &rows,
+                "retired migration survives reopen",
+            )?;
+        }
+        Ok(())
+    }
+
     #[cfg(windows)]
     #[test]
     fn schema_twentytwo_worktree_identity_migration_rejects_unprovable_verbatim_paths()
@@ -2213,6 +2324,12 @@ mod tests {
         let root_display = projectatlas_core::normalize_native_path_display(&root);
         let missing_display =
             projectatlas_core::normalize_native_path_display(temp.path().join("a".repeat(240)));
+        let suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
+        let prefix = projectatlas_core::normalize_native_path_display(temp.path());
+        let suffix_threshold_display = format!(
+            "{prefix}/{}",
+            "b".repeat(260 - suffix_units - prefix.encode_utf16().count() - 1)
+        );
         let ambiguous_common_display = format!("{common_display}.");
         let ambiguous_administrative_display = format!("{administrative_display}.");
         let ambiguous_root_display = format!("{root_display}.");
@@ -2225,6 +2342,17 @@ mod tests {
                 &missing_display,
             ),
             ("missing-root", "last_root", &missing_display),
+            (
+                "suffix-common",
+                "git_common_directory",
+                &suffix_threshold_display,
+            ),
+            (
+                "suffix-administrative",
+                "git_administrative_directory",
+                &suffix_threshold_display,
+            ),
+            ("suffix-root", "last_root", &suffix_threshold_display),
             (
                 "ambiguous-common",
                 "git_common_directory",
