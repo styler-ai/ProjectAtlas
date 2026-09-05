@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "fd5ef993da7ad8a2fd9a04939cd61f0f76a5b7b29e20d87761c4b034d8c6a9ab",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "3ee3ab5250d3fa4be0f6d7a9d26f55629cccaf6d53d6828e8e5bbc9dac8eef2c",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "35c4cf8a4e3e69ffd4fb3ca18b191d5c79ea27646ba9fd7d3d21f5c0788aab32",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "72b95317626c27cbe036b8fc02d2749a302347c4fb1f3fb961f1e86d9bcee397",
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 179,
+  "test_count": 180,
   "symbol_count": 431,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -1649,6 +1649,15 @@
       "line": 36893,
       "end_line": 36987,
       "owner": "e2e_maintenance",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "release_asset_server_lifecycle_is_causal_and_bounded",
+      "line": 21027,
+      "end_line": 21377,
+      "owner": "e2e_delivery",
       "attributes": [
         "#[test]"
       ]
@@ -11041,20 +11050,20 @@
         "text": "                thread::sleep(Duration::from_millis(100).min(remaining));"
       },
       {
-        "line": 35416,
-        "text": "        let deadline = Instant::now() + Duration::from_mins(1);"
+        "line": 307,
+        "text": "const RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT: Duration = Duration::from_mins(4);"
       },
       {
-        "line": 35423,
-        "text": "                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;"
+        "line": 20795,
+        "text": "        .checked_add(RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT)"
       },
       {
         "line": 35469,
         "text": "                    if Instant::now() >= deadline {"
       },
       {
-        "line": 35475,
-        "text": "                    thread::sleep(Duration::from_millis(50));"
+        "line": 20993,
+        "text": "                    match completion_receiver.recv_timeout(Duration::from_millis(50)) {"
       },
       {
         "line": 35664,
@@ -11664,7 +11673,7 @@
       },
       {
         "line": 15563,
-        "text": "            drop(first_child.kill());"
+        "text": "            drop(terminate_plugin_installer_process_tree(&mut first_child));"
       },
       {
         "line": 15564,
@@ -13166,7 +13175,7 @@
       },
       {
         "line": 7026,
-        "text": "    let output = StdCommand::new(\"pwsh\")"
+        "text": "    let mut command = StdCommand::new(\"pwsh\");"
       },
       {
         "line": 8434,
@@ -13454,11 +13463,11 @@
       },
       {
         "line": 15547,
-        "text": "    let mut first_child = first_command.spawn()?;"
+        "text": "    let mut first_child = spawn_plugin_installer_process(&mut first_command)?;"
       },
       {
         "line": 15573,
-        "text": "    let second_child = second_command.spawn()?;"
+        "text": "    let second_child = spawn_plugin_installer_process(&mut second_command)?;"
       },
       {
         "line": 15642,
@@ -13486,7 +13495,7 @@
       },
       {
         "line": 16277,
-        "text": "        command.spawn()?,"
+        "text": "        spawn_plugin_installer_process(&mut command)?,"
       },
       {
         "line": 16399,
@@ -18172,7 +18181,7 @@
       },
       {
         "line": 17494,
-        "text": "    if !installer_output_text.contains(\"produced an invalid runtime\") {"
+        "text": "        .contains(\"producedaninvalidruntime\")"
       },
       {
         "line": 17496,
@@ -19076,7 +19085,7 @@
       },
       {
         "line": 36269,
-        "text": "            \"plugin installer failed\\nstdout:\\n{}\\nstderr:\\n{}\","
+        "text": "        \"plugin installer failed with status {}\\nstdout:\\n{}\\nstderr:\\n{}\","
       },
       {
         "line": 36814,
@@ -19356,6 +19365,26 @@
       "workflow": ".github/workflows/ci.yml",
       "line": 185,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery e2e_process_observers_ -- --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 473,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery release_asset_server_lifecycle_is_causal_and_bounded -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 478,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery posix_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 483,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 488,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_only_rejects_invalid_runtime_without_fallback -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
