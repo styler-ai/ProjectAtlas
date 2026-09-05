@@ -6555,9 +6555,9 @@ impl ProjectAtlasMcpServer {
             .worktrees
             .iter()
             .find(|entry| {
-                CanonicalProjectRoot::from_path(&entry.administrative_directory).is_ok_and(
-                    |identity| identity == registration.git_administrative_directory_identity,
-                )
+                Self::worktree_administrative_path_identity(entry).is_some_and(|identity| {
+                    identity == registration.git_administrative_directory_identity
+                })
             })
             .ok_or_else(|| {
                 CliError::InvalidInput(format!(
@@ -8068,11 +8068,14 @@ impl ProjectAtlasMcpServer {
             let registration = control.worktree_registration(&alias)?;
             let mut blocker = None;
             let entry = repository.worktrees.iter().find(|entry| {
-                CanonicalProjectRoot::from_path(&entry.administrative_directory).is_ok_and(
-                    |identity| identity == registration.git_administrative_directory_identity,
-                )
+                Self::worktree_administrative_path_identity(entry).is_some_and(|identity| {
+                    identity == registration.git_administrative_directory_identity
+                })
             });
             let entry = match entry {
+                Some(entry) if matches!(entry.state, GitWorktreeState::Invalid { .. }) => {
+                    Some(entry)
+                }
                 Some(entry) => match git_administrative_identity(&entry.administrative_directory) {
                     Ok(identity) if identity == registration.git_administrative_identity => {
                         Some(entry)
@@ -12265,6 +12268,23 @@ mod tests {
                         == 1,
                 &format!("{replacement} replacement split its registered invalid row: {listed}"),
             )?;
+            let removed =
+                fixture
+                    .server
+                    .atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+                        worktree: fixture.alias.to_string(),
+                    }));
+            let control =
+                open_atlas_store_read_only_for_project(&fixture.control_db, &fixture.control_root)?;
+            require(
+                removed.contains("cannot retire worktree")
+                    && removed.contains("Git evidence is invalid")
+                    && control.worktree_registration(&fixture.alias)?.state
+                        == WorktreeRegistrationState::Active,
+                &format!(
+                    "{replacement} invalid evidence allowed registration retirement: {removed}"
+                ),
+            )?;
             require(
                 fixture
                     .server
@@ -12758,6 +12778,14 @@ mod tests {
                     .state_for_target(None, Some(case.to_string()))
                     .is_err(),
             &format!("native invalid registration was split or admitted: {invalid_listing}"),
+        )?;
+        let invalid_removal = server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+            worktree: case.to_string(),
+        }));
+        require(
+            invalid_removal.contains("cannot retire worktree")
+                && invalid_removal.contains("Git evidence is invalid"),
+            &format!("native invalid evidence allowed retirement: {invalid_removal}"),
         )?;
         fs::remove_file(administrative_identity.as_path())?;
         fs::rename(&preserved_administrative, administrative_identity.as_path())?;
