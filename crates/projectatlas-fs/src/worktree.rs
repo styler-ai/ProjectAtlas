@@ -180,6 +180,18 @@ pub enum GitStructureIssueKind {
     },
 }
 
+impl GitStructureIssue {
+    /// Preserve the operating-system error class when adapting structural discovery.
+    pub(super) fn into_io_error(self) -> (PathBuf, io::Error) {
+        let error_kind = match &self.kind {
+            GitStructureIssueKind::FilesystemUnavailable { error_kind } => *error_kind,
+            _ => io::ErrorKind::InvalidData,
+        };
+        let message = format!("{:?}", self.kind);
+        (self.path, io::Error::new(error_kind, message))
+    }
+}
+
 /// Discover one repository structure without starting Git or mutating the filesystem.
 ///
 /// The nearest containing worktree wins for nested paths. If the supplied path is
@@ -1488,7 +1500,10 @@ mod windows_file_identity {
 }
 
 /// Read exactly one `prefix path` pointer record.
-fn read_prefixed_pointer(path: &Path, prefix: &str) -> Result<PathBuf, GitStructureIssue> {
+pub(super) fn read_prefixed_pointer(
+    path: &Path,
+    prefix: &str,
+) -> Result<PathBuf, GitStructureIssue> {
     let bytes = read_bounded_bytes(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
     let value = single_pointer_line_bytes(path, &bytes)?;
     let Some(value) = value
@@ -1508,7 +1523,7 @@ fn read_prefixed_pointer(path: &Path, prefix: &str) -> Result<PathBuf, GitStruct
 }
 
 /// Read exactly one plain path pointer record.
-fn read_plain_pointer(path: &Path) -> Result<PathBuf, GitStructureIssue> {
+pub(super) fn read_plain_pointer(path: &Path) -> Result<PathBuf, GitStructureIssue> {
     let bytes = read_bounded_bytes(path, GIT_DIRECTORY_POINTER_MAX_BYTES)?;
     path_value_bytes(path, single_pointer_line_bytes(path, &bytes)?)
 }
