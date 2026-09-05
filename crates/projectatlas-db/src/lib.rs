@@ -1095,6 +1095,9 @@ pub struct ReverseCallerBenchmarkQuery {
     pub parameters: Vec<serde_json::Value>,
     /// `EXPLAIN QUERY PLAN` details for the exact production SQL.
     pub query_plan: Vec<String>,
+    /// Plan-replay failure retained only when the production query already failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_plan_error: Option<String>,
     /// Exact rusqlite bindings retained only until the untimed plan replay.
     #[serde(skip)]
     bindings: Vec<Value>,
@@ -1128,6 +1131,12 @@ pub struct ReverseCallerBenchmarkTrace {
 thread_local! {
     static REVERSE_CALLER_BENCHMARK_QUERIES: RefCell<Option<Vec<ReverseCallerBenchmarkQuery>>> =
         const { RefCell::new(None) };
+}
+
+#[cfg(feature = "reverse-caller-benchmark")]
+/// Report whether the current thread owns an active reverse-caller capture.
+fn reverse_caller_benchmark_trace_active() -> bool {
+    REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow().is_some())
 }
 
 #[cfg(feature = "reverse-caller-benchmark")]
@@ -1168,6 +1177,7 @@ fn record_reverse_caller_benchmark_query(
                 })
                 .collect(),
             query_plan: Vec::new(),
+            query_plan_error: None,
             bindings: values.to_vec(),
         });
     });
@@ -1243,6 +1253,7 @@ fn query_import_relations_for_reverse_caller_benchmark(
     sql: &str,
     values: &[Value],
 ) -> DbResult<Vec<StoredImportRelation>> {
+    debug_assert!(reverse_caller_benchmark_trace_active());
     let result: DbResult<Vec<StoredImportRelation>> = (|| {
         let mut statement = connection.prepare_cached(sql)?;
         let rows = statement.query_map(
@@ -1961,7 +1972,18 @@ impl AtlasStore {
             .unwrap_or_default();
         let engine = reverse_caller_benchmark_engine(&self.connection)?;
         for query in &mut queries {
-            query.query_plan = reverse_caller_benchmark_query_plan(&self.connection, query)?;
+            match reverse_caller_benchmark_query_plan(&self.connection, query) {
+                Ok(plan) => query.query_plan = plan,
+                Err(error)
+                    if matches!(
+                        &query.outcome,
+                        ReverseCallerBenchmarkQueryOutcome::Failed { .. }
+                    ) =>
+                {
+                    query.query_plan_error = Some(error.to_string());
+                }
+                Err(error) => return Err(error),
+            }
             query.bindings.clear();
         }
         Ok(ReverseCallerBenchmarkTrace {
@@ -4313,26 +4335,26 @@ impl AtlasStore {
                 Value::Integer(usize_to_i64(limit)),
             ];
             #[cfg(feature = "reverse-caller-benchmark")]
-            relations.extend(query_import_relations_for_reverse_caller_benchmark(
-                &self.connection,
-                "import-targets",
-                term.clone(),
-                limit,
-                IMPORT_RELATIONS_MATCHING_TARGETS_SQL,
-                &benchmark_values,
-            )?);
-            #[cfg(not(feature = "reverse-caller-benchmark"))]
-            {
-                let mut statement = self
-                    .connection
-                    .prepare_cached(IMPORT_RELATIONS_MATCHING_TARGETS_SQL)?;
-                let rows = statement.query_map(
-                    params![pattern, usize_to_i64(limit)],
-                    stored_import_relation_from_row,
-                )?;
-                for row in rows {
-                    relations.push(row?);
-                }
+            if reverse_caller_benchmark_trace_active() {
+                relations.extend(query_import_relations_for_reverse_caller_benchmark(
+                    &self.connection,
+                    "import-targets",
+                    term.clone(),
+                    limit,
+                    IMPORT_RELATIONS_MATCHING_TARGETS_SQL,
+                    &benchmark_values,
+                )?);
+                continue;
+            }
+            let mut statement = self
+                .connection
+                .prepare_cached(IMPORT_RELATIONS_MATCHING_TARGETS_SQL)?;
+            let rows = statement.query_map(
+                params![pattern, usize_to_i64(limit)],
+                stored_import_relation_from_row,
+            )?;
+            for row in rows {
+                relations.push(row?);
             }
         }
         relations.sort_by(|left, right| {
@@ -4368,29 +4390,27 @@ impl AtlasStore {
             Value::Integer(usize_to_i64(bounded_limit)),
         ];
         #[cfg(feature = "reverse-caller-benchmark")]
-        let relations = query_import_relations_for_reverse_caller_benchmark(
-            &self.connection,
-            "import-caller-path",
-            path.to_string(),
-            bounded_limit,
-            IMPORT_RELATIONS_FOR_PATH_SQL,
-            &benchmark_values,
+        if reverse_caller_benchmark_trace_active() {
+            return query_import_relations_for_reverse_caller_benchmark(
+                &self.connection,
+                "import-caller-path",
+                path.to_string(),
+                bounded_limit,
+                IMPORT_RELATIONS_FOR_PATH_SQL,
+                &benchmark_values,
+            );
+        }
+        let mut statement = self
+            .connection
+            .prepare_cached(IMPORT_RELATIONS_FOR_PATH_SQL)?;
+        let rows = statement.query_map(
+            params![path, usize_to_i64(bounded_limit)],
+            stored_import_relation_from_row,
         )?;
-        #[cfg(not(feature = "reverse-caller-benchmark"))]
-        let relations = {
-            let mut statement = self
-                .connection
-                .prepare_cached(IMPORT_RELATIONS_FOR_PATH_SQL)?;
-            let rows = statement.query_map(
-                params![path, usize_to_i64(bounded_limit)],
-                stored_import_relation_from_row,
-            )?;
-            let mut relations = Vec::new();
-            for row in rows {
-                relations.push(row?);
-            }
-            relations
-        };
+        let mut relations = Vec::new();
+        for row in rows {
+            relations.push(row?);
+        }
         Ok(relations)
     }
 
@@ -8917,6 +8937,7 @@ mod tests {
         let terms = ["target".to_string()];
 
         store.load_import_relations_matching_targets(&terms, 1)?;
+        store.load_import_relations_for_path("src/caller.rs", 1)?;
         let inactive =
             REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow().is_none());
         require_eq(&inactive, &true, "capture before start")?;
@@ -8927,6 +8948,7 @@ mod tests {
         require_eq(&trace.queries.len(), &1, "active capture query count")?;
 
         store.load_import_relations_matching_targets(&terms, 1)?;
+        store.load_import_relations_for_path("src/caller.rs", 1)?;
         let inactive =
             REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow().is_none());
         require_eq(&inactive, &true, "capture after take")?;
@@ -9038,6 +9060,76 @@ mod tests {
             require(
                 !query.query_plan.is_empty(),
                 "failed query plan was not replayed",
+            )?;
+            require_eq(
+                &query.query_plan_error,
+                &None,
+                "replayable failed query reported a plan error",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "reverse-caller-benchmark")]
+    #[test]
+    fn reverse_caller_benchmark_retains_failed_imports_without_a_plan() -> Result<(), Box<dyn Error>>
+    {
+        let store = AtlasStore::in_memory()?;
+        store
+            .connection
+            .execute("DROP TABLE symbol_relations", [])?;
+
+        store.start_reverse_caller_benchmark_trace();
+        let target_result =
+            store.load_import_relations_matching_targets(&["target".to_string()], 20);
+        let target_trace = store.take_reverse_caller_benchmark_trace()?;
+        store.start_reverse_caller_benchmark_trace();
+        let path_result = store.load_import_relations_for_path("src/caller.rs", 20);
+        let path_trace = store.take_reverse_caller_benchmark_trace()?;
+
+        for (family, result, trace) in [
+            ("import-targets", target_result, target_trace),
+            ("import-caller-path", path_result, path_trace),
+        ] {
+            let Err(error) = result else {
+                return Err(
+                    io::Error::other("missing relation table unexpectedly produced rows").into(),
+                );
+            };
+            require(
+                error.to_string().contains("no such table"),
+                "production query did not retain its preparation failure",
+            )?;
+            require_eq(&trace.queries.len(), &1, "failed query observation count")?;
+            let query = &trace.queries[0];
+            require_eq(&query.family, &family, "failed query family")?;
+            require_eq(&query.rows, &0, "failed query accepted rows")?;
+            require(
+                matches!(
+                    &query.outcome,
+                    ReverseCallerBenchmarkQueryOutcome::Failed { error }
+                        if error.contains("no such table")
+                ),
+                "failed query outcome did not retain the preparation error",
+            )?;
+            require(
+                query.query_plan.is_empty(),
+                "unavailable failed-query plan was fabricated",
+            )?;
+            require(
+                query
+                    .query_plan_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("no such table")),
+                "failed plan replay error was not retained",
+            )?;
+            let encoded = serde_json::to_value(query)?;
+            require(
+                encoded
+                    .get("query_plan_error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|error| error.contains("no such table")),
+                "failed plan replay error was not serialized",
             )?;
         }
         Ok(())

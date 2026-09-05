@@ -223,7 +223,7 @@ class ReverseCallerHarnessTests(unittest.TestCase):
                                         "status": "failed",
                                         "error": "sqlite error: invalid line",
                                     },
-                                    "query_plan": [],
+                                    "query_plan": ["SEARCH symbol_relations"],
                                 }
                             ],
                             "engine": {"sqlite_version": "3"},
@@ -268,6 +268,89 @@ class ReverseCallerHarnessTests(unittest.TestCase):
         self.assertEqual(result["query_engine"], {"sqlite_version": "3"})
         self.assertEqual(
             result["query_observations"][0]["outcome"]["status"], "failed"
+        )
+
+    def test_corrupt_import_failures_replay_each_failed_query(self) -> None:
+        target = {
+            "path": "src/target.rs",
+            "language": "rust",
+            "caller_suffix": ".rs",
+            "symbol_count": 1,
+            "caller_count": 1,
+        }
+        for name, family in (
+            ("corrupt-import-target", "import-targets"),
+            ("corrupt-import-caller-path", "import-caller-path"),
+        ):
+            with self.subTest(name=name):
+                def fake_process(
+                    command: list[str],
+                    cwd: Path,
+                    *,
+                    trace_path: Path | None = None,
+                    allocation_path: Path | None = None,
+                ) -> dict[str, object]:
+                    del command, cwd, allocation_path
+                    if trace_path is not None:
+                        trace_path.write_text(
+                            json.dumps(
+                                {
+                                    "queries": [
+                                        {
+                                            "family": family,
+                                            "outcome": {
+                                                "status": "failed",
+                                                "error": "sqlite error: invalid line",
+                                            },
+                                            "query_plan": ["SEARCH symbol_relations"],
+                                        }
+                                    ],
+                                    "engine": {"sqlite_version": "3"},
+                                    "plan_provenance": (
+                                        "projectatlas-db::AtlasStore::connection"
+                                    ),
+                                    "allocations": None,
+                                }
+                            ),
+                            encoding="utf-8",
+                        )
+                    return {
+                        "returncode": 1,
+                        "wall_ms": 1.0,
+                        "cpu_ms": 1.0,
+                        "peak_rss_bytes": 1,
+                        "stdout": b"",
+                        "stderr": b"invalid line",
+                    }
+
+                with (
+                    patch.object(reverse_caller, "write_fixture", return_value=[target]),
+                    patch.object(reverse_caller, "setup_fixture"),
+                    patch.object(reverse_caller, "mutate_corrupt_import_row"),
+                    patch.object(reverse_caller, "run_process", side_effect=fake_process),
+                ):
+                    result = reverse_caller.failure_case(
+                        Path("ordinary"), Path("evidence"), name, "baseline"
+                    )
+                self.assertEqual(result["query_observations"][0]["family"], family)
+                self.assertEqual(
+                    result["query_observations"][0]["outcome"]["status"], "failed"
+                )
+
+    def test_failed_query_accepts_an_explicit_plan_replay_error(self) -> None:
+        reverse_caller.require_production_trace_evidence(
+            {
+                "queries": [
+                    {
+                        "outcome": {"status": "failed", "error": "no such table"},
+                        "query_plan": [],
+                        "query_plan_error": "no such table: symbol_relations",
+                    }
+                ],
+                "engine": {"sqlite_version": "3"},
+                "plan_provenance": "projectatlas-db::AtlasStore::connection",
+            },
+            "failed preparation",
         )
 
     def test_compact_evidence_drops_raw_process_streams(self) -> None:

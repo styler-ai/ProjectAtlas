@@ -733,7 +733,8 @@ def require_production_trace_evidence(trace: dict[str, Any], label: str) -> None
     ):
         raise AssertionError(f"{label} trace has no SQLite engine identity")
     for event in trace.get("queries", []):
-        if not isinstance(event.get("query_plan"), list):
+        query_plan = event.get("query_plan")
+        if not isinstance(query_plan, list):
             raise AssertionError(f"{label} trace omitted a production query plan")
         outcome = event.get("outcome")
         if not isinstance(outcome, dict) or outcome.get("status") not in {
@@ -741,8 +742,21 @@ def require_production_trace_evidence(trace: dict[str, Any], label: str) -> None
             "failed",
         }:
             raise AssertionError(f"{label} trace omitted a typed query outcome")
-        if outcome["status"] == "failed" and not isinstance(outcome.get("error"), str):
-            raise AssertionError(f"{label} failed query omitted its database error")
+        plan_error = event.get("query_plan_error")
+        if outcome["status"] == "succeeded":
+            if not query_plan or plan_error is not None:
+                raise AssertionError(f"{label} successful query omitted its production plan")
+        else:
+            if not isinstance(outcome.get("error"), str):
+                raise AssertionError(f"{label} failed query omitted its database error")
+            if not query_plan and not isinstance(plan_error, str):
+                raise AssertionError(
+                    f"{label} failed query omitted both its plan and replay error"
+                )
+            if query_plan and plan_error is not None:
+                raise AssertionError(
+                    f"{label} failed query retained both a plan and replay error"
+                )
 
 
 def multi_binding_alias_case(binary: Path, arm: str) -> dict[str, Any]:
@@ -961,6 +975,29 @@ def mutate_corrupt_row(database: Path) -> None:
         connection.close()
 
 
+def mutate_corrupt_import_row(database: Path, family: str) -> None:
+    """Corrupt the import row selected by one production query family."""
+
+    connection = sqlite3.connect(database)
+    try:
+        if family == "import-targets":
+            assignment = "line = 'invalid'"
+        elif family == "import-caller-path":
+            assignment = "line = 'invalid', target_name = 'use crate::unrelated'"
+        else:
+            raise ValueError(family)
+        cursor = connection.execute(
+            f"UPDATE symbol_relations SET {assignment} WHERE rowid = "
+            "(SELECT rowid FROM symbol_relations "
+            "WHERE kind = 'imports' AND path = 'src/rust_caller_000.rs' LIMIT 1)"
+        )
+        if cursor.rowcount != 1:
+            raise AssertionError(f"{family} corruption selected no import row")
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def cancellation_case(binary: Path, arm: str) -> dict[str, Any]:
     """Compare one supported MCP summary cancellation against the other arm."""
 
@@ -989,6 +1026,13 @@ def failure_case(
             target_path = "src/missing.rs"
         elif name == "corrupt-relation":
             mutate_corrupt_row(root / ".projectatlas" / "projectatlas.db")
+            target_path = targets[0]["path"]
+        elif name in {"corrupt-import-target", "corrupt-import-caller-path"}:
+            family = {
+                "corrupt-import-target": "import-targets",
+                "corrupt-import-caller-path": "import-caller-path",
+            }[name]
+            mutate_corrupt_import_row(root / ".projectatlas" / "projectatlas.db", family)
             target_path = targets[0]["path"]
         elif name == "stale-source":
             target_path = targets[0]["path"]
@@ -1024,17 +1068,22 @@ def failure_case(
         result["plan_provenance"] = trace.get("plan_provenance")
         result["trace_observed"] = True
         result["timed"] = False
-        if name == "corrupt-relation":
-            call_queries = [
+        failed_family = {
+            "corrupt-relation": "call-targets",
+            "corrupt-import-target": "import-targets",
+            "corrupt-import-caller-path": "import-caller-path",
+        }.get(name)
+        if failed_family is not None:
+            failed_queries = [
                 event
                 for event in result["query_observations"]
-                if event.get("family") == "call-targets"
+                if event.get("family") == failed_family
             ]
-            if len(call_queries) != 1 or call_queries[0].get("outcome", {}).get(
+            if len(failed_queries) != 1 or failed_queries[0].get("outcome", {}).get(
                 "status"
             ) != "failed":
                 raise AssertionError(
-                    f"{arm} malformed relation trace omitted the failed call-target query"
+                    f"{arm} {name} trace omitted the failed {failed_family} query"
                 )
             if measured["returncode"] == 0:
                 raise AssertionError("malformed relation unexpectedly succeeded")
@@ -1210,6 +1259,7 @@ def compact_query_plan_evidence(observations: dict[str, Any]) -> dict[str, Any]:
                     "sql",
                     "parameters",
                     "query_plan",
+                    "query_plan_error",
                 )
                 if field in event
             }
@@ -1543,7 +1593,13 @@ def main() -> None:
             semantic_findings.append(f"{shape}: production query evidence drift")
 
     failures: dict[str, dict[str, Any]] = {}
-    for case in ("missing-summary", "corrupt-relation", "stale-source"):
+    for case in (
+        "missing-summary",
+        "corrupt-relation",
+        "corrupt-import-target",
+        "corrupt-import-caller-path",
+        "stale-source",
+    ):
         failures[case] = {
             "baseline": failure_case(
                 baseline_binary, baseline_evidence_binary, case, "baseline"
