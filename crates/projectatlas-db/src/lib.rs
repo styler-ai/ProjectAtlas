@@ -4266,7 +4266,9 @@ impl AtlasStore {
         #[cfg(feature = "reverse-caller-benchmark")]
         let relation_result = self.query_relations(&sql, params_from_iter(values.iter()));
         #[cfg(feature = "reverse-caller-benchmark")]
-        if let Err(error) = &relation_result {
+        if reverse_caller_benchmark_trace_active()
+            && let Err(error) = &relation_result
+        {
             record_reverse_caller_benchmark_query(
                 "call-targets",
                 target_names.join("\u{1f}"),
@@ -4299,16 +4301,18 @@ impl AtlasStore {
                 && left.line == right.line
         });
         #[cfg(feature = "reverse-caller-benchmark")]
-        record_reverse_caller_benchmark_query(
-            "call-targets",
-            target_names.join("\u{1f}"),
-            limit_per_target.max(1),
-            relations.len(),
-            relations.iter().map(symbol_relation_bytes).sum(),
-            ReverseCallerBenchmarkQueryOutcome::Succeeded,
-            &sql,
-            &values,
-        );
+        if reverse_caller_benchmark_trace_active() {
+            record_reverse_caller_benchmark_query(
+                "call-targets",
+                target_names.join("\u{1f}"),
+                limit_per_target.max(1),
+                relations.len(),
+                relations.iter().map(symbol_relation_bytes).sum(),
+                ReverseCallerBenchmarkQueryOutcome::Succeeded,
+                &sql,
+                &values,
+            );
+        }
         Ok(relations)
     }
 
