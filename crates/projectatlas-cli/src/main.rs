@@ -2007,15 +2007,16 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             let benchmark_allocation_path =
                 std::env::var_os("PROJECTATLAS_REVERSE_CALLER_ALLOCATIONS").map(PathBuf::from);
             #[cfg(feature = "reverse-caller-benchmark")]
-            if benchmark_trace_path.is_some() || benchmark_allocation_path.is_some() {
-                if benchmark_trace_path.is_some() {
-                    store.start_reverse_caller_benchmark_trace();
-                }
-                reverse_caller_benchmark::reset();
+            if benchmark_trace_path.is_some() {
+                store.start_reverse_caller_benchmark_trace();
             }
             let report_result: Result<_, CliError> = (|| {
                 let file_key = validated_indexed_file_key(&store, file)?;
                 let content = read_indexed_file_content(&store, &file_key)?;
+                #[cfg(feature = "reverse-caller-benchmark")]
+                if benchmark_trace_path.is_some() || benchmark_allocation_path.is_some() {
+                    reverse_caller_benchmark::reset();
+                }
                 let report = build_file_summary_from_source_with_selection(
                     &store,
                     Path::new(&file_key),
