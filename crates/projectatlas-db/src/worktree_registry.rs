@@ -2433,10 +2433,11 @@ mod tests {
     fn schema_twentytwo_worktree_identity_migration_rejects_unprovable_verbatim_paths()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let control = temp.path().join("control");
-        let common = temp.path().join("common.git");
+        let base = temp.path().canonicalize()?;
+        let control = base.join("control");
+        let common = base.join("common.git");
         let administrative = common.join("worktrees/legacy");
-        let root = temp.path().join("legacy");
+        let root = base.join("legacy");
         for path in [&control, &common, &administrative, &root] {
             fs::create_dir_all(path)?;
         }
@@ -2445,9 +2446,9 @@ mod tests {
             projectatlas_core::normalize_native_path_display(&administrative);
         let root_display = projectatlas_core::normalize_native_path_display(&root);
         let missing_display =
-            projectatlas_core::normalize_native_path_display(temp.path().join("a".repeat(240)));
+            projectatlas_core::normalize_native_path_display(base.join("a".repeat(240)));
         let suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
-        let prefix = projectatlas_core::normalize_native_path_display(temp.path());
+        let prefix = projectatlas_core::normalize_native_path_display(&base);
         let suffix_threshold_display = format!(
             "{prefix}/{}",
             "b".repeat(260 - suffix_units - prefix.encode_utf16().count() - 1)
