@@ -51,6 +51,23 @@ impl CanonicalProjectRoot {
         Self::from_decoded_path(canonical)
     }
 
+    /// Construct an identity from a persisted native path whose filesystem
+    /// object may no longer exist.
+    ///
+    /// This is the migration and recovery entry point for historical
+    /// worktree identities. It uses the same identity type and lexical
+    /// validation as [`Self::decode`], but deliberately does not require a
+    /// live directory. Active filesystem admission must continue to use
+    /// [`Self::from_path`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is relative, contains an interior NUL,
+    /// or does not satisfy the native canonical lexical contract.
+    pub fn from_persisted_path(path: PathBuf) -> CoreResult<Self> {
+        Self::from_decoded_path(path)
+    }
+
     /// Construct an identity from a durable native codec value.
     ///
     /// This is deliberately private: active roots must enter through

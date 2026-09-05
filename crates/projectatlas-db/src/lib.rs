@@ -240,6 +240,28 @@ pub enum DbError {
         /// Bounded caller-visible value.
         value: String,
     },
+    /// A legacy active registration would violate native identity uniqueness.
+    #[error(
+        "worktree registration migration found duplicate active native {field} identities in registrations {first_registration_id} and {second_registration_id}; repair one legacy row and retry"
+    )]
+    WorktreeRegistrationMigrationConflict {
+        /// Native identity column whose uniqueness would be violated.
+        field: &'static str,
+        /// Lowest stable registration ID in the collision.
+        first_registration_id: i64,
+        /// Highest stable registration ID in the collision.
+        second_registration_id: i64,
+    },
+    /// A legacy path projection cannot establish its original native identity.
+    #[error(
+        "worktree registration migration cannot establish native {field} identity for registration {registration_id}; repair the legacy row and retry"
+    )]
+    WorktreeRegistrationMigrationIdentityUnavailable {
+        /// Legacy path field whose native identity cannot be recovered safely.
+        field: &'static str,
+        /// Stable registration ID that needs repair.
+        registration_id: i64,
+    },
     /// The bounded worktree-registration catalog is full.
     #[error("worktree registration capacity {limit} is exhausted")]
     WorktreeRegistrationCapacity {

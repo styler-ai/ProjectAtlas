@@ -773,36 +773,20 @@ pub fn source_selection_policy_paths_controlled(
                 paths.insert(git.join("info").join("exclude"));
             }
             Ok(metadata) if metadata.is_file() => {
-                if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
-                    return Err(FsError::Io {
-                        path: git,
-                        source: io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "linked-worktree .git pointer exceeds the policy-input limit",
-                        ),
-                    });
-                }
-                let text = fs::read_to_string(&git).map_err(|source| FsError::Io {
-                    path: git.clone(),
-                    source,
-                })?;
-                if let Some(directory) = text.strip_prefix("gitdir:").map(str::trim) {
-                    let directory = Path::new(directory);
-                    let directory = if directory.is_absolute() {
-                        directory.to_path_buf()
-                    } else {
-                        ancestor.join(directory)
-                    };
-                    paths.insert(directory.join("info").join("exclude"));
-                    let common_dir_pointer = directory.join("commondir");
-                    paths.insert(common_dir_pointer.clone());
-                    if let Some(common_dir) = read_git_directory_pointer(
-                        &common_dir_pointer,
-                        &directory,
-                        "linked-worktree commondir",
-                    )? {
-                        paths.insert(common_dir.join("info").join("exclude"));
-                    }
+                let directory = worktree::read_prefixed_pointer(&git, "gitdir:")
+                    .map_err(git_pointer_io_error)?;
+                let directory = if directory.is_absolute() {
+                    directory
+                } else {
+                    ancestor.join(&directory)
+                };
+                paths.insert(directory.join("info").join("exclude"));
+                let common_dir_pointer = directory.join("commondir");
+                paths.insert(common_dir_pointer.clone());
+                if let Some(common_dir) =
+                    read_git_directory_pointer(&common_dir_pointer, &directory)?
+                {
+                    paths.insert(common_dir.join("info").join("exclude"));
                 }
             }
             Ok(_metadata) => {}
@@ -854,11 +838,7 @@ pub fn source_selection_policy_paths_controlled(
 }
 
 /// Read one bounded Git directory pointer relative to its containing directory.
-fn read_git_directory_pointer(
-    path: &Path,
-    base: &Path,
-    description: &str,
-) -> FsResult<Option<PathBuf>> {
+fn read_git_directory_pointer(path: &Path, base: &Path) -> FsResult<Option<PathBuf>> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -872,29 +852,24 @@ fn read_git_directory_pointer(
     if !metadata.is_file() {
         return Ok(None);
     }
-    if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
-        return Err(FsError::Io {
-            path: path.to_path_buf(),
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{description} exceeds the policy-input limit"),
-            ),
-        });
-    }
-    let value = fs::read_to_string(path).map_err(|source| FsError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    let value = Path::new(value);
+    let value = worktree::read_plain_pointer(path).map_err(git_pointer_io_error)?;
     Ok(Some(if value.is_absolute() {
-        value.to_path_buf()
+        value
     } else {
         base.join(value)
     }))
+}
+
+/// Adapt one structural pointer failure for scanner policy callers.
+fn git_pointer_io_error(issue: worktree::GitStructureIssue) -> FsError {
+    let (path, source) = issue.into_io_error();
+    FsError::Io { path, source }
+}
+
+/// Adapt one structural pointer failure for repository-boundary callers.
+fn git_pointer_boundary_error(issue: worktree::GitStructureIssue) -> FsError {
+    let (path, source) = issue.into_io_error();
+    FsError::RepositoryBoundary { path, source }
 }
 
 /// Add registered in-root sibling worktrees to the existing prefix policy.
@@ -1061,36 +1036,12 @@ fn common_git_directory(root: &Path) -> FsResult<Option<PathBuf>> {
             ),
         });
     }
-    if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
-        return Err(FsError::RepositoryBoundary {
-            path: git,
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                "linked-worktree .git pointer exceeds the policy-input limit",
-            ),
-        });
-    }
-    let value = fs::read_to_string(&git).map_err(|source| FsError::RepositoryBoundary {
-        path: git.clone(),
-        source,
-    })?;
-    let git_dir = value
-        .trim()
-        .strip_prefix("gitdir:")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| FsError::RepositoryBoundary {
-            path: git.clone(),
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                "linked-worktree .git pointer is malformed",
-            ),
-        })?;
-    let git_dir = Path::new(git_dir);
+    let git_dir =
+        worktree::read_prefixed_pointer(&git, "gitdir:").map_err(git_pointer_boundary_error)?;
     let git_dir = if git_dir.is_absolute() {
-        git_dir.to_path_buf()
+        git_dir
     } else {
-        root.join(git_dir)
+        root.join(&git_dir)
     };
     let git_dir = git_dir
         .canonicalize()
@@ -1139,7 +1090,7 @@ fn read_repository_boundary_pointer(
             ),
         });
     }
-    match read_git_directory_pointer(path, base, description) {
+    match read_git_directory_pointer(path, base) {
         Ok(Some(value)) => Ok(Some(value)),
         Ok(None) => Err(FsError::RepositoryBoundary {
             path: path.to_path_buf(),

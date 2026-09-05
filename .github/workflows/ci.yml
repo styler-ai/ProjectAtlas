@@ -599,6 +599,21 @@ jobs:
           cargo test --locked -p projectatlas-cli final_retirement_does_not_import_replacement_lifecycle_telemetry -- --nocapture
           cargo test --locked -p projectatlas-cli retirement_reclassifies_identity_and_snapshot_failures_after_lifecycle_replacement -- --nocapture
           cargo test --locked -p projectatlas-cli registered_reset_and_binding_linearize_without_recreating_a_reset_winner -- --nocapture
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cargo test --locked -p projectatlas-core windows_verbatim_component_classifier_covers_legacy_spellings -- --nocapture
+            cargo test --locked -p projectatlas-db schema_twentytwo_ -- --nocapture
+            cargo test --locked -p projectatlas-cli windows_worktree_selector_survives_live_to_retained_transition -- --nocapture
+          fi
+
+      - name: Native Unix worktree lifecycle
+        if: runner.os != 'Windows' && (contains(matrix.contracts, 'worktree') || contains(matrix.contracts, 'mac-quality'))
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          cargo test --locked -p projectatlas-cli real_unicode_worktree_lifecycle_routes_alias_and_preserves_native_identities -- --nocapture
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            cargo test --locked -p projectatlas-cli real_non_utf8_worktree_lifecycle_routes_alias_and_preserves_native_identities -- --nocapture
+          fi
 
       - name: Plugin installer E2E
         if: contains(matrix.contracts, 'plugin')

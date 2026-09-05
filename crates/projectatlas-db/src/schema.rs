@@ -5,8 +5,8 @@ use crate::sqlite_profile::{
     open_read_only_connection, verify_current_read_profile,
 };
 use crate::{DbError, DbResult};
-use projectatlas_core::CanonicalProjectRoot;
 use projectatlas_core::graph::{GraphLimitKind, ProjectInstanceId};
+use projectatlas_core::{CanonicalProjectRoot, CoreError};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use projectatlas_core::normalize_native_path_display;
 
 /// Current `SQLite` schema version supported by this crate.
-pub(crate) const SCHEMA_VERSION: i64 = 22;
+pub(crate) const SCHEMA_VERSION: i64 = 23;
 /// Released 0.3.26 schema accepted by the migration inventory.
 pub(crate) const PREVIOUS_SCHEMA_VERSION: i64 = 8;
 /// First internal schema with explicit publication invalidation.
@@ -47,6 +47,8 @@ const CANONICAL_ROOT_SCHEMA_VERSION: i64 = 20;
 const GRAPH_IDENTITY_REJECTION_SCHEMA_VERSION: i64 = 21;
 /// First schema with deterministic same-span rejection fact identities.
 const GRAPH_IDENTITY_REJECTION_FACT_INDEX_SCHEMA_VERSION: i64 = 22;
+/// First schema with lossless native identities for registered worktrees.
+const WORKTREE_NATIVE_IDENTITY_SCHEMA_VERSION: i64 = 23;
 /// Metadata key for the durable schema version.
 pub(crate) const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// Metadata key for the owning project root.
@@ -175,6 +177,11 @@ const MIGRATIONS: &[Migration] = &[
         from: GRAPH_IDENTITY_REJECTION_SCHEMA_VERSION,
         to: GRAPH_IDENTITY_REJECTION_FACT_INDEX_SCHEMA_VERSION,
         apply: migrate_21_to_22,
+    },
+    Migration {
+        from: GRAPH_IDENTITY_REJECTION_FACT_INDEX_SCHEMA_VERSION,
+        to: WORKTREE_NATIVE_IDENTITY_SCHEMA_VERSION,
+        apply: migrate_22_to_23,
     },
 ];
 
@@ -319,6 +326,9 @@ static GRAPH_IDENTITY_REJECTION_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaCont
     OnceLock::new();
 /// Immutable expected schema-21 contract before rejection fact identity storage.
 static GRAPH_IDENTITY_REJECTION_SCHEMA_CONTRACT: OnceLock<SchemaContract> = OnceLock::new();
+/// Immutable expected schema-22 contract before native worktree identities.
+static WORKTREE_NATIVE_IDENTITY_PREDECESSOR_SCHEMA_CONTRACT: OnceLock<SchemaContract> =
+    OnceLock::new();
 
 /// Immutable physical schema emitted by the released 0.3.26 runtime.
 #[cfg(test)]
@@ -991,6 +1001,41 @@ const PROJECT_ROOT_IDENTITY_SCHEMA_SQL: &str = "
         root BLOB NOT NULL
             CHECK(typeof(root) = 'blob' AND length(root) >= 3)
     ) STRICT;
+";
+
+/// Add the lossless native identities to historical worktree registrations.
+///
+/// SQLite requires a default when adding a `NOT NULL` column to a populated
+/// table. The platform-specific default is valid codec-shaped data and is
+/// replaced for every existing row by [`backfill_worktree_native_identities`]
+/// in the same migration transaction. New writes always provide the real
+/// identity explicitly.
+fn add_worktree_native_identity_columns(connection: &Connection) -> DbResult<()> {
+    let default_hex = if cfg!(unix) {
+        // codec version 1, Unix platform 1, root "/"
+        "01012f"
+    } else if cfg!(windows) {
+        // codec version 1, Windows platform 2, temporary absolute `C:\\`
+        "010243003a005c00"
+    } else {
+        // codec version 1, fallback platform 3, root "/"
+        "01032f"
+    };
+    let sql = format!(
+        "ALTER TABLE worktree_registrations ADD COLUMN git_common_directory_identity BLOB NOT NULL DEFAULT X'{default_hex}' CHECK(typeof(git_common_directory_identity) = 'blob' AND length(git_common_directory_identity) >= 3);\n\
+         ALTER TABLE worktree_registrations ADD COLUMN git_administrative_directory_identity BLOB NOT NULL DEFAULT X'{default_hex}' CHECK(typeof(git_administrative_directory_identity) = 'blob' AND length(git_administrative_directory_identity) >= 3);\n\
+         ALTER TABLE worktree_registrations ADD COLUMN last_root_identity BLOB NOT NULL DEFAULT X'{default_hex}' CHECK(typeof(last_root_identity) = 'blob' AND length(last_root_identity) >= 3);"
+    );
+    connection.execute_batch(&sql)?;
+    Ok(())
+}
+
+/// Access paths owned by the native worktree identity migration.
+const WORKTREE_NATIVE_IDENTITY_INDEX_SCHEMA_SQL: &str = "
+    CREATE UNIQUE INDEX idx_worktree_registrations_active_native_administrative_directory
+        ON worktree_registrations(git_administrative_directory_identity) WHERE state = 'active';
+    CREATE UNIQUE INDEX idx_worktree_registrations_active_native_root
+        ON worktree_registrations(last_root_identity) WHERE state = 'active';
 ";
 
 /// Produce one exact historical or current graph contract from one DDL authority.
@@ -2228,6 +2273,8 @@ fn create_fresh(
     connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
     connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
     connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
+    add_worktree_native_identity_columns(connection)?;
+    connection.execute_batch(WORKTREE_NATIVE_IDENTITY_INDEX_SCHEMA_SQL)?;
     connection.execute_batch(PROJECT_ROOT_IDENTITY_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_SQL)?;
     set_metadata(connection, FILE_TEXT_FTS_SOURCE_REVISION_KEY, "0")?;
@@ -2390,6 +2437,157 @@ fn migrate_21_to_22(connection: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+/// Add and backfill lossless native identities for every registered worktree.
+fn migrate_22_to_23(connection: &Connection) -> DbResult<()> {
+    add_worktree_native_identity_columns(connection)?;
+    backfill_worktree_native_identities(connection)?;
+    reject_worktree_native_identity_collisions(connection)?;
+    connection.execute_batch(WORKTREE_NATIVE_IDENTITY_INDEX_SCHEMA_SQL)?;
+    Ok(())
+}
+
+/// Reject legacy active rows that would collide in the native identity indexes.
+///
+/// The old display projections could erase distinctions between native paths,
+/// so migration must not choose a survivor or merge rows. The first collision
+/// is selected by schema-owned field order and ascending registration IDs to
+/// keep the typed diagnostic stable across retries and SQLite row layouts.
+fn reject_worktree_native_identity_collisions(connection: &Connection) -> DbResult<()> {
+    const NATIVE_IDENTITY_FIELDS: [(&str, &str); 2] = [
+        (
+            "git_administrative_directory_identity",
+            "git_administrative_directory_identity",
+        ),
+        ("last_root_identity", "last_root_identity"),
+    ];
+
+    for (field, column) in NATIVE_IDENTITY_FIELDS {
+        let query = format!(
+            "SELECT MIN(registration_id), MAX(registration_id)\n\
+             FROM worktree_registrations\n\
+             WHERE state = 'active'\n\
+             GROUP BY {column}\n\
+             HAVING COUNT(*) > 1\n\
+             ORDER BY MIN(registration_id)\n\
+             LIMIT 1"
+        );
+        let collision = connection
+            .query_row(&query, [], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .optional()?;
+        if let Some((first_registration_id, second_registration_id)) = collision {
+            return Err(DbError::WorktreeRegistrationMigrationConflict {
+                field,
+                first_registration_id,
+                second_registration_id,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Encode the historical UTF-8 path projection before publishing native keys.
+fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT registration_id, git_common_directory,
+                    git_administrative_directory, last_root, state = 'retired'
+             FROM worktree_registrations
+             ORDER BY registration_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (registration_id, common, administrative, root, retired) in rows {
+        let common = legacy_worktree_native_identity(
+            registration_id,
+            "git_common_directory",
+            PathBuf::from(common),
+            retired,
+        )?;
+        let administrative = legacy_worktree_native_identity(
+            registration_id,
+            "git_administrative_directory",
+            PathBuf::from(administrative),
+            retired,
+        )?;
+        let root = legacy_worktree_native_identity(
+            registration_id,
+            "last_root",
+            PathBuf::from(root),
+            retired,
+        )?;
+        connection.execute(
+            "UPDATE worktree_registrations
+             SET git_common_directory_identity = ?1,
+                 git_administrative_directory_identity = ?2,
+                 last_root_identity = ?3
+             WHERE registration_id = ?4",
+            params![
+                common.encode()?,
+                administrative.encode()?,
+                root.encode()?,
+                registration_id,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Recover active native authority or retain a retired row's lexical history.
+fn legacy_worktree_native_identity(
+    registration_id: i64,
+    field: &'static str,
+    path: PathBuf,
+    retired: bool,
+) -> DbResult<CanonicalProjectRoot> {
+    if projectatlas_core::windows_path_has_verbatim_only_components(&path) {
+        return Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
+            field,
+            registration_id,
+        });
+    }
+    if !retired {
+        match CanonicalProjectRoot::from_path(&path) {
+            Ok(identity) => return Ok(identity),
+            Err(CoreError::CanonicalProjectRootIo { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Retired paths may now name unrelated files, directories, or symlinks.
+    if projectatlas_core::windows_path_requires_verbatim_semantics(&path) {
+        return Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
+            field,
+            registration_id,
+        });
+    }
+    CanonicalProjectRoot::from_persisted_path(path).map_err(DbError::from)
+}
+
+/// Remove the worktree identity extension from test fixtures that model a
+/// released schema 19, 20, or 22 database.
+#[cfg(test)]
+pub(crate) fn drop_worktree_native_identity_schema(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS idx_worktree_registrations_active_native_administrative_directory;
+         DROP INDEX IF EXISTS idx_worktree_registrations_active_native_root;
+         ALTER TABLE worktree_registrations DROP COLUMN git_common_directory_identity;
+         ALTER TABLE worktree_registrations DROP COLUMN git_administrative_directory_identity;
+         ALTER TABLE worktree_registrations DROP COLUMN last_root_identity;",
+    )?;
+    Ok(())
+}
+
 /// Add selector columns by rebuilding the derived symbol table in the caller transaction.
 fn add_symbol_source_selector_storage(connection: &Connection) -> DbResult<()> {
     connection.execute_batch(SYMBOL_SOURCE_SELECTOR_SCHEMA_SQL)?;
@@ -2516,6 +2714,9 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
                 }
                 GRAPH_IDENTITY_REJECTION_SCHEMA_VERSION => {
                     graph_identity_rejection_schema_contract()?
+                }
+                GRAPH_IDENTITY_REJECTION_FACT_INDEX_SCHEMA_VERSION => {
+                    worktree_native_identity_predecessor_schema_contract()?
                 }
                 found => {
                     return Err(DbError::SchemaVersion {
@@ -2831,6 +3032,8 @@ fn schema_contract() -> DbResult<&'static SchemaContract> {
     connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
     connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
     connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
+    add_worktree_native_identity_columns(&connection)?;
+    connection.execute_batch(WORKTREE_NATIVE_IDENTITY_INDEX_SCHEMA_SQL)?;
     connection.execute_batch(PROJECT_ROOT_IDENTITY_SCHEMA_SQL)?;
     connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
@@ -3041,6 +3244,30 @@ fn canonical_root_predecessor_schema_contract() -> DbResult<&'static SchemaContr
     connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
     let contract = read_schema_contract(&connection)?;
     Ok(CANONICAL_ROOT_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
+}
+
+/// Build the schema-22 contract before native worktree identity storage.
+fn worktree_native_identity_predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
+    if let Some(contract) = WORKTREE_NATIVE_IDENTITY_PREDECESSOR_SCHEMA_CONTRACT.get() {
+        return Ok(contract);
+    }
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(BASE_SCHEMA_SQL)?;
+    add_symbol_source_selector_storage(&connection)?;
+    connection.execute_batch(SOURCE_PARSE_PROVENANCE_SCHEMA_SQL)?;
+    create_graph_schema(&connection, GraphSchemaShape::Current)?;
+    create_coverage_discovery_schema(&connection)?;
+    connection.execute_batch(RESOLUTION_KEY_SCHEMA_SQL)?;
+    connection.execute_batch(TELEMETRY_STORAGE_SCHEMA_SQL)?;
+    connection.execute_batch(CURRENT_USAGE_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_TEXT_FTS_SCHEMA_SQL)?;
+    connection.execute_batch(SYMBOL_RELATION_LOOKUP_SCHEMA_SQL)?;
+    connection.execute_batch(FILE_CONTENT_CLASSIFICATION_SCHEMA_SQL)?;
+    connection.execute_batch(WORKTREE_CONTROL_SCHEMA_SQL)?;
+    connection.execute_batch(PROJECT_ROOT_IDENTITY_SCHEMA_SQL)?;
+    connection.execute_batch(GRAPH_IDENTITY_REJECTION_SCHEMA_SQL)?;
+    let contract = read_schema_contract(&connection)?;
+    Ok(WORKTREE_NATIVE_IDENTITY_PREDECESSOR_SCHEMA_CONTRACT.get_or_init(|| contract))
 }
 
 /// Build the immutable schema-8/9 contract from the unchanged base DDL.
@@ -5443,6 +5670,7 @@ mod tests {
         ] {
             set_metadata(&store.connection, key, value)?;
         }
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity; DROP TABLE IF EXISTS graph_identity_rejections;",
         )?;
@@ -5666,6 +5894,7 @@ mod tests {
         ] {
             set_metadata(&store.connection, key, value)?;
         }
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE graph_identity_rejections;
              UPDATE metadata SET value = '20' WHERE key = 'schema_version';",
@@ -5683,8 +5912,8 @@ mod tests {
         connection.execute_batch(
             "CREATE TEMP TRIGGER fail_schema_twenty_rejection_table
              BEFORE UPDATE OF value ON metadata
-             WHEN OLD.key = 'schema_version' AND NEW.value = '22'
-             BEGIN SELECT RAISE(ABORT, 'injected schema-22 rejection-table failure'); END;",
+             WHEN OLD.key = 'schema_version' AND NEW.value = '23'
+             BEGIN SELECT RAISE(ABORT, 'injected schema-23 rejection-table failure'); END;",
         )?;
         let failed = initialize(&connection, Some(&expected_root));
         if !matches!(failed, Err(DbError::Sqlite(_))) {
@@ -5743,7 +5972,7 @@ mod tests {
                 ))
             },
         )?;
-        if migrated != ("22".to_string(), 4, 1, 1, 1)
+        if migrated != ("23".to_string(), 4, 1, 1, 1)
             || read_schema_contract(&connection)? != *schema_contract()?
         {
             return Err(io::Error::other(format!(
@@ -5774,7 +6003,7 @@ mod tests {
             || read_schema_contract(&reopened.connection)? != *schema_contract()?
         {
             return Err(io::Error::other(
-                "reopened schema-22 state did not retain generation or current contract",
+                "reopened schema-23 state did not retain generation or current contract",
             )
             .into());
         }
@@ -5796,6 +6025,7 @@ mod tests {
             "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
             [],
         )?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE graph_identity_rejections;
              UPDATE metadata SET value = '21' WHERE key = 'schema_version';
@@ -5827,7 +6057,7 @@ mod tests {
         connection.execute_batch(
             "CREATE TEMP TRIGGER fail_schema_twentyone_rejection_migration
              BEFORE UPDATE OF value ON metadata
-             WHEN OLD.key = 'schema_version' AND NEW.value = '22'
+             WHEN OLD.key = 'schema_version' AND NEW.value = '23'
              BEGIN SELECT RAISE(ABORT, 'injected schema-21 migration failure'); END;",
         )?;
         let failed = initialize(&connection, Some(&normalize_native_path_display(&root)));
@@ -5891,7 +6121,7 @@ mod tests {
                 ))
             },
         )?;
-        if migrated_state != ("22".to_string(), 0, 0, 1) {
+        if migrated_state != ("23".to_string(), 0, 0, 1) {
             return Err(io::Error::other(format!(
                 "schema-21 migration retained unreconstructable state: {migrated_state:?}"
             ))
@@ -5934,6 +6164,7 @@ mod tests {
         fs::create_dir(&root)?;
         let database = temp.path().join("schema-21-empty.db");
         let store = AtlasStore::open_for_project(&database, &root)?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE graph_identity_rejections;
              UPDATE metadata SET value = '21' WHERE key = 'schema_version';
@@ -6042,6 +6273,7 @@ mod tests {
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
              INSERT INTO purposes(node_id, purpose, source, status, updated_by)
@@ -6153,7 +6385,7 @@ mod tests {
                 ))
             },
         )?;
-        if migrated_state != ("22".to_string(), 7, 1, 1, 0, 1)
+        if migrated_state != ("23".to_string(), 7, 1, 1, 0, 1)
             || migrated.project_root_identity()? != Some(expected_identity.clone())
         {
             return Err(io::Error::other(format!(
@@ -6218,6 +6450,7 @@ mod tests {
             "UPDATE project_identity SET active_generation = 7 WHERE singleton = 1",
             [],
         )?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -6440,6 +6673,7 @@ mod tests {
             "UPDATE project_identity SET active_generation = 9 WHERE singleton = 1",
             [],
         )?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -6565,6 +6799,7 @@ mod tests {
                 io::Error::other("verbatim predecessor lost its historical display").into(),
             );
         }
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -6615,6 +6850,7 @@ mod tests {
         fs::create_dir_all(&root)?;
         let database = temp.path().join("unicode-replacement.db");
         let store = AtlasStore::open_for_project(&database, &root)?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -6724,6 +6960,7 @@ mod tests {
             30,
             10,
         ))?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file');
              INSERT INTO purposes(node_id, purpose, source, status, updated_by)
@@ -6822,6 +7059,7 @@ mod tests {
                 fs::create_dir_all(parent)?;
             }
             let store = AtlasStore::open_for_project(database, root)?;
+            drop_worktree_native_identity_schema(&store.connection)?;
             store.connection.execute_batch(
                 "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -6919,6 +7157,7 @@ mod tests {
                 fs::create_dir_all(parent)?;
             }
             let store = AtlasStore::open_for_project(database, root)?;
+            drop_worktree_native_identity_schema(&store.connection)?;
             store.connection.execute_batch(
                 "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -7039,6 +7278,7 @@ mod tests {
         ] {
             set_metadata(&store.connection, key, value)?;
         }
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -7757,6 +7997,7 @@ mod tests {
         fs::create_dir_all(&root_b)?;
         let database = temp.path().join("predecessor.db");
         let store = AtlasStore::open_for_project(&database, &root_a)?;
+        drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
