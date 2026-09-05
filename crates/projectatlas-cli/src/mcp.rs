@@ -12392,9 +12392,8 @@ mod tests {
 
         let linked = linked.canonicalize()?;
         if let Some(name) = administrative_name {
-            let initial = match discover_repository_structure(&linked)? {
-                RepositoryStructure::Git(repository) => repository,
-                _ => return Err(io::Error::other("fixture was not discovered as Git").into()),
+            let RepositoryStructure::Git(initial) = discover_repository_structure(&linked)? else {
+                return Err(io::Error::other("fixture was not discovered as Git").into());
             };
             let current = initial
                 .worktrees
