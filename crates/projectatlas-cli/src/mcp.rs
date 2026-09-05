@@ -12461,12 +12461,23 @@ mod tests {
         let listed = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
             include_retired: Some(false),
         }));
+        let listed_value: serde_json::Value = toon_format::decode_default(&listed)?;
+        let expected_display = if display_available {
+            "available"
+        } else {
+            "unavailable"
+        };
         require(
-            listed.contains(&selector)
-                && listed.contains(if display_available {
-                    "path_display: available"
-                } else {
-                    "path_display: unavailable"
+            listed_value
+                .pointer("/worktrees/worktrees")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row.get("selector").and_then(serde_json::Value::as_str)
+                            == Some(selector.as_str())
+                            && row.get("path_display").and_then(serde_json::Value::as_str)
+                                == Some(expected_display)
+                    })
                 }),
             &format!("native worktree discovery was not publicly selectable: {listed}"),
         )?;
