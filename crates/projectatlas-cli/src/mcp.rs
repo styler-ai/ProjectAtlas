@@ -12313,6 +12313,319 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    fn relocate_fixture_administrative_directory(
+        linked: &Path,
+        current: &Path,
+        name: std::ffi::OsString,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let relocated = current
+            .parent()
+            .ok_or_else(|| io::Error::other("worktree administrative directory has no parent"))?
+            .join(name);
+        fs::rename(current, &relocated)?;
+        let relocated = relocated.canonicalize()?;
+        let mut pointer = b"gitdir: ".to_vec();
+        pointer.extend_from_slice(relocated.as_os_str().as_encoded_bytes());
+        pointer.push(b'\n');
+        fs::write(linked.join(".git"), pointer)?;
+        Ok(relocated)
+    }
+
+    #[cfg(unix)]
+    fn require_real_native_worktree_lifecycle(
+        case: &str,
+        primary_name: std::ffi::OsString,
+        common_name: Option<std::ffi::OsString>,
+        linked_name: std::ffi::OsString,
+        administrative_name: Option<std::ffi::OsString>,
+        expected_utf8: (bool, bool, bool),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let primary = temp.path().join(primary_name);
+        let linked = temp.path().join(linked_name);
+        fs::create_dir_all(primary.join("src"))?;
+        if let Some(common_name) = common_name {
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(temp.path())
+                    .args(["init", "--quiet", "--separate-git-dir"])
+                    .arg(temp.path().join(common_name))
+                    .arg(&primary),
+            )?;
+        } else {
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(&primary)
+                    .args(["init", "--quiet"]),
+            )?;
+        }
+        for (key, value) in [
+            ("user.name", "ProjectAtlas Test"),
+            ("user.email", "projectatlas@example.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.autocrlf", "false"),
+        ] {
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(&primary)
+                    .args(["config", key, value]),
+            )?;
+        }
+        fs::write(primary.join("src/lib.rs"), "pub fn baseline() {}\n")?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["add", "."]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["commit", "--quiet", "-m", "fixture"]),
+        )?;
+        run_fixture_command(
+            StdCommand::new("git")
+                .current_dir(&primary)
+                .args(["worktree", "add", "--quiet", "-b", case])
+                .arg(&linked),
+        )?;
+
+        let linked = linked.canonicalize()?;
+        if let Some(name) = administrative_name {
+            let initial = match discover_repository_structure(&linked)? {
+                RepositoryStructure::Git(repository) => repository,
+                _ => return Err(io::Error::other("fixture was not discovered as Git").into()),
+            };
+            let current = initial
+                .worktrees
+                .iter()
+                .find(|entry| {
+                    ProjectAtlasMcpServer::active_worktree_root(entry) == Some(linked.as_path())
+                })
+                .ok_or_else(|| io::Error::other("linked fixture was not discovered"))?
+                .administrative_directory
+                .clone();
+            relocate_fixture_administrative_directory(&linked, &current, name)?;
+        }
+        require(
+            run_fixture_command(
+                StdCommand::new("git")
+                    .current_dir(&linked)
+                    .args(["status", "--short"]),
+            )?
+            .is_empty(),
+            "Git could not use the native fixture paths",
+        )?;
+
+        let primary = primary.canonicalize()?;
+        let control_config = primary.join(PROJECTATLAS_DIR_NAME).join("config.toml");
+        let control_db = primary
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_DB_FILE_NAME);
+        init_project_with_config(&primary, Some(&control_config))?;
+        let mut control = AtlasStore::open_for_project(&control_db, &primary)?;
+        let plan = ScanRuntimePlan::for_path(Some(&control_config), &primary, None)?;
+        run_scan_pipeline(
+            &mut control,
+            &plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), None),
+        )?;
+        drop(control);
+        let server = ProjectAtlasMcpServer::new(
+            control_db.clone(),
+            Some(control_config),
+            format!("native-{case}"),
+            false,
+        );
+        let repository = server.control_git_repository()?;
+        let entry = repository
+            .worktrees
+            .iter()
+            .find(|entry| {
+                ProjectAtlasMcpServer::active_worktree_root(entry) == Some(linked.as_path())
+            })
+            .ok_or_else(|| io::Error::other("native linked worktree was not discovered"))?;
+        let common_identity = CanonicalProjectRoot::from_path(&repository.common_directory)?;
+        let administrative_identity =
+            CanonicalProjectRoot::from_path(&entry.administrative_directory)?;
+        let root_identity = CanonicalProjectRoot::from_path(&linked)?;
+        require(
+            (
+                linked.to_str().is_some(),
+                repository.common_directory.to_str().is_some(),
+                entry.administrative_directory.to_str().is_some(),
+            ) == expected_utf8,
+            "fixture did not isolate the expected native path component",
+        )?;
+        let selector = ProjectAtlasMcpServer::worktree_candidate_selector(entry);
+        let display_available = expected_utf8 == (true, true, true);
+        let listed = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+            include_retired: Some(false),
+        }));
+        require(
+            listed.contains(&selector)
+                && listed.contains(if display_available {
+                    "path_display: available"
+                } else {
+                    "path_display: unavailable"
+                }),
+            &format!("native worktree discovery was not publicly selectable: {listed}"),
+        )?;
+        let added = server.atlas_worktree_add(Parameters(AtlasWorktreeAddParams {
+            worktree: selector,
+            alias: Some(case.to_string()),
+        }));
+        require(
+            added.contains("status: registered")
+                && added.contains(&format!("alias: \"{case}\""))
+                && added.contains(if display_available {
+                    "path_display: available"
+                } else {
+                    "path_display: unavailable"
+                }),
+            &format!("native worktree registration failed: {added}"),
+        )?;
+        let alias = WorktreeAlias::parse(case)?;
+        let control = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        let registration = control.worktree_registration(&alias)?;
+        require(
+            registration.git_common_directory_identity == common_identity
+                && registration.git_administrative_directory_identity == administrative_identity
+                && registration.last_root_identity == root_identity,
+            "registration did not retain the exact native identities",
+        )?;
+        drop(control);
+
+        let initialized = server.atlas_init(Parameters(AtlasInitParams {
+            project_path: None,
+            worktree: Some(case.to_string()),
+            no_scan: Some(false),
+            force_rescan: Some(false),
+            text_index_max_bytes: None,
+        }));
+        require(
+            initialized.contains("status: hydrated"),
+            &format!("alias-routed native initialization failed: {initialized}"),
+        )?;
+        fs::write(linked.join("src/native.rs"), "pub fn native_refresh() {}\n")?;
+        let watched = server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
+            project_path: None,
+            worktree: Some(case.to_string()),
+            path: None,
+            nearest_project: Some(false),
+            max_workers: Some(1),
+            timeout_seconds: None,
+            text_index_max_bytes: None,
+            background: Some(false),
+        }));
+        require(
+            watched.contains(MCP_PAYLOAD_WATCH),
+            &format!("alias-routed native watcher failed: {watched}"),
+        )?;
+        let target_db = linked
+            .join(PROJECTATLAS_DIR_NAME)
+            .join(PROJECTATLAS_DB_FILE_NAME);
+        let target = open_atlas_store_read_only_for_project(&target_db, &linked)?;
+        require(
+            target.load_node_by_path("src/native.rs")?.is_some(),
+            "alias-routed watcher did not publish the changed native worktree",
+        )?;
+        drop(target);
+        require(
+            run_fixture_command(StdCommand::new("git").current_dir(&linked).args([
+                "status",
+                "--short",
+                "--untracked-files=all",
+            ]))?
+            .contains("src/native.rs"),
+            "Git command invocation lost the native worktree path",
+        )?;
+
+        let removed = server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
+            worktree: case.to_string(),
+        }));
+        require(
+            removed.contains("status: retired")
+                && removed.contains(if display_available {
+                    "path_display: available"
+                } else {
+                    "path_display: unavailable"
+                }),
+            &format!("native worktree retirement failed: {removed}"),
+        )?;
+        let control = open_atlas_store_read_only_for_project(&control_db, &primary)?;
+        let retired = control
+            .worktree_registrations(true)?
+            .into_iter()
+            .find(|registration| registration.alias == alias)
+            .ok_or_else(|| io::Error::other("retired native registration is missing"))?;
+        require(
+            retired.state == WorktreeRegistrationState::Retired
+                && retired.git_common_directory_identity == common_identity
+                && retired.git_administrative_directory_identity == administrative_identity
+                && retired.last_root_identity == root_identity,
+            "retirement changed the persisted native identities",
+        )?;
+        require(
+            server
+                .state_for_target(None, Some(case.to_string()))
+                .is_err(),
+            "retired native alias remained routable",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_non_utf8_worktree_lifecycle_routes_alias_and_preserves_native_identities()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (case, primary, common, linked, administrative, expected_utf8) in [
+            (
+                "invalid-root",
+                std::ffi::OsString::from("root-control"),
+                None,
+                std::ffi::OsString::from_vec(b"root-\xff".to_vec()),
+                Some(std::ffi::OsString::from("root-administrative")),
+                (false, true, true),
+            ),
+            (
+                "invalid-common",
+                std::ffi::OsString::from("common-control"),
+                Some(std::ffi::OsString::from_vec(b"common-\xfe".to_vec())),
+                std::ffi::OsString::from("common-linked"),
+                None,
+                (true, false, false),
+            ),
+            (
+                "invalid-administrative",
+                std::ffi::OsString::from("administrative-control"),
+                None,
+                std::ffi::OsString::from("administrative-linked"),
+                Some(std::ffi::OsString::from_vec(
+                    b"administrative-\xfd".to_vec(),
+                )),
+                (true, true, false),
+            ),
+            (
+                "valid-unicode",
+                std::ffi::OsString::from("unicode-control-λ"),
+                None,
+                std::ffi::OsString::from("unicode-linked-工作树"),
+                None,
+                (true, true, true),
+            ),
+        ] {
+            require_real_native_worktree_lifecycle(
+                case,
+                primary,
+                common,
+                linked,
+                administrative,
+                expected_utf8,
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn worktree_registration_revalidates_captured_local_atlas_identity()
     -> Result<(), Box<dyn std::error::Error>> {
