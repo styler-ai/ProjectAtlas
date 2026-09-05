@@ -12700,7 +12700,7 @@ mod tests {
             (
                 "invalid-common",
                 std::ffi::OsString::from("common-control"),
-                Some(std::ffi::OsString::from_vec(b"common-\xfe".to_vec())),
+                Some(std::ffi::OsString::from_vec(b"common-\xfe ".to_vec())),
                 std::ffi::OsString::from("common-linked"),
                 None,
                 (true, false, false),
@@ -12711,7 +12711,7 @@ mod tests {
                 None,
                 std::ffi::OsString::from("administrative-linked"),
                 Some(std::ffi::OsString::from_vec(
-                    b"administrative-\xfd".to_vec(),
+                    b"administrative-\xfd\t".to_vec(),
                 )),
                 (true, true, false),
             ),
@@ -12735,9 +12735,9 @@ mod tests {
         require_real_native_worktree_lifecycle(
             "valid-unicode",
             std::ffi::OsString::from("unicode-control-λ"),
-            Some(std::ffi::OsString::from("unicode-common-共同")),
+            Some(std::ffi::OsString::from("unicode-common-共同 ")),
             std::ffi::OsString::from("unicode-linked-工作树"),
-            Some(std::ffi::OsString::from("unicode-administrative-管理")),
+            Some(std::ffi::OsString::from("unicode-administrative-管理\t")),
             (true, true, true),
         )
     }

@@ -1508,7 +1508,7 @@ pub(super) fn read_prefixed_pointer(
     let value = single_pointer_line_bytes(path, &bytes)?;
     let Some(value) = value
         .strip_prefix(prefix.as_bytes())
-        .map(trim_pointer_whitespace)
+        .and_then(|value| value.strip_prefix(b" "))
     else {
         return Err(issue(
             path.to_path_buf(),
@@ -1590,28 +1590,18 @@ fn single_pointer_line_bytes<'a>(
     path: &Path,
     bytes: &'a [u8],
 ) -> Result<&'a [u8], GitStructureIssue> {
-    let mut lines = bytes
-        .split(|byte| *byte == b'\n')
-        .map(trim_pointer_whitespace)
-        .filter(|line| !line.is_empty());
-    let Some(value) = lines.next() else {
-        return Err(issue(
-            path.to_path_buf(),
-            GitStructureIssueKind::MalformedPointer,
-        ));
-    };
-    if lines.next().is_some() || value.contains(&0) {
+    let mut value = bytes;
+    // Git removes terminal CR/LF bytes; spaces and tabs belong to the native path.
+    while let Some((b'\r' | b'\n', rest)) = value.split_last() {
+        value = rest;
+    }
+    if value.is_empty() || value.contains(&b'\n') || value.contains(&0) {
         return Err(issue(
             path.to_path_buf(),
             GitStructureIssueKind::MalformedPointer,
         ));
     }
     Ok(value)
-}
-
-/// Trim only the ASCII whitespace accepted around Git pointer records.
-fn trim_pointer_whitespace(value: &[u8]) -> &[u8] {
-    value.trim_ascii_start().trim_ascii_end()
 }
 
 /// Convert one non-empty native path record into a platform path.
@@ -2749,6 +2739,48 @@ mod tests {
                 },
             "plain directory did not preserve the exact caller-selected non-Git root",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn native_git_pointer_records_preserve_path_whitespace() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let pointer = temp.path().join("pointer");
+        for value in [" relative path ", "\tleading and trailing tabs\t"] {
+            for ending in ["", "\n", "\r\n", "\n\n"] {
+                fs::write(&pointer, format!("gitdir: {value}{ending}"))?;
+                require(
+                    read_prefixed_pointer(&pointer, "gitdir:")
+                        .is_ok_and(|parsed| parsed == Path::new(value)),
+                    "prefixed Git pointer changed native path whitespace",
+                )?;
+                fs::write(&pointer, format!("{value}{ending}"))?;
+                require(
+                    read_plain_pointer(&pointer).is_ok_and(|parsed| parsed == Path::new(value)),
+                    "plain Git pointer changed native path whitespace",
+                )?;
+            }
+        }
+        for malformed in [b"".as_slice(), b"\r\n", b"first\nsecond", b"path\0suffix"] {
+            fs::write(&pointer, malformed)?;
+            require(
+                read_plain_pointer(&pointer).is_err(),
+                "malformed plain Git pointer was accepted",
+            )?;
+        }
+        for malformed in [
+            "gitdir:",
+            "gitdir: ",
+            "gitdir:path",
+            " gitdir: path",
+            "\ngitdir: path",
+        ] {
+            fs::write(&pointer, malformed)?;
+            require(
+                read_prefixed_pointer(&pointer, "gitdir:").is_err(),
+                "malformed prefixed Git pointer was accepted",
+            )?;
+        }
         Ok(())
     }
 
