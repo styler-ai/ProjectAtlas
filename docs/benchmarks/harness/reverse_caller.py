@@ -981,16 +981,21 @@ def mutate_corrupt_import_row(database: Path, family: str) -> None:
     connection = sqlite3.connect(database)
     try:
         if family == "import-targets":
-            assignment = "line = 'invalid'"
+            cursor = connection.execute(
+                "UPDATE symbol_relations SET line = 'invalid' WHERE rowid = "
+                "(SELECT rowid FROM symbol_relations "
+                "WHERE kind = 'imports' AND path = 'src/rust_caller_000.rs' LIMIT 1)"
+            )
         elif family == "import-caller-path":
-            assignment = "line = 'invalid', target_name = 'use crate::unrelated'"
+            cursor = connection.execute(
+                "INSERT INTO symbol_relations "
+                "(path, source_name, target_name, kind, line, context, parser) "
+                "SELECT path, source_name, 'use crate::unrelated', kind, 'invalid', "
+                "context, parser FROM symbol_relations "
+                "WHERE kind = 'imports' AND path = 'src/rust_caller_000.rs' LIMIT 1"
+            )
         else:
             raise ValueError(family)
-        cursor = connection.execute(
-            f"UPDATE symbol_relations SET {assignment} WHERE rowid = "
-            "(SELECT rowid FROM symbol_relations "
-            "WHERE kind = 'imports' AND path = 'src/rust_caller_000.rs' LIMIT 1)"
-        )
         if cursor.rowcount != 1:
             raise AssertionError(f"{family} corruption selected no import row")
         connection.commit()
@@ -1082,8 +1087,13 @@ def failure_case(
             if len(failed_queries) != 1 or failed_queries[0].get("outcome", {}).get(
                 "status"
             ) != "failed":
+                observed = [
+                    (event.get("family"), event.get("outcome", {}).get("status"))
+                    for event in result["query_observations"]
+                ]
                 raise AssertionError(
-                    f"{arm} {name} trace omitted the failed {failed_family} query"
+                    f"{arm} {name} trace omitted the failed {failed_family} query; "
+                    f"observed={observed!r}"
                 )
             if measured["returncode"] == 0:
                 raise AssertionError("malformed relation unexpectedly succeeded")
