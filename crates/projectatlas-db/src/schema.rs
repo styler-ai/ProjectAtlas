@@ -2558,13 +2558,23 @@ fn legacy_worktree_native_identity(
     }
     if !retired {
         match CanonicalProjectRoot::from_path(&path) {
-            Ok(identity) => return Ok(identity),
+            Ok(identity) => {
+                // Recover a stripped Windows prefix, never a replacement link's target.
+                if identity.as_path().to_str().zip(path.to_str()).is_some_and(
+                    |(current, legacy)| {
+                        projectatlas_core::normalize_native_path_display_str(current)
+                            == projectatlas_core::normalize_native_path_display_str(legacy)
+                    },
+                ) {
+                    return Ok(identity);
+                }
+            }
             Err(CoreError::CanonicalProjectRootIo { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
-    // Retired paths may now name unrelated files, directories, or symlinks.
+    // Historical paths may now name unrelated filesystem objects.
     if projectatlas_core::windows_path_requires_verbatim_semantics(&path) {
         return Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
             field,

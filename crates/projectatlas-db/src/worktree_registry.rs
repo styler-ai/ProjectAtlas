@@ -2085,10 +2085,11 @@ mod tests {
     fn schema_twentytwo_worktree_identity_migration_backfills_and_retries_atomically()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let control = temp.path().join("control");
-        let common = temp.path().join("common.git");
+        let base = temp.path().canonicalize()?;
+        let control = base.join("control");
+        let common = base.join("common.git");
         let administrative = common.join("worktrees/legacy");
-        let root = temp.path().join("legacy");
+        let root = base.join("legacy");
         for path in [&control, &common, &administrative, &root] {
             fs::create_dir_all(path)?;
         }
@@ -2303,6 +2304,127 @@ mod tests {
                 "retired migration survives reopen",
             )?;
         }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn schema_twentytwo_history_does_not_follow_replacement_directory_links()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let target = base.join("unrelated");
+        fs::create_dir(&target)?;
+        fs::write(target.join("sentinel"), "unrelated contents")?;
+        for replaced_field in 0..3 {
+            let fixture = base.join(format!("field-{replaced_field}"));
+            fs::create_dir(&fixture)?;
+            let paths = [
+                fixture.join("common"),
+                fixture.join("admin"),
+                fixture.join("root"),
+            ];
+            for path in &paths {
+                fs::create_dir(path)?;
+            }
+            let expected = paths
+                .iter()
+                .map(|path| CanonicalProjectRoot::from_path(path))
+                .collect::<Result<Vec<_>, _>>()?;
+            fs::rename(&paths[replaced_field], fixture.join("moved"))?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &paths[replaced_field])?;
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new("cmd")
+                    .args(["/D", "/C", "mklink", "/J"])
+                    .arg(&paths[replaced_field])
+                    .arg(&target)
+                    .output()?;
+                require(
+                    output.status.success(),
+                    &format!("junction fixture failed: {output:?}"),
+                )?;
+            }
+            for state in ["active", "retired"] {
+                let database = fixture.join(format!("{state}.db"));
+                let store = AtlasStore::open_for_project(&database, &fixture)?;
+                crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
+                store.connection.execute(
+                    "INSERT INTO worktree_registrations(
+                        alias, state, git_common_directory, git_administrative_directory,
+                        git_administrative_identity, last_root, created_at_epoch, retired_at_epoch
+                     ) VALUES('legacy', ?1, ?2, ?3, ?4, ?5, 1, ?6)",
+                    params![
+                        state,
+                        projectatlas_core::normalize_native_path_display(&paths[0]),
+                        projectatlas_core::normalize_native_path_display(&paths[1]),
+                        administrative_identity(22),
+                        projectatlas_core::normalize_native_path_display(&paths[2]),
+                        (state == "retired").then_some(2),
+                    ],
+                )?;
+                if replaced_field == 2 {
+                    let other_admin = fixture.join("other-admin");
+                    fs::create_dir_all(&other_admin)?;
+                    store.connection.execute(
+                        "INSERT INTO worktree_registrations(
+                            alias, state, git_common_directory, git_administrative_directory,
+                            git_administrative_identity, last_root, created_at_epoch
+                         ) VALUES('other', 'active', ?1, ?2, ?3, ?4, 1)",
+                        params![
+                            projectatlas_core::normalize_native_path_display(&paths[0]),
+                            projectatlas_core::normalize_native_path_display(&other_admin),
+                            administrative_identity(23),
+                            projectatlas_core::normalize_native_path_display(&target),
+                        ],
+                    )?;
+                }
+                store.connection.execute(
+                    "UPDATE metadata SET value = '22' WHERE key = 'schema_version'",
+                    [],
+                )?;
+                drop(store);
+                let migrated = AtlasStore::open_for_project(&database, &fixture)?;
+                let rows = migrated.worktree_registrations(true)?;
+                require_eq(
+                    &rows.len(),
+                    &(1 + usize::from(replaced_field == 2)),
+                    "historical registrations preserved without a false collision",
+                )?;
+                let alias = WorktreeAlias::parse("legacy")?;
+                let row = rows
+                    .iter()
+                    .find(|row| row.alias == alias)
+                    .ok_or_else(|| io::Error::other("legacy registration missing"))?;
+                for (actual, expected) in [
+                    &row.git_common_directory_identity,
+                    &row.git_administrative_directory_identity,
+                    &row.last_root_identity,
+                ]
+                .into_iter()
+                .zip(&expected)
+                {
+                    require_eq(
+                        actual,
+                        expected,
+                        "migration must not adopt a replacement target",
+                    )?;
+                }
+                drop(migrated);
+                let reopened = AtlasStore::open_for_project(&database, &fixture)?;
+                require_eq(
+                    &reopened.worktree_registrations(true)?,
+                    &rows,
+                    "stable migrated history",
+                )?;
+            }
+        }
+        require_eq(
+            &fs::read_to_string(target.join("sentinel"))?,
+            &"unrelated contents".to_string(),
+            "replacement target untouched",
+        )?;
         Ok(())
     }
 
