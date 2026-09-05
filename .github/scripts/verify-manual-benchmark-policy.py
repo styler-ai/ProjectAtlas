@@ -9,7 +9,11 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
-CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py")
+CAMPAIGN_ENTRYPOINTS = (
+    "agent_navigation.py",
+    "reverse_caller.py",
+    "system_scale.py",
+)
 MAX_TRACKED_RAW_BENCHMARK_BYTES = 4 * 1024 * 1024
 
 
@@ -165,10 +169,16 @@ def main() -> int:
     self_test()
     if campaign_entrypoint("python docs/benchmarks/harness/test_agent_navigation.py"):
         raise RuntimeError("benchmark unit tests must remain allowed")
+    if campaign_entrypoint("python docs/benchmarks/harness/test_reverse_caller.py"):
+        raise RuntimeError("reverse-caller unit tests must remain allowed")
     if not campaign_entrypoint(
         r"python docs\benchmarks\harness\agent_navigation.py --repeats 3"
     ):
         raise RuntimeError("full campaign invocation must be detected")
+    if not campaign_entrypoint(
+        "python docs/benchmarks/harness/reverse_caller.py --repeats 3"
+    ):
+        raise RuntimeError("reverse-caller campaign invocation must be detected")
     if not campaign_entrypoint("python3 system_scale.py"):
         raise RuntimeError("basename campaign invocation must be detected")
     if not campaign_entrypoint(
@@ -194,7 +204,7 @@ def main() -> int:
 
     if violations:
         print(
-            "full system-scale and agent-navigation campaigns are manual-only; "
+            "full benchmark campaigns are manual-only; "
             "remove automated invocations from " + ", ".join(violations),
             file=sys.stderr,
         )

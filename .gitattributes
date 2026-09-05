@@ -19,3 +19,4 @@
 *.ps1 text eol=crlf
 docs/benchmarks/harness/reverse_caller.py text eol=lf
 docs/benchmarks/reverse-caller-candidate.patch text eol=lf
+docs/benchmarks/reverse-caller-instrumentation.patch text eol=lf
