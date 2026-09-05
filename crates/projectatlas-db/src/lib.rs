@@ -1110,8 +1110,8 @@ pub struct ReverseCallerBenchmarkTrace {
 
 #[cfg(feature = "reverse-caller-benchmark")]
 thread_local! {
-    static REVERSE_CALLER_BENCHMARK_QUERIES: RefCell<Vec<ReverseCallerBenchmarkQuery>> =
-        const { RefCell::new(Vec::new()) };
+    static REVERSE_CALLER_BENCHMARK_QUERIES: RefCell<Option<Vec<ReverseCallerBenchmarkQuery>>> =
+        const { RefCell::new(None) };
 }
 
 #[cfg(feature = "reverse-caller-benchmark")]
@@ -1127,6 +1127,9 @@ fn record_reverse_caller_benchmark_query(
 ) {
     REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| {
         let mut observations = observations.borrow_mut();
+        let Some(observations) = observations.as_mut() else {
+            return;
+        };
         let sequence = observations.len() + 1;
         observations.push(ReverseCallerBenchmarkQuery {
             sequence,
@@ -1884,7 +1887,8 @@ impl AtlasStore {
     /// Start collecting production-owned reverse-caller query observations.
     #[cfg(feature = "reverse-caller-benchmark")]
     pub fn start_reverse_caller_benchmark_trace(&self) {
-        REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow_mut().clear());
+        REVERSE_CALLER_BENCHMARK_QUERIES
+            .with(|observations| *observations.borrow_mut() = Some(Vec::new()));
     }
 
     /// Take untimed reverse-caller observations and replay their plans on the
@@ -1897,7 +1901,8 @@ impl AtlasStore {
     #[cfg(feature = "reverse-caller-benchmark")]
     pub fn take_reverse_caller_benchmark_trace(&self) -> DbResult<ReverseCallerBenchmarkTrace> {
         let mut queries = REVERSE_CALLER_BENCHMARK_QUERIES
-            .with(|observations| std::mem::take(&mut *observations.borrow_mut()));
+            .with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+            .unwrap_or_default();
         let engine = reverse_caller_benchmark_engine(&self.connection)?;
         for query in &mut queries {
             query.query_plan = reverse_caller_benchmark_query_plan(&self.connection, query)?;
@@ -8827,6 +8832,29 @@ mod tests {
     use std::fs;
     use std::io;
     use std::time::Instant;
+
+    #[cfg(feature = "reverse-caller-benchmark")]
+    #[test]
+    fn reverse_caller_benchmark_queries_require_an_active_capture() -> Result<(), Box<dyn Error>> {
+        let store = AtlasStore::in_memory()?;
+        let terms = ["target".to_string()];
+
+        store.load_import_relations_matching_targets(&terms, 1)?;
+        let inactive =
+            REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow().is_none());
+        require_eq(&inactive, &true, "capture before start")?;
+
+        store.start_reverse_caller_benchmark_trace();
+        store.load_import_relations_matching_targets(&terms, 1)?;
+        let trace = store.take_reverse_caller_benchmark_trace()?;
+        require_eq(&trace.queries.len(), &1, "active capture query count")?;
+
+        store.load_import_relations_matching_targets(&terms, 1)?;
+        let inactive =
+            REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow().is_none());
+        require_eq(&inactive, &true, "capture after take")?;
+        Ok(())
+    }
 
     #[test]
     fn unsupported_schema_versions_follow_the_migration_inventory() -> Result<(), Box<dyn Error>> {

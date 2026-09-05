@@ -44,6 +44,7 @@ LANGUAGES = ("rust", "typescript", "python")
 RELEASE_PROFILE_DIRECTORY = "release"
 RELEASE_BINARY_STEM = "projectatlas"
 RAW_OUTPUT_DIRECTORY = Path("target/benchmarks/reverse-caller")
+RESULT_SCHEMA = "projectatlas.reverse-caller-performance.v8"
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -627,25 +628,21 @@ def run_summary(
 
     allocation_path = root.parent / f"{root.name}-allocations-{arm}-{ordinal:04d}.json"
     trace_path = root.parent / f"{root.name}-trace-{arm}-{ordinal:04d}.json"
-    if trace_path.exists():
-        raise AssertionError(f"timed summary trace path already exists: {trace_path}")
+    for path in (trace_path, allocation_path):
+        if path.exists():
+            raise AssertionError(f"timed summary observer path already exists: {path}")
     measured = run_process(
         [str(binary), *summary_command(target, limit)],
         root,
-        allocation_path=allocation_path,
     )
     result = serialize_process(measured, root)
     result["target"] = target["path"]
     result["limit"] = limit
-    if not allocation_path.is_file():
-        raise AssertionError("timed summary did not retain allocation metrics")
-    result["allocation_metrics"] = json.loads(
-        allocation_path.read_text(encoding="utf-8")
-    )
-    allocation_path.unlink()
-    if trace_path.is_file():
-        trace_path.unlink()
-        raise AssertionError("timed summary unexpectedly enabled the trace observer")
+    for path in (trace_path, allocation_path):
+        if path.is_file():
+            path.unlink()
+            raise AssertionError("timed summary unexpectedly enabled instrumentation")
+    result["allocation_metrics"] = None
     result["query_observations"] = []
     result["trace_observed"] = False
     result["timed"] = True
@@ -671,6 +668,26 @@ def run_summary_evidence(
 ) -> dict[str, Any]:
     """Replay one summary outside timing to capture production-owned evidence."""
 
+    allocation_path = root.parent / f"{root.name}-allocations-{arm}-{ordinal:04d}.json"
+    allocation_run = run_process(
+        [str(binary), *summary_command(target, limit)],
+        root,
+        allocation_path=allocation_path,
+    )
+    if allocation_run["returncode"] != 0:
+        raise AssertionError(
+            f"{arm} {shape} allocation replay failed: "
+            f"{allocation_run['stderr'].decode('utf-8', errors='replace')}"
+        )
+    if not allocation_path.is_file():
+        raise AssertionError(f"{arm} {shape} allocation replay omitted its sidecar")
+    allocation_metrics = json.loads(allocation_path.read_text(encoding="utf-8"))
+    allocation_path.unlink()
+    allocation_payload = json.loads(allocation_run["stdout"])
+    assert_semantics(allocation_payload, target, shape)
+    if allocation_payload != expected_summary:
+        raise AssertionError(f"{arm} {shape} allocation replay changed the summary")
+
     trace_path = root.parent / f"{root.name}-trace-{arm}-{ordinal:04d}.json"
     measured = run_process(
         [str(binary), *summary_command(target, limit)],
@@ -687,6 +704,8 @@ def run_summary_evidence(
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     trace_path.unlink()
     require_production_trace_evidence(trace, f"{arm} {shape}")
+    if not isinstance(allocation_metrics, dict):
+        raise AssertionError(f"{arm} {shape} evidence replay omitted allocations")
     payload = json.loads(measured["stdout"])
     assert_semantics(payload, target, shape)
     if payload != expected_summary:
@@ -695,6 +714,10 @@ def run_summary_evidence(
         "events": trace.get("queries", []),
         "engine": trace.get("engine"),
         "plan_provenance": trace.get("plan_provenance"),
+        "allocation_metrics": allocation_metrics,
+        "target": target["path"],
+        "limit": limit,
+        "trace_observed": True,
         "timed": False,
     }
 
@@ -840,6 +863,7 @@ def aggregate_queries(evidence_runs: list[dict[str, Any]]) -> dict[str, Any]:
 
 def measure_shape(
     binary: Path,
+    evidence_binary: Path,
     shape: str,
     repeats: int,
     arm: str,
@@ -873,7 +897,7 @@ def measure_shape(
                     ordinal += 1
                 evidence_runs.append(
                     run_summary_evidence(
-                        binary,
+                        evidence_binary,
                         root,
                         target,
                         shape,
@@ -890,11 +914,13 @@ def measure_shape(
         }
         allocation_runs = [
             run["allocation_metrics"]
-            for run in runs
+            for run in evidence_runs
             if isinstance(run.get("allocation_metrics"), dict)
         ]
-        if len(allocation_runs) != len(runs):
-            raise AssertionError(f"{arm} {shape} did not retain allocation metrics for every run")
+        if len(allocation_runs) != len(evidence_runs):
+            raise AssertionError(
+                f"{arm} {shape} did not retain allocation metrics for every evidence replay"
+            )
         metrics["allocation_calls"] = statistics.median(
             run["allocation_calls"] for run in allocation_runs
         )
@@ -905,7 +931,9 @@ def measure_shape(
             "targets": targets,
             "setup": setup,
             "runs": runs,
+            "evidence_replays": evidence_runs,
             "aggregate": metrics,
+            "allocation_measurement": "untimed-evidence-replay",
             "query_observations": aggregate_queries(evidence_runs),
         }
 
@@ -1184,7 +1212,12 @@ def compact_fixture_evidence(fixture: dict[str, Any]) -> dict[str, Any]:
     return {
         "targets": fixture.get("targets", []),
         "aggregate": fixture.get("aggregate", {}),
+        "allocation_measurement": fixture.get("allocation_measurement"),
         "runs": [compact_process_evidence(run) for run in fixture.get("runs", [])],
+        "evidence_replays": [
+            compact_process_evidence(run)
+            for run in fixture.get("evidence_replays", [])
+        ],
         "query_plan_evidence": compact_query_plan_evidence(
             fixture.get("query_observations", {})
         ),
@@ -1194,7 +1227,10 @@ def compact_fixture_evidence(fixture: dict[str, Any]) -> dict[str, Any]:
 def compact_arm_evidence(arm: dict[str, Any]) -> dict[str, Any]:
     """Project one benchmark arm without raw setup or process streams."""
 
-    result: dict[str, Any] = {"binary_sha256": arm["binary_sha256"]}
+    result: dict[str, Any] = {
+        "timed_binary_sha256": arm["timed_binary_sha256"],
+        "evidence_binary_sha256": arm["evidence_binary_sha256"],
+    }
     if "candidate_patch" in arm:
         result["candidate_patch"] = arm["candidate_patch"]
     result["fixtures"] = {
@@ -1248,6 +1284,7 @@ def compact_review_evidence(
         "repository_revision": result["repository_revision"],
         "repeats": result["repeats"],
         "build_profile": result["build_profile"],
+        "measurement_split": result["measurement_split"],
         "harness_identity": {
             "path": "docs/benchmarks/harness/reverse_caller.py",
             "sha256": sha256_file(ROOT / "docs/benchmarks/harness/reverse_caller.py"),
@@ -1327,7 +1364,7 @@ def canonical_raw_output_path(repository_revision: str) -> Path:
     """Return the revision-derived raw result path from the rerun contract."""
 
     return (
-        ROOT / RAW_OUTPUT_DIRECTORY / f"{repository_revision}-full-results.json"
+        ROOT / RAW_OUTPUT_DIRECTORY / f"{repository_revision}-v8-full-results.json"
     ).resolve()
 
 
@@ -1402,7 +1439,9 @@ def preflight_candidate_patch(candidate_patch: Path) -> dict[str, str]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-binary", type=Path, required=True)
+    parser.add_argument("--baseline-evidence-binary", type=Path, required=True)
     parser.add_argument("--candidate-binary", type=Path, required=True)
+    parser.add_argument("--candidate-evidence-binary", type=Path, required=True)
     parser.add_argument("--candidate-patch", type=Path, default=ROOT / "docs/benchmarks/reverse-caller-candidate.patch")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
@@ -1417,7 +1456,13 @@ def main() -> None:
     repository_revision = git_revision()
     try:
         baseline_binary = validate_release_binary(args.baseline_binary, "baseline binary")
+        baseline_evidence_binary = validate_release_binary(
+            args.baseline_evidence_binary, "baseline evidence binary"
+        )
         candidate_binary = validate_release_binary(args.candidate_binary, "candidate binary")
+        candidate_evidence_binary = validate_release_binary(
+            args.candidate_evidence_binary, "candidate evidence binary"
+        )
         output = validate_raw_output(args.output, repository_revision)
     except ValueError as error:
         parser.error(str(error))
@@ -1429,8 +1474,18 @@ def main() -> None:
         parser.error("--compact-output must remain inside the repository")
     if compact_output == output:
         parser.error("--compact-output must differ from --output")
-    if sha256_file(baseline_binary) == sha256_file(candidate_binary):
+    baseline_binary_sha256 = sha256_file(baseline_binary)
+    baseline_evidence_binary_sha256 = sha256_file(baseline_evidence_binary)
+    candidate_binary_sha256 = sha256_file(candidate_binary)
+    candidate_evidence_binary_sha256 = sha256_file(candidate_evidence_binary)
+    if baseline_binary_sha256 == candidate_binary_sha256:
         parser.error("baseline and candidate binaries must be distinct")
+    if baseline_evidence_binary_sha256 == candidate_evidence_binary_sha256:
+        parser.error("baseline and candidate evidence binaries must be distinct")
+    if baseline_binary_sha256 == baseline_evidence_binary_sha256:
+        parser.error("baseline timed and evidence binaries must be distinct")
+    if candidate_binary_sha256 == candidate_evidence_binary_sha256:
+        parser.error("candidate timed and evidence binaries must be distinct")
     if not candidate_patch.is_relative_to(ROOT):
         parser.error("--candidate-patch must remain inside the repository")
     candidate_patch_preflight = preflight_candidate_patch(candidate_patch)
@@ -1438,8 +1493,12 @@ def main() -> None:
     baseline: dict[str, Any] = {}
     candidate: dict[str, Any] = {}
     for shape in SHAPES:
-        baseline[shape] = measure_shape(baseline_binary, shape, args.repeats, "baseline")
-        candidate[shape] = measure_shape(candidate_binary, shape, args.repeats, "candidate")
+        baseline[shape] = measure_shape(
+            baseline_binary, baseline_evidence_binary, shape, args.repeats, "baseline"
+        )
+        candidate[shape] = measure_shape(
+            candidate_binary, candidate_evidence_binary, shape, args.repeats, "candidate"
+        )
 
     semantic_findings: list[str] = []
     for shape in SHAPES:
@@ -1472,8 +1531,12 @@ def main() -> None:
         )
 
     multi_binding_alias = {
-        "baseline": multi_binding_alias_case(baseline_binary, "baseline"),
-        "candidate": multi_binding_alias_case(candidate_binary, "candidate"),
+        "baseline": multi_binding_alias_case(
+            baseline_evidence_binary, "baseline"
+        ),
+        "candidate": multi_binding_alias_case(
+            candidate_evidence_binary, "candidate"
+        ),
     }
     semantic_findings.extend(
         f"python-multi-binding-same-local-alias: {finding}"
@@ -1483,8 +1546,8 @@ def main() -> None:
     )
 
     cancellation = {
-        "baseline": cancellation_case(baseline_binary, "baseline"),
-        "candidate": cancellation_case(candidate_binary, "candidate"),
+        "baseline": cancellation_case(baseline_evidence_binary, "baseline"),
+        "candidate": cancellation_case(candidate_evidence_binary, "candidate"),
     }
     semantic_findings.extend(
         f"mcp-summary-cancellation: {finding}"
@@ -1494,17 +1557,25 @@ def main() -> None:
     )
 
     result = {
-        "schema": "projectatlas.reverse-caller-performance.v6",
+        "schema": RESULT_SCHEMA,
         "issue": 342,
         "repository_revision": repository_revision,
         "build_profile": "release",
+        "measurement_split": {
+            "timing": "ordinary-release-binary",
+            "allocations": "untimed-benchmark-feature-allocation-only-replay",
+            "query_plans": "untimed-benchmark-feature-trace-replay",
+            "cancellation": "benchmark-feature-binary",
+        },
         "repeats": args.repeats,
         "baseline": {
-            "binary_sha256": sha256_file(baseline_binary),
+            "timed_binary_sha256": baseline_binary_sha256,
+            "evidence_binary_sha256": baseline_evidence_binary_sha256,
             "fixtures": baseline,
         },
         "candidate": {
-            "binary_sha256": sha256_file(candidate_binary),
+            "timed_binary_sha256": candidate_binary_sha256,
+            "evidence_binary_sha256": candidate_evidence_binary_sha256,
             "candidate_patch": {
                 "path": candidate_patch.relative_to(ROOT).as_posix(),
                 "sha256": sha256_file(candidate_patch),

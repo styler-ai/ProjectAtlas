@@ -49,6 +49,7 @@ class ReverseCallerHarnessTests(unittest.TestCase):
     def test_raw_output_must_match_revision_derived_rerun_path(self) -> None:
         revision = "a" * 40
         canonical = canonical_raw_output_path(revision)
+        self.assertEqual(canonical.name, f"{revision}-v8-full-results.json")
         self.assertEqual(validate_raw_output(canonical, revision), canonical)
         with self.assertRaisesRegex(ValueError, "canonical revision-derived"):
             validate_raw_output(
@@ -67,6 +68,9 @@ class ReverseCallerHarnessTests(unittest.TestCase):
         ):
             timed = process_environment()
             replay = process_environment(trace_path=Path("replay-trace.json"))
+            allocations = process_environment(
+                allocation_path=Path("replay-allocations.json")
+            )
 
         self.assertNotIn("PROJECTATLAS_REVERSE_CALLER_TRACE", timed)
         self.assertNotIn("PROJECTATLAS_REVERSE_CALLER_ALLOCATIONS", timed)
@@ -75,6 +79,11 @@ class ReverseCallerHarnessTests(unittest.TestCase):
             "replay-trace.json",
         )
         self.assertNotIn("PROJECTATLAS_REVERSE_CALLER_ALLOCATIONS", replay)
+        self.assertNotIn("PROJECTATLAS_REVERSE_CALLER_TRACE", allocations)
+        self.assertEqual(
+            allocations["PROJECTATLAS_REVERSE_CALLER_ALLOCATIONS"],
+            "replay-allocations.json",
+        )
 
     def test_evidence_replay_is_marked_untimed_and_separate(self) -> None:
         process = {
@@ -86,7 +95,7 @@ class ReverseCallerHarnessTests(unittest.TestCase):
             "stdout_sha256": "a" * 64,
             "stderr_bytes": 0,
             "stderr_sha256": "b" * 64,
-            "allocation_metrics": {"allocation_calls": 1},
+            "allocation_metrics": None,
             "trace_observed": False,
             "timed": True,
         }
@@ -145,6 +154,10 @@ class ReverseCallerHarnessTests(unittest.TestCase):
                             "plan_provenance": (
                                 "projectatlas-db::AtlasStore::connection"
                             ),
+                            "allocations": {
+                                "allocation_calls": 0,
+                                "allocation_bytes": 0,
+                            },
                         }
                     ),
                     encoding="utf-8",
@@ -176,12 +189,16 @@ class ReverseCallerHarnessTests(unittest.TestCase):
                 )
 
         self.assertIsNone(calls[0]["trace_path"])
-        self.assertIsNotNone(calls[0]["allocation_path"])
-        self.assertIsNotNone(calls[1]["trace_path"])
-        self.assertIsNone(calls[1]["allocation_path"])
+        self.assertIsNone(calls[0]["allocation_path"])
+        self.assertIsNone(calls[1]["trace_path"])
+        self.assertIsNotNone(calls[1]["allocation_path"])
+        self.assertIsNotNone(calls[2]["trace_path"])
+        self.assertIsNone(calls[2]["allocation_path"])
         self.assertTrue(timed["timed"])
         self.assertFalse(timed["trace_observed"])
+        self.assertIsNone(timed["allocation_metrics"])
         self.assertFalse(evidence["timed"])
+        self.assertEqual(evidence["allocation_metrics"]["allocation_calls"], 0)
 
     def test_compact_evidence_drops_raw_process_streams(self) -> None:
         process = {
@@ -202,17 +219,38 @@ class ReverseCallerHarnessTests(unittest.TestCase):
             "targets": [],
             "aggregate": {"wall_ms": 1.0},
             "runs": [process],
+            "evidence_replays": [
+                {
+                    "allocation_metrics": {"allocation_calls": 1},
+                    "target": "src/empty.rs",
+                    "limit": 1,
+                    "trace_observed": True,
+                    "timed": False,
+                }
+            ],
+            "allocation_measurement": "untimed-evidence-replay",
             "query_observations": {"events": [], "by_family": {}},
         }
         result = {
-            "schema": "projectatlas.reverse-caller-performance.v6",
+            "schema": "projectatlas.reverse-caller-performance.v8",
             "issue": 342,
             "repository_revision": "c" * 40,
             "repeats": 1,
             "build_profile": "release",
-            "baseline": {"binary_sha256": "d" * 64, "fixtures": {"small": fixture}},
+            "measurement_split": {
+                "timing": "ordinary-release-binary",
+                "allocations": "untimed-benchmark-feature-allocation-only-replay",
+                "query_plans": "untimed-benchmark-feature-trace-replay",
+                "cancellation": "benchmark-feature-binary",
+            },
+            "baseline": {
+                "timed_binary_sha256": "d" * 64,
+                "evidence_binary_sha256": "e" * 64,
+                "fixtures": {"small": fixture},
+            },
             "candidate": {
-                "binary_sha256": "e" * 64,
+                "timed_binary_sha256": "f" * 64,
+                "evidence_binary_sha256": "0" * 64,
                 "candidate_patch": {"path": "patch", "sha256": "f" * 64},
                 "fixtures": {"small": fixture},
             },
