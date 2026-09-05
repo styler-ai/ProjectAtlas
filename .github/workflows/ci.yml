@@ -603,6 +603,7 @@ jobs:
             cargo test --locked -p projectatlas-core windows_verbatim_component_classifier_covers_legacy_spellings -- --nocapture
             cargo test --locked -p projectatlas-db schema_twentytwo_ -- --nocapture
             cargo test --locked -p projectatlas-cli windows_worktree_selector_survives_live_to_retained_transition -- --nocapture
+            cargo test --locked -p projectatlas-cli worktree_remove_retains_display_for_git_known_missing_registration -- --nocapture
           fi
 
       - name: Native Unix worktree lifecycle
