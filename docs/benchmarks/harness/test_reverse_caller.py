@@ -27,10 +27,13 @@ from reverse_caller import (
     validate_release_binary,
 )
 
+TEST_TEMP_ROOT = ROOT / ".tmp"
+TEST_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+
 
 class ReverseCallerHarnessTests(unittest.TestCase):
     def test_benchmark_binaries_require_release_profile(self) -> None:
-        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as directory:
             root = Path(directory)
             debug = root / "debug" / "projectatlas.exe"
             release = root / "release" / "projectatlas.exe"
@@ -171,7 +174,7 @@ class ReverseCallerHarnessTests(unittest.TestCase):
                 "stderr": b"",
             }
 
-        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as directory:
             root = Path(directory)
             with patch.object(reverse_caller, "run_process", side_effect=fake_process):
                 timed = run_summary(
@@ -413,7 +416,7 @@ class ReverseCallerHarnessTests(unittest.TestCase):
             "cancellation": {"baseline": {}, "candidate": {}},
             "decision": {"semantic_findings": []},
         }
-        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as directory:
             raw = Path(directory) / "raw.json"
             raw.write_bytes(b"raw")
             compact = compact_review_evidence(result, raw)

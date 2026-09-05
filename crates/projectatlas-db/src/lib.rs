@@ -4330,12 +4330,11 @@ impl AtlasStore {
             let pattern = sqlite_like_pattern(term);
             let limit = limit_per_term.max(1);
             #[cfg(feature = "reverse-caller-benchmark")]
-            let benchmark_values = [
-                Value::Text(pattern.clone()),
-                Value::Integer(usize_to_i64(limit)),
-            ];
-            #[cfg(feature = "reverse-caller-benchmark")]
             if reverse_caller_benchmark_trace_active() {
+                let benchmark_values = [
+                    Value::Text(pattern.clone()),
+                    Value::Integer(usize_to_i64(limit)),
+                ];
                 relations.extend(query_import_relations_for_reverse_caller_benchmark(
                     &self.connection,
                     "import-targets",
@@ -4385,12 +4384,11 @@ impl AtlasStore {
     ) -> DbResult<Vec<StoredImportRelation>> {
         let bounded_limit = limit.max(1);
         #[cfg(feature = "reverse-caller-benchmark")]
-        let benchmark_values = [
-            Value::Text(path.to_string()),
-            Value::Integer(usize_to_i64(bounded_limit)),
-        ];
-        #[cfg(feature = "reverse-caller-benchmark")]
         if reverse_caller_benchmark_trace_active() {
+            let benchmark_values = [
+                Value::Text(path.to_string()),
+                Value::Integer(usize_to_i64(bounded_limit)),
+            ];
             return query_import_relations_for_reverse_caller_benchmark(
                 &self.connection,
                 "import-caller-path",
