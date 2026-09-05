@@ -6238,6 +6238,19 @@ impl ProjectAtlasMcpServer {
         }
     }
 
+    /// Match invalid evidence by its retained path without following a replacement target.
+    fn worktree_administrative_path_identity(
+        entry: &GitWorktreeEntry,
+    ) -> Option<CanonicalProjectRoot> {
+        match &entry.state {
+            GitWorktreeState::Invalid { .. } => {
+                CanonicalProjectRoot::from_persisted_path(entry.administrative_directory.clone())
+                    .ok()
+            }
+            _ => CanonicalProjectRoot::from_path(&entry.administrative_directory).ok(),
+        }
+    }
+
     /// Join one structural worktree entry to registry, atlas, and telemetry state.
     fn worktree_list_row(
         &self,
@@ -6248,8 +6261,7 @@ impl ProjectAtlasMcpServer {
         let administrative_directory =
             lossless_native_path_display(&entry.administrative_directory);
         let common_identity = CanonicalProjectRoot::from_path(common_directory).ok();
-        let administrative_identity =
-            CanonicalProjectRoot::from_path(&entry.administrative_directory).ok();
+        let administrative_identity = Self::worktree_administrative_path_identity(entry);
         let registration = registrations.iter().find(|registration| {
             registration.state == WorktreeRegistrationState::Active
                 && common_identity
@@ -7812,9 +7824,7 @@ impl ProjectAtlasMcpServer {
             let structural_identities = repository
                 .worktrees
                 .iter()
-                .filter_map(|entry| {
-                    CanonicalProjectRoot::from_path(&entry.administrative_directory).ok()
-                })
+                .filter_map(Self::worktree_administrative_path_identity)
                 .collect::<HashSet<_>>();
             let (mut worktrees, unregistered): (Vec<_>, Vec<_>) = repository
                 .worktrees
@@ -12194,6 +12204,80 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn worktree_list_retains_one_invalid_registration_after_administrative_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for replacement in ["file", "link"] {
+            let fixture = registered_worktree_race_fixture("invalid-registration")?;
+            let preserved = fixture.primary.join("preserved-administrative");
+            let target = fixture.primary.join("unrelated-target");
+            fs::create_dir(&target)?;
+            fs::write(target.join("canary"), "unrelated")?;
+            fs::rename(&fixture.administrative_directory, &preserved)?;
+            if replacement == "file" {
+                fs::write(&fixture.administrative_directory, "replacement")?;
+            } else {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &fixture.administrative_directory)?;
+                #[cfg(windows)]
+                {
+                    let parent = fixture
+                        .administrative_directory
+                        .parent()
+                        .ok_or_else(|| io::Error::other("administrative path has no parent"))?;
+                    let name = fixture
+                        .administrative_directory
+                        .file_name()
+                        .ok_or_else(|| io::Error::other("administrative path has no name"))?;
+                    run_fixture_command(
+                        StdCommand::new("cmd")
+                            .args(["/D", "/C", "mklink", "/J"])
+                            .arg(parent.canonicalize()?.join(name))
+                            .arg(target.canonicalize()?),
+                    )?;
+                }
+            }
+            let listed = fixture
+                .server
+                .atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+                    include_retired: Some(false),
+                }));
+            let value: serde_json::Value = toon_format::decode_default(&listed)?;
+            let rows = value
+                .pointer("/worktrees/worktrees")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| io::Error::other(format!("missing worktree rows: {listed}")))?;
+            require(
+                rows.len() == 2
+                    && rows
+                        .iter()
+                        .filter(|row| {
+                            row.get("alias").and_then(serde_json::Value::as_str)
+                                == Some(fixture.alias.as_str())
+                                && row.get("git_state").and_then(serde_json::Value::as_str)
+                                    == Some("invalid")
+                                && row.get("registration").and_then(serde_json::Value::as_str)
+                                    == Some("registered")
+                                && row.get("atlas_state").and_then(serde_json::Value::as_str)
+                                    == Some("unavailable")
+                        })
+                        .count()
+                        == 1,
+                &format!("{replacement} replacement split its registered invalid row: {listed}"),
+            )?;
+            require(
+                fixture
+                    .server
+                    .state_for_target(None, Some(fixture.alias.to_string()))
+                    .is_err()
+                    && fs::read_to_string(target.join("canary"))? == "unrelated"
+                    && !target.join(PROJECTATLAS_DIR_NAME).exists(),
+                "invalid administrative replacement became an actionable target",
+            )?;
+        }
+        Ok(())
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_worktree_selector_survives_live_to_retained_transition()
@@ -12649,6 +12733,34 @@ mod tests {
             "Git-known missing native worktree lost its retained root or display state",
         )?;
         fs::write(linked.join(".git"), git_pointer)?;
+
+        let preserved_administrative = temp.path().join("preserved-administrative");
+        fs::rename(administrative_identity.as_path(), &preserved_administrative)?;
+        std::os::unix::fs::symlink(&preserved_administrative, administrative_identity.as_path())?;
+        let invalid_listing = server.atlas_worktree_list(Parameters(AtlasWorktreeListParams {
+            include_retired: Some(false),
+        }));
+        let invalid_value: serde_json::Value = toon_format::decode_default(&invalid_listing)?;
+        let invalid_rows = invalid_value
+            .pointer("/worktrees/worktrees")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| io::Error::other("native invalid worktree rows are missing"))?;
+        require(
+            invalid_rows.len() == 2
+                && invalid_rows.iter().any(|row| {
+                    row.get("alias").and_then(serde_json::Value::as_str) == Some(case)
+                        && row.get("git_state").and_then(serde_json::Value::as_str)
+                            == Some("invalid")
+                        && row.get("registration").and_then(serde_json::Value::as_str)
+                            == Some("registered")
+                })
+                && server
+                    .state_for_target(None, Some(case.to_string()))
+                    .is_err(),
+            &format!("native invalid registration was split or admitted: {invalid_listing}"),
+        )?;
+        fs::remove_file(administrative_identity.as_path())?;
+        fs::rename(&preserved_administrative, administrative_identity.as_path())?;
 
         let removed = server.atlas_worktree_remove(Parameters(AtlasWorktreeRemoveParams {
             worktree: case.to_string(),
