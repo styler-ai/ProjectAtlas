@@ -735,6 +735,14 @@ def require_production_trace_evidence(trace: dict[str, Any], label: str) -> None
     for event in trace.get("queries", []):
         if not isinstance(event.get("query_plan"), list):
             raise AssertionError(f"{label} trace omitted a production query plan")
+        outcome = event.get("outcome")
+        if not isinstance(outcome, dict) or outcome.get("status") not in {
+            "succeeded",
+            "failed",
+        }:
+            raise AssertionError(f"{label} trace omitted a typed query outcome")
+        if outcome["status"] == "failed" and not isinstance(outcome.get("error"), str):
+            raise AssertionError(f"{label} failed query omitted its database error")
 
 
 def multi_binding_alias_case(binary: Path, arm: str) -> dict[str, Any]:
@@ -1017,6 +1025,17 @@ def failure_case(
         result["trace_observed"] = True
         result["timed"] = False
         if name == "corrupt-relation":
+            call_queries = [
+                event
+                for event in result["query_observations"]
+                if event.get("family") == "call-targets"
+            ]
+            if len(call_queries) != 1 or call_queries[0].get("outcome", {}).get(
+                "status"
+            ) != "failed":
+                raise AssertionError(
+                    f"{arm} malformed relation trace omitted the failed call-target query"
+                )
             if measured["returncode"] == 0:
                 raise AssertionError("malformed relation unexpectedly succeeded")
             if measured["stdout"]:
@@ -1187,6 +1206,7 @@ def compact_query_plan_evidence(observations: dict[str, Any]) -> dict[str, Any]:
                     "limit",
                     "rows",
                     "row_bytes",
+                    "outcome",
                     "sql",
                     "parameters",
                     "query_plan",
@@ -1247,6 +1267,14 @@ def compact_failure_evidence(record: dict[str, Any]) -> dict[str, Any]:
     summary = compact_summary_evidence(record.get("decoded_summary"))
     if summary is not None:
         result["decoded_summary"] = summary
+    result["query_plan_evidence"] = compact_query_plan_evidence(
+        {
+            "events": record.get("query_observations", []),
+            "engine": record.get("query_engine"),
+            "plan_provenance": record.get("plan_provenance"),
+            "timed": record.get("timed"),
+        }
+    )
     return result
 
 

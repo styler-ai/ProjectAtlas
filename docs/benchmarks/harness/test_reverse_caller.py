@@ -200,7 +200,7 @@ class ReverseCallerHarnessTests(unittest.TestCase):
         self.assertFalse(evidence["timed"])
         self.assertEqual(evidence["allocation_metrics"]["allocation_calls"], 0)
 
-    def test_failure_case_replays_query_evidence_outside_ordinary_binary(self) -> None:
+    def test_corrupt_failure_replays_the_failed_call_query(self) -> None:
         calls: list[dict[str, object]] = []
 
         def fake_process(
@@ -216,7 +216,16 @@ class ReverseCallerHarnessTests(unittest.TestCase):
                 trace_path.write_text(
                     json.dumps(
                         {
-                            "queries": [],
+                            "queries": [
+                                {
+                                    "family": "call-targets",
+                                    "outcome": {
+                                        "status": "failed",
+                                        "error": "sqlite error: invalid line",
+                                    },
+                                    "query_plan": [],
+                                }
+                            ],
                             "engine": {"sqlite_version": "3"},
                             "plan_provenance": (
                                 "projectatlas-db::AtlasStore::connection"
@@ -245,10 +254,11 @@ class ReverseCallerHarnessTests(unittest.TestCase):
         with (
             patch.object(reverse_caller, "write_fixture", return_value=[target]),
             patch.object(reverse_caller, "setup_fixture"),
+            patch.object(reverse_caller, "mutate_corrupt_row"),
             patch.object(reverse_caller, "run_process", side_effect=fake_process),
         ):
             result = reverse_caller.failure_case(
-                Path("ordinary"), Path("evidence"), "missing-summary", "baseline"
+                Path("ordinary"), Path("evidence"), "corrupt-relation", "baseline"
             )
 
         self.assertEqual(calls[0], {"binary": "ordinary", "trace_path": None})
@@ -256,6 +266,9 @@ class ReverseCallerHarnessTests(unittest.TestCase):
         self.assertIsNotNone(calls[1]["trace_path"])
         self.assertTrue(result["trace_observed"])
         self.assertEqual(result["query_engine"], {"sqlite_version": "3"})
+        self.assertEqual(
+            result["query_observations"][0]["outcome"]["status"], "failed"
+        )
 
     def test_compact_evidence_drops_raw_process_streams(self) -> None:
         process = {

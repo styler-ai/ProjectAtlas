@@ -1,16 +1,16 @@
 {
   "artifact_kind": "compact-review-evidence",
   "baseline": {
-    "evidence_binary_sha256": "23e76965c1e9f8541c82d6febabd89aee26f5fd8b0ff459741aeef61da0cda66",
+    "evidence_binary_sha256": "e02dfa854c9f15af3d9f0bf3ff6596fa13b06311949685d4405cb40eff9255b7",
     "fixtures": {
       "duplicate-alias": {
         "aggregate": {
           "allocation_bytes": 34274.0,
           "allocation_calls": 493.5,
-          "cpu_ms": 85.9375,
-          "peak_rss_bytes": 13547520.0,
+          "cpu_ms": 78.125,
+          "peak_rss_bytes": 13555712.0,
           "stdout_bytes": 1697.0,
-          "wall_ms": 114.72700000740588
+          "wall_ms": 115.46620004810393
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -186,6 +186,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -202,6 +205,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -218,6 +224,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -246,9 +255,9 @@
         "runs": [
           {
             "allocation_metrics": null,
-            "cpu_ms": 93.75,
+            "cpu_ms": 109.375,
             "limit": 1,
-            "peak_rss_bytes": 13438976,
+            "peak_rss_bytes": 13602816,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -257,13 +266,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 103.91440009698272
+            "wall_ms": 109.07950019463897
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 62.5,
             "limit": 1,
-            "peak_rss_bytes": 13578240,
+            "peak_rss_bytes": 13545472,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -272,28 +281,58 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 115.20610004663467
+            "wall_ms": 112.80950019136071
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 1,
+            "peak_rss_bytes": 13344768,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1696,
+            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 107.225599931553
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 62.5,
+            "limit": 500,
+            "peak_rss_bytes": 13443072,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1698,
+            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 118.9828000497073
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 13295616,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1698,
+            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 118.1053000036627
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 46.875,
-            "limit": 1,
-            "peak_rss_bytes": 13381632,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1696,
-            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 111.60529986955225
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 13336576,
+            "peak_rss_bytes": 13578240,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -302,43 +341,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 114.24789996817708
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 78.125,
-            "limit": 500,
-            "peak_rss_bytes": 13746176,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1698,
-            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 109.62540004402399
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 13656064,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1698,
-            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 113.08989999815822
+            "wall_ms": 123.44360002316535
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 13590528,
+            "peak_rss_bytes": 13500416,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -347,13 +356,28 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 112.44460009038448
+            "wall_ms": 115.09130010381341
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 78.125,
+            "limit": 500,
+            "peak_rss_bytes": 13479936,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1706,
+            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 112.01060004532337
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 13508608,
+            "peak_rss_bytes": 13565952,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -362,28 +386,13 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 116.52759998105466
+            "wall_ms": 116.21650005690753
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 46.875,
+            "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 13516800,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1706,
-            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 115.88119994848967
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 78.125,
-            "limit": 500,
-            "peak_rss_bytes": 13455360,
+            "peak_rss_bytes": 13631488,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -392,7 +401,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 148.55669997632504
+            "wall_ms": 111.13530001603067
           },
           {
             "allocation_metrics": null,
@@ -407,13 +416,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 115.82489986903965
+            "wall_ms": 115.84109999239445
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 125.0,
+            "cpu_ms": 78.125,
             "limit": 500,
-            "peak_rss_bytes": 13582336,
+            "peak_rss_bytes": 13799424,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -422,7 +431,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 136.9696999900043
+            "wall_ms": 119.34850015677512
           }
         ],
         "targets": [
@@ -456,10 +465,10 @@
         "aggregate": {
           "allocation_bytes": 948053.0,
           "allocation_calls": 15294.0,
-          "cpu_ms": 281.25,
-          "peak_rss_bytes": 14827520.0,
+          "cpu_ms": 265.625,
+          "peak_rss_bytes": 14813184.0,
           "stdout_bytes": 2612.0,
-          "wall_ms": 134.24510008189827
+          "wall_ms": 135.98785002250224
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -635,6 +644,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -651,6 +663,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -667,6 +682,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001frust_target_alias::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -696,9 +714,9 @@
         "runs": [
           {
             "allocation_metrics": null,
-            "cpu_ms": 125.0,
+            "cpu_ms": 109.375,
             "limit": 1,
-            "peak_rss_bytes": 15007744,
+            "peak_rss_bytes": 15151104,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -707,148 +725,133 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 139.13080003112555
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 140.625,
-            "limit": 1,
-            "peak_rss_bytes": 14520320,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2592,
-            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 135.70440001785755
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 343.75,
-            "limit": 1,
-            "peak_rss_bytes": 14909440,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2592,
-            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 145.23290004581213
+            "wall_ms": 135.27650013566017
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 296.875,
-            "limit": 500,
+            "limit": 1,
             "peak_rss_bytes": 14737408,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "stdout_bytes": 2592,
+            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 137.08949997089803
+            "wall_ms": 163.6655000038445
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 109.375,
-            "limit": 500,
-            "peak_rss_bytes": 14790656,
+            "cpu_ms": 93.75,
+            "limit": 1,
+            "peak_rss_bytes": 14864384,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "stdout_bytes": 2592,
+            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 132.09540001116693
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 281.25,
-            "limit": 500,
-            "peak_rss_bytes": 14897152,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 132.785800145939
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 109.375,
-            "limit": 500,
-            "peak_rss_bytes": 14819328,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 131.4109000377357
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 296.875,
-            "limit": 500,
-            "peak_rss_bytes": 14770176,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 127.4594001006335
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 328.125,
-            "limit": 500,
-            "peak_rss_bytes": 14979072,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 131.25659991055727
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 281.25,
-            "limit": 500,
-            "peak_rss_bytes": 14741504,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2630,
-            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 136.82990008965135
+            "wall_ms": 140.77599998563528
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 312.5,
             "limit": 500,
-            "peak_rss_bytes": 14835712,
+            "peak_rss_bytes": 14950400,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 133.53540003299713
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 281.25,
+            "limit": 500,
+            "peak_rss_bytes": 14901248,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 131.3479000236839
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 296.875,
+            "limit": 500,
+            "peak_rss_bytes": 14696448,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 136.31529989652336
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 250.0,
+            "limit": 500,
+            "peak_rss_bytes": 14757888,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 134.84909990802407
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 187.5,
+            "limit": 500,
+            "peak_rss_bytes": 14692352,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 141.2474000826478
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 312.5,
+            "limit": 500,
+            "peak_rss_bytes": 14716928,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 135.66040014848113
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 359.375,
+            "limit": 500,
+            "peak_rss_bytes": 14815232,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -857,13 +860,28 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 135.95589995384216
+            "wall_ms": 138.04710004478693
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 125.0,
+            "limit": 500,
+            "peak_rss_bytes": 15028224,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2630,
+            "stdout_sha256": "9bab40bb74d63fd5f1c6f61dd98240006327a62d03eec9bb84059f1be111673f",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 137.12710002437234
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 14843904,
+            "peak_rss_bytes": 14811136,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -872,7 +890,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 131.8737999536097
+            "wall_ms": 133.76170000992715
           }
         ],
         "targets": [
@@ -906,10 +924,10 @@
         "aggregate": {
           "allocation_bytes": 3479368.5,
           "allocation_calls": 57577.5,
-          "cpu_ms": 85.9375,
-          "peak_rss_bytes": 15601664.0,
+          "cpu_ms": 78.125,
+          "peak_rss_bytes": 15466496.0,
           "stdout_bytes": 82730.0,
-          "wall_ms": 130.50609990023077
+          "wall_ms": 132.67209997866303
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -1085,6 +1103,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -1101,6 +1122,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -1117,6 +1141,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001frust_target_alias::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -1146,9 +1173,24 @@
         "runs": [
           {
             "allocation_metrics": null,
+            "cpu_ms": 31.25,
+            "limit": 1,
+            "peak_rss_bytes": 13651968,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 107.04599996097386
+          },
+          {
+            "allocation_metrics": null,
             "cpu_ms": 46.875,
             "limit": 1,
-            "peak_rss_bytes": 13799424,
+            "peak_rss_bytes": 13770752,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1157,13 +1199,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 109.70010003075004
+            "wall_ms": 110.12309999205172
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 109.375,
             "limit": 1,
-            "peak_rss_bytes": 13508608,
+            "peak_rss_bytes": 13684736,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1172,58 +1214,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 117.85540007986128
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 78.125,
-            "limit": 1,
-            "peak_rss_bytes": 13778944,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "7f2fa8932b62d845d0a0bbfa2890f0f047e1352be522bcd7fbf0f77ab2f1b239",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 116.4937000721693
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 78.125,
-            "limit": 500,
-            "peak_rss_bytes": 15794176,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 127.9845000244677
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 125.0,
-            "limit": 500,
-            "peak_rss_bytes": 15716352,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 129.54559992067516
+            "wall_ms": 110.90009985491633
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 15699968,
+            "peak_rss_bytes": 15564800,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1232,88 +1229,88 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 131.46659987978637
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 109.375,
-            "limit": 500,
-            "peak_rss_bytes": 15261696,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 149.80949996970594
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 15368192,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 132.20339990220964
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 125.0,
-            "limit": 500,
-            "peak_rss_bytes": 15503360,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 127.97260005027056
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 78.125,
-            "limit": 500,
-            "peak_rss_bytes": 16056320,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 139.1211999580264
+            "wall_ms": 130.34820021130145
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 15867904,
+            "peak_rss_bytes": 15753216,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 136.7635999340564
+            "wall_ms": 128.69539996609092
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 78.125,
+            "cpu_ms": 125.0,
             "limit": 500,
-            "peak_rss_bytes": 15994880,
+            "peak_rss_bytes": 15495168,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 133.34570010192692
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 125.0,
+            "limit": 500,
+            "peak_rss_bytes": 15335424,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 132.36859999597073
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 15372288,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 133.44609993509948
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 15437824,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 132.97559996135533
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 46.875,
+            "limit": 500,
+            "peak_rss_bytes": 15872000,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1322,7 +1319,37 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 146.8080000486225
+            "wall_ms": 138.35060014389455
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 46.875,
+            "limit": 500,
+            "peak_rss_bytes": 15896576,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 140.59480000287294
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 62.5,
+            "limit": 500,
+            "peak_rss_bytes": 15749120,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 138.0395998712629
           }
         ],
         "targets": [
@@ -1356,10 +1383,10 @@
         "aggregate": {
           "allocation_bytes": 37488723.0,
           "allocation_calls": 804280.5,
-          "cpu_ms": 218.75,
-          "peak_rss_bytes": 14917632.0,
+          "cpu_ms": 250.0,
+          "peak_rss_bytes": 14952448.0,
           "stdout_bytes": 37929.0,
-          "wall_ms": 230.52350000943989
+          "wall_ms": 232.02220001257956
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -1535,6 +1562,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -1551,6 +1581,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -1567,6 +1600,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001frust_target_alias::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -1596,9 +1632,9 @@
         "runs": [
           {
             "allocation_metrics": null,
-            "cpu_ms": 109.375,
+            "cpu_ms": 250.0,
             "limit": 1,
-            "peak_rss_bytes": 14327808,
+            "peak_rss_bytes": 14372864,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1607,13 +1643,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 117.90150008164346
+            "wall_ms": 126.16520002484322
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 125.0,
+            "cpu_ms": 93.75,
             "limit": 1,
-            "peak_rss_bytes": 14344192,
+            "peak_rss_bytes": 14303232,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1622,43 +1658,28 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 121.64420005865395
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 125.0,
-            "limit": 1,
-            "peak_rss_bytes": 14327808,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1812,
-            "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 126.33690005168319
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 203.125,
-            "limit": 500,
-            "peak_rss_bytes": 21897216,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 246.47850007750094
+            "wall_ms": 128.64410015754402
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 234.375,
+            "limit": 1,
+            "peak_rss_bytes": 14286848,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1812,
+            "stdout_sha256": "c69942fb0a7f6ec56c400ae18a7b051ff5a687e8a602f2b19154461f30e3bb62",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 136.14209997467697
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 218.75,
             "limit": 500,
-            "peak_rss_bytes": 21757952,
+            "peak_rss_bytes": 21671936,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1667,13 +1688,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 243.47270000725985
+            "wall_ms": 246.3489999063313
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 265.625,
             "limit": 500,
-            "peak_rss_bytes": 21356544,
+            "peak_rss_bytes": 21712896,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1682,13 +1703,28 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 248.10440000146627
+            "wall_ms": 245.5525000113994
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 203.125,
+            "cpu_ms": 281.25,
             "limit": 500,
-            "peak_rss_bytes": 14893056,
+            "peak_rss_bytes": 21733376,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 245.88770000264049
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 187.5,
+            "limit": 500,
+            "peak_rss_bytes": 14872576,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1697,28 +1733,13 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 216.9292001053691
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 203.125,
-            "limit": 500,
-            "peak_rss_bytes": 14909440,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 39741,
-            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 214.44269991479814
+            "wall_ms": 218.49190001375973
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 343.75,
             "limit": 500,
-            "peak_rss_bytes": 14925824,
+            "peak_rss_bytes": 14942208,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1727,13 +1748,43 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 217.57430001161993
+            "wall_ms": 218.4574999846518
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 171.875,
+            "limit": 500,
+            "peak_rss_bytes": 14950400,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 39741,
+            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 215.1221998501569
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 437.5,
+            "limit": 500,
+            "peak_rss_bytes": 14954496,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 37083,
+            "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 287.2027000412345
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 250.0,
             "limit": 500,
-            "peak_rss_bytes": 14925824,
+            "peak_rss_bytes": 15093760,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1742,13 +1793,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 283.5049000568688
+            "wall_ms": 280.75490007176995
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 234.375,
+            "cpu_ms": 484.375,
             "limit": 500,
-            "peak_rss_bytes": 14794752,
+            "peak_rss_bytes": 15040512,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1757,22 +1808,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 281.40640002675354
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 406.25,
-            "limit": 500,
-            "peak_rss_bytes": 15134720,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 37083,
-            "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 284.2393999453634
+            "wall_ms": 285.9337998088449
           }
         ],
         "targets": [
@@ -1806,10 +1842,10 @@
         "aggregate": {
           "allocation_bytes": 63269.5,
           "allocation_calls": 985.0,
-          "cpu_ms": 93.75,
-          "peak_rss_bytes": 13580288.0,
+          "cpu_ms": 78.125,
+          "peak_rss_bytes": 13604864.0,
           "stdout_bytes": 2540.0,
-          "wall_ms": 112.38950002007186
+          "wall_ms": 116.46659998223186
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -1985,6 +2021,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -2001,6 +2040,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -2017,6 +2059,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001frust_target_alias::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -2046,9 +2091,9 @@
         "runs": [
           {
             "allocation_metrics": null,
-            "cpu_ms": 140.625,
+            "cpu_ms": 31.25,
             "limit": 1,
-            "peak_rss_bytes": 13557760,
+            "peak_rss_bytes": 13504512,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2057,82 +2102,37 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 106.07669991441071
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 1,
-            "peak_rss_bytes": 13561856,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1800,
-            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 110.09419988840818
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 78.125,
-            "limit": 1,
-            "peak_rss_bytes": 13750272,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1800,
-            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 118.77830000594258
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 13598720,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 111.97560001164675
+            "wall_ms": 107.38990013487637
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 62.5,
-            "limit": 500,
-            "peak_rss_bytes": 13750272,
+            "limit": 1,
+            "peak_rss_bytes": 13664256,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "stdout_bytes": 1800,
+            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 108.84719993919134
+            "wall_ms": 108.60350006259978
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 78.125,
-            "limit": 500,
-            "peak_rss_bytes": 13406208,
+            "cpu_ms": 62.5,
+            "limit": 1,
+            "peak_rss_bytes": 13549568,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "stdout_bytes": 1800,
+            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 107.91960009373724
+            "wall_ms": 107.86390001885593
           },
           {
             "allocation_metrics": null,
@@ -2142,18 +2142,48 @@
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 115.56770000606775
+            "wall_ms": 116.2030000705272
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 46.875,
+            "limit": 500,
+            "peak_rss_bytes": 13606912,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 114.775899797678
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 13549568,
+            "peak_rss_bytes": 13602816,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 113.61249978654087
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 46.875,
+            "limit": 500,
+            "peak_rss_bytes": 13619200,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2162,13 +2192,13 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 116.81969999335706
+            "wall_ms": 118.25360008515418
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 93.75,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 13660160,
+            "peak_rss_bytes": 13516800,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2177,13 +2207,28 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 113.33840014412999
+            "wall_ms": 117.85069992765784
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 13426688,
+            "peak_rss_bytes": 13553664,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 117.69960005767643
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 31.25,
+            "limit": 500,
+            "peak_rss_bytes": 13606912,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2192,13 +2237,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 118.31369996070862
+            "wall_ms": 116.73019989393651
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 78.125,
+            "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 13762560,
+            "peak_rss_bytes": 13688832,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2207,13 +2252,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 110.79680011607707
+            "wall_ms": 118.10870002955198
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 13660160,
+            "peak_rss_bytes": 13733888,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2222,7 +2267,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 112.80340002849698
+            "wall_ms": 118.78260015510023
           }
         ],
         "targets": [
@@ -2253,7 +2298,7 @@
         ]
       }
     },
-    "timed_binary_sha256": "d2d16ea6fc34d615adacab552e896a8a587dbf7ab9f78d46497885d7eb30a7a6"
+    "timed_binary_sha256": "e89bf92723d52f0d6efe9f7e5f6abb7bd8bb225bb0fcafa6d90f9560c48c83d8"
   },
   "build_profile": "release",
   "cancellation": {
@@ -2303,16 +2348,16 @@
       "path": "docs/benchmarks/reverse-caller-candidate.patch",
       "sha256": "e4779fc73c4f149c7a1b27822aac4f47a7b731a8e06bc123e13d7622576d78ca"
     },
-    "evidence_binary_sha256": "706e5b11249b8cbf30f1d550e6ccb4344de3085c8feb03ca636bd4b52c619aa4",
+    "evidence_binary_sha256": "eda91e6855dfa3f628550a0af76f32cc83a8baf89063ea3826267e37ae25f0f7",
     "fixtures": {
       "duplicate-alias": {
         "aggregate": {
           "allocation_bytes": 34072.0,
           "allocation_calls": 489.5,
           "cpu_ms": 93.75,
-          "peak_rss_bytes": 13608960.0,
+          "peak_rss_bytes": 13611008.0,
           "stdout_bytes": 1697.0,
-          "wall_ms": 114.14065002463758
+          "wall_ms": 112.83120000734925
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -2488,6 +2533,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -2504,6 +2552,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -2520,6 +2571,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -2548,9 +2602,9 @@
         "runs": [
           {
             "allocation_metrics": null,
-            "cpu_ms": 93.75,
+            "cpu_ms": 109.375,
             "limit": 1,
-            "peak_rss_bytes": 13545472,
+            "peak_rss_bytes": 13635584,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2559,43 +2613,43 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 104.66429986990988
+            "wall_ms": 107.24720009602606
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 62.5,
+            "limit": 1,
+            "peak_rss_bytes": 13553664,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1696,
+            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 114.65319991111755
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 1,
+            "peak_rss_bytes": 13586432,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1696,
+            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 110.22210004739463
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 78.125,
-            "limit": 1,
-            "peak_rss_bytes": 13549568,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1696,
-            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 110.90339999645948
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 1,
-            "peak_rss_bytes": 13578240,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1696,
-            "stdout_sha256": "fce3a8d8ccb1ff3256b614af0dcab75312ea54cf6ee2983e6b0735b56537d296",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 109.86409988254309
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 125.0,
             "limit": 500,
-            "peak_rss_bytes": 13475840,
+            "peak_rss_bytes": 13725696,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2604,28 +2658,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 121.79050012491643
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 46.875,
-            "limit": 500,
-            "peak_rss_bytes": 13656064,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1698,
-            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 111.9911998976022
+            "wall_ms": 109.12129981443286
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 13615104,
+            "peak_rss_bytes": 13504512,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2634,43 +2673,28 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 114.541299873963
+            "wall_ms": 111.84169980697334
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 13742080,
+            "peak_rss_bytes": 13770752,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1706,
-            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
-            "target": "src/ts_target.ts",
+            "stdout_bytes": 1698,
+            "stdout_sha256": "d0c85636112324599d22224d081905d325400385511563d81363c4c51a7758eb",
+            "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 165.58960010297596
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 140.625,
-            "limit": 500,
-            "peak_rss_bytes": 13774848,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1706,
-            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 114.95149997062981
+            "wall_ms": 112.90739988908172
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 13606912,
+            "peak_rss_bytes": 13574144,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2679,13 +2703,43 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 111.82959983125329
+            "wall_ms": 111.35350004769862
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 140.625,
+            "cpu_ms": 46.875,
             "limit": 500,
-            "peak_rss_bytes": 13557760,
+            "peak_rss_bytes": 13533184,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1706,
+            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 113.21500013582408
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 109.375,
+            "limit": 500,
+            "peak_rss_bytes": 13717504,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1706,
+            "stdout_sha256": "991c5086c06002e85f5540b375aae9af71af733859f7dfcb27fdc038e1d786aa",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 120.85550022311509
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 13541376,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2694,13 +2748,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 119.04149991460145
+            "wall_ms": 112.75500012561679
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 15.625,
+            "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 13623296,
+            "peak_rss_bytes": 13676544,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2709,13 +2763,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 113.74000017531216
+            "wall_ms": 114.55320008099079
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 156.25,
+            "cpu_ms": 46.875,
             "limit": 500,
-            "peak_rss_bytes": 13611008,
+            "peak_rss_bytes": 13701120,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -2724,7 +2778,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 115.72870006784797
+            "wall_ms": 118.01820015534759
           }
         ],
         "targets": [
@@ -2758,10 +2812,10 @@
         "aggregate": {
           "allocation_bytes": 934613.0,
           "allocation_calls": 14815.0,
-          "cpu_ms": 117.1875,
-          "peak_rss_bytes": 15007744.0,
+          "cpu_ms": 296.875,
+          "peak_rss_bytes": 15013888.0,
           "stdout_bytes": 2612.0,
-          "wall_ms": 132.67225003801286
+          "wall_ms": 138.28125002328306
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -2937,6 +2991,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -2953,6 +3010,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -2969,6 +3029,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001frust_target_alias::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -3000,7 +3063,7 @@
             "allocation_metrics": null,
             "cpu_ms": 109.375,
             "limit": 1,
-            "peak_rss_bytes": 14966784,
+            "peak_rss_bytes": 15003648,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3009,13 +3072,28 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 126.68400001712143
+            "wall_ms": 129.14819992147386
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 281.25,
+            "limit": 1,
+            "peak_rss_bytes": 14893056,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2592,
+            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 148.54530012235045
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 312.5,
             "limit": 1,
-            "peak_rss_bytes": 14921728,
+            "peak_rss_bytes": 15114240,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3024,28 +3102,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 130.49630005843937
+            "wall_ms": 139.77560005150735
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 109.375,
-            "limit": 1,
-            "peak_rss_bytes": 15122432,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2592,
-            "stdout_sha256": "7b458891151aa236b4928f79c20bb14ecf4653e684a189abda31fb2e4c6a3e14",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 130.76920015737414
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
+            "cpu_ms": 312.5,
             "limit": 500,
-            "peak_rss_bytes": 15368192,
+            "peak_rss_bytes": 15249408,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3054,88 +3117,88 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 131.30820007063448
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 281.25,
-            "limit": 500,
-            "peak_rss_bytes": 15089664,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 130.80539996735752
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 14991360,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2594,
-            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 130.8283000253141
+            "wall_ms": 137.08110013976693
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 296.875,
             "limit": 500,
-            "peak_rss_bytes": 14974976,
+            "peak_rss_bytes": 14938112,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 140.19659999758005
+            "wall_ms": 139.4813999067992
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 218.75,
-            "limit": 500,
-            "peak_rss_bytes": 15200256,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2722,
-            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 136.7552001029253
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 125.0,
+            "cpu_ms": 281.25,
             "limit": 500,
             "peak_rss_bytes": 15024128,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2594,
+            "stdout_sha256": "3b257d360985a565dbc331d71b4f1cc7fe95460f41f77e7cc0cae44ef50d1921",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 141.11780002713203
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 15540224,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "stdout_bytes": 2722,
             "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 134.03630000539124
+            "wall_ms": 132.30250007472932
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 250.0,
+            "cpu_ms": 296.875,
             "limit": 500,
-            "peak_rss_bytes": 14970880,
+            "peak_rss_bytes": 15089664,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 136.7105001118034
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 312.5,
+            "limit": 500,
+            "peak_rss_bytes": 15519744,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2722,
+            "stdout_sha256": "112a218c77f58608c40554405bd799d436d33edc063f255fe03c4df0b08d1814",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 136.93409995175898
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 312.5,
+            "limit": 500,
+            "peak_rss_bytes": 14856192,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3144,13 +3207,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 134.63510014116764
+            "wall_ms": 140.81009989604354
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 78.125,
+            "cpu_ms": 312.5,
             "limit": 500,
-            "peak_rss_bytes": 14897152,
+            "peak_rss_bytes": 14966784,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3159,13 +3222,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 135.64809993840754
+            "wall_ms": 143.7552000861615
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 78.125,
+            "cpu_ms": 265.625,
             "limit": 500,
-            "peak_rss_bytes": 15085568,
+            "peak_rss_bytes": 14917632,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3174,7 +3237,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 137.94549996964633
+            "wall_ms": 136.41469995491207
           }
         ],
         "targets": [
@@ -3208,10 +3271,10 @@
         "aggregate": {
           "allocation_bytes": 3409132.5,
           "allocation_calls": 56460.0,
-          "cpu_ms": 93.75,
-          "peak_rss_bytes": 15626240.0,
+          "cpu_ms": 101.5625,
+          "peak_rss_bytes": 15640576.0,
           "stdout_bytes": 82730.0,
-          "wall_ms": 133.27644998207688
+          "wall_ms": 136.2302500056103
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -3387,6 +3450,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -3403,6 +3469,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -3419,6 +3488,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001frust_target_alias::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -3448,9 +3520,9 @@
         "runs": [
           {
             "allocation_metrics": null,
-            "cpu_ms": 78.125,
+            "cpu_ms": 93.75,
             "limit": 1,
-            "peak_rss_bytes": 13828096,
+            "peak_rss_bytes": 13623296,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3459,13 +3531,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 115.65549997612834
+            "wall_ms": 109.76569983176887
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 78.125,
             "limit": 1,
-            "peak_rss_bytes": 13684736,
+            "peak_rss_bytes": 14008320,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3474,13 +3546,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 111.18660005740821
+            "wall_ms": 270.7124000880867
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 78.125,
+            "cpu_ms": 93.75,
             "limit": 1,
-            "peak_rss_bytes": 13664256,
+            "peak_rss_bytes": 13746176,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3489,133 +3561,103 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 133.41780006885529
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 15581184,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 133.72869999147952
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 109.375,
-            "limit": 500,
-            "peak_rss_bytes": 15519744,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 127.03879992477596
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 15835136,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 85495,
-            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 134.71320015378296
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 109.375,
-            "limit": 500,
-            "peak_rss_bytes": 15687680,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 132.143700029701
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 78.125,
-            "limit": 500,
-            "peak_rss_bytes": 15626240,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 129.9332999624312
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 109.375,
-            "limit": 500,
-            "peak_rss_bytes": 15626240,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 86147,
-            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 133.13509989529848
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 16023552,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 138.73700005933642
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 15982592,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 79965,
-            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 142.980300122872
+            "wall_ms": 119.51950006186962
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 125.0,
             "limit": 500,
-            "peak_rss_bytes": 15753216,
+            "peak_rss_bytes": 15925248,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 139.9826998822391
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 109.375,
+            "limit": 500,
+            "peak_rss_bytes": 15577088,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 140.35290013998747
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 46.875,
+            "limit": 500,
+            "peak_rss_bytes": 15577088,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 85495,
+            "stdout_sha256": "0ee7ba9fd35fb725ca145458d1d58cfed28c59049c456e40e30d18cd289b37be",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 140.78140002675354
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 140.625,
+            "limit": 500,
+            "peak_rss_bytes": 15704064,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 133.14919988624752
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 62.5,
+            "limit": 500,
+            "peak_rss_bytes": 15224832,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 133.65610013715923
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 15941632,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 86147,
+            "stdout_sha256": "0a75ddbfc4c861b97af00aed595643758c7e625ce793be4559f96c4d557a500b",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 136.3791001494974
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 109.375,
+            "limit": 500,
+            "peak_rss_bytes": 16379904,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3624,7 +3666,37 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 136.46539999172091
+            "wall_ms": 135.18969994038343
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 140.625,
+            "limit": 500,
+            "peak_rss_bytes": 16007168,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 139.5527001004666
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 125.0,
+            "limit": 500,
+            "peak_rss_bytes": 16240640,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 79965,
+            "stdout_sha256": "a6fef46a131bb9d5810ce95dc5a53a681e9059f4a66098d1bae5817fb53de414",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 136.08139986172318
           }
         ],
         "targets": [
@@ -3658,10 +3730,10 @@
         "aggregate": {
           "allocation_bytes": 34324803.0,
           "allocation_calls": 754061.5,
-          "cpu_ms": 242.1875,
-          "peak_rss_bytes": 14936064.0,
+          "cpu_ms": 218.75,
+          "peak_rss_bytes": 14950400.0,
           "stdout_bytes": 37929.0,
-          "wall_ms": 222.21509995870292
+          "wall_ms": 236.05289997067302
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -3837,6 +3909,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -3853,6 +3928,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -3869,6 +3947,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001frust_target_alias::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -3898,9 +3979,9 @@
         "runs": [
           {
             "allocation_metrics": null,
-            "cpu_ms": 265.625,
+            "cpu_ms": 156.25,
             "limit": 1,
-            "peak_rss_bytes": 14270464,
+            "peak_rss_bytes": 14569472,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3909,13 +3990,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 117.30180005542934
+            "wall_ms": 128.60869988799095
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 125.0,
             "limit": 1,
-            "peak_rss_bytes": 14290944,
+            "peak_rss_bytes": 14647296,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3924,13 +4005,13 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 127.51000002026558
+            "wall_ms": 137.99569988623261
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 125.0,
+            "cpu_ms": 78.125,
             "limit": 1,
-            "peak_rss_bytes": 14209024,
+            "peak_rss_bytes": 14512128,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -3939,118 +4020,103 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 122.80630017630756
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 218.75,
-            "limit": 500,
-            "peak_rss_bytes": 21282816,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 236.85829993337393
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 187.5,
-            "limit": 500,
-            "peak_rss_bytes": 21704704,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 234.22320000827312
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 390.625,
-            "limit": 500,
-            "peak_rss_bytes": 21917696,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 38775,
-            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 243.66849986836314
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 359.375,
-            "limit": 500,
-            "peak_rss_bytes": 14815232,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 39741,
-            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 205.0327998585999
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 203.125,
-            "limit": 500,
-            "peak_rss_bytes": 14864384,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 39741,
-            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 210.20699990913272
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 312.5,
-            "limit": 500,
-            "peak_rss_bytes": 15003648,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 39741,
-            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 206.5894000697881
+            "wall_ms": 126.79019989445806
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 234.375,
             "limit": 500,
-            "peak_rss_bytes": 15085568,
+            "peak_rss_bytes": 21807104,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 37083,
-            "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
-            "target": "src/package/py_target.py",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
+            "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 270.43420006521046
+            "wall_ms": 254.9753999337554
           },
           {
             "allocation_metrics": null,
-            "cpu_ms": 468.75,
+            "cpu_ms": 375.0,
             "limit": 500,
-            "peak_rss_bytes": 14999552,
+            "peak_rss_bytes": 21741568,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 281.01399983279407
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 218.75,
+            "limit": 500,
+            "peak_rss_bytes": 21909504,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 38775,
+            "stdout_sha256": "306bf11cce8cf5f793f5351f8dabfea57f625cfc31cb1b6c5c13f5b1caa3a67e",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 269.51130013912916
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 203.125,
+            "limit": 500,
+            "peak_rss_bytes": 14950400,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 39741,
+            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 216.87490004114807
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 156.25,
+            "limit": 500,
+            "peak_rss_bytes": 15159296,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 39741,
+            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 217.13040000759065
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 343.75,
+            "limit": 500,
+            "peak_rss_bytes": 14839808,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 39741,
+            "stdout_sha256": "ece65a668af36539884b61e3e94a83a5682da64ba516914b6f29cdd1f01f2a7e",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 201.4266001060605
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 281.25,
+            "limit": 500,
+            "peak_rss_bytes": 14823424,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4059,13 +4125,13 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 305.93209993094206
+            "wall_ms": 270.581099903211
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 250.0,
             "limit": 500,
-            "peak_rss_bytes": 14872576,
+            "peak_rss_bytes": 15028224,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4074,7 +4140,22 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 268.1496001314372
+            "wall_ms": 264.0339999925345
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 218.75,
+            "limit": 500,
+            "peak_rss_bytes": 14950400,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 37083,
+            "stdout_sha256": "c0fa61ded8dc6a5cc8f09df7d5fda10bcb585915a72742adf016323ee2718352",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 271.3695000857115
           }
         ],
         "targets": [
@@ -4109,9 +4190,9 @@
           "allocation_bytes": 62553.5,
           "allocation_calls": 973.5,
           "cpu_ms": 93.75,
-          "peak_rss_bytes": 13627392.0,
+          "peak_rss_bytes": 13690880.0,
           "stdout_bytes": 2540.0,
-          "wall_ms": 113.13589999917895
+          "wall_ms": 113.06815012358129
         },
         "allocation_measurement": "untimed-evidence-replay",
         "evidence_replays": [
@@ -4287,6 +4368,9 @@
               "binding": "rust_target",
               "family": "import-targets",
               "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "%rust\\_target%",
                 500
@@ -4303,6 +4387,9 @@
               "binding": "src/rust_caller_000.rs",
               "family": "import-caller-path",
               "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "src/rust_caller_000.rs",
                 1000
@@ -4319,6 +4406,9 @@
               "binding": "crate.rust_target.target_0\u001fcrate::rust_target::target_0\u001frust_target.target_0\u001frust_target::target_0\u001frust_target_alias::target_0\u001ftarget_0",
               "family": "call-targets",
               "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
               "parameters": [
                 "crate.rust_target.target_0",
                 "crate::rust_target::target_0",
@@ -4350,7 +4440,7 @@
             "allocation_metrics": null,
             "cpu_ms": 93.75,
             "limit": 1,
-            "peak_rss_bytes": 13627392,
+            "peak_rss_bytes": 13598720,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4359,13 +4449,28 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 109.10840006545186
+            "wall_ms": 108.40780008584261
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 1,
+            "peak_rss_bytes": 13918208,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 1800,
+            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 112.92659980244935
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 78.125,
             "limit": 1,
-            "peak_rss_bytes": 13627392,
+            "peak_rss_bytes": 13717504,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4374,103 +4479,58 @@
             "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 117.80359991826117
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 1,
-            "peak_rss_bytes": 13611008,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 1800,
-            "stdout_sha256": "46fc767e2f0a9f7d66f4d259d48f4929420a726132b36bb26ac7256828bd5726",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 132.75220012292266
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 171.875,
-            "limit": 500,
-            "peak_rss_bytes": 13615104,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 113.26960008591413
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 13582336,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 110.20100000314415
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 13733888,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2565,
-            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
-            "target": "src/rust_target.rs",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 113.00219991244376
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 93.75,
-            "limit": 500,
-            "peak_rss_bytes": 13701120,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 113.68920002132654
+            "wall_ms": 108.12090011313558
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 62.5,
             "limit": 500,
-            "peak_rss_bytes": 13484032,
+            "peak_rss_bytes": 13729792,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2585,
-            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
-            "target": "src/ts_target.ts",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 114.73999987356365
+            "wall_ms": 114.41379995085299
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 62.5,
+            "limit": 500,
+            "peak_rss_bytes": 13664256,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 110.14269990846515
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 93.75,
+            "limit": 500,
+            "peak_rss_bytes": 13492224,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2565,
+            "stdout_sha256": "76dabaa9a284e42d4c59dc2c0549f871e98355d68d715a06fa81de3d0f019938",
+            "target": "src/rust_target.rs",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 110.73029995895922
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 109.375,
             "limit": 500,
-            "peak_rss_bytes": 13889536,
+            "peak_rss_bytes": 13643776,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4479,13 +4539,73 @@
             "target": "src/ts_target.ts",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 111.44720017910004
+            "wall_ms": 120.15690002590418
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 109.375,
+            "limit": 500,
+            "peak_rss_bytes": 13545472,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 144.91960010491312
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 109.375,
+            "limit": 500,
+            "peak_rss_bytes": 13721600,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2585,
+            "stdout_sha256": "8a84116187b58f528fe868ac651cc4e02381df5b76ce24b295a935d78e3b7501",
+            "target": "src/ts_target.ts",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 116.25630012713373
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 78.125,
+            "limit": 500,
+            "peak_rss_bytes": 13819904,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2515,
+            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 114.17090008035302
+          },
+          {
+            "allocation_metrics": null,
+            "cpu_ms": 31.25,
+            "limit": 500,
+            "peak_rss_bytes": 13647872,
+            "returncode": 0,
+            "stderr_bytes": 0,
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stdout_bytes": 2515,
+            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
+            "target": "src/package/py_target.py",
+            "timed": true,
+            "trace_observed": false,
+            "wall_ms": 113.15300012938678
           },
           {
             "allocation_metrics": null,
             "cpu_ms": 93.75,
             "limit": 500,
-            "peak_rss_bytes": 13893632,
+            "peak_rss_bytes": 13770752,
             "returncode": 0,
             "stderr_bytes": 0,
             "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4494,37 +4614,7 @@
             "target": "src/package/py_target.py",
             "timed": true,
             "trace_observed": false,
-            "wall_ms": 116.16649990901351
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 62.5,
-            "limit": 500,
-            "peak_rss_bytes": 13795328,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2515,
-            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 111.27629992552102
-          },
-          {
-            "allocation_metrics": null,
-            "cpu_ms": 46.875,
-            "limit": 500,
-            "peak_rss_bytes": 13615104,
-            "returncode": 0,
-            "stderr_bytes": 0,
-            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "stdout_bytes": 2515,
-            "stdout_sha256": "8bba85f7cb078d0bbe651b7339f9ee629b5fcd463a7574656d763ca02f6d2ecd",
-            "target": "src/package/py_target.py",
-            "timed": true,
-            "trace_observed": false,
-            "wall_ms": 111.91709991544485
+            "wall_ms": 112.9833001177758
           }
         ],
         "targets": [
@@ -4555,7 +4645,7 @@
         ]
       }
     },
-    "timed_binary_sha256": "a9d4ac84931324db14c501907d9d369f5bd9dd80b13cb1a0dbb6d9d2b6c55f51"
+    "timed_binary_sha256": "788c19aeba0c30c21e64ef223e295755434bc1d4d946f8a16678b4f9c90f63f0"
   },
   "candidate_patch_preflight": {
     "baseline_source_sha256": "e61ec46ef05de848bd9367fff6957870f9af395dcd1fa878255e1dc54c061712",
@@ -4575,28 +4665,28 @@
       "small_max_regression_fraction": 0.05
     },
     "wall_change_fraction": {
-      "duplicate-alias": -0.005110828163644539,
-      "high-import": -0.01171625663004362,
-      "high-symbol": 0.0212277440208848,
-      "representative-large": -0.03604144501708822,
-      "small": 0.006641189603777763
+      "duplicate-alias": -0.022820531373310273,
+      "high-import": 0.016864741963354274,
+      "high-symbol": 0.026819127966765423,
+      "representative-large": 0.017372044390040833,
+      "small": -0.029179609082509772
     }
   },
   "failure_cases": {
     "corrupt-relation": {
       "baseline": {
         "allocation_metrics": {
-          "allocation_bytes": 55504,
-          "allocation_calls": 821,
+          "allocation_bytes": 60680,
+          "allocation_calls": 874,
           "deallocation_bytes": 58949,
           "deallocation_calls": 801,
-          "reallocation_bytes": 12301,
-          "reallocation_calls": 170
+          "reallocation_bytes": 12403,
+          "reallocation_calls": 172
         },
         "case": "corrupt-relation",
-        "cpu_ms": 62.5,
+        "cpu_ms": 78.125,
         "diagnostic": "error: sqlite error: Invalid column type Text at index: 4, name: line\n",
-        "peak_rss_bytes": 12267520,
+        "peak_rss_bytes": 12038144,
         "plan_provenance": "projectatlas-db::AtlasStore::connection",
         "query_engine": {
           "compile_options": [
@@ -4655,6 +4745,157 @@
           "sqlite_version": "3.53.2",
           "sqlite_version_number": 3053002
         },
+        "query_plan_evidence": {
+          "by_family": {},
+          "engine": {
+            "compile_options": [
+              "ATOMIC_INTRINSICS=0",
+              "COMPILER=msvc-1944",
+              "DEFAULT_AUTOVACUUM",
+              "DEFAULT_CACHE_SIZE=-2000",
+              "DEFAULT_FILE_FORMAT=4",
+              "DEFAULT_FOREIGN_KEYS",
+              "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+              "DEFAULT_MMAP_SIZE=0",
+              "DEFAULT_PAGE_SIZE=4096",
+              "DEFAULT_PCACHE_INITSZ=20",
+              "DEFAULT_RECURSIVE_TRIGGERS",
+              "DEFAULT_SECTOR_SIZE=4096",
+              "DEFAULT_SYNCHRONOUS=2",
+              "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+              "DEFAULT_WAL_SYNCHRONOUS=2",
+              "DEFAULT_WORKER_THREADS=0",
+              "DIRECT_OVERFLOW_READ",
+              "ENABLE_API_ARMOR",
+              "ENABLE_COLUMN_METADATA",
+              "ENABLE_DBSTAT_VTAB",
+              "ENABLE_FTS3",
+              "ENABLE_FTS3_PARENTHESIS",
+              "ENABLE_FTS5",
+              "ENABLE_LOAD_EXTENSION",
+              "ENABLE_MEMORY_MANAGEMENT",
+              "ENABLE_RTREE",
+              "ENABLE_STAT4",
+              "HAVE_ISNAN",
+              "MALLOC_SOFT_LIMIT=1024",
+              "MAX_ATTACHED=10",
+              "MAX_COLUMN=2000",
+              "MAX_COMPOUND_SELECT=500",
+              "MAX_DEFAULT_PAGE_SIZE=8192",
+              "MAX_EXPR_DEPTH=1000",
+              "MAX_FUNCTION_ARG=1000",
+              "MAX_LENGTH=1000000000",
+              "MAX_LIKE_PATTERN_LENGTH=50000",
+              "MAX_MMAP_SIZE=0x7fff0000",
+              "MAX_PAGE_COUNT=0xfffffffe",
+              "MAX_PAGE_SIZE=65536",
+              "MAX_SQL_LENGTH=1000000000",
+              "MAX_TRIGGER_DEPTH=1000",
+              "MAX_VARIABLE_NUMBER=32766",
+              "MAX_VDBE_OP=250000000",
+              "MAX_WORKER_THREADS=8",
+              "MUTEX_W32",
+              "SOUNDEX",
+              "SYSTEM_MALLOC",
+              "TEMP_STORE=1",
+              "THREADSAFE=1",
+              "USE_URI"
+            ],
+            "sqlite_version": "3.53.2",
+            "sqlite_version_number": 3053002
+          },
+          "plan_provenance": "projectatlas-db::AtlasStore::connection",
+          "representative_events": [
+            {
+              "binding": "rust_target",
+              "family": "import-targets",
+              "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "%rust\\_target%",
+                500
+              ],
+              "query_plan": [
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=?)"
+              ],
+              "row_bytes": 82,
+              "rows": 1,
+              "sequence": 1,
+              "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+            },
+            {
+              "binding": "src/rust_caller_000.rs",
+              "family": "import-caller-path",
+              "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "src/rust_caller_000.rs",
+                1000
+              ],
+              "query_plan": [
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=? AND path=?)"
+              ],
+              "row_bytes": 82,
+              "rows": 1,
+              "sequence": 2,
+              "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND path = ?1\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+            },
+            {
+              "binding": "crate.rust_target.target_0\u001fcrate.rust_target.target_1\u001fcrate.rust_target.target_2\u001fcrate.rust_target.target_3\u001fcrate::rust_target::target_0\u001fcrate::rust_target::target_1\u001fcrate::rust_target::target_2\u001fcrate::rust_target::target_3\u001frust_target.target_0\u001frust_target.target_1\u001frust_target.target_2\u001frust_target.target_3\u001frust_target::target_0\u001frust_target::target_1\u001frust_target::target_2\u001frust_target::target_3\u001frust_target_alias::target_0\u001frust_target_alias::target_1\u001frust_target_alias::target_2\u001frust_target_alias::target_3\u001ftarget_0\u001ftarget_1\u001ftarget_2\u001ftarget_3",
+              "family": "call-targets",
+              "limit": 20,
+              "outcome": {
+                "error": "sqlite error: Invalid column type Text at index: 4, name: line",
+                "status": "failed"
+              },
+              "parameters": [
+                "crate.rust_target.target_0",
+                "crate.rust_target.target_1",
+                "crate.rust_target.target_2",
+                "crate.rust_target.target_3",
+                "crate::rust_target::target_0",
+                "crate::rust_target::target_1",
+                "crate::rust_target::target_2",
+                "crate::rust_target::target_3",
+                "rust_target.target_0",
+                "rust_target.target_1",
+                "rust_target.target_2",
+                "rust_target.target_3",
+                "rust_target::target_0",
+                "rust_target::target_1",
+                "rust_target::target_2",
+                "rust_target::target_3",
+                "rust_target_alias::target_0",
+                "rust_target_alias::target_1",
+                "rust_target_alias::target_2",
+                "rust_target_alias::target_3",
+                "target_0",
+                "target_1",
+                "target_2",
+                "target_3",
+                20
+              ],
+              "query_plan": [
+                "CO-ROUTINE (subquery-1)",
+                "CO-ROUTINE (subquery-3)",
+                "SEARCH symbol_relations USING INDEX idx_symbol_relations_target (target_name=?)",
+                "USE TEMP B-TREE FOR LAST 4 TERMS OF ORDER BY",
+                "SCAN (subquery-3)",
+                "SCAN (subquery-1)",
+                "USE TEMP B-TREE FOR ORDER BY"
+              ],
+              "row_bytes": 0,
+              "rows": 0,
+              "sequence": 3,
+              "sql": "\n            SELECT path, source_name, target_name, kind, line, context, parser\n            FROM (\n                SELECT\n                    path,\n                    source_name,\n                    target_name,\n                    kind,\n                    line,\n                    context,\n                    parser,\n                    ROW_NUMBER() OVER (\n                        PARTITION BY target_name\n                        ORDER BY path, line, source_name, target_name\n                    ) AS target_row\n                FROM symbol_relations INDEXED BY idx_symbol_relations_target\n                WHERE kind = 'calls' AND target_name IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)\n            )\n            WHERE target_row <= ?25\n            ORDER BY path, line, source_name, target_name\n            "
+            }
+          ],
+          "timed": false
+        },
         "returncode": 1,
         "stderr_bytes": 70,
         "stderr_sha256": "af7c0330be60c8e95ea61672654fe8cd87c5f7c1c5b57b3379716ab1da246e8c",
@@ -4663,21 +4904,21 @@
         "target": "src/rust_target.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 91.67730016633868
+        "wall_ms": 94.27550015971065
       },
       "candidate": {
         "allocation_metrics": {
-          "allocation_bytes": 55288,
-          "allocation_calls": 811,
+          "allocation_bytes": 60464,
+          "allocation_calls": 864,
           "deallocation_bytes": 58773,
           "deallocation_calls": 791,
-          "reallocation_bytes": 11941,
-          "reallocation_calls": 165
+          "reallocation_bytes": 12043,
+          "reallocation_calls": 167
         },
         "case": "corrupt-relation",
         "cpu_ms": 62.5,
         "diagnostic": "error: sqlite error: Invalid column type Text at index: 4, name: line\n",
-        "peak_rss_bytes": 12423168,
+        "peak_rss_bytes": 12201984,
         "plan_provenance": "projectatlas-db::AtlasStore::connection",
         "query_engine": {
           "compile_options": [
@@ -4736,6 +4977,157 @@
           "sqlite_version": "3.53.2",
           "sqlite_version_number": 3053002
         },
+        "query_plan_evidence": {
+          "by_family": {},
+          "engine": {
+            "compile_options": [
+              "ATOMIC_INTRINSICS=0",
+              "COMPILER=msvc-1944",
+              "DEFAULT_AUTOVACUUM",
+              "DEFAULT_CACHE_SIZE=-2000",
+              "DEFAULT_FILE_FORMAT=4",
+              "DEFAULT_FOREIGN_KEYS",
+              "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+              "DEFAULT_MMAP_SIZE=0",
+              "DEFAULT_PAGE_SIZE=4096",
+              "DEFAULT_PCACHE_INITSZ=20",
+              "DEFAULT_RECURSIVE_TRIGGERS",
+              "DEFAULT_SECTOR_SIZE=4096",
+              "DEFAULT_SYNCHRONOUS=2",
+              "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+              "DEFAULT_WAL_SYNCHRONOUS=2",
+              "DEFAULT_WORKER_THREADS=0",
+              "DIRECT_OVERFLOW_READ",
+              "ENABLE_API_ARMOR",
+              "ENABLE_COLUMN_METADATA",
+              "ENABLE_DBSTAT_VTAB",
+              "ENABLE_FTS3",
+              "ENABLE_FTS3_PARENTHESIS",
+              "ENABLE_FTS5",
+              "ENABLE_LOAD_EXTENSION",
+              "ENABLE_MEMORY_MANAGEMENT",
+              "ENABLE_RTREE",
+              "ENABLE_STAT4",
+              "HAVE_ISNAN",
+              "MALLOC_SOFT_LIMIT=1024",
+              "MAX_ATTACHED=10",
+              "MAX_COLUMN=2000",
+              "MAX_COMPOUND_SELECT=500",
+              "MAX_DEFAULT_PAGE_SIZE=8192",
+              "MAX_EXPR_DEPTH=1000",
+              "MAX_FUNCTION_ARG=1000",
+              "MAX_LENGTH=1000000000",
+              "MAX_LIKE_PATTERN_LENGTH=50000",
+              "MAX_MMAP_SIZE=0x7fff0000",
+              "MAX_PAGE_COUNT=0xfffffffe",
+              "MAX_PAGE_SIZE=65536",
+              "MAX_SQL_LENGTH=1000000000",
+              "MAX_TRIGGER_DEPTH=1000",
+              "MAX_VARIABLE_NUMBER=32766",
+              "MAX_VDBE_OP=250000000",
+              "MAX_WORKER_THREADS=8",
+              "MUTEX_W32",
+              "SOUNDEX",
+              "SYSTEM_MALLOC",
+              "TEMP_STORE=1",
+              "THREADSAFE=1",
+              "USE_URI"
+            ],
+            "sqlite_version": "3.53.2",
+            "sqlite_version_number": 3053002
+          },
+          "plan_provenance": "projectatlas-db::AtlasStore::connection",
+          "representative_events": [
+            {
+              "binding": "rust_target",
+              "family": "import-targets",
+              "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "%rust\\_target%",
+                500
+              ],
+              "query_plan": [
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=?)"
+              ],
+              "row_bytes": 82,
+              "rows": 1,
+              "sequence": 1,
+              "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+            },
+            {
+              "binding": "src/rust_caller_000.rs",
+              "family": "import-caller-path",
+              "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "src/rust_caller_000.rs",
+                1000
+              ],
+              "query_plan": [
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=? AND path=?)"
+              ],
+              "row_bytes": 82,
+              "rows": 1,
+              "sequence": 2,
+              "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND path = ?1\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+            },
+            {
+              "binding": "crate.rust_target.target_0\u001fcrate.rust_target.target_1\u001fcrate.rust_target.target_2\u001fcrate.rust_target.target_3\u001fcrate::rust_target::target_0\u001fcrate::rust_target::target_1\u001fcrate::rust_target::target_2\u001fcrate::rust_target::target_3\u001frust_target.target_0\u001frust_target.target_1\u001frust_target.target_2\u001frust_target.target_3\u001frust_target::target_0\u001frust_target::target_1\u001frust_target::target_2\u001frust_target::target_3\u001frust_target_alias::target_0\u001frust_target_alias::target_1\u001frust_target_alias::target_2\u001frust_target_alias::target_3\u001ftarget_0\u001ftarget_1\u001ftarget_2\u001ftarget_3",
+              "family": "call-targets",
+              "limit": 20,
+              "outcome": {
+                "error": "sqlite error: Invalid column type Text at index: 4, name: line",
+                "status": "failed"
+              },
+              "parameters": [
+                "crate.rust_target.target_0",
+                "crate.rust_target.target_1",
+                "crate.rust_target.target_2",
+                "crate.rust_target.target_3",
+                "crate::rust_target::target_0",
+                "crate::rust_target::target_1",
+                "crate::rust_target::target_2",
+                "crate::rust_target::target_3",
+                "rust_target.target_0",
+                "rust_target.target_1",
+                "rust_target.target_2",
+                "rust_target.target_3",
+                "rust_target::target_0",
+                "rust_target::target_1",
+                "rust_target::target_2",
+                "rust_target::target_3",
+                "rust_target_alias::target_0",
+                "rust_target_alias::target_1",
+                "rust_target_alias::target_2",
+                "rust_target_alias::target_3",
+                "target_0",
+                "target_1",
+                "target_2",
+                "target_3",
+                20
+              ],
+              "query_plan": [
+                "CO-ROUTINE (subquery-1)",
+                "CO-ROUTINE (subquery-3)",
+                "SEARCH symbol_relations USING INDEX idx_symbol_relations_target (target_name=?)",
+                "USE TEMP B-TREE FOR LAST 4 TERMS OF ORDER BY",
+                "SCAN (subquery-3)",
+                "SCAN (subquery-1)",
+                "USE TEMP B-TREE FOR ORDER BY"
+              ],
+              "row_bytes": 0,
+              "rows": 0,
+              "sequence": 3,
+              "sql": "\n            SELECT path, source_name, target_name, kind, line, context, parser\n            FROM (\n                SELECT\n                    path,\n                    source_name,\n                    target_name,\n                    kind,\n                    line,\n                    context,\n                    parser,\n                    ROW_NUMBER() OVER (\n                        PARTITION BY target_name\n                        ORDER BY path, line, source_name, target_name\n                    ) AS target_row\n                FROM symbol_relations INDEXED BY idx_symbol_relations_target\n                WHERE kind = 'calls' AND target_name IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)\n            )\n            WHERE target_row <= ?25\n            ORDER BY path, line, source_name, target_name\n            "
+            }
+          ],
+          "timed": false
+        },
         "returncode": 1,
         "stderr_bytes": 70,
         "stderr_sha256": "af7c0330be60c8e95ea61672654fe8cd87c5f7c1c5b57b3379716ab1da246e8c",
@@ -4744,104 +5136,23 @@
         "target": "src/rust_target.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 95.8791000302881
+        "wall_ms": 89.49679997749627
       }
     },
     "missing-summary": {
       "baseline": {
         "allocation_metrics": {
-          "allocation_bytes": 2136951,
+          "allocation_bytes": 2137024,
           "allocation_calls": 22534,
-          "deallocation_bytes": 2993770,
+          "deallocation_bytes": 2994099,
           "deallocation_calls": 19990,
-          "reallocation_bytes": 2274859,
-          "reallocation_calls": 2601
-        },
-        "case": "missing-summary",
-        "cpu_ms": 78.125,
-        "diagnostic": "error: invalid input: file \"src/missing.rs\" is not indexed\n",
-        "peak_rss_bytes": 11878400,
-        "plan_provenance": "projectatlas-db::AtlasStore::connection",
-        "query_engine": {
-          "compile_options": [
-            "ATOMIC_INTRINSICS=0",
-            "COMPILER=msvc-1944",
-            "DEFAULT_AUTOVACUUM",
-            "DEFAULT_CACHE_SIZE=-2000",
-            "DEFAULT_FILE_FORMAT=4",
-            "DEFAULT_FOREIGN_KEYS",
-            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
-            "DEFAULT_MMAP_SIZE=0",
-            "DEFAULT_PAGE_SIZE=4096",
-            "DEFAULT_PCACHE_INITSZ=20",
-            "DEFAULT_RECURSIVE_TRIGGERS",
-            "DEFAULT_SECTOR_SIZE=4096",
-            "DEFAULT_SYNCHRONOUS=2",
-            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
-            "DEFAULT_WAL_SYNCHRONOUS=2",
-            "DEFAULT_WORKER_THREADS=0",
-            "DIRECT_OVERFLOW_READ",
-            "ENABLE_API_ARMOR",
-            "ENABLE_COLUMN_METADATA",
-            "ENABLE_DBSTAT_VTAB",
-            "ENABLE_FTS3",
-            "ENABLE_FTS3_PARENTHESIS",
-            "ENABLE_FTS5",
-            "ENABLE_LOAD_EXTENSION",
-            "ENABLE_MEMORY_MANAGEMENT",
-            "ENABLE_RTREE",
-            "ENABLE_STAT4",
-            "HAVE_ISNAN",
-            "MALLOC_SOFT_LIMIT=1024",
-            "MAX_ATTACHED=10",
-            "MAX_COLUMN=2000",
-            "MAX_COMPOUND_SELECT=500",
-            "MAX_DEFAULT_PAGE_SIZE=8192",
-            "MAX_EXPR_DEPTH=1000",
-            "MAX_FUNCTION_ARG=1000",
-            "MAX_LENGTH=1000000000",
-            "MAX_LIKE_PATTERN_LENGTH=50000",
-            "MAX_MMAP_SIZE=0x7fff0000",
-            "MAX_PAGE_COUNT=0xfffffffe",
-            "MAX_PAGE_SIZE=65536",
-            "MAX_SQL_LENGTH=1000000000",
-            "MAX_TRIGGER_DEPTH=1000",
-            "MAX_VARIABLE_NUMBER=32766",
-            "MAX_VDBE_OP=250000000",
-            "MAX_WORKER_THREADS=8",
-            "MUTEX_W32",
-            "SOUNDEX",
-            "SYSTEM_MALLOC",
-            "TEMP_STORE=1",
-            "THREADSAFE=1",
-            "USE_URI"
-          ],
-          "sqlite_version": "3.53.2",
-          "sqlite_version_number": 3053002
-        },
-        "returncode": 1,
-        "stderr_bytes": 59,
-        "stderr_sha256": "d7918848ac4c48843ccecb85dadba65320a5ae44b36bbfebb42cc450edd3668c",
-        "stdout_bytes": 0,
-        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "target": "src/missing.rs",
-        "timed": false,
-        "trace_observed": true,
-        "wall_ms": 91.6826999746263
-      },
-      "candidate": {
-        "allocation_metrics": {
-          "allocation_bytes": 2136953,
-          "allocation_calls": 22534,
-          "deallocation_bytes": 2993771,
-          "deallocation_calls": 19990,
-          "reallocation_bytes": 2274859,
-          "reallocation_calls": 2601
+          "reallocation_bytes": 2275371,
+          "reallocation_calls": 2602
         },
         "case": "missing-summary",
         "cpu_ms": 93.75,
         "diagnostic": "error: invalid input: file \"src/missing.rs\" is not indexed\n",
-        "peak_rss_bytes": 11857920,
+        "peak_rss_bytes": 11862016,
         "plan_provenance": "projectatlas-db::AtlasStore::connection",
         "query_engine": {
           "compile_options": [
@@ -4900,6 +5211,69 @@
           "sqlite_version": "3.53.2",
           "sqlite_version_number": 3053002
         },
+        "query_plan_evidence": {
+          "by_family": {},
+          "engine": {
+            "compile_options": [
+              "ATOMIC_INTRINSICS=0",
+              "COMPILER=msvc-1944",
+              "DEFAULT_AUTOVACUUM",
+              "DEFAULT_CACHE_SIZE=-2000",
+              "DEFAULT_FILE_FORMAT=4",
+              "DEFAULT_FOREIGN_KEYS",
+              "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+              "DEFAULT_MMAP_SIZE=0",
+              "DEFAULT_PAGE_SIZE=4096",
+              "DEFAULT_PCACHE_INITSZ=20",
+              "DEFAULT_RECURSIVE_TRIGGERS",
+              "DEFAULT_SECTOR_SIZE=4096",
+              "DEFAULT_SYNCHRONOUS=2",
+              "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+              "DEFAULT_WAL_SYNCHRONOUS=2",
+              "DEFAULT_WORKER_THREADS=0",
+              "DIRECT_OVERFLOW_READ",
+              "ENABLE_API_ARMOR",
+              "ENABLE_COLUMN_METADATA",
+              "ENABLE_DBSTAT_VTAB",
+              "ENABLE_FTS3",
+              "ENABLE_FTS3_PARENTHESIS",
+              "ENABLE_FTS5",
+              "ENABLE_LOAD_EXTENSION",
+              "ENABLE_MEMORY_MANAGEMENT",
+              "ENABLE_RTREE",
+              "ENABLE_STAT4",
+              "HAVE_ISNAN",
+              "MALLOC_SOFT_LIMIT=1024",
+              "MAX_ATTACHED=10",
+              "MAX_COLUMN=2000",
+              "MAX_COMPOUND_SELECT=500",
+              "MAX_DEFAULT_PAGE_SIZE=8192",
+              "MAX_EXPR_DEPTH=1000",
+              "MAX_FUNCTION_ARG=1000",
+              "MAX_LENGTH=1000000000",
+              "MAX_LIKE_PATTERN_LENGTH=50000",
+              "MAX_MMAP_SIZE=0x7fff0000",
+              "MAX_PAGE_COUNT=0xfffffffe",
+              "MAX_PAGE_SIZE=65536",
+              "MAX_SQL_LENGTH=1000000000",
+              "MAX_TRIGGER_DEPTH=1000",
+              "MAX_VARIABLE_NUMBER=32766",
+              "MAX_VDBE_OP=250000000",
+              "MAX_WORKER_THREADS=8",
+              "MUTEX_W32",
+              "SOUNDEX",
+              "SYSTEM_MALLOC",
+              "TEMP_STORE=1",
+              "THREADSAFE=1",
+              "USE_URI"
+            ],
+            "sqlite_version": "3.53.2",
+            "sqlite_version_number": 3053002
+          },
+          "plan_provenance": "projectatlas-db::AtlasStore::connection",
+          "representative_events": [],
+          "timed": false
+        },
         "returncode": 1,
         "stderr_bytes": 59,
         "stderr_sha256": "d7918848ac4c48843ccecb85dadba65320a5ae44b36bbfebb42cc450edd3668c",
@@ -4908,13 +5282,157 @@
         "target": "src/missing.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 95.80809995532036
+        "wall_ms": 92.25920005701482
+      },
+      "candidate": {
+        "allocation_metrics": {
+          "allocation_bytes": 2137025,
+          "allocation_calls": 22534,
+          "deallocation_bytes": 2994099,
+          "deallocation_calls": 19990,
+          "reallocation_bytes": 2275371,
+          "reallocation_calls": 2602
+        },
+        "case": "missing-summary",
+        "cpu_ms": 62.5,
+        "diagnostic": "error: invalid input: file \"src/missing.rs\" is not indexed\n",
+        "peak_rss_bytes": 12021760,
+        "plan_provenance": "projectatlas-db::AtlasStore::connection",
+        "query_engine": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=0",
+            "COMPILER=msvc-1944",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_FOREIGN_KEYS",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "ENABLE_API_ARMOR",
+            "ENABLE_COLUMN_METADATA",
+            "ENABLE_DBSTAT_VTAB",
+            "ENABLE_FTS3",
+            "ENABLE_FTS3_PARENTHESIS",
+            "ENABLE_FTS5",
+            "ENABLE_LOAD_EXTENSION",
+            "ENABLE_MEMORY_MANAGEMENT",
+            "ENABLE_RTREE",
+            "ENABLE_STAT4",
+            "HAVE_ISNAN",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=8",
+            "MUTEX_W32",
+            "SOUNDEX",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=1",
+            "USE_URI"
+          ],
+          "sqlite_version": "3.53.2",
+          "sqlite_version_number": 3053002
+        },
+        "query_plan_evidence": {
+          "by_family": {},
+          "engine": {
+            "compile_options": [
+              "ATOMIC_INTRINSICS=0",
+              "COMPILER=msvc-1944",
+              "DEFAULT_AUTOVACUUM",
+              "DEFAULT_CACHE_SIZE=-2000",
+              "DEFAULT_FILE_FORMAT=4",
+              "DEFAULT_FOREIGN_KEYS",
+              "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+              "DEFAULT_MMAP_SIZE=0",
+              "DEFAULT_PAGE_SIZE=4096",
+              "DEFAULT_PCACHE_INITSZ=20",
+              "DEFAULT_RECURSIVE_TRIGGERS",
+              "DEFAULT_SECTOR_SIZE=4096",
+              "DEFAULT_SYNCHRONOUS=2",
+              "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+              "DEFAULT_WAL_SYNCHRONOUS=2",
+              "DEFAULT_WORKER_THREADS=0",
+              "DIRECT_OVERFLOW_READ",
+              "ENABLE_API_ARMOR",
+              "ENABLE_COLUMN_METADATA",
+              "ENABLE_DBSTAT_VTAB",
+              "ENABLE_FTS3",
+              "ENABLE_FTS3_PARENTHESIS",
+              "ENABLE_FTS5",
+              "ENABLE_LOAD_EXTENSION",
+              "ENABLE_MEMORY_MANAGEMENT",
+              "ENABLE_RTREE",
+              "ENABLE_STAT4",
+              "HAVE_ISNAN",
+              "MALLOC_SOFT_LIMIT=1024",
+              "MAX_ATTACHED=10",
+              "MAX_COLUMN=2000",
+              "MAX_COMPOUND_SELECT=500",
+              "MAX_DEFAULT_PAGE_SIZE=8192",
+              "MAX_EXPR_DEPTH=1000",
+              "MAX_FUNCTION_ARG=1000",
+              "MAX_LENGTH=1000000000",
+              "MAX_LIKE_PATTERN_LENGTH=50000",
+              "MAX_MMAP_SIZE=0x7fff0000",
+              "MAX_PAGE_COUNT=0xfffffffe",
+              "MAX_PAGE_SIZE=65536",
+              "MAX_SQL_LENGTH=1000000000",
+              "MAX_TRIGGER_DEPTH=1000",
+              "MAX_VARIABLE_NUMBER=32766",
+              "MAX_VDBE_OP=250000000",
+              "MAX_WORKER_THREADS=8",
+              "MUTEX_W32",
+              "SOUNDEX",
+              "SYSTEM_MALLOC",
+              "TEMP_STORE=1",
+              "THREADSAFE=1",
+              "USE_URI"
+            ],
+            "sqlite_version": "3.53.2",
+            "sqlite_version_number": 3053002
+          },
+          "plan_provenance": "projectatlas-db::AtlasStore::connection",
+          "representative_events": [],
+          "timed": false
+        },
+        "returncode": 1,
+        "stderr_bytes": 59,
+        "stderr_sha256": "d7918848ac4c48843ccecb85dadba65320a5ae44b36bbfebb42cc450edd3668c",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "target": "src/missing.rs",
+        "timed": false,
+        "trace_observed": true,
+        "wall_ms": 96.15910006687045
       }
     },
     "stale-source": {
       "baseline": {
         "allocation_metrics": {
-          "allocation_bytes": 41433,
+          "allocation_bytes": 41529,
           "allocation_calls": 613,
           "deallocation_bytes": 37170,
           "deallocation_calls": 541,
@@ -4922,7 +5440,7 @@
           "reallocation_calls": 96
         },
         "case": "stale-source",
-        "cpu_ms": 109.375,
+        "cpu_ms": 187.5,
         "decoded_summary": {
           "file_path": "src/rust_target.rs",
           "functions": [
@@ -4950,7 +5468,7 @@
           "symbol_count": 2,
           "truncated": false
         },
-        "peak_rss_bytes": 16060416,
+        "peak_rss_bytes": 15925248,
         "plan_provenance": "projectatlas-db::AtlasStore::connection",
         "query_engine": {
           "compile_options": [
@@ -5009,6 +5527,144 @@
           "sqlite_version": "3.53.2",
           "sqlite_version_number": 3053002
         },
+        "query_plan_evidence": {
+          "by_family": {},
+          "engine": {
+            "compile_options": [
+              "ATOMIC_INTRINSICS=0",
+              "COMPILER=msvc-1944",
+              "DEFAULT_AUTOVACUUM",
+              "DEFAULT_CACHE_SIZE=-2000",
+              "DEFAULT_FILE_FORMAT=4",
+              "DEFAULT_FOREIGN_KEYS",
+              "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+              "DEFAULT_MMAP_SIZE=0",
+              "DEFAULT_PAGE_SIZE=4096",
+              "DEFAULT_PCACHE_INITSZ=20",
+              "DEFAULT_RECURSIVE_TRIGGERS",
+              "DEFAULT_SECTOR_SIZE=4096",
+              "DEFAULT_SYNCHRONOUS=2",
+              "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+              "DEFAULT_WAL_SYNCHRONOUS=2",
+              "DEFAULT_WORKER_THREADS=0",
+              "DIRECT_OVERFLOW_READ",
+              "ENABLE_API_ARMOR",
+              "ENABLE_COLUMN_METADATA",
+              "ENABLE_DBSTAT_VTAB",
+              "ENABLE_FTS3",
+              "ENABLE_FTS3_PARENTHESIS",
+              "ENABLE_FTS5",
+              "ENABLE_LOAD_EXTENSION",
+              "ENABLE_MEMORY_MANAGEMENT",
+              "ENABLE_RTREE",
+              "ENABLE_STAT4",
+              "HAVE_ISNAN",
+              "MALLOC_SOFT_LIMIT=1024",
+              "MAX_ATTACHED=10",
+              "MAX_COLUMN=2000",
+              "MAX_COMPOUND_SELECT=500",
+              "MAX_DEFAULT_PAGE_SIZE=8192",
+              "MAX_EXPR_DEPTH=1000",
+              "MAX_FUNCTION_ARG=1000",
+              "MAX_LENGTH=1000000000",
+              "MAX_LIKE_PATTERN_LENGTH=50000",
+              "MAX_MMAP_SIZE=0x7fff0000",
+              "MAX_PAGE_COUNT=0xfffffffe",
+              "MAX_PAGE_SIZE=65536",
+              "MAX_SQL_LENGTH=1000000000",
+              "MAX_TRIGGER_DEPTH=1000",
+              "MAX_VARIABLE_NUMBER=32766",
+              "MAX_VDBE_OP=250000000",
+              "MAX_WORKER_THREADS=8",
+              "MUTEX_W32",
+              "SOUNDEX",
+              "SYSTEM_MALLOC",
+              "TEMP_STORE=1",
+              "THREADSAFE=1",
+              "USE_URI"
+            ],
+            "sqlite_version": "3.53.2",
+            "sqlite_version_number": 3053002
+          },
+          "plan_provenance": "projectatlas-db::AtlasStore::connection",
+          "representative_events": [
+            {
+              "binding": "rust_target",
+              "family": "import-targets",
+              "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "%rust\\_target%",
+                500
+              ],
+              "query_plan": [
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=?)"
+              ],
+              "row_bytes": 82,
+              "rows": 1,
+              "sequence": 1,
+              "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+            },
+            {
+              "binding": "src/rust_caller_000.rs",
+              "family": "import-caller-path",
+              "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "src/rust_caller_000.rs",
+                1000
+              ],
+              "query_plan": [
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=? AND path=?)"
+              ],
+              "row_bytes": 82,
+              "rows": 1,
+              "sequence": 2,
+              "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND path = ?1\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+            },
+            {
+              "binding": "crate.rust_target.stale_added\u001fcrate.rust_target.target_0\u001fcrate::rust_target::stale_added\u001fcrate::rust_target::target_0\u001frust_target.stale_added\u001frust_target.target_0\u001frust_target::stale_added\u001frust_target::target_0\u001frust_target_alias::stale_added\u001frust_target_alias::target_0\u001fstale_added\u001ftarget_0",
+              "family": "call-targets",
+              "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "crate.rust_target.stale_added",
+                "crate.rust_target.target_0",
+                "crate::rust_target::stale_added",
+                "crate::rust_target::target_0",
+                "rust_target.stale_added",
+                "rust_target.target_0",
+                "rust_target::stale_added",
+                "rust_target::target_0",
+                "rust_target_alias::stale_added",
+                "rust_target_alias::target_0",
+                "stale_added",
+                "target_0",
+                20
+              ],
+              "query_plan": [
+                "CO-ROUTINE (subquery-1)",
+                "CO-ROUTINE (subquery-3)",
+                "SEARCH symbol_relations USING INDEX idx_symbol_relations_target (target_name=?)",
+                "USE TEMP B-TREE FOR LAST 4 TERMS OF ORDER BY",
+                "SCAN (subquery-3)",
+                "SCAN (subquery-1)",
+                "USE TEMP B-TREE FOR ORDER BY"
+              ],
+              "row_bytes": 105,
+              "rows": 1,
+              "sequence": 3,
+              "sql": "\n            SELECT path, source_name, target_name, kind, line, context, parser\n            FROM (\n                SELECT\n                    path,\n                    source_name,\n                    target_name,\n                    kind,\n                    line,\n                    context,\n                    parser,\n                    ROW_NUMBER() OVER (\n                        PARTITION BY target_name\n                        ORDER BY path, line, source_name, target_name\n                    ) AS target_row\n                FROM symbol_relations INDEXED BY idx_symbol_relations_target\n                WHERE kind = 'calls' AND target_name IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)\n            )\n            WHERE target_row <= ?13\n            ORDER BY path, line, source_name, target_name\n            "
+            }
+          ],
+          "timed": false
+        },
         "returncode": 0,
         "stderr_bytes": 0,
         "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -5017,11 +5673,11 @@
         "target": "src/rust_target.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 184.10809990018606
+        "wall_ms": 181.88320007175207
       },
       "candidate": {
         "allocation_metrics": {
-          "allocation_bytes": 41383,
+          "allocation_bytes": 41479,
           "allocation_calls": 609,
           "deallocation_bytes": 37144,
           "deallocation_calls": 537,
@@ -5116,6 +5772,144 @@
           "sqlite_version": "3.53.2",
           "sqlite_version_number": 3053002
         },
+        "query_plan_evidence": {
+          "by_family": {},
+          "engine": {
+            "compile_options": [
+              "ATOMIC_INTRINSICS=0",
+              "COMPILER=msvc-1944",
+              "DEFAULT_AUTOVACUUM",
+              "DEFAULT_CACHE_SIZE=-2000",
+              "DEFAULT_FILE_FORMAT=4",
+              "DEFAULT_FOREIGN_KEYS",
+              "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+              "DEFAULT_MMAP_SIZE=0",
+              "DEFAULT_PAGE_SIZE=4096",
+              "DEFAULT_PCACHE_INITSZ=20",
+              "DEFAULT_RECURSIVE_TRIGGERS",
+              "DEFAULT_SECTOR_SIZE=4096",
+              "DEFAULT_SYNCHRONOUS=2",
+              "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+              "DEFAULT_WAL_SYNCHRONOUS=2",
+              "DEFAULT_WORKER_THREADS=0",
+              "DIRECT_OVERFLOW_READ",
+              "ENABLE_API_ARMOR",
+              "ENABLE_COLUMN_METADATA",
+              "ENABLE_DBSTAT_VTAB",
+              "ENABLE_FTS3",
+              "ENABLE_FTS3_PARENTHESIS",
+              "ENABLE_FTS5",
+              "ENABLE_LOAD_EXTENSION",
+              "ENABLE_MEMORY_MANAGEMENT",
+              "ENABLE_RTREE",
+              "ENABLE_STAT4",
+              "HAVE_ISNAN",
+              "MALLOC_SOFT_LIMIT=1024",
+              "MAX_ATTACHED=10",
+              "MAX_COLUMN=2000",
+              "MAX_COMPOUND_SELECT=500",
+              "MAX_DEFAULT_PAGE_SIZE=8192",
+              "MAX_EXPR_DEPTH=1000",
+              "MAX_FUNCTION_ARG=1000",
+              "MAX_LENGTH=1000000000",
+              "MAX_LIKE_PATTERN_LENGTH=50000",
+              "MAX_MMAP_SIZE=0x7fff0000",
+              "MAX_PAGE_COUNT=0xfffffffe",
+              "MAX_PAGE_SIZE=65536",
+              "MAX_SQL_LENGTH=1000000000",
+              "MAX_TRIGGER_DEPTH=1000",
+              "MAX_VARIABLE_NUMBER=32766",
+              "MAX_VDBE_OP=250000000",
+              "MAX_WORKER_THREADS=8",
+              "MUTEX_W32",
+              "SOUNDEX",
+              "SYSTEM_MALLOC",
+              "TEMP_STORE=1",
+              "THREADSAFE=1",
+              "USE_URI"
+            ],
+            "sqlite_version": "3.53.2",
+            "sqlite_version_number": 3053002
+          },
+          "plan_provenance": "projectatlas-db::AtlasStore::connection",
+          "representative_events": [
+            {
+              "binding": "rust_target",
+              "family": "import-targets",
+              "limit": 500,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "%rust\\_target%",
+                500
+              ],
+              "query_plan": [
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=?)"
+              ],
+              "row_bytes": 82,
+              "rows": 1,
+              "sequence": 1,
+              "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+            },
+            {
+              "binding": "src/rust_caller_000.rs",
+              "family": "import-caller-path",
+              "limit": 1000,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "src/rust_caller_000.rs",
+                1000
+              ],
+              "query_plan": [
+                "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=? AND path=?)"
+              ],
+              "row_bytes": 82,
+              "rows": 1,
+              "sequence": 2,
+              "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND path = ?1\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+            },
+            {
+              "binding": "crate.rust_target.stale_added\u001fcrate.rust_target.target_0\u001fcrate::rust_target::stale_added\u001fcrate::rust_target::target_0\u001frust_target.stale_added\u001frust_target.target_0\u001frust_target::stale_added\u001frust_target::target_0\u001frust_target_alias::stale_added\u001frust_target_alias::target_0\u001fstale_added\u001ftarget_0",
+              "family": "call-targets",
+              "limit": 20,
+              "outcome": {
+                "status": "succeeded"
+              },
+              "parameters": [
+                "crate.rust_target.stale_added",
+                "crate.rust_target.target_0",
+                "crate::rust_target::stale_added",
+                "crate::rust_target::target_0",
+                "rust_target.stale_added",
+                "rust_target.target_0",
+                "rust_target::stale_added",
+                "rust_target::target_0",
+                "rust_target_alias::stale_added",
+                "rust_target_alias::target_0",
+                "stale_added",
+                "target_0",
+                20
+              ],
+              "query_plan": [
+                "CO-ROUTINE (subquery-1)",
+                "CO-ROUTINE (subquery-3)",
+                "SEARCH symbol_relations USING INDEX idx_symbol_relations_target (target_name=?)",
+                "USE TEMP B-TREE FOR LAST 4 TERMS OF ORDER BY",
+                "SCAN (subquery-3)",
+                "SCAN (subquery-1)",
+                "USE TEMP B-TREE FOR ORDER BY"
+              ],
+              "row_bytes": 105,
+              "rows": 1,
+              "sequence": 3,
+              "sql": "\n            SELECT path, source_name, target_name, kind, line, context, parser\n            FROM (\n                SELECT\n                    path,\n                    source_name,\n                    target_name,\n                    kind,\n                    line,\n                    context,\n                    parser,\n                    ROW_NUMBER() OVER (\n                        PARTITION BY target_name\n                        ORDER BY path, line, source_name, target_name\n                    ) AS target_row\n                FROM symbol_relations INDEXED BY idx_symbol_relations_target\n                WHERE kind = 'calls' AND target_name IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)\n            )\n            WHERE target_row <= ?13\n            ORDER BY path, line, source_name, target_name\n            "
+            }
+          ],
+          "timed": false
+        },
         "returncode": 0,
         "stderr_bytes": 0,
         "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -5124,13 +5918,13 @@
         "target": "src/rust_target.rs",
         "timed": false,
         "trace_observed": true,
-        "wall_ms": 186.52829993516207
+        "wall_ms": 179.2618001345545
       }
     }
   },
   "harness_identity": {
     "path": "docs/benchmarks/harness/reverse_caller.py",
-    "sha256": "9d695dedce54e77fd3a93caae844d5e7c7fb82f916ad81af13fd7ac874b10f60"
+    "sha256": "9c23616c6a32be1448b4fb3957311addb5fc22b312a4dcb4be9b2a7f9c666364"
   },
   "issue": 342,
   "measurement_split": {
@@ -5142,114 +5936,12 @@
   "multi_binding_alias": {
     "baseline": {
       "allocation_metrics": {
-        "allocation_bytes": 40159,
+        "allocation_bytes": 40255,
         "allocation_calls": 552,
         "deallocation_bytes": 34961,
         "deallocation_calls": 470,
-        "reallocation_bytes": 8166,
+        "reallocation_bytes": 8358,
         "reallocation_calls": 91
-      },
-      "case": "python-multi-binding-same-local-alias",
-      "cpu_ms": 93.75,
-      "decoded_summary": {
-        "file_path": "src/package/py_target.py",
-        "functions": [
-          {
-            "called_by": [
-              "src/py_caller.py::caller"
-            ],
-            "kind": "function",
-            "line": 1,
-            "name": "a"
-          }
-        ],
-        "language": "python",
-        "limit": 1,
-        "line_count": 5,
-        "parser_kind": "tree-sitter-symbol-graph",
-        "source_status": "live-source",
-        "summary_status": "ok",
-        "symbol_count": 2,
-        "truncated": true
-      },
-      "limit": 1,
-      "peak_rss_bytes": 13692928,
-      "plan_provenance": "projectatlas-db::AtlasStore::connection",
-      "query_engine": {
-        "compile_options": [
-          "ATOMIC_INTRINSICS=0",
-          "COMPILER=msvc-1944",
-          "DEFAULT_AUTOVACUUM",
-          "DEFAULT_CACHE_SIZE=-2000",
-          "DEFAULT_FILE_FORMAT=4",
-          "DEFAULT_FOREIGN_KEYS",
-          "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
-          "DEFAULT_MMAP_SIZE=0",
-          "DEFAULT_PAGE_SIZE=4096",
-          "DEFAULT_PCACHE_INITSZ=20",
-          "DEFAULT_RECURSIVE_TRIGGERS",
-          "DEFAULT_SECTOR_SIZE=4096",
-          "DEFAULT_SYNCHRONOUS=2",
-          "DEFAULT_WAL_AUTOCHECKPOINT=1000",
-          "DEFAULT_WAL_SYNCHRONOUS=2",
-          "DEFAULT_WORKER_THREADS=0",
-          "DIRECT_OVERFLOW_READ",
-          "ENABLE_API_ARMOR",
-          "ENABLE_COLUMN_METADATA",
-          "ENABLE_DBSTAT_VTAB",
-          "ENABLE_FTS3",
-          "ENABLE_FTS3_PARENTHESIS",
-          "ENABLE_FTS5",
-          "ENABLE_LOAD_EXTENSION",
-          "ENABLE_MEMORY_MANAGEMENT",
-          "ENABLE_RTREE",
-          "ENABLE_STAT4",
-          "HAVE_ISNAN",
-          "MALLOC_SOFT_LIMIT=1024",
-          "MAX_ATTACHED=10",
-          "MAX_COLUMN=2000",
-          "MAX_COMPOUND_SELECT=500",
-          "MAX_DEFAULT_PAGE_SIZE=8192",
-          "MAX_EXPR_DEPTH=1000",
-          "MAX_FUNCTION_ARG=1000",
-          "MAX_LENGTH=1000000000",
-          "MAX_LIKE_PATTERN_LENGTH=50000",
-          "MAX_MMAP_SIZE=0x7fff0000",
-          "MAX_PAGE_COUNT=0xfffffffe",
-          "MAX_PAGE_SIZE=65536",
-          "MAX_SQL_LENGTH=1000000000",
-          "MAX_TRIGGER_DEPTH=1000",
-          "MAX_VARIABLE_NUMBER=32766",
-          "MAX_VDBE_OP=250000000",
-          "MAX_WORKER_THREADS=8",
-          "MUTEX_W32",
-          "SOUNDEX",
-          "SYSTEM_MALLOC",
-          "TEMP_STORE=1",
-          "THREADSAFE=1",
-          "USE_URI"
-        ],
-        "sqlite_version": "3.53.2",
-        "sqlite_version_number": 3053002
-      },
-      "returncode": 0,
-      "stderr_bytes": 0,
-      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "stdout_bytes": 1715,
-      "stdout_sha256": "289605b415dbf8a4a60bc30104898197c44587a61cd15a797fa0500cb9e6b0aa",
-      "target": "src/package/py_target.py",
-      "timed": false,
-      "trace_observed": true,
-      "wall_ms": 109.85439992509782
-    },
-    "candidate": {
-      "allocation_metrics": {
-        "allocation_bytes": 39997,
-        "allocation_calls": 547,
-        "deallocation_bytes": 34815,
-        "deallocation_calls": 465,
-        "reallocation_bytes": 7542,
-        "reallocation_calls": 89
       },
       "case": "python-multi-binding-same-local-alias",
       "cpu_ms": 78.125,
@@ -5275,7 +5967,7 @@
         "truncated": true
       },
       "limit": 1,
-      "peak_rss_bytes": 13705216,
+      "peak_rss_bytes": 13676544,
       "plan_provenance": "projectatlas-db::AtlasStore::connection",
       "query_engine": {
         "compile_options": [
@@ -5334,6 +6026,146 @@
         "sqlite_version": "3.53.2",
         "sqlite_version_number": 3053002
       },
+      "query_plan_evidence": {
+        "by_family": {},
+        "engine": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=0",
+            "COMPILER=msvc-1944",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_FOREIGN_KEYS",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "ENABLE_API_ARMOR",
+            "ENABLE_COLUMN_METADATA",
+            "ENABLE_DBSTAT_VTAB",
+            "ENABLE_FTS3",
+            "ENABLE_FTS3_PARENTHESIS",
+            "ENABLE_FTS5",
+            "ENABLE_LOAD_EXTENSION",
+            "ENABLE_MEMORY_MANAGEMENT",
+            "ENABLE_RTREE",
+            "ENABLE_STAT4",
+            "HAVE_ISNAN",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=8",
+            "MUTEX_W32",
+            "SOUNDEX",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=1",
+            "USE_URI"
+          ],
+          "sqlite_version": "3.53.2",
+          "sqlite_version_number": 3053002
+        },
+        "plan_provenance": "projectatlas-db::AtlasStore::connection",
+        "representative_events": [
+          {
+            "binding": "package.py_target",
+            "family": "import-targets",
+            "limit": 500,
+            "outcome": {
+              "status": "succeeded"
+            },
+            "parameters": [
+              "%package.py\\_target%",
+              500
+            ],
+            "query_plan": [
+              "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=?)"
+            ],
+            "row_bytes": 86,
+            "rows": 1,
+            "sequence": 1,
+            "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+          },
+          {
+            "binding": "src/py_caller.py",
+            "family": "import-caller-path",
+            "limit": 1000,
+            "outcome": {
+              "status": "succeeded"
+            },
+            "parameters": [
+              "src/py_caller.py",
+              1000
+            ],
+            "query_plan": [
+              "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=? AND path=?)"
+            ],
+            "row_bytes": 86,
+            "rows": 1,
+            "sequence": 4,
+            "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND path = ?1\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+          },
+          {
+            "binding": "a\u001fcrate.package.py_target.a\u001fcrate.package::py_target.a\u001fcrate.py_target.a\u001fcrate::package.py_target::a\u001fcrate::package::py_target::a\u001fcrate::py_target::a\u001fpackage.py_target.a\u001fpackage.py_target::a\u001fpackage::py_target.a\u001fpackage::py_target::a\u001fpy_target.a\u001fpy_target::a\u001fshared",
+            "family": "call-targets",
+            "limit": 20,
+            "outcome": {
+              "status": "succeeded"
+            },
+            "parameters": [
+              "a",
+              "crate.package.py_target.a",
+              "crate.package::py_target.a",
+              "crate.py_target.a",
+              "crate::package.py_target::a",
+              "crate::package::py_target::a",
+              "crate::py_target::a",
+              "package.py_target.a",
+              "package.py_target::a",
+              "package::py_target.a",
+              "package::py_target::a",
+              "py_target.a",
+              "py_target::a",
+              "shared",
+              20
+            ],
+            "query_plan": [
+              "CO-ROUTINE (subquery-1)",
+              "CO-ROUTINE (subquery-3)",
+              "SEARCH symbol_relations USING INDEX idx_symbol_relations_target (target_name=?)",
+              "USE TEMP B-TREE FOR LAST 4 TERMS OF ORDER BY",
+              "SCAN (subquery-3)",
+              "SCAN (subquery-1)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ],
+            "row_bytes": 55,
+            "rows": 1,
+            "sequence": 5,
+            "sql": "\n            SELECT path, source_name, target_name, kind, line, context, parser\n            FROM (\n                SELECT\n                    path,\n                    source_name,\n                    target_name,\n                    kind,\n                    line,\n                    context,\n                    parser,\n                    ROW_NUMBER() OVER (\n                        PARTITION BY target_name\n                        ORDER BY path, line, source_name, target_name\n                    ) AS target_row\n                FROM symbol_relations INDEXED BY idx_symbol_relations_target\n                WHERE kind = 'calls' AND target_name IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)\n            )\n            WHERE target_row <= ?15\n            ORDER BY path, line, source_name, target_name\n            "
+          }
+        ],
+        "timed": false
+      },
       "returncode": 0,
       "stderr_bytes": 0,
       "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -5342,18 +6174,260 @@
       "target": "src/package/py_target.py",
       "timed": false,
       "trace_observed": true,
-      "wall_ms": 108.59760013408959
+      "wall_ms": 113.39320009574294
+    },
+    "candidate": {
+      "allocation_metrics": {
+        "allocation_bytes": 40093,
+        "allocation_calls": 547,
+        "deallocation_bytes": 34815,
+        "deallocation_calls": 465,
+        "reallocation_bytes": 7734,
+        "reallocation_calls": 89
+      },
+      "case": "python-multi-binding-same-local-alias",
+      "cpu_ms": 93.75,
+      "decoded_summary": {
+        "file_path": "src/package/py_target.py",
+        "functions": [
+          {
+            "called_by": [
+              "src/py_caller.py::caller"
+            ],
+            "kind": "function",
+            "line": 1,
+            "name": "a"
+          }
+        ],
+        "language": "python",
+        "limit": 1,
+        "line_count": 5,
+        "parser_kind": "tree-sitter-symbol-graph",
+        "source_status": "live-source",
+        "summary_status": "ok",
+        "symbol_count": 2,
+        "truncated": true
+      },
+      "limit": 1,
+      "peak_rss_bytes": 13635584,
+      "plan_provenance": "projectatlas-db::AtlasStore::connection",
+      "query_engine": {
+        "compile_options": [
+          "ATOMIC_INTRINSICS=0",
+          "COMPILER=msvc-1944",
+          "DEFAULT_AUTOVACUUM",
+          "DEFAULT_CACHE_SIZE=-2000",
+          "DEFAULT_FILE_FORMAT=4",
+          "DEFAULT_FOREIGN_KEYS",
+          "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+          "DEFAULT_MMAP_SIZE=0",
+          "DEFAULT_PAGE_SIZE=4096",
+          "DEFAULT_PCACHE_INITSZ=20",
+          "DEFAULT_RECURSIVE_TRIGGERS",
+          "DEFAULT_SECTOR_SIZE=4096",
+          "DEFAULT_SYNCHRONOUS=2",
+          "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+          "DEFAULT_WAL_SYNCHRONOUS=2",
+          "DEFAULT_WORKER_THREADS=0",
+          "DIRECT_OVERFLOW_READ",
+          "ENABLE_API_ARMOR",
+          "ENABLE_COLUMN_METADATA",
+          "ENABLE_DBSTAT_VTAB",
+          "ENABLE_FTS3",
+          "ENABLE_FTS3_PARENTHESIS",
+          "ENABLE_FTS5",
+          "ENABLE_LOAD_EXTENSION",
+          "ENABLE_MEMORY_MANAGEMENT",
+          "ENABLE_RTREE",
+          "ENABLE_STAT4",
+          "HAVE_ISNAN",
+          "MALLOC_SOFT_LIMIT=1024",
+          "MAX_ATTACHED=10",
+          "MAX_COLUMN=2000",
+          "MAX_COMPOUND_SELECT=500",
+          "MAX_DEFAULT_PAGE_SIZE=8192",
+          "MAX_EXPR_DEPTH=1000",
+          "MAX_FUNCTION_ARG=1000",
+          "MAX_LENGTH=1000000000",
+          "MAX_LIKE_PATTERN_LENGTH=50000",
+          "MAX_MMAP_SIZE=0x7fff0000",
+          "MAX_PAGE_COUNT=0xfffffffe",
+          "MAX_PAGE_SIZE=65536",
+          "MAX_SQL_LENGTH=1000000000",
+          "MAX_TRIGGER_DEPTH=1000",
+          "MAX_VARIABLE_NUMBER=32766",
+          "MAX_VDBE_OP=250000000",
+          "MAX_WORKER_THREADS=8",
+          "MUTEX_W32",
+          "SOUNDEX",
+          "SYSTEM_MALLOC",
+          "TEMP_STORE=1",
+          "THREADSAFE=1",
+          "USE_URI"
+        ],
+        "sqlite_version": "3.53.2",
+        "sqlite_version_number": 3053002
+      },
+      "query_plan_evidence": {
+        "by_family": {},
+        "engine": {
+          "compile_options": [
+            "ATOMIC_INTRINSICS=0",
+            "COMPILER=msvc-1944",
+            "DEFAULT_AUTOVACUUM",
+            "DEFAULT_CACHE_SIZE=-2000",
+            "DEFAULT_FILE_FORMAT=4",
+            "DEFAULT_FOREIGN_KEYS",
+            "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+            "DEFAULT_MMAP_SIZE=0",
+            "DEFAULT_PAGE_SIZE=4096",
+            "DEFAULT_PCACHE_INITSZ=20",
+            "DEFAULT_RECURSIVE_TRIGGERS",
+            "DEFAULT_SECTOR_SIZE=4096",
+            "DEFAULT_SYNCHRONOUS=2",
+            "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+            "DEFAULT_WAL_SYNCHRONOUS=2",
+            "DEFAULT_WORKER_THREADS=0",
+            "DIRECT_OVERFLOW_READ",
+            "ENABLE_API_ARMOR",
+            "ENABLE_COLUMN_METADATA",
+            "ENABLE_DBSTAT_VTAB",
+            "ENABLE_FTS3",
+            "ENABLE_FTS3_PARENTHESIS",
+            "ENABLE_FTS5",
+            "ENABLE_LOAD_EXTENSION",
+            "ENABLE_MEMORY_MANAGEMENT",
+            "ENABLE_RTREE",
+            "ENABLE_STAT4",
+            "HAVE_ISNAN",
+            "MALLOC_SOFT_LIMIT=1024",
+            "MAX_ATTACHED=10",
+            "MAX_COLUMN=2000",
+            "MAX_COMPOUND_SELECT=500",
+            "MAX_DEFAULT_PAGE_SIZE=8192",
+            "MAX_EXPR_DEPTH=1000",
+            "MAX_FUNCTION_ARG=1000",
+            "MAX_LENGTH=1000000000",
+            "MAX_LIKE_PATTERN_LENGTH=50000",
+            "MAX_MMAP_SIZE=0x7fff0000",
+            "MAX_PAGE_COUNT=0xfffffffe",
+            "MAX_PAGE_SIZE=65536",
+            "MAX_SQL_LENGTH=1000000000",
+            "MAX_TRIGGER_DEPTH=1000",
+            "MAX_VARIABLE_NUMBER=32766",
+            "MAX_VDBE_OP=250000000",
+            "MAX_WORKER_THREADS=8",
+            "MUTEX_W32",
+            "SOUNDEX",
+            "SYSTEM_MALLOC",
+            "TEMP_STORE=1",
+            "THREADSAFE=1",
+            "USE_URI"
+          ],
+          "sqlite_version": "3.53.2",
+          "sqlite_version_number": 3053002
+        },
+        "plan_provenance": "projectatlas-db::AtlasStore::connection",
+        "representative_events": [
+          {
+            "binding": "package.py_target",
+            "family": "import-targets",
+            "limit": 500,
+            "outcome": {
+              "status": "succeeded"
+            },
+            "parameters": [
+              "%package.py\\_target%",
+              500
+            ],
+            "query_plan": [
+              "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=?)"
+            ],
+            "row_bytes": 86,
+            "rows": 1,
+            "sequence": 1,
+            "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND target_name LIKE ?1 ESCAPE '\\'\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+          },
+          {
+            "binding": "src/py_caller.py",
+            "family": "import-caller-path",
+            "limit": 1000,
+            "outcome": {
+              "status": "succeeded"
+            },
+            "parameters": [
+              "src/py_caller.py",
+              1000
+            ],
+            "query_plan": [
+              "SEARCH symbol_relations USING COVERING INDEX idx_symbol_import_alias_lookup (kind=? AND path=?)"
+            ],
+            "row_bytes": 86,
+            "rows": 1,
+            "sequence": 4,
+            "sql": "\n    SELECT path, source_name, target_name, line\n    FROM symbol_relations INDEXED BY idx_symbol_import_alias_lookup\n    WHERE kind = 'imports' AND path = ?1\n    ORDER BY path, line, source_name, target_name\n    LIMIT ?2\n"
+          },
+          {
+            "binding": "a\u001fcrate.package.py_target.a\u001fcrate.package::py_target.a\u001fcrate.py_target.a\u001fcrate::package.py_target::a\u001fcrate::package::py_target::a\u001fcrate::py_target::a\u001fpackage.py_target.a\u001fpackage.py_target::a\u001fpackage::py_target.a\u001fpackage::py_target::a\u001fpy_target.a\u001fpy_target::a\u001fshared",
+            "family": "call-targets",
+            "limit": 20,
+            "outcome": {
+              "status": "succeeded"
+            },
+            "parameters": [
+              "a",
+              "crate.package.py_target.a",
+              "crate.package::py_target.a",
+              "crate.py_target.a",
+              "crate::package.py_target::a",
+              "crate::package::py_target::a",
+              "crate::py_target::a",
+              "package.py_target.a",
+              "package.py_target::a",
+              "package::py_target.a",
+              "package::py_target::a",
+              "py_target.a",
+              "py_target::a",
+              "shared",
+              20
+            ],
+            "query_plan": [
+              "CO-ROUTINE (subquery-1)",
+              "CO-ROUTINE (subquery-3)",
+              "SEARCH symbol_relations USING INDEX idx_symbol_relations_target (target_name=?)",
+              "USE TEMP B-TREE FOR LAST 4 TERMS OF ORDER BY",
+              "SCAN (subquery-3)",
+              "SCAN (subquery-1)",
+              "USE TEMP B-TREE FOR ORDER BY"
+            ],
+            "row_bytes": 55,
+            "rows": 1,
+            "sequence": 5,
+            "sql": "\n            SELECT path, source_name, target_name, kind, line, context, parser\n            FROM (\n                SELECT\n                    path,\n                    source_name,\n                    target_name,\n                    kind,\n                    line,\n                    context,\n                    parser,\n                    ROW_NUMBER() OVER (\n                        PARTITION BY target_name\n                        ORDER BY path, line, source_name, target_name\n                    ) AS target_row\n                FROM symbol_relations INDEXED BY idx_symbol_relations_target\n                WHERE kind = 'calls' AND target_name IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)\n            )\n            WHERE target_row <= ?15\n            ORDER BY path, line, source_name, target_name\n            "
+          }
+        ],
+        "timed": false
+      },
+      "returncode": 0,
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 1715,
+      "stdout_sha256": "289605b415dbf8a4a60bc30104898197c44587a61cd15a797fa0500cb9e6b0aa",
+      "target": "src/package/py_target.py",
+      "timed": false,
+      "trace_observed": true,
+      "wall_ms": 112.10670019499958
     }
   },
   "repeats": 3,
   "repository_revision": "0243d5c6da0e66210abbe1c95b2815d651a77c2d",
   "reproduction": {
     "note": "Full raw streams remain in ignored local output and are recoverable by rerunning the existing harness; this tracked file contains only bounded review evidence.",
-    "raw_trace_bytes": 18687631,
+    "raw_trace_bytes": 19224628,
     "raw_trace_ignored": true,
     "raw_trace_path": "target/benchmarks/reverse-caller/0243d5c6da0e66210abbe1c95b2815d651a77c2d-v8-full-results.json",
     "raw_trace_schema": "projectatlas.reverse-caller-performance.v8",
-    "raw_trace_sha256": "c8dd9c2e6824047faa27c2d5a433097e9f9aadecea0e29fcd5cde2458c9432e8"
+    "raw_trace_sha256": "59faf6006ec65cf1576df3a543a17bb3f4b0b4c3389e9cae687e2aeb68f9bd3b"
   },
   "schema": "projectatlas.reverse-caller-performance.v8"
 }

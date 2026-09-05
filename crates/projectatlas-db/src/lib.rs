@@ -1057,6 +1057,20 @@ pub struct StoredImportRelation {
     pub line: usize,
 }
 
+/// Outcome of one reverse-caller relation query in the benchmark-only build.
+#[cfg(feature = "reverse-caller-benchmark")]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum ReverseCallerBenchmarkQueryOutcome {
+    /// The query decoded every returned row successfully.
+    Succeeded,
+    /// The query failed before it could return a complete result.
+    Failed {
+        /// Exact database error propagated by the production query.
+        error: String,
+    },
+}
+
 /// One observed reverse-caller relation query from the benchmark-only build.
 #[cfg(feature = "reverse-caller-benchmark")]
 #[derive(Clone, Debug, Serialize)]
@@ -1073,6 +1087,8 @@ pub struct ReverseCallerBenchmarkQuery {
     pub rows: usize,
     /// UTF-8 bytes retained by the decoded relation fields.
     pub row_bytes: usize,
+    /// Whether the production query returned a complete result or failed.
+    pub outcome: ReverseCallerBenchmarkQueryOutcome,
     /// Exact production SQL captured for the untimed plan replay.
     pub sql: String,
     /// Exact bound values supplied to the production SQL.
@@ -1122,6 +1138,7 @@ fn record_reverse_caller_benchmark_query(
     limit: usize,
     rows: usize,
     row_bytes: usize,
+    outcome: ReverseCallerBenchmarkQueryOutcome,
     sql: &str,
     values: &[Value],
 ) {
@@ -1138,6 +1155,7 @@ fn record_reverse_caller_benchmark_query(
             limit,
             rows,
             row_bytes,
+            outcome,
             sql: sql.to_string(),
             parameters: values
                 .iter()
@@ -4185,6 +4203,26 @@ impl AtlasStore {
             .map(|target| Value::Text(target.clone()))
             .collect::<Vec<_>>();
         values.push(Value::Integer(usize_to_i64(limit_per_target.max(1))));
+        #[cfg(feature = "reverse-caller-benchmark")]
+        let relation_result = self.query_relations(&sql, params_from_iter(values.iter()));
+        #[cfg(feature = "reverse-caller-benchmark")]
+        if let Err(error) = &relation_result {
+            record_reverse_caller_benchmark_query(
+                "call-targets",
+                target_names.join("\u{1f}"),
+                limit_per_target.max(1),
+                0,
+                0,
+                ReverseCallerBenchmarkQueryOutcome::Failed {
+                    error: error.to_string(),
+                },
+                &sql,
+                &values,
+            );
+        }
+        #[cfg(feature = "reverse-caller-benchmark")]
+        let mut relations = relation_result?;
+        #[cfg(not(feature = "reverse-caller-benchmark"))]
         let mut relations = self.query_relations(&sql, params_from_iter(values.iter()))?;
         relations.sort_by(|left, right| {
             left.path
@@ -4207,6 +4245,7 @@ impl AtlasStore {
             limit_per_target.max(1),
             relations.len(),
             relations.iter().map(symbol_relation_bytes).sum(),
+            ReverseCallerBenchmarkQueryOutcome::Succeeded,
             &sql,
             &values,
         );
@@ -4257,6 +4296,7 @@ impl AtlasStore {
                     .iter()
                     .map(stored_import_relation_bytes)
                     .sum(),
+                ReverseCallerBenchmarkQueryOutcome::Succeeded,
                 IMPORT_RELATIONS_MATCHING_TARGETS_SQL,
                 &benchmark_values,
             );
@@ -4311,6 +4351,7 @@ impl AtlasStore {
             bounded_limit,
             relations.len(),
             relations.iter().map(stored_import_relation_bytes).sum(),
+            ReverseCallerBenchmarkQueryOutcome::Succeeded,
             IMPORT_RELATIONS_FOR_PATH_SQL,
             &benchmark_values,
         );
@@ -8853,6 +8894,56 @@ mod tests {
         let inactive =
             REVERSE_CALLER_BENCHMARK_QUERIES.with(|observations| observations.borrow().is_none());
         require_eq(&inactive, &true, "capture after take")?;
+        Ok(())
+    }
+
+    #[cfg(feature = "reverse-caller-benchmark")]
+    #[test]
+    fn reverse_caller_benchmark_records_failed_call_query() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/caller.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: Vec::new(),
+            relations: vec![SymbolRelation {
+                path: "src/caller.rs".to_string(),
+                source_name: "caller".to_string(),
+                target_name: "target".to_string(),
+                kind: RelationKind::Calls,
+                line: 1,
+                context: "target()".to_string(),
+                parser: ParserKind::TreeSitter,
+            }],
+        })?;
+        store.connection.execute(
+            "UPDATE symbol_relations SET line = 'invalid' WHERE kind = 'calls'",
+            [],
+        )?;
+
+        store.start_reverse_caller_benchmark_trace();
+        let query_result = store.load_call_relations_to_targets(&["target".to_string()], 20);
+        require(
+            query_result.is_err(),
+            "corrupt relation query unexpectedly succeeded",
+        )?;
+        let trace = store.take_reverse_caller_benchmark_trace()?;
+        require_eq(&trace.queries.len(), &1, "failed query observation count")?;
+        let query = &trace.queries[0];
+        require_eq(&query.family, &"call-targets", "failed query family")?;
+        require_eq(&query.rows, &0, "failed query accepted rows")?;
+        require(
+            matches!(
+                &query.outcome,
+                ReverseCallerBenchmarkQueryOutcome::Failed { error }
+                    if error.contains("Invalid column type Text")
+            ),
+            "failed query outcome did not retain the propagated SQLite error",
+        )?;
+        require(
+            !query.query_plan.is_empty(),
+            "failed query plan was not replayed",
+        )?;
         Ok(())
     }
 
