@@ -701,8 +701,6 @@ fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
 pub fn windows_path_requires_verbatim_semantics(path: &Path) -> bool {
     #[cfg(windows)]
     {
-        use std::path::Component;
-
         let Some(value) = path.to_str() else {
             return true;
         };
@@ -710,6 +708,24 @@ pub fn windows_path_requires_verbatim_semantics(path: &Path) -> bool {
         if normalized.encode_utf16().count() >= 260 {
             return true;
         }
+        windows_path_has_verbatim_only_components(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Return whether a Windows path contains components whose spelling requires verbatim semantics.
+///
+/// Ordinary Win32 canonicalization may reinterpret these components, so a
+/// prefix-stripped historical path cannot safely establish their identity.
+#[must_use]
+pub fn windows_path_has_verbatim_only_components(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
 
         path.components().any(|component| {
             let Component::Normal(component) = component else {

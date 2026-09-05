@@ -2213,26 +2213,44 @@ mod tests {
         let root_display = projectatlas_core::normalize_native_path_display(&root);
         let missing_display =
             projectatlas_core::normalize_native_path_display(temp.path().join("a".repeat(240)));
+        let ambiguous_common_display = format!("{common_display}.");
+        let ambiguous_administrative_display = format!("{administrative_display}.");
+        let ambiguous_root_display = format!("{root_display}.");
 
-        for (case, field) in [
-            ("common", "git_common_directory"),
-            ("administrative", "git_administrative_directory"),
-            ("root", "last_root"),
+        for (case, field, rejected_display) in [
+            ("missing-common", "git_common_directory", &missing_display),
+            (
+                "missing-administrative",
+                "git_administrative_directory",
+                &missing_display,
+            ),
+            ("missing-root", "last_root", &missing_display),
+            (
+                "ambiguous-common",
+                "git_common_directory",
+                &ambiguous_common_display,
+            ),
+            (
+                "ambiguous-administrative",
+                "git_administrative_directory",
+                &ambiguous_administrative_display,
+            ),
+            ("ambiguous-root", "last_root", &ambiguous_root_display),
         ] {
             let database = control.join(format!("unprovable-{case}.db"));
             let store = AtlasStore::open_for_project(&database, &control)?;
             let common_value = if field == "git_common_directory" {
-                &missing_display
+                rejected_display
             } else {
                 &common_display
             };
             let administrative_value = if field == "git_administrative_directory" {
-                &missing_display
+                rejected_display
             } else {
                 &administrative_display
             };
             let root_value = if field == "last_root" {
-                &missing_display
+                rejected_display
             } else {
                 &root_display
             };
@@ -2319,7 +2337,7 @@ mod tests {
             require(
                 [&legacy_paths.0, &legacy_paths.1, &legacy_paths.2]
                     .into_iter()
-                    .any(|path| path == &missing_display),
+                    .any(|path| path == rejected_display),
                 "failed migration changed the unprovable legacy path",
             )?;
             let repair = match field {

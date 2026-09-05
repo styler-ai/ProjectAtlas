@@ -2542,6 +2542,12 @@ fn legacy_worktree_native_identity(
     field: &'static str,
     path: PathBuf,
 ) -> DbResult<CanonicalProjectRoot> {
+    if projectatlas_core::windows_path_has_verbatim_only_components(&path) {
+        return Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable {
+            field,
+            registration_id,
+        });
+    }
     match CanonicalProjectRoot::from_path(&path) {
         Ok(identity) => Ok(identity),
         Err(CoreError::CanonicalProjectRootIo { source, .. })
