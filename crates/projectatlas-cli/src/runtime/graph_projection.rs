@@ -4719,20 +4719,25 @@ fn relation_source<'a>(
             .language
             .as_deref()
             .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    let php_source = if is_php_call {
+        unique_php_call_source(
+            graph,
+            symbol_index,
+            &relation.source_name,
+            relation.line,
+            control,
+        )?
+    } else {
+        None
+    };
+    let indices = if is_php_call {
+        php_source.as_slice()
+    } else {
+        symbol_index.get(&relation.source_name)
+    };
     let mut matched = None;
-    for (candidate_index, &index) in symbol_index.get(&relation.source_name).iter().enumerate() {
+    for (candidate_index, &index) in indices.iter().enumerate() {
         check_graph_work(control, candidate_index)?;
-        if is_php_call {
-            let symbol = graph.symbols.get(index).ok_or_else(|| {
-                CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
-            })?;
-            // Semicolon namespace declarations do not span their later top-level calls.
-            if symbol.kind != SymbolKind::Module
-                && (relation.line < symbol.line_start || relation.line > symbol.line_end)
-            {
-                continue;
-            }
-        }
         let digest = owners.symbol_digests.get(index).ok_or_else(|| {
             CliError::InvalidInput("graph symbol owner index was not staged".to_string())
         })?;
@@ -5199,41 +5204,77 @@ fn unique_source_parent<'a>(
     relation_line: Option<usize>,
     control: &IndexWorkControl,
 ) -> Result<Option<&'a str>, CliError> {
+    if let Some(line) = relation_line {
+        let Some(index) = unique_php_call_source(graph, symbol_index, source_name, line, control)?
+        else {
+            return Ok(None);
+        };
+        let symbol = graph.symbols.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        return Ok(symbol.parent.as_deref());
+    }
     let mut parent = None;
     let mut source_found = false;
-    let mut parent_ambiguous = false;
-    let mut located_parent = None;
-    let mut located_found = false;
     for (candidate_index, &row_index) in symbol_index.get(source_name).iter().enumerate() {
         check_graph_work(control, candidate_index)?;
         let symbol = graph.symbols.get(row_index).ok_or_else(|| {
             CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
         })?;
         let candidate = symbol.parent.as_deref();
-        if relation_line.is_some_and(|line| symbol.line_start <= line && line <= symbol.line_end) {
-            if !located_found {
-                located_parent = candidate;
-                located_found = true;
-            } else if located_parent != candidate {
-                return Ok(None);
-            }
-        }
         if !source_found {
             parent = candidate;
             source_found = true;
-        } else if parent != candidate && relation_line.is_none() {
-            return Ok(None);
         } else if parent != candidate {
-            parent_ambiguous = true;
+            return Ok(None);
         }
     }
-    Ok(if located_found {
-        located_parent
-    } else if parent_ambiguous {
-        None
+    Ok(parent)
+}
+
+/// Prefer a proven PHP callable source, falling back to a unique namespace owner.
+fn unique_php_call_source(
+    graph: &SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
+    source_name: &str,
+    line: usize,
+    control: &IndexWorkControl,
+) -> Result<Option<usize>, CliError> {
+    let mut callable = None;
+    let mut callable_boundary = false;
+    let mut module = None;
+    let mut module_ambiguous = false;
+    for (candidate_index, &index) in symbol_index.get(source_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        match symbol.kind {
+            SymbolKind::Function | SymbolKind::Method
+                if symbol.line_start <= line && line <= symbol.line_end =>
+            {
+                if callable.replace(index).is_some() {
+                    return Ok(None);
+                }
+                callable_boundary = line == symbol.line_start || line == symbol.line_end;
+            }
+            SymbolKind::Module => {
+                module_ambiguous |= module.replace(index).is_some();
+            }
+            _ => {}
+        }
+    }
+    if callable.is_some() {
+        // Line-only facts cannot distinguish a boundary-line call from a
+        // same-named namespace's top-level call beside the declaration.
+        Ok(if module.is_some() && callable_boundary {
+            None
+        } else {
+            callable
+        })
     } else {
-        parent
-    })
+        Ok(if module_ambiguous { None } else { module })
+    }
 }
 
 /// Merge sorted candidate streams without materializing their full union.
@@ -11087,6 +11128,22 @@ class DuplicateB {
         )?;
         let namespace_call = staged_call("top_level_helper", "TopLevel");
         require(namespace_call.is_some_and(|relation| staged.entities.iter().any(|entity| entity.key() == relation.source() && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == "TopLevel"))), "semicolon PHP namespace retains top-level call ownership")?;
+        for (source, name, parent) in [
+            (
+                "<?php class caller { function caller() { helper(); } } function helper() {}",
+                "caller",
+                "caller",
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction Foo() {\nhelper();\n}\nfunction helper() {}",
+                "Foo",
+                "Foo",
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/source-collision.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            require(staged.relations.iter().filter(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)).any(|relation| staged.entities.iter().any(|entity| entity.key() == relation.source() && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == name && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(parent)))), "PHP callable source must not be hidden by a same-name class or module")?;
+        }
         let trait_graph = extract_symbol_graph(
             "src/trait.php",
             Some("php"),
@@ -11397,6 +11454,28 @@ function fallback_run(): void {
                     )
                 }),
                 "unknown or ambiguous PHP callers must not be treated as proven global functions",
+            )?;
+        }
+        for source in [
+            "<?php namespace Foo; function Foo() {} Foo();",
+            "<?php namespace Foo; function Foo() { helper(); } function helper() {}",
+        ] {
+            let graph = extract_symbol_graph("src/namespace-boundary.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            require(
+                staged
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    })
+                    .all(|relation| {
+                        staged.entities.iter().any(|entity| {
+                            entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::File { .. })
+                        })
+                    }),
+                "PHP namespace/callable boundary-line collisions must remain file-owned",
             )?;
         }
 
