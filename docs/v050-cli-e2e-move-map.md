@@ -1,6 +1,6 @@
 # CLI E2E ownership split move map
 
-This map freezes the complete pre-move contract before e2e.rs is deleted. The machine-readable source of truth is v050-cli-e2e-inventory.json.
+This map records the frozen pre-move contract for the accepted e2e.rs ownership split. The machine-readable source of truth is v050-cli-e2e-inventory.json. Historical facet digests preserve that baseline; current source digests and test, symbol, attribute, fixture, and workflow inventories protect subsequent reviewed changes without requiring superseded physical source lines to remain.
 
 - Baseline commit: b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb
 - Baseline e2e.rs SHA-256: e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c

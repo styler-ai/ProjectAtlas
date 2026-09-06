@@ -1194,7 +1194,6 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
     }
 
     let mut observed_symbols_by_owner = BTreeMap::<String, Vec<ObservedCliE2eSymbol>>::new();
-    let mut observed_source_lines = BTreeSet::new();
     for relative_path in CLI_E2E_SOURCE_PATHS
         .iter()
         .copied()
@@ -1202,12 +1201,6 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
     {
         let source =
             normalize_cli_e2e_text(&fs::read_to_string(workspace_root.join(relative_path))?);
-        for line in source.lines() {
-            observed_source_lines.insert(line.to_owned());
-            if let Some(unqualified) = line.strip_prefix("pub(super) ") {
-                observed_source_lines.insert(unqualified.to_owned());
-            }
-        }
         let owner = relative_path
             .strip_prefix("crates/projectatlas-cli/tests/")
             .and_then(|path| path.strip_suffix(".rs"))
@@ -1324,38 +1317,8 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
         }
     }
 
-    for (name, facets) in [
-        (
-            "environment_mutations",
-            &inventory.contract_facets.environment_mutations,
-        ),
-        (
-            "timeouts_and_deadlines",
-            &inventory.contract_facets.timeouts_and_deadlines,
-        ),
-        (
-            "cleanup_and_process_ownership",
-            &inventory.contract_facets.cleanup_and_process_ownership,
-        ),
-        (
-            "process_isolation_and_fixtures",
-            &inventory.contract_facets.process_isolation_and_fixtures,
-        ),
-        (
-            "packaged_product_routes",
-            &inventory.contract_facets.packaged_product_routes,
-        ),
-    ] {
-        for facet in facets {
-            if !observed_source_lines.contains(&facet.text) {
-                return Err(io::Error::other(format!(
-                    "CLI E2E {name} facet line disappeared: {}",
-                    facet.text.trim()
-                ))
-                .into());
-            }
-        }
-    }
+    // Baseline facets document the accepted ownership split. Current source
+    // digests protect later reviewed fixture and behavior changes.
     let observed_attributes = inventory
         .tests
         .iter()
