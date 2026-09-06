@@ -7400,6 +7400,20 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
 #[test]
 #[cfg(windows)]
 fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn Error>> {
+    let mut input_reader = StdCommand::new("powershell");
+    input_reader
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::In.ReadToEnd() | Out-Null; Write-Output 'stdin-closed'",
+        ])
+        .stdin(Stdio::piped());
+    let output = run_bounded_output(input_reader, "real host closed stdin")?;
+    require(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "stdin-closed",
+        "noninteractive real-host setup must close stdin before waiting".to_owned(),
+    )?;
     let temp = tempfile::tempdir()?;
     let runtime = temp
         .path()
@@ -8778,7 +8792,10 @@ fn run_bounded_output(
     mut command: StdCommand,
     label: &str,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     wait_for_plugin_installer_output(
         spawn_plugin_installer_process(&mut command)?,
         label,
