@@ -973,24 +973,19 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
             )));
         }
     };
-    if repository.common_directory.to_str().is_none() {
-        return Err(CliError::InvalidInput(
-            "registered worktree synchronization requires UTF-8 Git common-directory identity"
-                .to_string(),
-        ));
-    }
     let control = open_atlas_store_for_project(control_db, control_root)?;
     require_synchronization_control_identity(&control, Some(control_project))?;
-    let common = normalize_native_path_display(&repository.common_directory);
+    let common = CanonicalProjectRoot::from_path(&repository.common_directory)
+        .map_err(|source| CliError::InvalidInput(source.to_string()))?;
     let active_roots = repository
         .worktrees
         .iter()
         .filter_map(|entry| match &entry.state {
-            GitWorktreeState::Active { root, .. } => entry
-                .administrative_directory
-                .to_str()
-                .map(normalize_native_path_display_str)
-                .map(|administrative_directory| (administrative_directory, root.as_path())),
+            GitWorktreeState::Active { root, .. } => {
+                CanonicalProjectRoot::from_path(&entry.administrative_directory)
+                    .ok()
+                    .map(|administrative_directory| (administrative_directory, root.as_path()))
+            }
             GitWorktreeState::Missing { .. } | GitWorktreeState::Invalid { .. } => None,
         })
         .collect::<HashMap<_, _>>();
@@ -1001,18 +996,20 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
                 registration.alias
             ))
         };
-        if registration.git_common_directory != common {
+        if registration.git_common_directory_identity != common {
             if registration.project_instance_id.is_some() {
                 return Err(synchronization_incomplete());
             }
             continue;
         }
         let root = active_roots
-            .get(&registration.git_administrative_directory)
+            .get(&registration.git_administrative_directory_identity)
             .copied()
             .filter(|_| {
-                git_administrative_identity(Path::new(&registration.git_administrative_directory))
-                    .is_ok_and(|identity| identity == registration.git_administrative_identity)
+                git_administrative_identity(
+                    registration.git_administrative_directory_identity.as_path(),
+                )
+                .is_ok_and(|identity| identity == registration.git_administrative_identity)
             });
         let Some(root) = root else {
             if registration.project_instance_id.is_some() {
@@ -1020,12 +1017,6 @@ fn synchronize_registered_worktree_usage_with_catalog_validation<T>(
             }
             continue;
         };
-        if root.to_str().is_none() {
-            return Err(CliError::InvalidInput(
-                "registered worktree synchronization requires UTF-8 source-root identity"
-                    .to_string(),
-            ));
-        }
         let synchronized_project = control.with_active_worktree_registration(
             registration.registration_id,
             &registration.alias,
@@ -1121,8 +1112,8 @@ pub(crate) fn require_registered_worktree_lifecycle(
     };
     if !git_worktree_lifecycle_matches(
         expected_root,
-        Path::new(&registration.git_common_directory),
-        Path::new(&registration.git_administrative_directory),
+        registration.git_common_directory_identity.as_path(),
+        registration.git_administrative_directory_identity.as_path(),
         &registration.git_administrative_identity,
     )? {
         return Err(lifecycle_changed());
@@ -8842,6 +8833,19 @@ mod tests {
         Ok(())
     }
 
+    /// Downgrade a current fixture to the released schema-19 worktree shape.
+    fn drop_native_worktree_identity_schema(
+        connection: &rusqlite::Connection,
+    ) -> rusqlite::Result<()> {
+        connection.execute_batch(
+            "DROP INDEX IF EXISTS idx_worktree_registrations_active_native_administrative_directory;
+             DROP INDEX IF EXISTS idx_worktree_registrations_active_native_root;
+             ALTER TABLE worktree_registrations DROP COLUMN git_common_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN git_administrative_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN last_root_identity;",
+        )
+    }
+
     #[test]
     fn synchronization_control_identity_rejects_replacement_without_caller_identity()
     -> Result<(), Box<dyn Error>> {
@@ -8883,6 +8887,7 @@ mod tests {
         drop(AtlasStore::open_for_project(&database, &root)?);
         {
             let connection = rusqlite::Connection::open(&database)?;
+            drop_native_worktree_identity_schema(&connection)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
                  DROP TABLE IF EXISTS graph_identity_rejections;
@@ -9064,6 +9069,7 @@ mod tests {
         drop(AtlasStore::open_for_project(&database, &bound_root)?);
         {
             let connection = rusqlite::Connection::open(&database)?;
+            drop_native_worktree_identity_schema(&connection)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
                  DROP TABLE IF EXISTS graph_identity_rejections;
@@ -9131,6 +9137,7 @@ mod tests {
         drop(AtlasStore::open_for_project(&database, &raw_root)?);
         {
             let connection = rusqlite::Connection::open(&database)?;
+            drop_native_worktree_identity_schema(&connection)?;
             connection.execute_batch(
                 "DROP TABLE project_root_identity;
                  DROP TABLE IF EXISTS graph_identity_rejections;
@@ -13131,6 +13138,43 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &changes.paths,
             &HashSet::from([source]),
             "native Unix watcher paths",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn notify_events_preserve_non_utf8_worktree_root_identity() -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp
+            .path()
+            .join(OsString::from_vec(b"worktree-root-\xff".to_vec()));
+        let source = root.join("src").join("generated.rs");
+        fs::create_dir_all(
+            source
+                .parent()
+                .ok_or_else(|| io::Error::other("watch source has no parent"))?,
+        )?;
+        fs::write(&source, "pub fn generated() {}\n")?;
+        let event = Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(source.clone());
+
+        let changes = notify_event_changes(&root, &ScanOptions::default(), &event);
+
+        require_eq(
+            &changes.paths,
+            &HashSet::from([source.clone()]),
+            "non-UTF-8 worktree-root watcher path",
+        )?;
+        require_eq(
+            &normalized_deleted_path(&root, &source)?,
+            &Some("src/generated.rs".to_string()),
+            "non-UTF-8 worktree-root relative watcher path",
         )?;
         Ok(())
     }

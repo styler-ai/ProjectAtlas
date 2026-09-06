@@ -32,12 +32,17 @@ Use the existing owned Windows fixture to emit more than the existing output cei
 
 The test remains in the current Windows delivery E2E owner and follows #487's accepted move when that branch lands. No product module, shared test framework, workflow, schema, or architecture diagram changes.
 
+### Keep the aggregate watchdog by deleting duplicate work
+
+The hosted gate must retain its 30-second outer watchdog. Remove the older full-timeout rejection probe now superseded by the causal timeout-disposition fixture, and collapse duplicate valid-runtime invocations where one result can prove both payload compatibility and the optional observation seam. This preserves the direct output-limit and timeout branches while reducing nested process startup work instead of inflating time limits or adding retries.
+
 ## Risks / Trade-offs
 
 - [Risk] A test observation changes production control flow. -> Make it optional, assign only at existing branch points, and prove identical production-facing results with the sink omitted.
 - [Risk] The fixture still passes without exceeding the ceiling. -> Emit a finite payload strictly larger than the existing bound before blocking and assert the output-limit disposition.
 - [Risk] The fix races ongoing E2E ownership changes. -> Start implementation only from the accepted shared baseline and preserve the final single #487 owner.
 - [Risk] A disposition string becomes a new public contract. -> Keep it private to the installer script/test boundary and do not serialize or document it as product output.
+- [Risk] Redundant nested process launches make the aggregate Windows proof fail under ordinary hosted startup contention. -> Keep one causal probe per distinct behavior and retain the existing 30-second outer watchdog.
 
 ## Migration Plan
 
