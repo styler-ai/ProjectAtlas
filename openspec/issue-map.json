@@ -28,7 +28,7 @@
         "489": { "blocked_by": [] },
         "490": { "blocked_by": [339, 342, 358, 384, 464, 465, 489] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555] },
+        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 561] },
         "495": { "blocked_by": [] },
         "517": { "blocked_by": [] },
         "518": { "blocked_by": [547] },
@@ -38,7 +38,8 @@
         "544": { "blocked_by": [] },
         "547": { "blocked_by": [] },
         "549": { "blocked_by": [] },
-        "555": { "blocked_by": [487] }
+        "555": { "blocked_by": [487] },
+        "561": { "blocked_by": [] }
       }
     },
     "v0.6.0-00": {
@@ -170,6 +171,7 @@
     "persist-graph-coverage-limits": 471,
     "prefer-worktree-guidance-before-database-preflight": 412,
     "preserve-indexing-across-invalid-symbol-identities": 467,
+    "prove-completed-parent-pipe-cleanup": 561,
     "publish-rustdoc-readme-links": 300,
     "rationalize-agent-tool-surface": {
       "contract": "checklist-v1",
