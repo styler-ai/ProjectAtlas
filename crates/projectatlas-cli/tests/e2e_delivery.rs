@@ -2403,6 +2403,99 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     .join(WINDOWS_POWERSHELL_DIR)
     .join(WINDOWS_POWERSHELL_VERSION_DIR)
     .join(WINDOWS_POWERSHELL_EXECUTABLE);
+    let discovery_bin = temp.path().join("discovery-bin");
+    fs::create_dir_all(&discovery_bin)?;
+    let module_root = temp.path().join("discovery-modules");
+    let module = module_root.join("AtlasDiscoveryProbe");
+    fs::create_dir_all(&module)?;
+    fs::write(
+        module.join("AtlasDiscoveryProbe.psm1"),
+        "[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_MARKER, 'imported')\nfunction projectatlas {}\nExport-ModuleMember -Function projectatlas\n",
+    )?;
+    let discovery_script = temp.path().join("command-discovery.ps1");
+    fs::write(
+        &discovery_script,
+        r#"
+$ErrorActionPreference = 'Stop'
+$source = [IO.File]::ReadAllText($env:PROJECTATLAS_DISCOVERY_INSTALLER)
+foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasCommand', 'Test-ProjectAtlasBareCommandResolutionOnPath')) {
+    $definition = [regex]::Match($source, "(?ms)^function $name \{.*?^\}")
+    if (-not $definition.Success) { throw "Missing command discovery owner: $name" }
+    Invoke-Expression $definition.Value
+}
+$env:PSModulePath = $env:PROJECTATLAS_DISCOVERY_MODULES
+$env:Path = $env:PROJECTATLAS_DISCOVERY_EMPTY
+if (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT) {
+    throw 'Module-only command was classified as a PATH runtime'
+}
+if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) {
+    throw 'PATH discovery imported an unrelated module'
+}
+if ($null -ne $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')) {
+    throw 'Command discovery did not restore absent preference'
+}
+Set-Variable PSModuleAutoLoadingPreference -Scope Global -Value None -Option ReadOnly
+if (Get-ProjectAtlasCommand) { throw 'Read-only None preference admitted a module-only command' }
+$immutable = $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')
+if ($immutable.Value -ne 'None' -or $immutable.Options -ne [System.Management.Automation.ScopedItemOptions]::ReadOnly) {
+    throw 'Command discovery mutated an immutable preference'
+}
+if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) { throw 'Read-only None discovery imported a module' }
+Set-Variable PSModuleAutoLoadingPreference -Scope Global -Value All -Option None -Force
+[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_SCRIPT, "'script'")
+$env:Path = [IO.Path]::GetDirectoryName($env:PROJECTATLAS_DISCOVERY_SCRIPT)
+if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT)) {
+    throw 'Command discovery lost PowerShell script compatibility'
+}
+$global:PSModuleAutoLoadingPreference = 'All'
+function projectatlas { 'shadow' }
+if ((Get-ProjectAtlasCommand).CommandType -ne 'Function') { throw 'Function precedence changed' }
+if ($global:PSModuleAutoLoadingPreference -ne 'All') { throw 'Existing preference was not restored' }
+Set-Alias projectatlas Get-Date
+if ((Get-ProjectAtlasCommand).CommandType -ne 'Alias') { throw 'Alias precedence changed' }
+if ($global:PSModuleAutoLoadingPreference -ne 'All') { throw 'Alias lookup changed preference' }
+if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) { throw 'Discovery imported a module' }
+function Get-Command { throw 'command discovery failure' }
+$failed = $false
+try { Get-ProjectAtlasCommand } catch { $failed = $_.Exception.Message -eq 'command discovery failure' }
+if (-not $failed -or $global:PSModuleAutoLoadingPreference -ne 'All') {
+    throw 'Failed discovery did not preserve its error and restore preference'
+}
+
+"#,
+    )?;
+    let mut discovery = StdCommand::new(&system_powershell);
+    discovery
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&discovery_script)
+        .env(
+            "PROJECTATLAS_DISCOVERY_INSTALLER",
+            workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.ps1"),
+        )
+        .env("PROJECTATLAS_DISCOVERY_MODULES", &module_root)
+        .env("PROJECTATLAS_DISCOVERY_EMPTY", &empty_bin)
+        .env(
+            "PROJECTATLAS_DISCOVERY_SCRIPT",
+            discovery_bin.join("projectatlas.ps1"),
+        )
+        .env(
+            "PROJECTATLAS_DISCOVERY_MARKER",
+            temp.path().join("module-imported.marker"),
+        );
+    let discovery_output = run_bounded_output(discovery, "Windows PATH command discovery")?;
+    require(
+        discovery_output.status.success(),
+        format!(
+            "Windows command discovery failed: {}",
+            String::from_utf8_lossy(&discovery_output.stderr)
+        ),
+    )?;
     fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
     let verified_runtime = user_bin.join("projectatlas.cmd");
     fs::write(&verified_runtime, "@exit /b 0\r\n")?;
@@ -2516,6 +2609,7 @@ if ($errors.Count -ne 0) {
 $names = @(
     "Convert-ProjectAtlasVersionTag",
     "Get-NormalizedPathEntry",
+    "Get-ProjectAtlasCommand",
     "Initialize-ProjectAtlasRuntimeProbe",
     "Invoke-ProjectAtlasBoundedJsonCommand",
     "Invoke-ProjectAtlasRuntimeInfo",
@@ -7398,7 +7492,8 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
     ] {
         let step = workflow_job_step(&workflow, "e2e-smoke", name)?;
         require(
-            step["if"].as_str() == Some("contains(matrix.contracts, 'plugin')"),
+            step["if"].as_str()
+                == Some("contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'"),
             format!("{name} must cover plugin platforms and macOS Intel"),
         )?;
     }
