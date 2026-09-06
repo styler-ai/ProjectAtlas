@@ -1872,7 +1872,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
-        "$inheritedProjectAtlasCommand = Get-Command projectatlas",
+        "$inheritedProjectAtlasCommand = Get-ProjectAtlasCommand",
         "$stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData",
         "$inheritedSynchronizedMirrorReady = $stableMirrorReady",
         "$futureProcessPathReady = Set-ProjectAtlasPathPrecedence",
