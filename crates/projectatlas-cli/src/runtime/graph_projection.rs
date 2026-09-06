@@ -5110,6 +5110,7 @@ fn local_relation_matches<'a>(
                     && if is_php_contains {
                         if let Some(source) = php_containment_source {
                             symbol.line_start == relation.line
+                                && symbol.detail.as_deref() == Some(relation.context.as_str())
                                 && php_entity_matches_qualified_scope(
                                     staged_entities,
                                     digest.as_ref(),
@@ -5402,6 +5403,7 @@ fn unique_php_containment_source(
         })?;
         if symbol.parent.as_deref() == Some(relation.source_name.as_str())
             && symbol.line_start == relation.line
+            && symbol.detail.as_deref() == Some(relation.context.as_str())
             && target.replace(index).is_some()
         {
             return Ok(None);
@@ -11916,6 +11918,35 @@ function fallback_run(): void {
                 }),
                 &format!("PHP same-line namespace and type collisions must use exact containment spans: {name} {parent}"),
             )?;
+        }
+
+        for source in [
+            "<?php class A { public $run; function run() {} const run = 1; }",
+            "<?php trait A { public $run; function run() {} const run = 1; }",
+        ] {
+            let graph = extract_symbol_graph("src/member-kinds.php", Some("php"), source);
+            let members = finish_graph(&graph)?;
+            require_eq(
+                &graph
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.name == "run")
+                    .count(),
+                &3,
+                "PHP same-name fixture must retain property, method, and constant",
+            )?;
+            for expected in graph.symbols.iter().filter(|symbol| symbol.name == "run") {
+                require(
+                    members.relations.iter().any(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                            && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                                if symbol.name.as_str() == "run" && symbol.kind == expected.kind && symbol.signature.as_str() == expected.signature)
+                            && members.entities.iter().any(|entity| entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == "A"))
+                    }),
+                    &format!("same-line PHP {} must retain its distinct containment edge", expected.signature),
+                )?;
+            }
         }
 
         let imported_graph = extract_symbol_graph(
