@@ -92,7 +92,7 @@ use projectatlas_service::{
     validate_federated_root_count,
 };
 use projectatlas_symbols::{
-    MarkdownFacts, extract_markdown_facts_controlled, extract_symbol_graph_controlled,
+    MarkdownFacts, extract_markdown_facts_controlled, extract_symbol_graph_with_source_controlled,
     semantic_resolution_contract_digest,
 };
 use rayon::ThreadPoolBuilder;
@@ -6627,7 +6627,7 @@ fn parse_admitted_symbol_job(
             stage: IndexWorkStage::SymbolParsing,
         });
     }
-    let (graph, markdown_facts) = if job
+    let (observed_source_parser, graph, markdown_facts) = if job
         .language
         .as_deref()
         .and_then(language_capability)
@@ -6638,9 +6638,9 @@ fn parse_admitted_symbol_job(
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
         let graph = facts.symbol_graph(&job.path, job.language.as_deref());
-        (graph, Some(Box::new(facts)))
+        (graph.parser, graph, Some(Box::new(facts)))
     } else {
-        let graph = match extract_symbol_graph_controlled(
+        let (parser, graph) = match extract_symbol_graph_with_source_controlled(
             &job.path,
             job.language.as_deref(),
             content,
@@ -6649,9 +6649,9 @@ fn parse_admitted_symbol_job(
             Ok(graph) => graph,
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
-        (graph, None)
+        (parser, graph, None)
     };
-    let source_parser = source_parser.unwrap_or(graph.parser);
+    let source_parser = source_parser.unwrap_or(observed_source_parser);
     let structural_summary = if let Some(facts) = &markdown_facts {
         markdown_summary_from_facts(
             facts,
@@ -10454,6 +10454,106 @@ mod tests {
                 .content,
             &current_source.to_string(),
             "current source after contention",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_retains_actual_source_provenance() -> Result<(), Box<dyn Error>> {
+        for (language, content, parser) in [
+            ("rust", "fn recovered() {}", ParserKind::TreeSitter),
+            ("rust", "def recovered(): pass", ParserKind::Fallback),
+            (
+                "php",
+                "<?php function recovered() {}",
+                ParserKind::TreeSitter,
+            ),
+            ("php", "<?php\ndef recovered(): pass", ParserKind::Fallback),
+        ] {
+            let job = SymbolParseJob {
+                path: format!("src/recovered.{language}"),
+                native_path: PathBuf::new(),
+                expected_content_hash: String::new(),
+                language: Some(language.to_string()),
+                fallback_summary: None,
+                purpose_needs_suggestion: false,
+            };
+            let SymbolParseOutcome::Parsed(parsed) = parse_admitted_symbol_job(
+                &job,
+                content,
+                None,
+                &SymbolBuildOptions::new(1_024, Some(1), None),
+                &standalone_index_work_control(),
+            ) else {
+                return Err(io::Error::other("source provenance fixture did not parse").into());
+            };
+            require_eq(&parsed.graph.parser, &parser, "observed fact parser")?;
+            require_eq(&parsed.source_parser, &parser, "observed source parser")?;
+            require_eq(
+                &parsed
+                    .graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == "recovered"),
+                &true,
+                "recovered declaration",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn partial_php_facts_keep_tree_sitter_source_provenance() -> Result<(), Box<dyn Error>> {
+        let content = "<?php function run(): void { $callable(); helper(); }";
+        let job = SymbolParseJob {
+            path: "src/dynamic.php".to_string(),
+            native_path: PathBuf::new(),
+            expected_content_hash: String::new(),
+            language: Some("php".to_string()),
+            fallback_summary: None,
+            purpose_needs_suggestion: false,
+        };
+        let SymbolParseOutcome::Parsed(parsed) = parse_admitted_symbol_job(
+            &job,
+            content,
+            None,
+            &SymbolBuildOptions::new(1_024, Some(1), None),
+            &standalone_index_work_control(),
+        ) else {
+            return Err(io::Error::other("partial PHP fixture did not parse").into());
+        };
+        require_eq(
+            &parsed.graph.parser,
+            &ParserKind::Fallback,
+            "partial PHP fact parser",
+        )?;
+        require_eq(
+            &parsed.source_parser,
+            &ParserKind::TreeSitter,
+            "partial PHP source parser",
+        )?;
+        require_eq(
+            &parsed
+                .graph
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "run"),
+            &true,
+            "partial PHP recovered symbol",
+        )?;
+        require_eq(
+            &parsed.graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Calls && relation.target_name == "helper"
+            }),
+            &true,
+            "partial PHP known call",
+        )?;
+        require_eq(
+            &parsed.graph.relations.iter().all(|relation| {
+                relation.kind != RelationKind::Calls || relation.target_name != "$callable"
+            }),
+            &true,
+            "partial PHP dynamic call abstention",
         )?;
         Ok(())
     }

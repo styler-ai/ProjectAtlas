@@ -445,6 +445,16 @@ jobs:
             cargo check -p projectatlas-cli "${target_args[@]}" --all-features --locked
           fi
 
+      - name: Built-in PHP parser platform regression
+        if: contains(matrix.contracts, 'compile')
+        # Includes cold compilation of the symbol, CLI, and navigation test targets.
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
+          cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
+
       - name: Install exact real host CLIs for native reader proof
         if: contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'
         timeout-minutes: 10

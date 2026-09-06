@@ -30,13 +30,14 @@ pub use resolution_keys::{
     resolve_relative_import_path, semantic_resolution_contract_digest, source_stems_for_path,
 };
 
-use projectatlas_core::graph::QUALIFIED_SYMBOL_SCOPE_PREFIX;
+use projectatlas_core::graph::{GraphIdentityText, QUALIFIED_SYMBOL_SCOPE_PREFIX};
 use projectatlas_core::language::{
     EmbeddedHostKind, EmbeddedLanguageCapability, SymbolParserOwner, TreeSitterGrammar,
     builtin_tree_sitter_language_ids, language_capability, tree_sitter_grammar,
 };
 use projectatlas_core::symbols::{
-    CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    CodeSymbol, MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind,
+    SymbolRelation, SymbolSourceSelector,
 };
 use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
 use regex::Regex;
@@ -46,7 +47,7 @@ use std::convert::Infallible;
 use std::ops::ControlFlow;
 use std::path::Path;
 use toml::Value as TomlValue;
-use tree_sitter::{Language, Node, ParseOptions, Parser};
+use tree_sitter::{Language, Node, ParseOptions, Parser, Tree};
 
 /// Maximum symbols kept from one file to bound large generated sources.
 const MAX_SYMBOLS_PER_FILE: usize = 4_000;
@@ -84,13 +85,42 @@ pub fn extract_symbol_graph_controlled(
     })
 }
 
-/// Extract a symbol graph with one cooperative work checkpoint shared by every parser stage.
+/// Extract a graph and the parser that produced its retained source facts.
+///
+/// The first tuple item preserves source provenance independently of conservative
+/// fact confidence. Cancellation never returns a partial extraction result.
+///
+/// # Errors
+///
+/// Returns a typed cancellation or deadline failure.
+pub fn extract_symbol_graph_with_source_controlled(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    control: &IndexWorkControl,
+) -> Result<(ParserKind, SymbolGraph), IndexWorkFailure> {
+    extract_symbol_graph_with_source_checked(path, language, content, &mut || {
+        control.check(IndexWorkStage::SymbolParsing)
+    })
+}
+
+/// Preserve graph-only extraction for callers that do not consume source provenance.
 fn extract_symbol_graph_checked<E>(
     path: &str,
     language: Option<&str>,
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<SymbolGraph, E> {
+    extract_symbol_graph_with_source_checked(path, language, content, check).map(|(_, graph)| graph)
+}
+
+/// Extract a symbol graph with one cooperative work checkpoint shared by every parser stage.
+fn extract_symbol_graph_with_source_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(ParserKind, SymbolGraph), E> {
     check()?;
     let parse_content = content_without_leading_purpose_header(content);
     if let Some(capability) = semantic::embedded_source::host_capability(path, language) {
@@ -100,46 +130,68 @@ fn extract_symbol_graph_checked<E>(
             parse_content.as_ref(),
             capability,
             check,
-        );
+        )
+        .map(|graph| (graph.parser, graph));
     }
     match symbol_parser_owner(path, language) {
         SymbolParserOwner::CargoManifest => {
-            return extract_cargo_manifest_graph_checked(path, language, content, check);
+            return extract_cargo_manifest_graph_checked(path, language, content, check)
+                .map(|graph| (graph.parser, graph));
         }
         SymbolParserOwner::Vue => {
-            return extract_vue_sfc_graph_checked(path, language, parse_content.as_ref(), check);
+            return extract_vue_sfc_graph_checked(path, language, parse_content.as_ref(), check)
+                .map(|graph| (graph.parser, graph));
         }
         SymbolParserOwner::PowerShell => {
-            return extract_powershell_graph_checked(path, language, parse_content.as_ref(), check);
+            return extract_powershell_graph_checked(path, language, parse_content.as_ref(), check)
+                .map(|graph| (graph.parser, graph));
         }
         SymbolParserOwner::Markdown => {
             let facts = markdown::extract_markdown_facts_checked(parse_content.as_ref(), check)?;
-            return Ok(facts.symbol_graph(path, language));
+            let graph = facts.symbol_graph(path, language);
+            return Ok((graph.parser, graph));
         }
         SymbolParserOwner::Unavailable => {
             check()?;
-            return Ok(empty_graph(path, language, ParserKind::Structural));
+            return Ok((
+                ParserKind::Structural,
+                empty_graph(path, language, ParserKind::Structural),
+            ));
         }
         SymbolParserOwner::TreeSitter(_) | SymbolParserOwner::Fallback => {}
     }
-    if let Some(parsed) = extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
+    if let Some(mut parsed) =
+        extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
     {
+        normalize_source_selector_columns(&mut parsed.graph, content, check)?;
+        if parsed.incomplete || parsed.graph.parser == ParserKind::Fallback {
+            mark_graph_fallback(&mut parsed.graph);
+        }
+        // PHP partial facts retain their grammar origin; a rescue below owns
+        // fallback provenance independently of the file's language capability.
+        let source_parser =
+            if language.and_then(tree_sitter_grammar) == Some(TreeSitterGrammar::Php) {
+                ParserKind::TreeSitter
+            } else {
+                parsed.graph.parser
+            };
         if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
             check()?;
-            return Ok(parsed.graph);
+            return Ok((source_parser, parsed.graph));
         }
         if parsed.had_errors {
             let fallback =
                 extract_fallback_graph_checked(path, language, parse_content.as_ref(), check)?;
             if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
                 check()?;
-                return Ok(fallback);
+                return Ok((fallback.parser, fallback));
             }
         }
         check()?;
-        return Ok(parsed.graph);
+        return Ok((source_parser, parsed.graph));
     }
     extract_fallback_graph_checked(path, language, parse_content.as_ref(), check)
+        .map(|graph| (graph.parser, graph))
 }
 
 /// Extract accepted inline script facts without changing their host-file positions.
@@ -261,7 +313,7 @@ fn extract_vue_sfc_graph_checked<E>(
         if is_fallback_import(trimmed) {
             push_relation(
                 &mut structural,
-                "<module>",
+                MODULE_RELATION_SOURCE,
                 trimmed,
                 RelationKind::Imports,
                 line_index + 1,
@@ -314,7 +366,7 @@ fn extract_powershell_graph_checked<E>(
         if is_fallback_import(trimmed) {
             push_relation(
                 &mut structural,
-                "<module>",
+                MODULE_RELATION_SOURCE,
                 trimmed,
                 RelationKind::Imports,
                 line_index + 1,
@@ -835,6 +887,16 @@ struct TreeSitterParse {
     graph: SymbolGraph,
     /// Whether tree-sitter found syntax errors while parsing.
     had_errors: bool,
+    /// Whether the extracted facts omit PHP semantics that cannot be proven statically.
+    incomplete: bool,
+}
+
+/// PHP mixed-grammar result with its grammar-owned opening-tag classification.
+struct PhpParse {
+    /// Parsed full-file PHP/mixed tree.
+    tree: Tree,
+    /// Whether a PHP opening tag occurs outside PHP literals or comments.
+    has_opening_tag: bool,
 }
 
 /// Extract a graph through tree-sitter when the language has a grammar.
@@ -847,12 +909,257 @@ fn extract_tree_sitter_graph<E>(
     let Some(language_name) = language else {
         return Ok(None);
     };
-    let Some(parser_language) = tree_sitter_language(language_name) else {
+    let Some(grammar) = tree_sitter_grammar(language_name) else {
         return Ok(None);
     };
+    let (tree, has_php_opening_tag) = if grammar == TreeSitterGrammar::Php {
+        let Some(parsed) = parse_php_tree(content, check)? else {
+            return Ok(None);
+        };
+        (parsed.tree, Some(parsed.has_opening_tag))
+    } else {
+        let Some(parser_language) = tree_sitter_language(language_name) else {
+            return Ok(None);
+        };
+        let Some(tree) = parse_tree_sitter_language(&parser_language, content, check)? else {
+            return Ok(None);
+        };
+        (tree, None)
+    };
+    check()?;
+    let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
+    let root = tree.root_node();
+    if has_php_opening_tag == Some(false) {
+        return Ok(Some(TreeSitterParse {
+            graph,
+            had_errors: false,
+            incomplete: false,
+        }));
+    }
+    let had_errors = root.has_error() && has_php_opening_tag != Some(false);
+    let mut incomplete = has_php_opening_tag == Some(true) && had_errors;
+    let mut php_namespace_context = if has_php_opening_tag == Some(true) {
+        Some(PhpNamespaceContext::from_program(root, content, check)?)
+    } else {
+        None
+    };
+    let traversal = visit_node(
+        root,
+        content,
+        &mut graph,
+        check,
+        php_namespace_context.as_mut(),
+        &mut incomplete,
+    )?;
+    check()?;
+    if traversal.is_continue() {
+        languages::augment_language_graph(&mut graph, content, check)?;
+    }
+    check()?;
+    Ok(Some(TreeSitterParse {
+        graph,
+        had_errors,
+        incomplete,
+    }))
+}
+
+/// Precomputed source-order ownership ranges for semicolon PHP namespaces.
+struct PhpNamespaceContext {
+    /// Non-overlapping ranges whose declarations belong to a namespace.
+    ranges: Vec<PhpNamespaceRange>,
+    /// Next range to inspect while declarations are visited in source order.
+    next_range: usize,
+    /// Number of program children examined while building the ranges.
+    #[cfg(test)]
+    examined_children: usize,
+    /// Number of source-order lookups made while visiting top-level nodes.
+    #[cfg(test)]
+    parent_lookups: usize,
+}
+
+/// One semicolon namespace's source-order ownership range.
+struct PhpNamespaceRange {
+    /// First byte after the namespace declaration.
+    start_byte: usize,
+    /// First byte of the next namespace declaration or end of source.
+    end_byte: usize,
+    /// Bounded namespace identity; absent when its scope cannot be represented.
+    name: Option<String>,
+}
+
+impl PhpNamespaceContext {
+    /// Build namespace ranges in one forward pass over the program children.
+    fn from_program<E>(
+        root: Node<'_>,
+        content: &str,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let mut context = Self {
+            ranges: Vec::new(),
+            next_range: 0,
+            #[cfg(test)]
+            examined_children: 0,
+            #[cfg(test)]
+            parent_lookups: 0,
+        };
+        let mut active = None;
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            check()?;
+            #[cfg(test)]
+            {
+                context.examined_children += 1;
+            }
+            if child.kind() != "namespace_definition" {
+                continue;
+            }
+            if let Some((start_byte, name)) = active.take() {
+                context.ranges.push(PhpNamespaceRange {
+                    start_byte,
+                    end_byte: child.start_byte(),
+                    name,
+                });
+            }
+            if child.child_by_field_name("body").is_none() {
+                let name = (!child.has_error())
+                    .then(|| php_bounded_namespace_name(child, content))
+                    .flatten();
+                active = Some((child.end_byte(), name));
+            }
+        }
+        if let Some((start_byte, name)) = active {
+            context.ranges.push(PhpNamespaceRange {
+                start_byte,
+                end_byte: content.len(),
+                name,
+            });
+        }
+        Ok(context)
+    }
+
+    /// Return the active namespace for the next source-order top-level node.
+    fn parent_for(&mut self, node: Node<'_>) -> Option<String> {
+        #[cfg(test)]
+        {
+            self.parent_lookups += 1;
+        }
+        self.range_for(node).and_then(|range| range.name.clone())
+    }
+
+    /// Locate the next node's namespace without allocating its identity.
+    fn range_for(&mut self, node: Node<'_>) -> Option<&PhpNamespaceRange> {
+        while self
+            .ranges
+            .get(self.next_range)
+            .is_some_and(|range| range.end_byte <= node.start_byte())
+        {
+            self.next_range += 1;
+        }
+        self.ranges.get(self.next_range).filter(|range| {
+            range.start_byte <= node.start_byte() && node.start_byte() < range.end_byte
+        })
+    }
+}
+
+/// Return a namespace name only when its compact identity can remain bounded.
+fn php_bounded_namespace_name(node: Node<'_>, content: &str) -> Option<String> {
+    let name = node.child_by_field_name("name")?;
+    php_bounded_name_text(name, content)
+}
+
+/// Bound PHP identities before copying or composing their source text.
+fn php_bounded_name_text(node: Node<'_>, content: &str) -> Option<String> {
+    let text = node.utf8_text(content.as_bytes()).ok()?;
+    if text.chars().take(MAX_SNIPPET_CHARS + 1).count() > MAX_SNIPPET_CHARS {
+        return None;
+    }
+    named_text(node, content)
+}
+
+/// Select the official PHP-only or mixed grammar from their parsed roots.
+fn parse_php_tree<E>(
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<PhpParse>, E> {
+    let mixed_language: Language = tree_sitter_php::LANGUAGE_PHP.into();
+    let Some(mixed) = parse_tree_sitter_language(&mixed_language, content, check)? else {
+        return Ok(None);
+    };
+    let mut examined_nodes = 0;
+    let Some(first_tag_start) = first_php_tag_start(mixed.root_node(), check, &mut examined_nodes)?
+    else {
+        return Ok(Some(PhpParse {
+            tree: mixed,
+            has_opening_tag: false,
+        }));
+    };
+    let first_content_start = content.find(|character: char| !character.is_whitespace());
+    let first_tag_is_xml = content
+        .get(first_tag_start..)
+        .is_some_and(is_xml_declaration_start);
+    if !mixed.root_node().has_error()
+        && first_content_start == Some(first_tag_start)
+        && !first_tag_is_xml
+    {
+        return Ok(Some(PhpParse {
+            tree: mixed,
+            has_opening_tag: true,
+        }));
+    }
+
+    // The PHP-only grammar is only a bounded probe for opening tags that the
+    // mixed grammar can see inside a literal or comment. The full-file result
+    // remains the mixed grammar so tagless `.php` source is represented as
+    // inline text instead of executable PHP.
+    let php_only_language: Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
+    let Some(php_only) = parse_tree_sitter_language(&php_only_language, content, check)? else {
+        return Ok(Some(PhpParse {
+            tree: mixed,
+            has_opening_tag: true,
+        }));
+    };
+    let has_opening_tag = tree_contains_php_tag_outside_literals(
+        mixed.root_node(),
+        php_only.root_node(),
+        content,
+        check,
+        &mut examined_nodes,
+    )?;
+    Ok(Some(PhpParse {
+        tree: mixed,
+        has_opening_tag,
+    }))
+}
+
+/// Return a tree-sitter language for supported source families.
+fn tree_sitter_language(language: &str) -> Option<Language> {
+    Some(match tree_sitter_grammar(language)? {
+        TreeSitterGrammar::Rust => tree_sitter_rust::LANGUAGE.into(),
+        TreeSitterGrammar::Python => tree_sitter_python::LANGUAGE.into(),
+        TreeSitterGrammar::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        TreeSitterGrammar::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        TreeSitterGrammar::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        TreeSitterGrammar::Java => tree_sitter_java::LANGUAGE.into(),
+        TreeSitterGrammar::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+        TreeSitterGrammar::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        TreeSitterGrammar::Go => tree_sitter_go::LANGUAGE.into(),
+        TreeSitterGrammar::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),
+        TreeSitterGrammar::Zig => tree_sitter_zig::LANGUAGE.into(),
+        TreeSitterGrammar::C => tree_sitter_c::LANGUAGE.into(),
+        TreeSitterGrammar::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        TreeSitterGrammar::Php => tree_sitter_php::LANGUAGE_PHP_ONLY.into(),
+    })
+}
+
+/// Parse source with one pinned tree-sitter grammar while observing cancellation.
+fn parse_tree_sitter_language<E>(
+    parser_language: &Language,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
     check()?;
     let mut parser = Parser::new();
-    if parser.set_language(&parser_language).is_err() {
+    if parser.set_language(parser_language).is_err() {
         return Ok(None);
     }
     let mut parse_failure = None;
@@ -874,36 +1181,224 @@ fn extract_tree_sitter_graph<E>(
         return Err(error);
     }
     check()?;
-    let Some(tree) = tree else {
-        return Ok(None);
-    };
-    let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
-    let root = tree.root_node();
-    let had_errors = root.has_error();
-    visit_node(root, content, &mut graph, check)?;
-    check()?;
-    languages::augment_language_graph(&mut graph, content, check)?;
-    check()?;
-    Ok(Some(TreeSitterParse { graph, had_errors }))
+    Ok(tree)
 }
 
-/// Return a tree-sitter language for supported source families.
-fn tree_sitter_language(language: &str) -> Option<Language> {
-    Some(match tree_sitter_grammar(language)? {
-        TreeSitterGrammar::Rust => tree_sitter_rust::LANGUAGE.into(),
-        TreeSitterGrammar::Python => tree_sitter_python::LANGUAGE.into(),
-        TreeSitterGrammar::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-        TreeSitterGrammar::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        TreeSitterGrammar::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        TreeSitterGrammar::Java => tree_sitter_java::LANGUAGE.into(),
-        TreeSitterGrammar::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
-        TreeSitterGrammar::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-        TreeSitterGrammar::Go => tree_sitter_go::LANGUAGE.into(),
-        TreeSitterGrammar::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),
-        TreeSitterGrammar::Zig => tree_sitter_zig::LANGUAGE.into(),
-        TreeSitterGrammar::C => tree_sitter_c::LANGUAGE.into(),
-        TreeSitterGrammar::Cpp => tree_sitter_cpp::LANGUAGE.into(),
-    })
+/// Return the first opening-tag byte offset in a mixed PHP parse.
+fn first_php_tag_start<E>(
+    node: Node<'_>,
+    check: &mut impl FnMut() -> Result<(), E>,
+    examined_nodes: &mut usize,
+) -> Result<Option<usize>, E> {
+    *examined_nodes += 1;
+    check_parser_iteration(*examined_nodes, check)?;
+    if node.kind() == "php_tag" {
+        return Ok(Some(node.start_byte()));
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(start) = first_php_tag_start(child, check, examined_nodes)? {
+            return Ok(Some(start));
+        }
+    }
+    Ok(None)
+}
+
+/// Return whether a mixed parse contains a tag outside a PHP literal or comment.
+fn tree_contains_php_tag_outside_literals<E>(
+    mixed: Node<'_>,
+    php_only: Node<'_>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+    examined_nodes: &mut usize,
+) -> Result<bool, E> {
+    let mut opaque_ranges = Vec::new();
+    collect_php_only_opaque_ranges(php_only, &mut opaque_ranges, check, examined_nodes)?;
+    let mut next_opaque = 0;
+    tree_contains_php_tag_outside_ranges(
+        mixed,
+        &opaque_ranges,
+        &mut next_opaque,
+        content,
+        check,
+        examined_nodes,
+    )
+}
+
+/// Collect PHP literal/comment ranges in source order and mark top-level output nodes.
+fn collect_php_only_opaque_ranges<E>(
+    node: Node<'_>,
+    ranges: &mut Vec<(usize, usize, bool)>,
+    check: &mut impl FnMut() -> Result<(), E>,
+    examined_nodes: &mut usize,
+) -> Result<(), E> {
+    *examined_nodes += 1;
+    check_parser_iteration(*examined_nodes, check)?;
+    if is_php_opaque_node(node.kind()) {
+        let top_level_output = node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "program");
+        ranges.push((node.start_byte(), node.end_byte(), top_level_output));
+        return Ok(());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_php_only_opaque_ranges(child, ranges, check, examined_nodes)?;
+    }
+    Ok(())
+}
+
+/// Return whether a mixed parse contains a tag outside the sorted opaque ranges.
+fn tree_contains_php_tag_outside_ranges<E>(
+    node: Node<'_>,
+    opaque_ranges: &[(usize, usize, bool)],
+    next_opaque: &mut usize,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+    examined_nodes: &mut usize,
+) -> Result<bool, E> {
+    *examined_nodes += 1;
+    check_parser_iteration(*examined_nodes, check)?;
+    if node.kind() == "php_tag"
+        && !content
+            .get(node.start_byte()..)
+            .is_some_and(is_xml_declaration_start)
+    {
+        while *next_opaque < opaque_ranges.len()
+            && opaque_ranges[*next_opaque].1 <= node.start_byte()
+        {
+            *next_opaque += 1;
+        }
+        let outside_opaque_range =
+            opaque_ranges
+                .get(*next_opaque)
+                .is_none_or(|&(start, end, top_level_output)| {
+                    start >= node.end_byte()
+                        || end <= node.start_byte()
+                        || (top_level_output && is_php_inline_output_opening(node, content))
+                });
+        if outside_opaque_range {
+            return Ok(true);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if tree_contains_php_tag_outside_ranges(
+            child,
+            opaque_ranges,
+            next_opaque,
+            content,
+            check,
+            examined_nodes,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Distinguish an XML declaration from short-tag PHP calling an `xml` identifier.
+fn is_xml_declaration_start(content: &str) -> bool {
+    let Some(tail) = content.strip_prefix("<?xml") else {
+        return false;
+    };
+    let trimmed = tail.trim_start_matches([' ', '\t', '\r', '\n']);
+    tail.len() != trimmed.len()
+        && trimmed.strip_prefix("version").is_some_and(|version| {
+            version
+                .trim_start_matches([' ', '\t', '\r', '\n'])
+                .starts_with('=')
+        })
+}
+
+/// Return whether inline output text directly precedes a PHP opening tag.
+fn is_php_inline_output_opening(node: Node<'_>, content: &str) -> bool {
+    if node.kind() != "php_tag"
+        || !node_text(node, content)
+            .is_some_and(|tag| tag == "<?" || tag == "<?=" || tag.eq_ignore_ascii_case("<?php"))
+    {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if parent.kind() != "program" {
+        return false;
+    }
+    let mut cursor = parent.walk();
+    let mut previous = None;
+    for sibling in parent.children(&mut cursor) {
+        if sibling.kind() == node.kind()
+            && sibling.start_byte() == node.start_byte()
+            && sibling.end_byte() == node.end_byte()
+        {
+            break;
+        }
+        previous = Some(sibling);
+    }
+    previous.is_some_and(|text| text.kind() == "text" && text.end_byte() == node.start_byte())
+}
+
+/// Return whether the PHP-only parse node is opaque to mixed-grammar tags.
+fn is_php_opaque_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "comment"
+            | "encapsed_string"
+            | "heredoc"
+            | "nowdoc"
+            | "shell_command_expression"
+            | "string"
+    )
+}
+
+/// Return whether the official PHP grammars recognize an opening tag.
+#[cfg(test)]
+fn contains_php_opening_tag(content: &str) -> bool {
+    let mut check = || Ok::<(), Infallible>(());
+    parse_php_tree(content, &mut check)
+        .ok()
+        .flatten()
+        .is_some_and(|parsed| parsed.has_opening_tag)
+}
+
+/// Recognize the standalone outer-scope directive before visiting archive data.
+fn is_php_compiler_halt(node: Node<'_>, content: &str) -> bool {
+    if node.kind() != "expression_statement" || node.has_error() {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if parent.kind() != "program"
+        && !(parent.kind() == "compound_statement"
+            && parent
+                .parent()
+                .is_some_and(|owner| owner.kind() == "namespace_definition"))
+    {
+        return false;
+    }
+    let Some(call) = node.named_child(0) else {
+        return false;
+    };
+    if call.kind() != "function_call_expression" {
+        return false;
+    }
+    let Some(function) = call.child_by_field_name("function") else {
+        return false;
+    };
+    if function.kind() != "name"
+        || !content[function.byte_range()].eq_ignore_ascii_case("__halt_compiler")
+    {
+        return false;
+    }
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    arguments
+        .named_children(&mut cursor)
+        .all(|child| child.kind() == "comment")
 }
 
 /// Recursively inspect one tree-sitter node.
@@ -912,26 +1407,84 @@ fn visit_node<E>(
     content: &str,
     graph: &mut SymbolGraph,
     check: &mut impl FnMut() -> Result<(), E>,
-) -> Result<(), E> {
+    mut php_namespace_context: Option<&mut PhpNamespaceContext>,
+    incomplete: &mut bool,
+) -> Result<ControlFlow<()>, E> {
     check()?;
-    if graph.symbols.len() < MAX_SYMBOLS_PER_FILE
-        && let Some(kind) = declaration_kind(node.kind())
+    if is_php_language(graph.language.as_deref()) && is_php_compiler_halt(node, content) {
+        return Ok(ControlFlow::Break(()));
+    }
+    if is_php_language(graph.language.as_deref())
+        && (matches!(node.kind(), "anonymous_function" | "arrow_function")
+            || (node.kind() == "namespace_definition"
+                && node.child_by_field_name("name").is_some()
+                && php_bounded_namespace_name(node, content).is_none())
+            || php_namespace_context.as_deref_mut().is_some_and(|context| {
+                context
+                    .range_for(node)
+                    .is_some_and(|range| range.name.is_none())
+            }))
+    {
+        *incomplete = true;
+        return Ok(ControlFlow::Continue(()));
+    }
+    if is_php_language(graph.language.as_deref()) && php_node_is_incomplete(node, content) {
+        *incomplete = true;
+    }
+    if is_php_language(graph.language.as_deref()) {
+        *incomplete |= graph.relations.len() >= MAX_RELATIONS_PER_FILE
+            && (is_php_trait_use_declaration(node)
+                || is_import_node(node.kind())
+                || is_call_node(node.kind()));
+    }
+    if let Some(kind) = declaration_kind(node.kind())
         && should_emit_declaration_symbol(node, content)
     {
-        push_tree_symbol(graph, node, content, effective_declaration_kind(node, kind));
+        let admitted = graph.symbols.len() < MAX_SYMBOLS_PER_FILE
+            && push_tree_symbol(
+                graph,
+                node,
+                content,
+                if is_php_language(graph.language.as_deref())
+                    && node.kind() == "function_definition"
+                {
+                    // PHP methods have their own grammar node; nested functions stay functions.
+                    kind
+                } else {
+                    effective_declaration_kind(node, kind)
+                },
+                php_namespace_context.as_deref_mut(),
+            );
+        if !admitted && is_php_language(graph.language.as_deref()) {
+            *incomplete = true;
+            return Ok(ControlFlow::Continue(()));
+        }
     }
     if graph.relations.len() < MAX_RELATIONS_PER_FILE {
-        if is_import_node(node.kind()) {
+        if is_php_trait_use_declaration(node) {
+            push_php_trait_use_relations(graph, node, content);
+        } else if is_import_node(node.kind()) {
             push_import_relation(graph, node, content);
         } else if is_call_node(node.kind()) {
-            push_call_relation(graph, node, content);
+            push_call_relation(graph, node, content, php_namespace_context.as_deref_mut());
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        visit_node(child, content, graph, check)?;
+        if visit_node(
+            child,
+            content,
+            graph,
+            check,
+            php_namespace_context.as_deref_mut(),
+            incomplete,
+        )?
+        .is_break()
+        {
+            return Ok(ControlFlow::Break(()));
+        }
     }
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
 /// Refine a declaration kind using surrounding syntax context.
@@ -967,17 +1520,33 @@ fn declaration_is_method_context(node: Node<'_>) -> bool {
         || has_ancestor_kind(node.parent(), "class_body")
         || has_ancestor_kind(node.parent(), "class_specifier")
         || has_ancestor_kind(node.parent(), "struct_specifier")
-        || has_ancestor_kind(node.parent(), "interface_declaration"))
+        || has_ancestor_kind(node.parent(), "interface_declaration")
+        || has_ancestor_kind(node.parent(), "trait_declaration"))
 }
 
 /// Return whether this declaration node should become its own symbol row.
 fn should_emit_declaration_symbol(node: Node<'_>, content: &str) -> bool {
+    if node.kind() == "namespace_definition" && node.child_by_field_name("name").is_none() {
+        return false;
+    }
+    if is_inside_php_anonymous_class(node) {
+        return false;
+    }
+    if is_php_trait_use_declaration(node) {
+        return false;
+    }
     if is_object_literal_method(node) {
         return object_literal_method_owner(node, content).is_some_and(|owner| owner.exported);
     }
     if node.kind() == "field_declaration"
         && has_descendant_kind(node, &["function_declarator", "method_declarator"])
     {
+        return false;
+    }
+    if node.kind() == "property_declaration" && has_descendant_kind(node, &["property_element"]) {
+        return false;
+    }
+    if node.kind() == "const_declaration" && has_descendant_kind(node, &["const_element"]) {
         return false;
     }
     if matches!(node.kind(), "function_declarator" | "method_declarator") {
@@ -1177,6 +1746,11 @@ fn has_ancestor_kind_any(mut node: Option<Node<'_>>, kinds: &[&str]) -> bool {
     false
 }
 
+/// Return whether a PHP node belongs to an unsupported anonymous class.
+fn is_inside_php_anonymous_class(node: Node<'_>) -> bool {
+    has_ancestor_kind(node.parent(), "anonymous_class")
+}
+
 /// Return the nearest ancestor with the requested tree-sitter kind.
 fn nearest_ancestor_kind<'tree>(mut node: Option<Node<'tree>>, kind: &str) -> Option<Node<'tree>> {
     while let Some(current) = node {
@@ -1194,21 +1768,31 @@ fn push_tree_symbol(
     node: Node<'_>,
     content: &str,
     symbol_kind: SymbolKind,
-) {
+    php_namespace_context: Option<&mut PhpNamespaceContext>,
+) -> bool {
     let Some(name) = node_name(node, content) else {
-        return;
+        return false;
     };
     let signature = declaration_signature(node, content);
-    let parent = symbol_parent(node, content).and_then(|parent| compact_symbol_identity(&parent));
+    let parent = symbol_parent(node, content, php_namespace_context)
+        .and_then(|parent| compact_symbol_identity(&parent));
     let exported = has_direct_export_parent(node)
         || object_literal_method_owner(node, content).is_some_and(|owner| owner.exported)
-        || is_exported_symbol(graph.language.as_deref(), &name, &signature);
+        || is_exported_symbol(graph.language.as_deref(), node, content, &name, &signature);
     let documentation = symbol_documentation(node, content);
+    // Each PHP element shares its declaration header but ends at its own value.
+    let span_start = if is_php_language(graph.language.as_deref())
+        && matches!(node.kind(), "property_element" | "const_element")
+    {
+        node.parent().unwrap_or(node)
+    } else {
+        node
+    };
     let admitted = push_symbol_with_metadata(
         graph,
         &name,
         symbol_kind,
-        node.start_position().row + 1,
+        span_start.start_position().row + 1,
         node.end_position().row + 1,
         parent.clone(),
         Some(node.kind()),
@@ -1216,16 +1800,84 @@ fn push_tree_symbol(
         exported,
         documentation.as_deref(),
     );
+    if admitted
+        && is_php_language(graph.language.as_deref())
+        && let Some(symbol) = graph.symbols.last_mut()
+    {
+        symbol.source_selector = Some(tree_source_selector(span_start, node));
+    }
     if admitted && let Some(parent_name) = parent {
         push_relation(
             graph,
             &parent_name,
             &name,
             RelationKind::Contains,
-            node.start_position().row + 1,
+            span_start.start_position().row + 1,
             node.kind(),
         );
     }
+    admitted
+}
+
+/// Retain byte offsets and columns until normalization against the original source.
+fn tree_source_selector(start: Node<'_>, end: Node<'_>) -> SymbolSourceSelector {
+    SymbolSourceSelector {
+        byte_start: start.start_byte(),
+        byte_end: end.end_byte(),
+        column_start: start.start_position().column,
+        column_end: end.end_position().column,
+    }
+}
+
+/// Convert existing selectors to scalar columns in one bounded source traversal.
+fn normalize_source_selector_columns<E>(
+    graph: &mut SymbolGraph,
+    source: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let mut endpoints = Vec::new();
+    for (index, symbol) in graph.symbols.iter_mut().enumerate() {
+        check_parser_iteration(index, check)?;
+        if let Some(selector) = symbol.source_selector.as_mut() {
+            endpoints.push((selector.byte_start, &mut selector.column_start));
+            endpoints.push((selector.byte_end, &mut selector.column_end));
+        }
+    }
+    if endpoints.is_empty() {
+        return Ok(());
+    }
+    let mut ascii = true;
+    for (index, chunk) in source
+        .as_bytes()
+        .chunks(PARSER_CONTROL_CHECK_INTERVAL)
+        .enumerate()
+    {
+        check_parser_iteration(index, check)?;
+        if !chunk.is_ascii() {
+            ascii = false;
+            break;
+        }
+    }
+    if ascii {
+        return Ok(());
+    }
+    endpoints.sort_unstable_by_key(|(offset, _)| *offset);
+    let mut characters = source.char_indices().peekable();
+    let mut column = 0;
+    let mut consumed = 0;
+    for (offset, target) in endpoints {
+        check()?;
+        while characters.peek().is_some_and(|(index, _)| *index < offset) {
+            check_parser_iteration(consumed, check)?;
+            let Some((_, character)) = characters.next() else {
+                break;
+            };
+            column = if character == '\n' { 0 } else { column + 1 };
+            consumed += 1;
+        }
+        *target = column;
+    }
+    Ok(())
 }
 
 /// Return whether a declaration is directly wrapped by a JavaScript-like export.
@@ -1296,9 +1948,40 @@ fn blank_prefix_preserving_newlines(content: &str, end: usize) -> String {
 }
 
 /// Return the semantic parent for a declaration symbol.
-fn symbol_parent(node: Node<'_>, content: &str) -> Option<String> {
+fn symbol_parent(
+    node: Node<'_>,
+    content: &str,
+    php_namespace_context: Option<&mut PhpNamespaceContext>,
+) -> Option<String> {
+    if is_inside_php_anonymous_class(node) {
+        return None;
+    }
+    if php_namespace_context.is_some()
+        && matches!(
+            node.kind(),
+            "function_definition"
+                | "class_declaration"
+                | "interface_declaration"
+                | "trait_declaration"
+                | "enum_declaration"
+        )
+    {
+        // Named PHP declarations belong to their namespace even inside a callable.
+        return if let Some(namespace) = nearest_ancestor_kind(node.parent(), "namespace_definition")
+        {
+            php_bounded_namespace_name(namespace, content)
+        } else {
+            php_semicolon_namespace_parent(node, php_namespace_context)
+        };
+    }
     if let Some(owner) = object_literal_method_owner(node, content) {
         return Some(owner.name);
+    }
+    if node.kind() == "property_promotion_parameter"
+        && let Some(class) = nearest_ancestor_kind(node.parent(), "class_declaration")
+            .or_else(|| nearest_ancestor_kind(node.parent(), "trait_declaration"))
+    {
+        return node_name(class, content);
     }
     if node.kind() == "function_item"
         && let Some(impl_node) = nearest_ancestor_kind(node.parent(), "impl_item")
@@ -1311,7 +1994,24 @@ fn symbol_parent(node: Node<'_>, content: &str) -> Option<String> {
     {
         return node_name(type_node, content);
     }
-    enclosing_symbol_name(node.parent(), content)
+    let parent = if matches!(node.kind(), "property_element" | "const_element") {
+        node.parent().and_then(|declaration| declaration.parent())
+    } else {
+        node.parent()
+    };
+    enclosing_symbol_name(parent, content)
+        .or_else(|| php_semicolon_namespace_parent(node, php_namespace_context))
+}
+
+/// Return the active PHP namespace for a declaration in a semicolon namespace.
+fn php_semicolon_namespace_parent(
+    node: Node<'_>,
+    php_namespace_context: Option<&mut PhpNamespaceContext>,
+) -> Option<String> {
+    if node.kind() == "namespace_definition" {
+        return None;
+    }
+    php_namespace_context.and_then(|context| context.parent_for(node))
 }
 
 /// Map tree-sitter node kinds to `ProjectAtlas` symbol kinds.
@@ -1335,11 +2035,12 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         | "class_implementation" => Some(SymbolKind::Class),
         "struct_item" | "struct_specifier" | "struct_declaration" => Some(SymbolKind::Struct),
         "enum_item" | "enum_declaration" | "enum_specifier" => Some(SymbolKind::Enum),
-        "trait_item" => Some(SymbolKind::Trait),
+        "trait_item" | "trait_declaration" => Some(SymbolKind::Trait),
         "interface_declaration" | "interface_type" => Some(SymbolKind::Interface),
         "mod_item"
         | "module_declaration"
         | "namespace_declaration"
+        | "namespace_definition"
         | "file_scoped_namespace_declaration"
         | "package_declaration"
         | "package_clause"
@@ -1351,13 +2052,19 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         | "field_declaration"
         | "lexical_declaration"
         | "var_declaration"
-        | "short_var_declaration" => Some(SymbolKind::Value),
+        | "short_var_declaration"
+        | "property_declaration"
+        | "property_element"
+        | "property_promotion_parameter"
+        | "const_element"
+        | "enum_case" => Some(SymbolKind::Value),
         "use_declaration"
         | "import_statement"
         | "import_declaration"
         | "import_from_statement"
         | "using_directive"
-        | "preproc_include" => Some(SymbolKind::Import),
+        | "preproc_include"
+        | "namespace_use_declaration" => Some(SymbolKind::Import),
         _ => None,
     }
 }
@@ -1372,6 +2079,11 @@ fn is_import_node(kind: &str) -> bool {
             | "import_from_statement"
             | "using_directive"
             | "preproc_include"
+            | "namespace_use_declaration"
+            | "include_expression"
+            | "include_once_expression"
+            | "require_expression"
+            | "require_once_expression"
     )
 }
 
@@ -1384,7 +2096,424 @@ fn is_call_node(kind: &str) -> bool {
             | "invocation_expression"
             | "call"
             | "macro_invocation"
+            | "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression"
     )
+}
+
+/// Return whether a node is one of PHP's include/require expressions.
+fn is_php_include_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "include_expression"
+            | "include_once_expression"
+            | "require_expression"
+            | "require_once_expression"
+    )
+}
+
+/// Return whether a PHP `use` declaration composes traits inside a type.
+fn is_php_trait_use_declaration(node: Node<'_>) -> bool {
+    node.kind() == "use_declaration"
+        && has_ancestor_kind_any(
+            node.parent(),
+            &[
+                "anonymous_class",
+                "class_declaration",
+                "trait_declaration",
+                "enum_declaration",
+            ],
+        )
+}
+
+/// Return the owning type for a PHP trait composition declaration.
+fn php_trait_use_owner(node: Node<'_>, content: &str) -> Option<String> {
+    if !is_php_trait_use_declaration(node) {
+        return None;
+    }
+    let mut current = node.parent();
+    while let Some(candidate) = current {
+        if declaration_kind(candidate.kind()).is_some() {
+            return matches!(
+                candidate.kind(),
+                "class_declaration" | "trait_declaration" | "enum_declaration"
+            )
+            .then(|| node_name(candidate, content))
+            .flatten();
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+/// Return direct trait targets, excluding alias and adaptation clause names.
+fn php_trait_use_targets(node: Node<'_>, content: &str) -> (Vec<String>, bool) {
+    let mut targets = Vec::new();
+    let mut incomplete = false;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if targets.len() >= MAX_RELATIONS_PER_FILE {
+            return (targets, true);
+        }
+        if matches!(child.kind(), "name" | "qualified_name" | "relative_name") {
+            if let Some(target) = named_text(child, content)
+                && target.chars().count() <= MAX_SNIPPET_CHARS
+            {
+                targets.push(target);
+            } else {
+                incomplete = true;
+            }
+        }
+    }
+    (targets, incomplete)
+}
+
+/// Publish exact trait-composition targets under their owning PHP type.
+fn push_php_trait_use_relations(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+    if is_inside_php_anonymous_class(node) {
+        return;
+    }
+    let Some(owner) = php_trait_use_owner(node, content) else {
+        return;
+    };
+    let (targets, incomplete) = php_trait_use_targets(node, content);
+    if incomplete {
+        graph.parser = ParserKind::Fallback;
+    }
+    for target in targets {
+        if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
+            graph.parser = ParserKind::Fallback;
+            break;
+        }
+        push_relation(
+            graph,
+            &owner,
+            &target,
+            RelationKind::Imports,
+            node.start_position().row + 1,
+            &target,
+        );
+    }
+}
+
+/// Return whether a supplied language identifier selects the PHP owner.
+fn is_php_language(language: Option<&str>) -> bool {
+    language.is_some_and(|language| language.eq_ignore_ascii_case("php"))
+}
+
+/// Return whether a PHP node's facts require conservative partial coverage.
+fn php_node_is_incomplete(node: Node<'_>, content: &str) -> bool {
+    if node.kind() == "anonymous_class" {
+        return true;
+    }
+    if node.kind() == "namespace_use_declaration" {
+        return php_namespace_use_targets(node, content).1;
+    }
+    if is_call_node(node.kind()) {
+        if is_php_first_class_callable_acquisition(node) {
+            return false;
+        }
+        return php_call_target(node, content).is_none();
+    }
+    is_php_include_node(node.kind()) && php_static_include_target(node, content).is_none()
+}
+
+/// Keep recovered PHP facts while exposing their conservative parser tier.
+fn mark_graph_fallback(graph: &mut SymbolGraph) {
+    graph.parser = ParserKind::Fallback;
+    for symbol in &mut graph.symbols {
+        symbol.parser = ParserKind::Fallback;
+    }
+    for relation in &mut graph.relations {
+        relation.parser = ParserKind::Fallback;
+    }
+}
+
+/// Return a static PHP include target, omitting dynamic or ambiguous expressions.
+fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut expression = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() != "comment")?;
+    if expression.kind() == "parenthesized_expression" {
+        let mut cursor = expression.walk();
+        let mut children = expression
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() != "comment");
+        let inner = children.next()?;
+        if children.next().is_some() {
+            return None;
+        }
+        expression = inner;
+    }
+    let target = match expression.kind() {
+        "string" | "encapsed_string" => php_static_string_target(expression, content)?,
+        "nowdoc" => php_static_nowdoc_target(expression, content)?,
+        _ => return None,
+    };
+    Some(target).filter(|target| {
+        !target.is_empty()
+            && target.chars().count() <= MAX_SNIPPET_CHARS
+            && GraphIdentityText::new(target.clone()).is_ok()
+    })
+}
+
+/// Return the exact non-interpolating value of a PHP nowdoc literal.
+fn php_static_nowdoc_target(node: Node<'_>, content: &str) -> Option<String> {
+    let value = node.child_by_field_name("value")?;
+    let value = node_text(value, content)?;
+    let value = value
+        .strip_prefix("\r\n")
+        .or_else(|| value.strip_prefix('\n'))
+        .or_else(|| value.strip_prefix('\r'))?;
+    let end_tag = node.child_by_field_name("end_tag")?;
+    let line_start = content[..end_tag.start_byte()]
+        .rfind(['\n', '\r'])
+        .map_or(0, |newline| newline + 1);
+    let indentation = content.get(line_start..end_tag.start_byte())?;
+    if !indentation
+        .as_bytes()
+        .iter()
+        .all(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        return None;
+    }
+    let mut target = String::with_capacity(value.len());
+    for line in value.split_inclusive('\n') {
+        let (line, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |line| (line, "\n"));
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let blank = line.bytes().all(|byte| matches!(byte, b' ' | b'\t'));
+        if !indentation.is_empty() && !blank && !line.starts_with(indentation) {
+            return None;
+        }
+        let line = line.strip_prefix(indentation).unwrap_or(line);
+        target.push_str(line);
+        target.push_str(newline);
+    }
+    Some(target)
+}
+
+/// Return the plain content of a PHP string literal when it has no interpolation.
+fn php_static_string_target(node: Node<'_>, content: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut target = String::new();
+    let mut has_part = false;
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "string_content" => target.push_str(&node_text(child, content)?),
+            "escape_sequence" if node.kind() == "string" => {
+                match node_text(child, content)?.as_str() {
+                    r"\\" => target.push('\\'),
+                    r"\'" => target.push('\''),
+                    _ => return None,
+                }
+            }
+            "escape_sequence" if node.kind() == "encapsed_string" => {
+                target.push_str(php_double_quoted_escape_target(child, content)?);
+            }
+            _ => return None,
+        }
+        has_part = true;
+    }
+    has_part.then_some(target)
+}
+
+/// Decode one grammar-recognized, non-interpolating PHP double-quoted escape.
+fn php_double_quoted_escape_target(node: Node<'_>, content: &str) -> Option<&'static str> {
+    match node_text(node, content)?.as_str() {
+        r"\\" => Some("\\"),
+        r#"\""# => Some("\""),
+        r"\n" => Some("\n"),
+        r"\r" => Some("\r"),
+        r"\t" => Some("\t"),
+        r"\v" => Some("\x0b"),
+        r"\e" => Some("\x1b"),
+        r"\f" => Some("\x0c"),
+        r"\$" => Some("$"),
+        r"\`" => Some("`"),
+        _ => None,
+    }
+}
+
+/// Return bounded PHP namespace-use targets and whether any target was omitted.
+fn php_namespace_use_targets(node: Node<'_>, content: &str) -> (Vec<String>, bool) {
+    let mut targets = Vec::new();
+    let mut incomplete = false;
+    let mut prefix = None;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if targets.len() >= MAX_RELATIONS_PER_FILE {
+            incomplete = true;
+            break;
+        }
+        match child.kind() {
+            "namespace_use_clause" => {
+                if let Some(target) = php_namespace_use_clause_target(child, content, None) {
+                    targets.push(target);
+                } else {
+                    incomplete = true;
+                }
+            }
+            "namespace_name" => {
+                prefix = php_bounded_name_text(child, content);
+                if prefix.is_none() {
+                    return (targets, true);
+                }
+            }
+            "namespace_use_group" => {
+                incomplete |= php_namespace_use_group_targets(
+                    child,
+                    content,
+                    prefix.as_deref(),
+                    &mut targets,
+                );
+            }
+            _ => {}
+        }
+    }
+    (targets, incomplete)
+}
+
+/// Collect grouped PHP namespace-use targets, reporting omitted clauses.
+fn php_namespace_use_group_targets(
+    node: Node<'_>,
+    content: &str,
+    prefix: Option<&str>,
+    targets: &mut Vec<String>,
+) -> bool {
+    let mut incomplete = false;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if targets.len() >= MAX_RELATIONS_PER_FILE {
+            incomplete = true;
+            break;
+        }
+        if child.kind() == "namespace_use_clause" {
+            if let Some(target) = php_namespace_use_clause_target(child, content, prefix) {
+                targets.push(target);
+            } else {
+                incomplete = true;
+            }
+        }
+    }
+    incomplete
+}
+
+/// Compose one PHP namespace-use clause with an optional grouped prefix.
+fn php_namespace_use_clause_target(
+    node: Node<'_>,
+    content: &str,
+    prefix: Option<&str>,
+) -> Option<String> {
+    let target = first_named_child(node).and_then(|child| {
+        matches!(child.kind(), "name" | "qualified_name" | "relative_name")
+            .then(|| php_bounded_name_text(child, content))
+            .flatten()
+    })?;
+    let target = match prefix {
+        Some(prefix) if !prefix.is_empty() => {
+            if prefix.chars().take(MAX_SNIPPET_CHARS + 1).count() + 1 + target.chars().count()
+                > MAX_SNIPPET_CHARS
+            {
+                return None;
+            }
+            format!("{prefix}\\{target}")
+        }
+        _ => target,
+    };
+    Some(target)
+}
+
+/// Retain a proven local binding when an import's complete target is overbound.
+fn php_namespace_use_target(node: Node<'_>, content: &str) -> Option<String> {
+    php_namespace_use_targets(node, content)
+        .0
+        .into_iter()
+        .next()
+        .or_else(|| php_namespace_use_binding(node, content))
+}
+
+/// Select an actual alias or terminal import name without inventing a target.
+fn php_namespace_use_binding(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "namespace_use_clause" {
+        let name = node.child_by_field_name("alias").or_else(|| {
+            let target = first_named_child(node)?;
+            if target.kind() == "name" {
+                Some(target)
+            } else {
+                let mut cursor = target.walk();
+                target
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() == "name")
+            }
+        })?;
+        return php_bounded_name_text(name, content);
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| matches!(child.kind(), "namespace_use_clause" | "namespace_use_group"))
+        .find_map(|child| php_namespace_use_binding(child, content))
+}
+
+/// Return a conservative PHP call target, suppressing dynamic calls.
+fn php_call_target(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "function_call_expression"
+        && node
+            .child_by_field_name("function")
+            .and_then(|function| named_text(function, content))
+            .is_some_and(|name| name.eq_ignore_ascii_case("eval"))
+    {
+        return None;
+    }
+    let target = match node.kind() {
+        "scoped_call_expression" => {
+            let scope = node.child_by_field_name("scope")?;
+            let name = node.child_by_field_name("name")?;
+            let scope = php_static_call_part(scope, content)?;
+            let name = php_static_call_part(name, content)?;
+            format!("{scope}::{name}")
+        }
+        // The receiver determines member dispatch, and this parser does not
+        // resolve object types. Publishing only the member name would create
+        // a false edge to an unrelated same-file function or method.
+        "member_call_expression" | "nullsafe_member_call_expression" => return None,
+        _ => php_static_call_part(node.child_by_field_name("function")?, content)?,
+    };
+    let target = compact_text(&target);
+    (!target.is_empty() && target.chars().count() <= MAX_SNIPPET_CHARS).then_some(target)
+}
+
+/// Return a static PHP name-like call component, excluding variables and expressions.
+fn php_static_call_part(node: Node<'_>, content: &str) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "dynamic_variable_name"
+            | "variable_name"
+            | "expression"
+            | "parenthesized_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "function_call_expression"
+            | "scoped_call_expression"
+    ) {
+        return None;
+    }
+    matches!(
+        node.kind(),
+        "name" | "qualified_name" | "relative_name" | "relative_scope" | "identifier"
+    )
+    .then(|| named_text(node, content))
+    .flatten()
+}
+
+/// Return whether a PHP call node acquires a callable instead of invoking it.
+fn is_php_first_class_callable_acquisition(node: Node<'_>) -> bool {
+    node.child_by_field_name("arguments")
+        .is_some_and(|arguments| has_direct_child_kind(arguments, "variadic_placeholder"))
 }
 
 /// Return whether a subtree contains any node with one of the given kinds.
@@ -1398,35 +2527,116 @@ fn has_descendant_kind(node: Node<'_>, kinds: &[&str]) -> bool {
     false
 }
 
+/// Return whether a node has a direct named child of the requested kind.
+fn has_direct_child_kind(node: Node<'_>, kind: &str) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| child.kind() == kind)
+}
+
 /// Push an import relation from an import node.
 fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
-    let import_text = compact_text(node_text(node, content).as_deref().unwrap_or(""));
-    if import_text.is_empty() {
+    if is_php_language(graph.language.as_deref()) && is_inside_php_anonymous_class(node) {
         return;
     }
-    push_relation(
-        graph,
-        "<module>",
-        &import_text,
-        RelationKind::Imports,
-        node.start_position().row + 1,
-        &import_text,
-    );
+    if node.kind() == "namespace_use_declaration" {
+        for import_text in php_namespace_use_targets(node, content).0 {
+            if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
+                graph.parser = ParserKind::Fallback;
+                break;
+            }
+            if !import_text.is_empty() && import_text.chars().count() <= MAX_SNIPPET_CHARS {
+                push_relation(
+                    graph,
+                    MODULE_RELATION_SOURCE,
+                    &import_text,
+                    RelationKind::Imports,
+                    node.start_position().row + 1,
+                    &import_text,
+                );
+            }
+        }
+        return;
+    }
+    let import_text = if is_php_include_node(node.kind()) {
+        php_static_include_target(node, content)
+    } else {
+        Some(compact_text(
+            node_text(node, content).as_deref().unwrap_or(""),
+        ))
+    };
+    let Some(import_text) = import_text else {
+        return;
+    };
+    if import_text.is_empty() || import_text.chars().count() > MAX_SNIPPET_CHARS {
+        return;
+    }
+    if is_php_include_node(node.kind()) {
+        // Keep bounded source syntax so partial graphs distinguish includes from aliases.
+        let context = node
+            .utf8_text(content.as_bytes())
+            .unwrap_or_default()
+            .chars()
+            .take(MAX_SNIPPET_CHARS)
+            .collect::<String>();
+        push_relation_preserving_target(
+            graph,
+            MODULE_RELATION_SOURCE,
+            &import_text,
+            RelationKind::Imports,
+            node.start_position().row + 1,
+            &compact_text(&context),
+        );
+    } else {
+        push_relation(
+            graph,
+            MODULE_RELATION_SOURCE,
+            &import_text,
+            RelationKind::Imports,
+            node.start_position().row + 1,
+            &import_text,
+        );
+    }
 }
 
 /// Push a call relation from a call node.
-fn push_call_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+fn push_call_relation(
+    graph: &mut SymbolGraph,
+    node: Node<'_>,
+    content: &str,
+    php_namespace_context: Option<&mut PhpNamespaceContext>,
+) {
+    if is_php_language(graph.language.as_deref()) && is_inside_php_anonymous_class(node) {
+        return;
+    }
+    if is_php_language(graph.language.as_deref()) && is_php_first_class_callable_acquisition(node) {
+        return;
+    }
     let target_node = node
         .child_by_field_name("function")
         .or_else(|| first_named_child(node));
     let Some(target_node) = target_node else {
         return;
     };
-    let target = compact_text(node_text(target_node, content).as_deref().unwrap_or(""));
-    if target.is_empty() || target.len() > MAX_SNIPPET_CHARS {
+    let is_php = is_php_language(graph.language.as_deref());
+    let target = if is_php {
+        let Some(target) = php_call_target(node, content) else {
+            return;
+        };
+        target
+    } else {
+        compact_text(node_text(target_node, content).as_deref().unwrap_or(""))
+    };
+    if target.is_empty() || (!is_php && target.len() > MAX_SNIPPET_CHARS) {
         return;
     }
-    let source = enclosing_symbol_name(node.parent(), content).unwrap_or_else(|| "<module>".into());
+    let source = enclosing_symbol_name(node.parent(), content)
+        .or_else(|| {
+            is_php
+                .then(|| php_namespace_context.and_then(|context| context.parent_for(node)))
+                .flatten()
+        })
+        .unwrap_or_else(|| MODULE_RELATION_SOURCE.into());
     let context = compact_text(node_text(node, content).as_deref().unwrap_or(""));
     push_relation(
         graph,
@@ -1542,6 +2752,15 @@ fn node_name(node: Node<'_>, content: &str) -> Option<String> {
 fn declaration_specific_name(node: Node<'_>, content: &str) -> Option<String> {
     match node.kind() {
         kind if is_import_node(kind) => import_declaration_name(node, content),
+        "namespace_definition" => node
+            .child_by_field_name("name")
+            .and_then(|name| named_text(name, content)),
+        "property_declaration"
+        | "property_element"
+        | "property_promotion_parameter"
+        | "const_declaration"
+        | "const_element"
+        | "enum_case" => php_declaration_name(node, content),
         "package_declaration" | "package_clause" | "package_header" => {
             prefixed_declaration_name(node, content, &["package"])
         }
@@ -1563,6 +2782,12 @@ fn declaration_specific_name(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Extract the semantic target of an import-like declaration.
 fn import_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "namespace_use_declaration" {
+        return php_namespace_use_target(node, content);
+    }
+    if is_php_include_node(node.kind()) {
+        return php_static_include_target(node, content);
+    }
     if node.kind() == "import_spec_list" {
         let mut cursor = node.walk();
         let mut children = node.named_children(&mut cursor);
@@ -1596,6 +2821,29 @@ fn import_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
                 | "system_lib_string"
                 | "type"
         ) && let Some(name) = named_text(child, content)
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Extract a PHP property, constant, or enum-case name without initializer text.
+fn php_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
+    if let Some(name) = node.child_by_field_name("name")
+        && let Some(name) = named_text(name, content)
+    {
+        return Some(name.trim_start_matches('$').to_string());
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "name" | "variable_name")
+            && let Some(name) = named_text(child, content)
+        {
+            return Some(name.trim_start_matches('$').to_string());
+        }
+        if matches!(child.kind(), "property_element" | "const_element")
+            && let Some(name) = php_declaration_name(child, content)
         {
             return Some(name);
         }
@@ -1734,6 +2982,9 @@ fn named_text(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Build a compact declaration signature for a node.
 fn declaration_signature(node: Node<'_>, content: &str) -> String {
+    if matches!(node.kind(), "property_element" | "const_element") {
+        return php_element_signature(node, content);
+    }
     let header_end = declaration_body_start(node).unwrap_or_else(|| node.end_byte());
     let mut signature = String::new();
     append_declaration_tokens(node, content, header_end, &mut signature);
@@ -1744,8 +2995,40 @@ fn declaration_signature(node: Node<'_>, content: &str) -> String {
     }
 }
 
+/// Build a PHP property or constant element signature with its declaration header.
+fn php_element_signature(node: Node<'_>, content: &str) -> String {
+    let Some(parent) = node.parent() else {
+        return node_text(node, content).map_or_else(String::new, |raw| compact_text(&raw));
+    };
+    let mut cursor = parent.walk();
+    let first_element_start = parent
+        .named_children(&mut cursor)
+        .find(|child| matches!(child.kind(), "property_element" | "const_element"))
+        .map_or(node.start_byte(), |child| child.start_byte());
+    let mut signature = String::new();
+    append_declaration_tokens(parent, content, first_element_start, &mut signature);
+    let element_end = declaration_body_start(node).unwrap_or_else(|| node.end_byte());
+    append_declaration_tokens(node, content, element_end, &mut signature);
+    if signature.is_empty() {
+        node_text(node, content).map_or_else(String::new, |raw| compact_text(&raw))
+    } else {
+        signature
+    }
+}
+
 /// Return the byte at which executable or member body syntax begins.
 fn declaration_body_start(node: Node<'_>) -> Option<usize> {
+    if matches!(
+        node.kind(),
+        "property_declaration"
+            | "property_element"
+            | "const_declaration"
+            | "const_element"
+            | "enum_case"
+    ) && let Some(initializer) = php_initializer_start(node)
+    {
+        return Some(initializer);
+    }
     if declaration_has_direct_callable_initializer(node)
         && let Some(initializer) = first_declaration_initializer(node)
         && let Some(body) = initializer.child_by_field_name("body")
@@ -1769,6 +3052,21 @@ fn declaration_body_start(node: Node<'_>) -> Option<usize> {
             ) || child.kind().ends_with("_body")
         })
         .map(|body| body.start_byte())
+}
+
+/// Return the first byte of a PHP value initializer, if one is present.
+fn php_initializer_start(node: Node<'_>) -> Option<usize> {
+    let mut cursor = node.walk();
+    let mut after_equals = false;
+    for child in node.children(&mut cursor) {
+        if after_equals && child.is_named() {
+            return Some(child.start_byte());
+        }
+        after_equals = child.kind() == "=";
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find_map(php_initializer_start)
 }
 
 /// Append non-comment leaf tokens before a declaration body in source order.
@@ -1802,7 +3100,16 @@ fn append_declaration_tokens(
 }
 
 /// Return whether a declaration is exported or publicly visible.
-fn is_exported_symbol(language: Option<&str>, name: &str, signature: &str) -> bool {
+fn is_exported_symbol(
+    language: Option<&str>,
+    node: Node<'_>,
+    content: &str,
+    name: &str,
+    signature: &str,
+) -> bool {
+    if is_php_language(language) {
+        return php_declaration_is_exported(node, content);
+    }
     let trimmed = signature.trim_start();
     trimmed.starts_with("pub ")
         || trimmed.starts_with("pub(")
@@ -1810,6 +3117,29 @@ fn is_exported_symbol(language: Option<&str>, name: &str, signature: &str) -> bo
         || trimmed.starts_with("public ")
         || trimmed.starts_with("open ")
         || matches!(language, Some("go")) && starts_with_uppercase(name)
+}
+
+/// Return whether a PHP declaration has no private or protected visibility modifier.
+fn php_declaration_is_exported(node: Node<'_>, content: &str) -> bool {
+    if is_import_node(node.kind()) {
+        return false;
+    }
+    let declaration = match node.kind() {
+        "property_element" | "const_element" => node.parent(),
+        _ => Some(node),
+    };
+    let Some(declaration) = declaration else {
+        return true;
+    };
+    let mut cursor = declaration.walk();
+    !declaration
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "visibility_modifier")
+        .filter_map(|modifier| node_text(modifier, content))
+        .any(|modifier| {
+            let modifier = modifier.trim();
+            modifier.eq_ignore_ascii_case("private") || modifier.eq_ignore_ascii_case("protected")
+        })
 }
 
 /// Return whether a symbol name starts with an uppercase Unicode scalar.
@@ -1958,6 +3288,9 @@ fn compact_documentation(value: &str) -> Option<String> {
 /// Find the nearest containing declaration symbol name.
 fn enclosing_symbol_name(mut node: Option<Node<'_>>, content: &str) -> Option<String> {
     while let Some(current) = node {
+        if current.kind() == "anonymous_class" {
+            return None;
+        }
         if declaration_kind(current.kind()).is_some()
             && let Some(name) = node_name(current, content)
         {
@@ -2019,7 +3352,7 @@ fn extract_fallback_graph_checked<E>(
         if is_fallback_import(trimmed) {
             push_relation(
                 &mut graph,
-                "<module>",
+                MODULE_RELATION_SOURCE,
                 trimmed,
                 RelationKind::Imports,
                 line_index + 1,
@@ -2197,6 +3530,9 @@ fn push_relation(
     context: &str,
 ) {
     if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
+        if is_php_language(graph.language.as_deref()) {
+            graph.parser = ParserKind::Fallback;
+        }
         return;
     }
     let target = compact_text(target_name);
@@ -2210,6 +3546,37 @@ fn push_relation(
         kind,
         line,
         context: truncate_chars_at_boundary(&compact_text(context), MAX_SNIPPET_CHARS),
+        parser: graph.parser,
+    });
+}
+
+/// Push a bounded relation while preserving a target already decoded by a mapper.
+fn push_relation_preserving_target(
+    graph: &mut SymbolGraph,
+    source_name: &str,
+    target_name: &str,
+    kind: RelationKind,
+    line: usize,
+    context: &str,
+) {
+    if graph.relations.len() >= MAX_RELATIONS_PER_FILE && is_php_language(graph.language.as_deref())
+    {
+        graph.parser = ParserKind::Fallback;
+    }
+    if graph.relations.len() >= MAX_RELATIONS_PER_FILE
+        || target_name.is_empty()
+        || target_name.chars().count() > MAX_SNIPPET_CHARS
+        || context.chars().count() > MAX_SNIPPET_CHARS
+    {
+        return;
+    }
+    graph.relations.push(SymbolRelation {
+        path: graph.path.clone(),
+        source_name: truncate_chars_at_boundary(&compact_text(source_name), MAX_SNIPPET_CHARS),
+        target_name: target_name.to_string(),
+        kind,
+        line,
+        context: context.to_string(),
         parser: graph.parser,
     });
 }
@@ -2278,19 +3645,20 @@ fn is_snippet_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, QUALIFIED_SYMBOL_SCOPE_PREFIX,
-        compact_symbol_identity, content_without_leading_purpose_header, empty_graph,
-        extract_cargo_manifest_graph_checked, extract_fallback_graph,
-        extract_fallback_graph_checked, extract_powershell_graph_checked, extract_symbol_graph,
-        extract_symbol_graph_checked, extract_symbol_graph_controlled,
+        MAX_RELATIONS_PER_FILE, MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, PhpNamespaceContext,
+        QUALIFIED_SYMBOL_SCOPE_PREFIX, compact_symbol_identity,
+        content_without_leading_purpose_header, empty_graph, extract_cargo_manifest_graph_checked,
+        extract_fallback_graph, extract_fallback_graph_checked, extract_powershell_graph_checked,
+        extract_symbol_graph, extract_symbol_graph_checked, extract_symbol_graph_controlled,
         extract_vue_sfc_graph_checked, languages, specialized_languages,
     };
     use projectatlas_core::symbols::{
-        CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind,
+        CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolSourceSelector,
     };
     use projectatlas_core::{
         IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
     };
+    use std::convert::Infallible;
     use std::fmt::Write as _;
 
     fn tree_symbol<'a>(
@@ -2307,6 +3675,16 @@ mod tests {
                 && symbol.parent.as_deref() == parent
                 && symbol.signature.contains(signature_fragment)
         })
+    }
+
+    fn large_semicolon_namespace_source(declaration_count: usize) -> String {
+        let mut source = String::from(
+            "<?php\nnamespace Prefix;\nfunction prefix(): void {}\nnamespace Scale;\n",
+        );
+        for index in 0..(declaration_count - 1) {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        source
     }
 
     #[test]
@@ -2341,6 +3719,11 @@ mod tests {
                 "config/atlas.txt",
                 Some("text"),
                 "function fallbackOnly() {}\n",
+            ),
+            (
+                "src/Service.php",
+                Some("php"),
+                "<?php class Service { public function run(): void {} }\n",
             ),
             (
                 "src/Atlas.kt",
@@ -2413,6 +3796,9 @@ mod tests {
         assert_parser_cancels_at!("fallback", 3, |check| {
             extract_fallback_graph_checked(fixtures[5].0, fixtures[5].1, fixtures[5].2, check)
         });
+        assert_parser_cancels_at!("PHP tree-sitter", 3, |check| {
+            extract_symbol_graph_checked(fixtures[6].0, fixtures[6].1, fixtures[6].2, check)
+        });
         assert_parser_cancels_at!("Vue structural adapter", 8, |check| {
             extract_vue_sfc_graph_checked(fixtures[3].0, fixtures[3].1, fixtures[3].2, check)
         });
@@ -2427,18 +3813,18 @@ mod tests {
         });
 
         let mut native_augmentation =
-            empty_graph(fixtures[6].0, fixtures[6].1, ParserKind::TreeSitter);
+            empty_graph(fixtures[7].0, fixtures[7].1, ParserKind::TreeSitter);
         assert_parser_cancels_at!("native language augmentation", 3, |check| {
-            languages::augment_language_graph(&mut native_augmentation, fixtures[6].2, check)
+            languages::augment_language_graph(&mut native_augmentation, fixtures[7].2, check)
                 .map(|()| native_augmentation.clone())
         });
 
         let mut fallback_augmentation =
-            empty_graph(fixtures[7].0, fixtures[7].1, ParserKind::Fallback);
+            empty_graph(fixtures[8].0, fixtures[8].1, ParserKind::Fallback);
         assert_parser_cancels_at!("fallback language augmentation", 4, |check| {
             languages::augment_fallback_language_graph(
                 &mut fallback_augmentation,
-                fixtures[7].2,
+                fixtures[8].2,
                 check,
             )
             .map(|()| fallback_augmentation.clone())
@@ -4007,8 +5393,2223 @@ version = "0.60.0"
             "go",
             "objective-c",
             "zig",
+            "php",
         ] {
             assert!(specialized_languages().contains(&expected));
         }
+    }
+
+    #[test]
+    fn extracts_php_symbols_relations_and_exact_selectors() {
+        let shared_headers = "<?php class Fields {\n    public string\n        $name,\n        $other;\n    public const\n        FIRST = 1,\n        SECOND = 2;\n}";
+        let fields = extract_symbol_graph("src/fields.php", Some("php"), shared_headers);
+        for (name, header, end) in [
+            ("name", "public string", "$name"),
+            ("other", "public string", "$other"),
+            ("FIRST", "public const", "FIRST = 1"),
+            ("SECOND", "public const", "SECOND = 2"),
+        ] {
+            let symbol = fields.symbols.iter().find(|symbol| symbol.name == name);
+            assert!(
+                symbol.is_some(),
+                "shared PHP declaration {name} should exist"
+            );
+            let Some(symbol) = symbol else { return };
+            assert!(
+                symbol.source_selector.is_some(),
+                "PHP declaration should have an exact selector"
+            );
+            let Some(selector) = symbol.source_selector else {
+                return;
+            };
+            assert_eq!(Some(selector.byte_start), shared_headers.find(header));
+            assert_eq!(selector.column_start, 4);
+            assert_eq!(
+                symbol.line_start,
+                if name.starts_with(char::is_uppercase) {
+                    5
+                } else {
+                    2
+                }
+            );
+            let slice = &shared_headers[selector.byte_start..selector.byte_end];
+            assert!(
+                slice.starts_with(header) && slice.ends_with(end),
+                "{name}: {slice}"
+            );
+        }
+        for directive in [
+            "__halt_compiler();",
+            "__HALT_COMPILER /* comment */ ( /* comment */ );",
+        ] {
+            for (prefix, suffix) in [
+                ("", ""),
+                ("namespace N;", ""),
+                ("namespace N {", "}"),
+                ("namespace {", "}"),
+            ] {
+                let source = format!(
+                    "<?php {prefix} function real() {{}} {directive} function fake() {{ payload(); }} {suffix} function outside() {{}}"
+                );
+                let graph = extract_symbol_graph("src/archive.php", Some("php"), &source);
+                assert!(
+                    graph.symbols.iter().any(|symbol| symbol.name == "real")
+                        && graph
+                            .symbols
+                            .iter()
+                            .all(|symbol| !matches!(symbol.name.as_str(), "fake" | "outside"))
+                        && graph.relations.iter().all(|relation| !matches!(
+                            relation.target_name.as_str(),
+                            "payload" | "__halt_compiler" | "__HALT_COMPILER"
+                        )),
+                    "{source}: {graph:?}"
+                );
+            }
+        }
+        for lookalike in [
+            "// __halt_compiler();\n",
+            "$text = '__halt_compiler();';",
+            "$object->__halt_compiler();",
+            "Archive::__halt_compiler();",
+            "__halt_compiler(1);",
+            "function nested() { __halt_compiler(); }",
+        ] {
+            let source = format!("<?php {lookalike} function retained() {{}}");
+            let graph = extract_symbol_graph("src/not-archive.php", Some("php"), &source);
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == "retained"),
+                "{source}: {graph:?}"
+            );
+        }
+        for (source, parent) in [
+            (
+                "<?php namespace N; function outer() { function inner() {} class InnerType {} }",
+                Some("N"),
+            ),
+            (
+                "<?php namespace N { class OuterType { function outer() { function inner() {} class InnerType {} } } }",
+                Some("N"),
+            ),
+            (
+                "<?php function outer() { function inner() {} class InnerType {} }",
+                None,
+            ),
+            (
+                "<?php namespace { function outer() { function inner() {} class InnerType {} } }",
+                None,
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/nested.php", Some("php"), source);
+            for name in ["inner", "InnerType"] {
+                let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
+                assert_eq!(
+                    symbol.map(|symbol| (symbol.parent.as_deref(), symbol.kind)),
+                    Some((
+                        parent,
+                        if name == "inner" {
+                            SymbolKind::Function
+                        } else {
+                            SymbolKind::Class
+                        }
+                    )),
+                    "{source}: {name}"
+                );
+            }
+            assert!(
+                !graph
+                    .relations
+                    .iter()
+                    .any(|relation| relation.kind == RelationKind::Contains
+                        && relation.source_name == "outer"
+                        && matches!(relation.target_name.as_str(), "inner" | "InnerType"))
+            );
+        }
+        for source in [
+            "<?xml(); function boot(): void {}",
+            "HTML<?xml_parser(); function boot(): void {}",
+            "<?xml (); function boot(): void {}",
+        ] {
+            let graph = extract_symbol_graph("src/short.php", Some("php"), source);
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == "boot"),
+                "{source}: {graph:?}"
+            );
+            assert_eq!(graph.parser, ParserKind::TreeSitter);
+        }
+        for callback in [
+            "function () { hidden(); }",
+            "fn() => hidden()",
+            "static function () { require 'hidden.php'; hidden(); }",
+            "static fn() => hidden()",
+            "function () { $nested = fn() => hidden(); }",
+        ] {
+            let source = format!("<?php function outer() {{ $callback = {callback}; visible(); }}");
+            let graph = extract_symbol_graph("src/callback.php", Some("php"), &source);
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.target_name != "hidden"),
+                "{graph:?}"
+            );
+            assert!(graph.relations.iter().any(
+                |relation| relation.source_name == "outer" && relation.target_name == "visible"
+            ));
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.kind != RelationKind::Imports)
+            );
+        }
+        for prefix_length in [MAX_SNIPPET_CHARS + 1, 1_900_000] {
+            let prefix = "N".repeat(prefix_length);
+            let clauses = (0..2_000)
+                .map(|index| format!("A{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let source = format!("<?php use {prefix}\\{{{clauses}}}; function kept() {{}}");
+            let graph = extract_symbol_graph("src/imports.php", Some("php"), &source);
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.kind != RelationKind::Imports)
+            );
+            assert!(graph.symbols.iter().any(|symbol| symbol.name == "kept"));
+        }
+        for character in ["N", "界"] {
+            let prefix = character.repeat(MAX_SNIPPET_CHARS - 2);
+            let source = format!("<?php use {prefix}\\{{A, BB}}; function kept() {{}}");
+            let graph = extract_symbol_graph("src/imports.php", Some("php"), &source);
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            let imports: Vec<_> = graph
+                .relations
+                .iter()
+                .filter(|relation| relation.kind == RelationKind::Imports)
+                .collect();
+            assert_eq!(imports.len(), 1);
+            assert_eq!(imports[0].target_name, format!("{prefix}\\A"));
+        }
+        let enum_graph = extract_symbol_graph(
+            "src/State.php",
+            Some("php"),
+            "<?php enum State { public function run(): void {} }",
+        );
+        assert_eq!(enum_graph.parser, ParserKind::TreeSitter);
+        assert!(enum_graph.symbols.iter().any(|symbol| {
+            symbol.name == "run"
+                && symbol.kind == SymbolKind::Method
+                && symbol.parent.as_deref() == Some("State")
+        }));
+        let source = r#"<?php
+namespace Atlas\Domain;
+use Vendor\Thing as ThingAlias;
+require_once "bootstrap.php";
+include $dynamic;
+interface Contract {}
+trait Auditable {}
+enum State: string {
+    case Ready = 'ready';
+    public function state_label(): void {}
+    public static function state_boot(): void {}
+}
+class Service {
+    public const VERSION = 1;
+    private string $name = 'service';
+    public function run(string $value): string {
+        helper();
+        $this->save();
+        Service::boot();
+    }
+}
+function helper(string $value): void {}
+"#;
+        let graph = extract_symbol_graph("src/Service.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::Fallback);
+
+        for name in [
+            "Atlas\\Domain",
+            "Contract",
+            "Auditable",
+            "State",
+            "Ready",
+            "Service",
+            "VERSION",
+            "name",
+            "run",
+            "helper",
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == name),
+                "missing PHP symbol {name}: {:?}",
+                graph.symbols
+            );
+        }
+        for (name, kind, parent) in [
+            ("Contract", SymbolKind::Interface, Some("Atlas\\Domain")),
+            ("Auditable", SymbolKind::Trait, Some("Atlas\\Domain")),
+            ("State", SymbolKind::Enum, Some("Atlas\\Domain")),
+            ("Ready", SymbolKind::Value, Some("State")),
+            ("state_label", SymbolKind::Method, Some("State")),
+            ("state_boot", SymbolKind::Method, Some("State")),
+            ("Service", SymbolKind::Class, Some("Atlas\\Domain")),
+            ("VERSION", SymbolKind::Value, Some("Service")),
+            ("name", SymbolKind::Value, Some("Service")),
+            ("run", SymbolKind::Method, Some("Service")),
+            ("helper", SymbolKind::Function, Some("Atlas\\Domain")),
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| {
+                    symbol.name == name && symbol.kind == kind && symbol.parent.as_deref() == parent
+                }),
+                "missing PHP kind/parent for {name}: {:?}",
+                graph.symbols
+            );
+        }
+        assert!(
+            source.contains("public function run"),
+            "method start missing from PHP fixture"
+        );
+        let method_start = source.find("public function run").unwrap_or_default();
+        assert!(
+            source[method_start..].contains("\n    }\n"),
+            "method end missing from PHP fixture"
+        );
+        let method_relative_end = source[method_start..].find("\n    }\n").unwrap_or_default();
+        let method_end = method_start + method_relative_end + 6;
+        assert!(
+            graph.symbols.iter().any(|symbol| symbol.name == "run"),
+            "method symbol missing from PHP graph"
+        );
+        let Some(method) = graph.symbols.iter().find(|symbol| symbol.name == "run") else {
+            return;
+        };
+        assert_eq!(
+            method.source_selector,
+            Some(SymbolSourceSelector {
+                byte_start: method_start,
+                byte_end: method_end,
+                column_start: 4,
+                column_end: 5,
+            })
+        );
+        assert!(method.signature.contains("public function run"));
+        assert!(!method.signature.contains("helper"));
+        assert!(
+            graph.symbols.iter().any(|symbol| symbol.name == "name"),
+            "property symbol missing from PHP graph"
+        );
+        let Some(property) = graph.symbols.iter().find(|symbol| symbol.name == "name") else {
+            return;
+        };
+        assert!(property.signature.contains("private string"));
+        assert!(!property.signature.contains("service"));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports && relation.target_name == "Vendor\\Thing"
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports && relation.target_name == "bootstrap.php"
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Import && symbol.name == "Vendor\\Thing" && !symbol.exported
+        }));
+        for target in ["helper", "Service::boot"] {
+            assert!(
+                graph.relations.iter().any(|relation| {
+                    relation.kind == RelationKind::Calls && relation.target_name == target
+                }),
+                "missing PHP call target {target}: {:?}",
+                graph.relations
+            );
+        }
+        assert!(graph.relations.iter().all(|relation| {
+            relation.kind != RelationKind::Calls || relation.target_name != "save"
+        }));
+        assert!(
+            graph
+                .relations
+                .iter()
+                .all(|relation| relation.target_name != "$dynamic")
+        );
+
+        let multiple = extract_symbol_graph(
+            "src/Multiple.php",
+            Some("php"),
+            "<?php class Multiple { public string $first = 'one', $second = 'two'; const FIRST = 1, SECOND = 2; }",
+        );
+        for (name, signature) in [
+            ("first", "public string $ first ="),
+            ("second", "public string $ second ="),
+            ("FIRST", "const FIRST ="),
+            ("SECOND", "const SECOND ="),
+        ] {
+            assert!(
+                multiple
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == name && symbol.signature == signature),
+                "missing PHP element {name} with signature {signature}: {:?}",
+                multiple.symbols
+            );
+        }
+
+        let braced = extract_symbol_graph(
+            "src/Braced.php",
+            Some("php"),
+            "<?php namespace Atlas { class Service { public function run(): void {} } }",
+        );
+        assert!(braced.symbols.iter().any(|symbol| {
+            symbol.name == "Service" && symbol.parent.as_deref() == Some("Atlas")
+        }));
+        assert!(
+            braced.symbols.iter().any(|symbol| {
+                symbol.name == "run" && symbol.parent.as_deref() == Some("Service")
+            })
+        );
+
+        let duplicates = extract_symbol_graph(
+            "src/duplicates.php",
+            Some("php"),
+            "<?php function same(): void {} function same(): void {}",
+        );
+        assert_eq!(
+            duplicates
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.name == "same" && symbol.kind == SymbolKind::Function)
+                .count(),
+            2,
+            "duplicate PHP declarations must remain visible rather than being merged"
+        );
+    }
+
+    #[test]
+    fn php_selectors_use_original_columns_after_multibyte_purpose_header() {
+        let source = "/* Purpose: café */<?php function run(): void {}";
+        let graph = extract_symbol_graph("src/Service.php", Some("php"), source);
+        let function_start = source.find("function run");
+        assert!(function_start.is_some(), "PHP function should be present");
+        let Some(function_start) = function_start else {
+            return;
+        };
+        let function_symbol = graph.symbols.iter().find(|symbol| symbol.name == "run");
+        assert!(
+            function_symbol.is_some(),
+            "PHP function should be indexed: {graph:?}"
+        );
+        let Some(function_symbol) = function_symbol else {
+            return;
+        };
+        let selector = function_symbol.source_selector;
+        assert!(
+            selector.is_some(),
+            "PHP function selector should be present: {function_symbol:?}"
+        );
+        let Some(selector) = selector else { return };
+        assert_eq!(selector.byte_start, function_start);
+        assert_eq!(
+            selector.column_start,
+            source[..function_start].chars().count(),
+            "selector column must use Unicode scalars from the original source"
+        );
+    }
+
+    #[test]
+    fn php_selector_columns_stay_exact_at_file_and_symbol_limits() {
+        let mut source = String::from("<?php\n/*");
+        source.push_str(&"x".repeat(1_800_000));
+        source.push_str("*/\n");
+        for index in 0..3_999 {
+            assert!(writeln!(source, "function f{index}() {{}}").is_ok());
+        }
+        source.push_str("/* café */ function last() {}");
+        let graph = extract_symbol_graph("src/large.php", Some("php"), &source);
+        assert_eq!(graph.symbols.len(), 4_000);
+        let last = graph.symbols.iter().find(|symbol| symbol.name == "last");
+        assert!(
+            last.is_some(),
+            "last admitted declaration must remain exact"
+        );
+        let Some(last) = last else { return };
+        assert!(
+            last.source_selector.is_some(),
+            "last declaration selector is missing"
+        );
+        let Some(selector) = last.source_selector else {
+            return;
+        };
+        assert_eq!(selector.column_start, "/* café */ ".chars().count());
+        assert_eq!(
+            selector.column_end,
+            "/* café */ function last() {}".chars().count()
+        );
+        assert_eq!(
+            &source[selector.byte_start..selector.byte_end],
+            "function last() {}"
+        );
+    }
+
+    #[test]
+    fn selector_normalization_preserves_scalar_boundaries_and_cancellation() {
+        let mut graph = extract_symbol_graph("probe.php", Some("php"), "<?php function f() {}");
+        // Normalization changes existing selectors, not language support or selector admission.
+        graph.language = Some("rust".to_owned());
+        graph.symbols = vec![graph.symbols[0].clone(); 3];
+        let source = "α\r\nβγ";
+        for (symbol, (start, end)) in graph.symbols.iter_mut().zip([(4, 8), (0, 4), (6, 6)]) {
+            symbol.source_selector = Some(super::SymbolSourceSelector {
+                byte_start: start,
+                byte_end: end,
+                column_start: usize::MAX,
+                column_end: usize::MAX,
+            });
+        }
+        let result =
+            super::normalize_source_selector_columns(&mut graph, source, &mut || Ok::<_, ()>(()));
+        assert_eq!(result, Ok(()));
+        for (symbol, expected) in graph.symbols.iter().zip([(0, 2), (0, 0), (1, 1)]) {
+            assert_eq!(
+                symbol
+                    .source_selector
+                    .map(|span| (span.column_start, span.column_end)),
+                Some(expected)
+            );
+        }
+        for source in ["x".repeat(65_536), format!("{}é", "x".repeat(65_536))] {
+            for stop in [1, 2, 3, 5] {
+                let mut candidate = graph.clone();
+                candidate.symbols = vec![candidate.symbols[0].clone(); 129];
+                for symbol in &mut candidate.symbols {
+                    symbol.source_selector = Some(super::SymbolSourceSelector {
+                        byte_start: 0,
+                        byte_end: source.len(),
+                        column_start: 0,
+                        column_end: source.len(),
+                    });
+                }
+                let mut checks = 0;
+                let result =
+                    super::normalize_source_selector_columns(&mut candidate, &source, &mut || {
+                        checks += 1;
+                        if checks == stop {
+                            Err("cancelled")
+                        } else {
+                            Ok(())
+                        }
+                    });
+                assert_eq!(result, Err("cancelled"));
+                assert_eq!(checks, stop);
+            }
+        }
+        let source = format!("é{}", "x".repeat(65_536));
+        let mut checks = 0;
+        graph.symbols[0].source_selector = Some(super::SymbolSourceSelector {
+            byte_start: 0,
+            byte_end: source.len(),
+            column_start: 0,
+            column_end: source.len(),
+        });
+        let result = super::normalize_source_selector_columns(&mut graph, &source, &mut || {
+            checks += 1;
+            if checks == 20 {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(
+            checks, 20,
+            "the Unicode source walk must remain cancellable"
+        );
+    }
+
+    #[test]
+    fn php_constructor_promoted_properties_are_class_members() {
+        let source = r"<?php
+class Account {
+    public function __construct(
+        public readonly string $name,
+        private int $id = 0,
+    ) {}
+}
+";
+        let graph = extract_symbol_graph("src/Account.php", Some("php"), source);
+
+        for (name, exported, signature) in [
+            ("name", true, "public readonly string"),
+            ("id", false, "private int"),
+        ] {
+            let symbol = graph
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name && symbol.kind == SymbolKind::Value);
+            assert!(
+                symbol.is_some(),
+                "missing promoted property {name}: {graph:?}"
+            );
+            let Some(symbol) = symbol else { continue };
+            assert_eq!(symbol.parent.as_deref(), Some("Account"));
+            assert_eq!(symbol.exported, exported);
+            assert!(symbol.signature.contains(signature));
+            assert!(symbol.source_selector.is_some());
+        }
+        assert!(!graph.symbols.iter().any(|symbol| {
+            symbol.name == "name" && symbol.parent.as_deref() == Some("__construct")
+        }));
+
+        let trait_graph = extract_symbol_graph(
+            "src/Contract.php",
+            Some("php"),
+            r"<?php
+trait Contract {
+    public function __construct(public int $version) {}
+}
+",
+        );
+        let promoted = trait_graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "version" && symbol.kind == SymbolKind::Value);
+        assert_eq!(
+            promoted.and_then(|symbol| symbol.parent.as_deref()),
+            Some("Contract"),
+            "trait-promoted properties must belong to the trait"
+        );
+        assert!(!trait_graph.symbols.iter().any(|symbol| {
+            symbol.name == "version" && symbol.parent.as_deref() == Some("__construct")
+        }));
+    }
+
+    #[test]
+    fn php_visibility_modifiers_control_exported_symbol_queries() {
+        let source = r"<?php
+class Service {
+    final protected function guarded(): void {}
+    static private string $cache;
+    private(set) string $readablePrivateSet;
+    protected(set) string $readableProtectedSet;
+    public(set) string $readablePublicSet;
+    private(set) protected string $privateSetWithProtectedRead;
+    public static function exposed(): void {}
+    function defaulted(): void {}
+}
+";
+        let graph = extract_symbol_graph("src/Service.php", Some("php"), source);
+
+        for (name, exported) in [
+            ("Service", true),
+            ("guarded", false),
+            ("cache", false),
+            ("readablePrivateSet", true),
+            ("readableProtectedSet", true),
+            ("readablePublicSet", true),
+            ("privateSetWithProtectedRead", false),
+            ("exposed", true),
+            ("defaulted", true),
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == name),
+                "missing PHP symbol {name}: {:?}",
+                graph.symbols
+            );
+            let Some(symbol) = graph.symbols.iter().find(|symbol| symbol.name == name) else {
+                continue;
+            };
+            assert_eq!(
+                symbol.exported, exported,
+                "unexpected exported state for {name}: {symbol:?}"
+            );
+            assert_eq!(symbol.parser, ParserKind::TreeSitter);
+            assert!(
+                symbol.source_selector.is_some(),
+                "missing selector for {name}"
+            );
+        }
+
+        let exported_names = graph
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.exported)
+            .map(|symbol| symbol.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(exported_names.contains(&"exposed"));
+        assert!(exported_names.contains(&"defaulted"));
+        assert!(exported_names.contains(&"readablePrivateSet"));
+        assert!(exported_names.contains(&"readableProtectedSet"));
+        assert!(exported_names.contains(&"readablePublicSet"));
+        assert!(!exported_names.contains(&"privateSetWithProtectedRead"));
+        assert!(!exported_names.contains(&"guarded"));
+        assert!(!exported_names.contains(&"cache"));
+    }
+
+    #[test]
+    fn php_relative_scope_calls_preserve_exact_targets_and_source_evidence() {
+        let source = r"<?php
+class Child extends Base {
+    public function run(): void {
+        self::local();
+        parent::inherited();
+        static::lateBound();
+        $scope::dynamic();
+    }
+}
+";
+        let graph = extract_symbol_graph("src/Child.php", Some("php"), source);
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+
+        assert_eq!(calls.len(), 3, "dynamic PHP scopes must remain unresolved");
+        for (target, line) in [
+            ("self::local", 4),
+            ("parent::inherited", 5),
+            ("static::lateBound", 6),
+        ] {
+            assert!(
+                calls.iter().any(|relation| {
+                    relation.target_name == target && relation.source_name == "run"
+                }),
+                "missing PHP call relation {target}: {calls:?}"
+            );
+            let Some(relation) = calls
+                .iter()
+                .find(|relation| relation.target_name == target && relation.source_name == "run")
+            else {
+                continue;
+            };
+            assert_eq!(relation.path, "src/Child.php");
+            assert_eq!(relation.line, line);
+            assert!(relation.context.contains(target));
+        }
+        assert!(calls.iter().all(|relation| {
+            !relation.target_name.contains("dynamic") && !relation.target_name.contains("scope")
+        }));
+    }
+
+    #[test]
+    fn php_dynamic_execution_is_not_published_as_a_call() {
+        let source = r"<?php
+function run(string $code): void {
+    eval($code);
+    $callable();
+    helper();
+}
+";
+        let graph = extract_symbol_graph("src/DynamicExecution.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::Fallback);
+        assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+
+        assert!(calls.iter().all(|relation| relation.target_name != "eval"));
+        assert!(
+            calls
+                .iter()
+                .all(|relation| relation.target_name != "$callable")
+        );
+        assert!(calls.iter().any(|relation| {
+            relation.target_name == "helper"
+                && relation.source_name == "run"
+                && relation.path == "src/DynamicExecution.php"
+                && relation.context.contains("helper()")
+        }));
+    }
+
+    #[test]
+    fn php_dynamic_member_calls_are_omitted_and_mark_coverage_incomplete() {
+        let source = r"<?php
+function save(): void {}
+class Service {
+    public static function boot(): void {}
+}
+function run(object $object): void {
+    $object->save();
+    $object?->save();
+    Service::boot();
+}
+";
+        let graph = extract_symbol_graph("src/DynamicMember.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::Fallback, "graph: {graph:?}");
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+
+        assert!(calls.iter().all(|relation| relation.target_name != "save"));
+        assert!(calls.iter().any(|relation| {
+            relation.target_name == "Service::boot"
+                && relation.source_name == "run"
+                && relation.context.contains("Service::boot()")
+        }));
+    }
+
+    #[test]
+    fn php_first_class_callable_acquisitions_are_complete_but_dynamic_calls_are_partial() {
+        let acquisition = extract_symbol_graph(
+            "src/CallableAcquisition.php",
+            Some("php"),
+            r"<?php
+function capture(callable $callable, object $object): void {
+    $callable(...);
+    $object->save(...);
+    helper();
+}
+",
+        );
+        assert_eq!(
+            acquisition.parser,
+            ParserKind::TreeSitter,
+            "graph: {acquisition:?}"
+        );
+        assert!(
+            acquisition
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "capture" && symbol.source_selector.is_some())
+        );
+        let calls = acquisition
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls.len(),
+            1,
+            "acquisitions must not emit calls: {calls:?}"
+        );
+        assert_eq!(calls[0].target_name, "helper");
+        assert_eq!(calls[0].source_name, "capture");
+
+        let dynamic = extract_symbol_graph(
+            "src/DynamicCall.php",
+            Some("php"),
+            r"<?php
+function invoke(callable $callable, object $object): void {
+    $callable();
+    $object->save();
+    helper();
+}
+",
+        );
+        assert_eq!(dynamic.parser, ParserKind::Fallback, "graph: {dynamic:?}");
+        let calls = dynamic
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+        assert!(calls.iter().any(|relation| {
+            relation.target_name == "helper" && relation.source_name == "invoke"
+        }));
+        assert!(calls.iter().all(|relation| {
+            relation.target_name != "$callable" && relation.target_name != "save"
+        }));
+    }
+
+    #[test]
+    fn php_complete_static_source_stays_tree_sitter() {
+        let graph = extract_symbol_graph("fixture.php", Some("php"), "<?php function run() {}");
+        assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+        assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
+    }
+
+    #[test]
+    fn php_callable_acquisition_and_import_targets_stay_precise() {
+        let source = r#"<?php
+use Vendor\One, Vendor\Two as TwoAlias;
+use Vendor\Group\{First, Second as GroupAlias};
+require 'vendor\\bootstrap.php';
+require 'vendor\\it\'s.php';
+require 'bootstrap.php';
+require "bootstrap.php";
+require "boot/$name.php";
+require $dynamic;
+require [];
+function run(): void {
+    foo(...);
+    foo();
+    foo(...$args);
+    Service::boot(...);
+    Service::boot();
+    $object->save(...);
+    $object->save();
+}
+"#;
+        let graph = extract_symbol_graph("src/Callable.php", Some("php"), source);
+
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+        for (target, lines) in [
+            ("Vendor\\One", vec![2]),
+            ("Vendor\\Two", vec![2]),
+            ("Vendor\\Group\\First", vec![3]),
+            ("Vendor\\Group\\Second", vec![3]),
+            ("vendor\\bootstrap.php", vec![4]),
+            ("vendor\\it's.php", vec![5]),
+            ("bootstrap.php", vec![6, 7]),
+        ] {
+            assert_eq!(
+                imports
+                    .iter()
+                    .filter(|relation| relation.target_name == target)
+                    .count(),
+                lines.len(),
+                "missing exact PHP import target {target}: {imports:?}"
+            );
+            let mut observed_lines = imports
+                .iter()
+                .filter(|relation| relation.target_name == target)
+                .map(|relation| {
+                    assert_eq!(relation.path, "src/Callable.php");
+                    let expected_context = if relation.line >= 4 {
+                        source
+                            .lines()
+                            .nth(relation.line - 1)
+                            .unwrap_or_default()
+                            .trim_end_matches(';')
+                    } else {
+                        target
+                    };
+                    assert_eq!(relation.context, expected_context);
+                    relation.line
+                })
+                .collect::<Vec<_>>();
+            observed_lines.sort_unstable();
+            assert_eq!(observed_lines, lines);
+        }
+        assert!(imports.iter().all(|relation| {
+            !relation.target_name.contains("boot/")
+                && !relation.target_name.contains("dynamic")
+                && relation.target_name != "[]"
+                && !relation.target_name.contains("TwoAlias")
+                && !relation.target_name.contains("GroupAlias")
+        }));
+
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+        for (target, lines) in [("foo", vec![13, 14]), ("Service::boot", vec![16])] {
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|relation| relation.target_name == target)
+                    .count(),
+                lines.len(),
+                "callable acquisition must not be published as invocation for {target}: {calls:?}"
+            );
+            let mut observed_lines = calls
+                .iter()
+                .filter(|relation| relation.target_name == target)
+                .map(|relation| {
+                    assert_eq!(relation.source_name, "run");
+                    assert_eq!(relation.path, "src/Callable.php");
+                    assert!(relation.context.contains(target));
+                    relation.line
+                })
+                .collect::<Vec<_>>();
+            observed_lines.sort_unstable();
+            assert_eq!(observed_lines, lines);
+        }
+        assert!(calls.iter().all(|relation| {
+            !relation.context.contains("foo(...)")
+                && !relation.context.contains("Service::boot(...)")
+                && !relation.context.contains("$object->save(...)")
+                && relation.target_name != "save"
+                && relation.target_name != "$dynamic"
+                && relation.target_name != "$name"
+        }));
+    }
+
+    #[test]
+    fn php_static_include_literals_reject_constants_and_decode_double_quoted_escapes() {
+        let source = r#"<?php
+require "vendor\\bootstrap.php";
+require "vendor\"quoted.php";
+require "control\npath.php";
+require "dollar\$name.php";
+require "unsupported\x41.php";
+require "boot/$name.php";
+require $dynamic;
+require BOOTSTRAP;
+require Vendor\BOOTSTRAP;
+require (1 + 2);
+require 'dir  bootstrap.php';
+"#;
+        let graph = extract_symbol_graph("src/StaticIncludes.php", Some("php"), source);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        for (target, line, context) in [
+            (
+                "vendor\\bootstrap.php",
+                2,
+                r#"require "vendor\\bootstrap.php""#,
+            ),
+            ("vendor\"quoted.php", 3, r#"require "vendor\"quoted.php""#),
+            ("dollar$name.php", 5, r#"require "dollar\$name.php""#),
+            ("dir  bootstrap.php", 12, "require 'dir bootstrap.php'"),
+        ] {
+            let matches = imports
+                .iter()
+                .filter(|relation| relation.target_name == target)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "missing exact escaped PHP include {target}: {imports:?}"
+            );
+            let relation = matches[0];
+            assert_eq!(relation.path, "src/StaticIncludes.php");
+            assert_eq!(relation.line, line);
+            assert_eq!(relation.context, context);
+        }
+        assert!(imports.iter().all(|relation| {
+            relation.target_name != "control\npath.php"
+                && !relation.target_name.chars().any(char::is_control)
+        }));
+        assert!(imports.iter().all(|relation| {
+            !relation.target_name.contains("unsupported")
+                && !relation.target_name.contains("boot/")
+                && relation.target_name != "$dynamic"
+                && relation.target_name != "BOOTSTRAP"
+                && !relation.target_name.contains("Vendor")
+                && !relation.target_name.contains("1 + 2")
+        }));
+    }
+
+    #[test]
+    fn php_static_nowdoc_includes_decode_indentation_and_reject_dynamic_forms() {
+        let graph = extract_symbol_graph(
+            "src/NowdocIncludes.php",
+            Some("php"),
+            r"<?php
+require <<<'PATH'
+bootstrap.php
+PATH;
+require <<<'PATH'
+    indented.php
+    PATH;
+",
+        );
+        assert_eq!(graph.parser, ParserKind::TreeSitter);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        for (target, line) in [("bootstrap.php", 2), ("indented.php", 5)] {
+            assert!(
+                imports
+                    .iter()
+                    .any(|relation| relation.target_name == target && relation.line == line),
+                "missing static nowdoc include {target}: {imports:?}"
+            );
+            if let Some(relation) = imports
+                .iter()
+                .find(|relation| relation.target_name == target && relation.line == line)
+            {
+                assert_eq!(relation.path, "src/NowdocIncludes.php");
+                assert_eq!(relation.context, format!("require <<<'PATH' {target} PATH"));
+                assert_eq!(relation.parser, ParserKind::TreeSitter);
+            }
+        }
+
+        let graph = extract_symbol_graph(
+            "src/NowdocIncludes.php",
+            Some("php"),
+            r"<?php
+require <<<'PATH'
+first.php
+second.php
+PATH;
+require <<<PATH
+heredoc.php
+PATH;
+require $dynamic;
+",
+        );
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        assert!(imports.iter().all(|relation| {
+            !matches!(
+                relation.target_name.as_str(),
+                "first.php\nsecond.php" | "heredoc.php" | "$dynamic"
+            )
+        }));
+    }
+
+    #[test]
+    fn php_call_targets_use_character_bounds_for_unicode_names() {
+        let target = "é".repeat(MAX_SNIPPET_CHARS / 2 + 1);
+        assert!(target.chars().count() <= MAX_SNIPPET_CHARS);
+        assert!(target.len() > MAX_SNIPPET_CHARS);
+        let source = format!("<?php\nfunction caller(): void {{\n{target}();\n}}\n");
+        let graph = extract_symbol_graph("src/UnicodeCalls.php", Some("php"), &source);
+        let calls = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Calls)
+            .collect::<Vec<_>>();
+        assert!(
+            calls.iter().any(|relation| relation.target_name == target),
+            "Unicode PHP call within character bound must be published: {calls:?}"
+        );
+        let Some(relation) = calls.iter().find(|relation| relation.target_name == target) else {
+            return;
+        };
+        assert_eq!(relation.source_name, "caller");
+        assert_eq!(relation.path, "src/UnicodeCalls.php");
+        assert_eq!(relation.line, 3);
+        assert_eq!(relation.context, format!("{target}()"));
+    }
+
+    #[test]
+    fn php_include_context_is_bounded_without_truncating_the_target() {
+        let target = "é".repeat(MAX_SNIPPET_CHARS);
+        let source = format!("<?php require /*{}*/ '{target}';", "comment ".repeat(1_000));
+        let graph = extract_symbol_graph("src/IncludeContext.php", Some("php"), &source);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].target_name, target);
+        assert!(imports[0].context.starts_with("require /*comment"));
+        assert!(imports[0].context.chars().count() <= MAX_SNIPPET_CHARS);
+    }
+
+    #[test]
+    fn php_parenthesized_static_include_targets_stay_precise() {
+        let source = r#"<?php
+require(/*before*/'parenthesized.php'/*after*/);
+include_once("parent-config.php");
+require(('nested.php'));
+require("malformed.php" + );
+require("boot/$name.php");
+require($dynamic);
+require [];
+require(BOOTSTRAP);
+include_once(Vendor\BOOTSTRAP);
+"#;
+        let graph = extract_symbol_graph("src/Includes.php", Some("php"), source);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        for (target, line) in [("parenthesized.php", 2), ("parent-config.php", 3)] {
+            let matches = imports
+                .iter()
+                .filter(|relation| relation.target_name == target)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "missing exact static include {target}: {imports:?}"
+            );
+            let relation = matches[0];
+            assert_eq!(relation.path, "src/Includes.php");
+            assert_eq!(relation.line, line);
+            assert_eq!(
+                relation.context,
+                source
+                    .lines()
+                    .nth(line - 1)
+                    .unwrap_or_default()
+                    .trim_end_matches(';')
+            );
+        }
+        assert!(imports.iter().all(|relation| {
+            !matches!(
+                relation.target_name.as_str(),
+                "nested.php" | "malformed.php" | "boot/$name.php" | "$dynamic" | "[]" | "BOOTSTRAP"
+            ) && !relation.target_name.contains("Vendor")
+        }));
+    }
+
+    #[test]
+    fn php_trait_use_relations_preserve_type_ownership_and_ignore_adaptations() {
+        let source = r"<?php
+trait Auditable {
+    public function audit(): void {}
+}
+trait FirstTrait {}
+class Service {
+    use Auditable;
+    use FirstTrait, Vendor\SecondTrait {
+        FirstTrait::audit insteadof Vendor\SecondTrait;
+        Vendor\SecondTrait::audit as protected auditFromSecond;
+    }
+}
+";
+        let graph = extract_symbol_graph("src/Traits.php", Some("php"), source);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+
+        for target in ["Auditable", "FirstTrait", "Vendor\\SecondTrait"] {
+            assert!(
+                imports.iter().any(|relation| {
+                    relation.source_name == "Service" && relation.target_name == target
+                }),
+                "missing class-owned PHP trait relation {target}: {imports:?}"
+            );
+        }
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "audit"
+                && symbol.parent.as_deref() == Some("Auditable")
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Contains
+                && relation.source_name == "Auditable"
+                && relation.target_name == "audit"
+        }));
+        assert!(imports.iter().all(|relation| {
+            relation.source_name != "<module>"
+                && !relation.target_name.starts_with("use ")
+                && !relation.target_name.contains("audit")
+                && !relation.target_name.contains("protected")
+        }));
+        assert!(!graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Import && symbol.parent.as_deref() == Some("Service")
+        }));
+
+        let anonymous = extract_symbol_graph(
+            "src/AnonymousTraits.php",
+            Some("php"),
+            "<?php new class { use Auditable; };",
+        );
+        assert!(
+            anonymous
+                .symbols
+                .iter()
+                .all(|symbol| symbol.kind != SymbolKind::Import),
+            "anonymous-class trait use must not become a module import: {anonymous:?}"
+        );
+        assert!(
+            anonymous
+                .relations
+                .iter()
+                .all(|relation| relation.kind != RelationKind::Imports),
+            "unsupported anonymous-class trait composition must abstain: {anonymous:?}"
+        );
+    }
+
+    #[test]
+    fn php_namespace_context_preserves_semicolon_and_braced_ownership() {
+        let source = r"<?php
+namespace First;
+use Vendor\First as FirstAlias;
+class FirstService {}
+function first_helper(): void {}
+first_helper();
+namespace Second;
+class SecondService {}
+function second_helper(): void {}
+namespace Third { class BracedService {} }
+namespace Fourth;
+class FourthService {}
+namespace { class GlobalService {} }
+class OutsideGlobal {}
+";
+        let graph = extract_symbol_graph("src/Namespaces.php", Some("php"), source);
+
+        for (name, parent) in [
+            ("Vendor\\First", "First"),
+            ("FirstService", "First"),
+            ("first_helper", "First"),
+            ("SecondService", "Second"),
+            ("second_helper", "Second"),
+            ("BracedService", "Third"),
+            ("FourthService", "Fourth"),
+        ] {
+            let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
+            assert!(
+                symbol.is_some(),
+                "missing PHP symbol {name}: {:?}",
+                graph.symbols
+            );
+            let Some(symbol) = symbol else { return };
+            assert_eq!(
+                symbol.parent.as_deref(),
+                Some(parent),
+                "wrong parent for {name}"
+            );
+            assert!(graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Contains
+                    && relation.source_name == parent
+                    && relation.target_name == name
+            }));
+        }
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Calls
+                && relation.source_name == "First"
+                && relation.target_name == "first_helper"
+        }));
+
+        let global_symbol = graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "GlobalService");
+        assert!(
+            global_symbol.is_some(),
+            "missing global PHP symbol: {:?}",
+            graph.symbols
+        );
+        let Some(global_symbol) = global_symbol else {
+            return;
+        };
+        assert!(global_symbol.parent.is_none());
+        assert!(!graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Contains && relation.target_name == "GlobalService"
+        }));
+
+        let outside_global = graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "OutsideGlobal");
+        assert_eq!(
+            outside_global.and_then(|symbol| symbol.parent.as_deref()),
+            None
+        );
+
+        let malformed = extract_symbol_graph(
+            "src/MalformedNamespace.php",
+            Some("php"),
+            "<?php\nnamespace Before;\nclass BeforeService {}\nnamespace Broken\\;\nclass AfterMalformed {}\n",
+        );
+        assert!(malformed.symbols.iter().any(|symbol| {
+            symbol.name == "BeforeService" && symbol.parent.as_deref() == Some("Before")
+        }));
+        assert!(
+            !malformed
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "AfterMalformed")
+        );
+        assert_eq!(malformed.parser, ParserKind::Fallback);
+        assert!(!malformed.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Contains && relation.target_name == "AfterMalformed"
+        }));
+    }
+
+    #[test]
+    fn php_conditional_namespace_declarations_preserve_scope_without_crossing_symbol_owners() {
+        let source = r"<?php
+namespace Conditional;
+if ($enabled) {
+    function boot(): void {}
+    class ConditionalService {}
+}
+class Owner {
+    public function run(): void {
+        if ($enabled) {
+            function nested(): void {}
+        }
+    }
+}
+";
+        let graph = extract_symbol_graph("src/Conditional.php", Some("php"), source);
+
+        for name in ["boot", "ConditionalService"] {
+            let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
+            assert!(symbol.is_some(), "missing conditional PHP symbol {name}");
+            let Some(symbol) = symbol else { return };
+            assert_eq!(symbol.parent.as_deref(), Some("Conditional"));
+            assert!(graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Contains
+                    && relation.source_name == "Conditional"
+                    && relation.target_name == name
+            }));
+        }
+
+        for (name, parent) in [("run", "Owner"), ("nested", "Conditional")] {
+            let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
+            assert!(symbol.is_some(), "missing nested PHP symbol {name}");
+            let Some(symbol) = symbol else { return };
+            assert_eq!(symbol.parent.as_deref(), Some(parent));
+            assert!(graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Contains
+                    && relation.source_name == parent
+                    && relation.target_name == name
+            }));
+        }
+    }
+
+    #[test]
+    fn php_mixed_recovery_dynamic_and_bounded_inputs_stay_conservative() {
+        let mixed = extract_symbol_graph(
+            "templates/page.php",
+            Some("php"),
+            "<main>static</main><?php function render(): void { helper(); } ?>",
+        );
+        assert_eq!(mixed.parser, ParserKind::TreeSitter);
+        assert!(mixed.symbols.iter().any(|symbol| symbol.name == "render"));
+
+        let pure = extract_symbol_graph(
+            "src/pure.php",
+            Some("php"),
+            "function pure(): void { return; }",
+        );
+        assert_eq!(pure.parser, ParserKind::TreeSitter);
+        assert!(
+            pure.symbols.is_empty(),
+            "tagless PHP files are inline text, not PHP-only fragments: {pure:?}"
+        );
+
+        let dynamic = extract_symbol_graph(
+            "src/dynamic.php",
+            Some("php"),
+            "<?php $callable(); $object->$method(); include $path;",
+        );
+        assert_eq!(dynamic.parser, ParserKind::Fallback);
+        assert!(dynamic.relations.iter().all(|relation| {
+            !matches!(relation.kind, RelationKind::Calls | RelationKind::Imports)
+                || ![
+                    "$callable",
+                    "$method",
+                    "$path",
+                    "callable",
+                    "method",
+                    "path",
+                ]
+                .contains(&relation.target_name.as_str())
+        }));
+
+        let malformed = extract_symbol_graph(
+            "src/broken.php",
+            Some("php"),
+            "<?php function recovered(): void {} function broken( { $unknown->();",
+        );
+        assert_eq!(malformed.parser, ParserKind::Fallback);
+        assert!(
+            malformed
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "recovered")
+        );
+        assert!(malformed.relations.iter().all(|relation| {
+            relation.kind != RelationKind::Calls || relation.target_name != "$unknown"
+        }));
+        assert!(malformed.symbols.len() <= MAX_SYMBOLS_PER_FILE);
+        assert!(malformed.relations.len() <= 8_000);
+    }
+
+    #[test]
+    fn php_namespace_context_builds_one_forward_cursor_at_intended_scale() {
+        let declaration_count = 8_050;
+        let source = large_semicolon_namespace_source(declaration_count);
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let parsed = super::parse_php_tree(&source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(parsed.is_some(), "large PHP source should have a tree");
+        let Some(parsed) = parsed else { return };
+        let root = parsed.tree.root_node();
+        let named_child_count = root.named_child_count();
+        let mut context_check = || Ok::<(), Infallible>(());
+        let mut context = PhpNamespaceContext::from_program(root, &source, &mut context_check)
+            .expect("namespace context should build");
+        let mut cursor = root.walk();
+        let mut declaration_lookups = 0;
+        for child in root.named_children(&mut cursor) {
+            if matches!(child.kind(), "namespace_definition" | "php_tag") {
+                continue;
+            }
+            declaration_lookups += 1;
+            let expected_parent = if declaration_lookups == 1 {
+                "Prefix"
+            } else {
+                "Scale"
+            };
+            assert_eq!(context.parent_for(child).as_deref(), Some(expected_parent));
+        }
+        assert_eq!(named_child_count, declaration_count + 3);
+        assert_eq!(context.examined_children, named_child_count);
+        assert_eq!(context.parent_lookups, declaration_lookups);
+        assert_eq!(declaration_lookups, declaration_count);
+        assert_eq!(context.next_range, context.ranges.len() - 1);
+
+        let bounded = extract_symbol_graph("src/large.php", Some("php"), &source);
+        assert_eq!(bounded.parser, ParserKind::Fallback);
+        assert_eq!(bounded.symbols.len(), MAX_SYMBOLS_PER_FILE);
+        for count in [
+            MAX_SYMBOLS_PER_FILE - 1,
+            MAX_SYMBOLS_PER_FILE,
+            MAX_SYMBOLS_PER_FILE + 1,
+        ] {
+            let mut source = String::from("<?php\n");
+            for index in 0..count {
+                assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+            }
+            let graph = extract_symbol_graph("src/capped.php", Some("php"), &source);
+            let expected = if count > MAX_SYMBOLS_PER_FILE {
+                ParserKind::Fallback
+            } else {
+                ParserKind::TreeSitter
+            };
+            assert_eq!(graph.parser, expected, "PHP symbol-cap coverage at {count}");
+            assert_eq!(graph.symbols.len(), count.min(MAX_SYMBOLS_PER_FILE));
+            assert!(graph.symbols.iter().all(|symbol| symbol.parser == expected));
+        }
+    }
+
+    #[test]
+    fn php_relation_caps_report_partial_coverage() {
+        for length in [
+            MAX_SNIPPET_CHARS - 1,
+            MAX_SNIPPET_CHARS,
+            MAX_SNIPPET_CHARS + 1,
+        ] {
+            let name = "N".repeat(length);
+            for declaration in [
+                format!("class {name} {{ function child() {{ helper(); }} }}"),
+                format!("trait {name} {{ function child() {{ helper(); }} }}"),
+                format!("interface {name} {{ function child(); }}"),
+                format!("enum {name} {{ function child() {{ helper(); }} }}"),
+                format!("function {name}() {{ function child() {{ helper(); }} }}"),
+            ] {
+                let source = format!("<?php {declaration} function kept() {{}}");
+                let graph = extract_symbol_graph("src/declaration-name.php", Some("php"), &source);
+                let rejected = length > MAX_SNIPPET_CHARS;
+                let expected = if rejected {
+                    ParserKind::Fallback
+                } else {
+                    ParserKind::TreeSitter
+                };
+                assert_eq!(
+                    graph.parser, expected,
+                    "PHP declaration admission: {declaration}"
+                );
+                assert!(graph.symbols.iter().any(|symbol| symbol.name == "kept"));
+                assert_eq!(
+                    graph.symbols.iter().any(|symbol| symbol.name == "child"),
+                    !rejected
+                );
+                if rejected {
+                    assert_eq!(graph.symbols.len(), 1);
+                    assert!(graph.relations.is_empty());
+                }
+                assert!(graph.symbols.iter().all(|symbol| symbol.parser == expected));
+                assert!(
+                    graph
+                        .relations
+                        .iter()
+                        .all(|relation| relation.parser == expected)
+                );
+            }
+        }
+        for length in [
+            MAX_SNIPPET_CHARS - 1,
+            MAX_SNIPPET_CHARS,
+            MAX_SNIPPET_CHARS + 1,
+        ] {
+            let target = "T".repeat(length);
+            let source = format!("<?php class Owner {{ use {target}, Kept; }}");
+            let graph = extract_symbol_graph("src/trait-name.php", Some("php"), &source);
+            let expected = if length > MAX_SNIPPET_CHARS {
+                ParserKind::Fallback
+            } else {
+                ParserKind::TreeSitter
+            };
+            assert_eq!(
+                graph.parser, expected,
+                "PHP trait-name coverage at {length}"
+            );
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .any(|relation| relation.kind == RelationKind::Imports
+                        && relation.target_name == "Kept")
+            );
+            assert_eq!(
+                graph
+                    .relations
+                    .iter()
+                    .filter(|relation| relation.kind == RelationKind::Imports)
+                    .count(),
+                if length > MAX_SNIPPET_CHARS { 1 } else { 2 }
+            );
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.parser == expected)
+            );
+        }
+        for count in [
+            MAX_RELATIONS_PER_FILE - 1,
+            MAX_RELATIONS_PER_FILE,
+            MAX_RELATIONS_PER_FILE + 1,
+        ] {
+            let calls = format!("<?php\n{}", "helper();\n".repeat(count));
+            let graph = extract_symbol_graph("src/calls.php", Some("php"), &calls);
+            let expected = if count > MAX_RELATIONS_PER_FILE {
+                ParserKind::Fallback
+            } else {
+                ParserKind::TreeSitter
+            };
+            assert_eq!(graph.parser, expected, "PHP call-cap coverage at {count}");
+            assert_eq!(graph.relations.len(), count.min(MAX_RELATIONS_PER_FILE));
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.parser == expected)
+            );
+        }
+        let targets = (0..MAX_RELATIONS_PER_FILE)
+            .map(|index| format!("T{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for source in [
+            format!("<?php\nhelper();\nuse Vendor\\{{{targets}}};"),
+            format!("<?php\nhelper();\nclass Owner {{ use {targets}; }}"),
+            format!("<?php\nclass Owner {{ use {targets}, Overflow; }}"),
+        ] {
+            let graph = extract_symbol_graph("src/imports.php", Some("php"), &source);
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            assert_eq!(graph.relations.len(), MAX_RELATIONS_PER_FILE);
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.parser == ParserKind::Fallback)
+            );
+        }
+    }
+
+    #[test]
+    fn php_oversized_namespace_is_bounded_before_declaration_ownership() {
+        let oversized_name = "N".repeat(1_900_000);
+        let mut source = format!("<?php\nnamespace {oversized_name};\n");
+        for index in 0..(MAX_SYMBOLS_PER_FILE + 50) {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let parsed = super::parse_php_tree(&source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(parsed.is_some(), "oversized namespace source should parse");
+        let Some(parsed) = parsed else { return };
+
+        let mut cancellation_checks = 0;
+        let cancelled =
+            PhpNamespaceContext::from_program(parsed.tree.root_node(), &source, &mut || {
+                cancellation_checks += 1;
+                if cancellation_checks > 128 {
+                    Err("cancelled")
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(matches!(cancelled, Err("cancelled")));
+        assert_eq!(cancellation_checks, 129);
+
+        let mut context_check = || Ok::<(), Infallible>(());
+        let context =
+            PhpNamespaceContext::from_program(parsed.tree.root_node(), &source, &mut context_check)
+                .expect("oversized namespace context should remain bounded");
+        assert_eq!(context.ranges.len(), 1);
+        assert!(context.ranges[0].name.is_none());
+
+        let graph = extract_symbol_graph("src/OversizedNamespace.php", Some("php"), &source);
+        assert_eq!(graph.parser, ParserKind::Fallback, "graph: {graph:?}");
+        assert!(graph.symbols.is_empty());
+        assert!(graph.relations.is_empty());
+    }
+
+    #[test]
+    fn php_unrepresentable_namespace_does_not_publish_global_facts() {
+        let namespace = "N".repeat(MAX_SNIPPET_CHARS + 1);
+        for source in [
+            format!(
+                "<?php\nnamespace {namespace};\nfunction hidden() {{ hidden(); }}\nnamespace Visible;\nfunction kept() {{}}"
+            ),
+            format!(
+                "<?php\nnamespace {namespace} {{ function hidden() {{ hidden(); }} }}\nnamespace Visible {{ function kept() {{}} }}"
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/scopes.php", Some("php"), &source);
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            assert!(graph.symbols.iter().all(|symbol| symbol.name != "hidden"));
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.target_name != "hidden")
+            );
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == "kept"
+                        && symbol.parent.as_deref() == Some("Visible"))
+            );
+        }
+    }
+
+    #[test]
+    fn php_namespace_prepass_honors_cancellation_at_intended_scale() {
+        let source = large_semicolon_namespace_source(8_050);
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let parsed = super::parse_php_tree(&source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(parsed.is_some(), "large PHP source should have a tree");
+        let Some(parsed) = parsed else { return };
+        assert!(parsed.tree.root_node().named_child_count() > 8_000);
+
+        let mut checks = 0;
+        let result =
+            PhpNamespaceContext::from_program(parsed.tree.root_node(), &source, &mut || {
+                checks += 1;
+                if checks > 128 {
+                    Err("cancelled")
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(matches!(result, Err("cancelled")));
+        assert_eq!(checks, 129);
+    }
+
+    #[test]
+    fn php_opening_tag_detection_ignores_literals_and_comments() {
+        for source in [
+            r#"function marker(): string { return "<?"; }"#,
+            r#"function marker(): string { return "<?php function fake(): void {}"; }"#,
+            r"function marker(): string { return <<<TEXT
+<?
+TEXT;
+}",
+            r"function marker(): string { return <<<'TEXT'
+<?
+TEXT;
+            }",
+            "function marker(): string { return `echo <?`; }",
+            "<?xml version=\"1.0\"?><root />",
+            "HTML<?xml version=\"1.0\"?><root />",
+            "<?xml\nversion = '1.0' ?><root />",
+        ] {
+            assert!(
+                !super::contains_php_opening_tag(source),
+                "PHP-only source was classified as mixed: {source:?}"
+            );
+            let graph = extract_symbol_graph("src/marker.php", Some("php"), source);
+            assert!(
+                graph.symbols.is_empty(),
+                "tagless PHP source must remain inline text: {graph:?}"
+            );
+        }
+
+        for (source, symbol_name) in [
+            ("<?php function tagged(): void {} ?>", "tagged"),
+            ("<? function short_tagged(): void {} ?>", "short_tagged"),
+            (
+                "HTML // <? function short_after_output(): void {}",
+                "short_after_output",
+            ),
+            (
+                "//x<? function short_after_marker(): void {}",
+                "short_after_marker",
+            ),
+            (
+                "// <? function short_after_comment(): void {}",
+                "short_after_comment",
+            ),
+            (
+                "# <? function short_after_hash(): void {}",
+                "short_after_hash",
+            ),
+            (
+                "/* <? */ function short_after_block(): void {}",
+                "short_after_block",
+            ),
+            (
+                "<?= $value ?><?php function after_echo(): void {} ?>",
+                "after_echo",
+            ),
+            (
+                "<main>content</main><?php function mixed(): void {} ?>",
+                "mixed",
+            ),
+            ("// <? ?><?php function reopened(): void {} ?>", "reopened"),
+            (
+                "# <? ?><?php function reopened_hash(): void {} ?>",
+                "reopened_hash",
+            ),
+            (
+                "/* <? ?> */<?php function reopened_block(): void {} ?>",
+                "reopened_block",
+            ),
+            (
+                "/* <?php */ function marker(): string { return 'marker'; }",
+                "marker",
+            ),
+            ("// <?php function boot() {}", "boot"),
+            ("# <?php function hash_boot() {}", "hash_boot"),
+            ("/* <?php function block_boot(): void {}", "block_boot"),
+            ("//x<?php function marker(): string {}", "marker"),
+            (
+                "#output<?= $value ?><?php function after_echo(): void {}",
+                "after_echo",
+            ),
+        ] {
+            assert!(
+                super::contains_php_opening_tag(source),
+                "genuine PHP opening tag was not classified as mixed: {source:?}"
+            );
+            let graph = extract_symbol_graph("src/tagged.php", Some("php"), source);
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == symbol_name),
+                "mixed PHP symbol disappeared after opening-tag classification: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn php_pre_tag_inline_output_keeps_exact_symbol_identity() {
+        let source = "// <?php function boot() {}";
+        let graph = extract_symbol_graph("src/boot.php", Some("php"), source);
+        assert!(
+            graph.symbols.iter().any(|symbol| symbol.name == "boot"),
+            "pre-tag PHP function must be recovered"
+        );
+        let Some(symbol) = graph.symbols.iter().find(|symbol| symbol.name == "boot") else {
+            return;
+        };
+        assert!(
+            symbol.source_selector.is_some(),
+            "pre-tag PHP function must retain its selector"
+        );
+        let Some(selector) = symbol.source_selector else {
+            return;
+        };
+        assert_eq!(
+            &source[selector.byte_start..selector.byte_end],
+            "function boot() {}"
+        );
+        assert_eq!(selector.column_start, 9);
+        assert_eq!(selector.column_end, 27);
+    }
+
+    #[test]
+    fn php_mixed_inline_output_transitions_retain_tree_sitter_facts() {
+        for (source, symbol_name, expected_selector, expected_start, expected_end) in [
+            (
+                "//x<?php function marker(): string { helper(); }",
+                "marker",
+                "function marker(): string { helper(); }",
+                9,
+                48,
+            ),
+            (
+                "//x<?PHP function mixed_case(): string { helper(); }",
+                "mixed_case",
+                "function mixed_case(): string { helper(); }",
+                9,
+                52,
+            ),
+            (
+                "HTML // <?php function marker(): string { helper(); }",
+                "marker",
+                "function marker(): string { helper(); }",
+                14,
+                53,
+            ),
+            (
+                "HTML // <? function short_after_output(): string { helper(); }",
+                "short_after_output",
+                "function short_after_output(): string { helper(); }",
+                11,
+                62,
+            ),
+            (
+                "//x<? function short_after_marker(): string { helper(); }",
+                "short_after_marker",
+                "function short_after_marker(): string { helper(); }",
+                6,
+                57,
+            ),
+            (
+                "/* <?php function block_boot(): void { helper(); }",
+                "block_boot",
+                "function block_boot(): void { helper(); }",
+                9,
+                50,
+            ),
+            (
+                "#output<?= $value ?><?php function after_echo(): void { helper(); }",
+                "after_echo",
+                "function after_echo(): void { helper(); }",
+                26,
+                67,
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/inline-output.php", Some("php"), source);
+            assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == symbol_name),
+                "mixed PHP declaration must be recovered"
+            );
+            let Some(symbol) = graph
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == symbol_name)
+            else {
+                return;
+            };
+            assert_eq!(symbol.parser, ParserKind::TreeSitter);
+            assert!(
+                symbol.source_selector.is_some(),
+                "mixed PHP declaration must retain its selector"
+            );
+            let Some(selector) = symbol.source_selector else {
+                return;
+            };
+            assert_eq!(selector.byte_start, expected_start);
+            assert_eq!(selector.byte_end, expected_end);
+            assert_eq!(selector.column_start, expected_start);
+            assert_eq!(selector.column_end, expected_end);
+            assert_eq!(
+                &source[selector.byte_start..selector.byte_end],
+                expected_selector
+            );
+            assert!(graph.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Calls
+                    && relation.source_name == symbol_name
+                    && relation.target_name == "helper"
+                    && relation.path == "src/inline-output.php"
+                    && relation.parser == ParserKind::TreeSitter
+            }));
+        }
+    }
+
+    #[test]
+    fn php_template_attribute_output_does_not_hide_php_tag() {
+        let source = "<div title='<?php function boot(): void {} ?>'>";
+        assert!(super::contains_php_opening_tag(source));
+        let graph = extract_symbol_graph("src/template.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+        assert!(
+            graph.symbols.iter().any(|symbol| symbol.name == "boot"),
+            "PHP inside contiguous template output must remain navigable: {graph:?}"
+        );
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .all(|symbol| { !matches!(symbol.name.as_str(), "div" | "title") })
+        );
+    }
+
+    #[test]
+    fn php_confirmed_mode_does_not_promote_tag_like_literals() {
+        let source = r#"<?php
+//x<?php function fake_comment(): void {}
+#output<?php function fake_hash_comment(): void {}
+$value = "<?php function fake_string(): void {}";
+$doc = <<<TEXT
+<?php function fake_heredoc(): void {}
+TEXT;
+function real(): void { helper(); }
+"#;
+        let graph = extract_symbol_graph("src/confirmed-mode.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
+        assert!(graph.symbols.iter().any(|symbol| symbol.name == "real"));
+        assert!(graph.symbols.iter().all(|symbol| {
+            !matches!(
+                symbol.name.as_str(),
+                "fake_comment" | "fake_hash_comment" | "fake_string" | "fake_heredoc"
+            )
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Calls
+                && relation.source_name == "real"
+                && relation.target_name == "helper"
+        }));
+    }
+
+    #[test]
+    fn php_opening_tag_search_stops_at_first_source_order_tag() {
+        let mut source = String::from("<?php\n");
+        for index in 0..512 {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let language = super::tree_sitter_language("php");
+        assert!(language.is_some(), "PHP grammar should be registered");
+        let Some(language) = language else { return };
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let tree = super::parse_tree_sitter_language(&language, &source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(tree.is_some(), "mixed PHP source should produce a tree");
+        let Some(tree) = tree else { return };
+        let mut examined_nodes = 0;
+        let first = super::first_php_tag_start(
+            tree.root_node(),
+            &mut || Ok::<(), Infallible>(()),
+            &mut examined_nodes,
+        );
+        assert_eq!(first, Ok(Some(0)));
+        assert!(
+            examined_nodes < 16,
+            "source-order tag search should stop before walking the function body: {examined_nodes}"
+        );
+    }
+
+    #[test]
+    fn php_opening_tag_search_checks_cancellation_on_large_tagless_tree() {
+        let mut source = String::new();
+        for index in 0..512 {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let language = super::tree_sitter_language("php");
+        assert!(language.is_some(), "PHP grammar should be registered");
+        let Some(language) = language else { return };
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let tree = super::parse_tree_sitter_language(&language, &source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(tree.is_some(), "PHP-only source should produce a tree");
+        let Some(tree) = tree else { return };
+        let mut examined_nodes = 0;
+        let mut checks = 0;
+        let result = super::first_php_tag_start(
+            tree.root_node(),
+            &mut || {
+                checks += 1;
+                Err::<(), _>("cancelled")
+            },
+            &mut examined_nodes,
+        );
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(checks, 1);
+        assert!(examined_nodes >= super::PARSER_CONTROL_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn php_opaque_range_walk_checks_cancellation_on_large_tree() {
+        let mut source = String::new();
+        for index in 0..512 {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let language = super::tree_sitter_language("php");
+        assert!(language.is_some(), "PHP grammar should be registered");
+        let Some(language) = language else { return };
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let tree = super::parse_tree_sitter_language(&language, &source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(tree.is_some(), "PHP-only source should produce a tree");
+        let Some(tree) = tree else { return };
+        let mut ranges = Vec::new();
+        let mut examined_nodes = 0;
+        let mut checks = 0;
+        let result = super::collect_php_only_opaque_ranges(
+            tree.root_node(),
+            &mut ranges,
+            &mut || {
+                checks += 1;
+                Err::<(), _>("cancelled")
+            },
+            &mut examined_nodes,
+        );
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(checks, 1);
+        assert!(examined_nodes >= super::PARSER_CONTROL_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn php_mixed_tag_walk_checks_cancellation_on_large_tree() {
+        let mut source = String::from("<?php\n");
+        for index in 0..512 {
+            assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+        }
+        let language = tree_sitter_php::LANGUAGE_PHP.into();
+        let mut parse_check = || Ok::<(), Infallible>(());
+        let tree = super::parse_tree_sitter_language(&language, &source, &mut parse_check)
+            .ok()
+            .flatten();
+        assert!(tree.is_some(), "mixed PHP source should produce a tree");
+        let Some(tree) = tree else { return };
+        let mut next_opaque = 0;
+        let mut examined_nodes = 0;
+        let mut checks = 0;
+        let result = super::tree_contains_php_tag_outside_ranges(
+            tree.root_node(),
+            &[(0, 6, true)],
+            &mut next_opaque,
+            &source,
+            &mut || {
+                checks += 1;
+                Err::<(), _>("cancelled")
+            },
+            &mut examined_nodes,
+        );
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(checks, 1);
+        assert!(examined_nodes >= super::PARSER_CONTROL_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn indexes_composer_style_php_source_through_the_builtin_owner() {
+        let source = r"<?php
+namespace Composer\Autoload;
+
+use Composer\Autoload\ClassLoader as Loader;
+
+class ClassLoader {
+    public function loadClass(string $class): bool {
+        return $this->findFile($class) !== null;
+    }
+    private function findFile(string $class): ?string { return null; }
+}
+";
+        let graph = extract_symbol_graph("vendor/composer/ClassLoader.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::Fallback);
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.kind == SymbolKind::Class && symbol.name == "ClassLoader" })
+        );
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Method
+                && symbol.name == "loadClass"
+                && symbol.parent.as_deref() == Some("ClassLoader")
+        }));
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports
+                && relation.target_name == "Composer\\Autoload\\ClassLoader"
+        }));
+        assert!(graph.relations.iter().all(|relation| {
+            relation.kind != RelationKind::Calls || relation.target_name != "findFile"
+        }));
+    }
+
+    #[test]
+    fn php_anonymous_class_members_do_not_inherit_named_owners() {
+        let source = r"<?php
+namespace Outer;
+
+trait Auditable {}
+
+function factory(): object {
+    return new class {
+        use Auditable;
+        public string $anonymous_property;
+        public const ANONYMOUS_CONSTANT = 1;
+        public function __construct(public string $anonymous_promoted) {}
+        public function anonymous_method(): void { anonymous_helper(); }
+    };
+}
+
+class NamedOwner {
+    public string $named_property;
+    public const NAMED_CONSTANT = 1;
+    public function named_method(): void { named_helper(); }
+    public function make(): object {
+        return new class {
+            use Auditable;
+            public string $nested_property;
+            public const NESTED_CONSTANT = 1;
+            public function __construct(public string $nested_promoted) {}
+            public function nested_method(): void { nested_helper(); }
+        };
+    }
+}
+";
+        let graph = extract_symbol_graph("src/AnonymousMembers.php", Some("php"), source);
+        assert_eq!(graph.parser, ParserKind::Fallback, "graph: {graph:?}");
+
+        for name in [
+            "factory",
+            "NamedOwner",
+            "named_property",
+            "NAMED_CONSTANT",
+            "named_method",
+        ] {
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == name),
+                "named PHP symbol disappeared: {name}: {graph:?}"
+            );
+        }
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.name == "factory" && symbol.parent.as_deref() == Some("Outer")
+        }));
+        assert!(graph.symbols.iter().any(|symbol| {
+            symbol.name == "named_method" && symbol.parent.as_deref() == Some("NamedOwner")
+        }));
+
+        for name in [
+            "anonymous_property",
+            "ANONYMOUS_CONSTANT",
+            "anonymous_promoted",
+            "anonymous_method",
+            "nested_property",
+            "NESTED_CONSTANT",
+            "nested_promoted",
+            "nested_method",
+        ] {
+            assert!(
+                graph.symbols.iter().all(|symbol| symbol.name != name),
+                "unsupported anonymous PHP member leaked as a symbol: {name}: {graph:?}"
+            );
+            assert!(
+                graph.relations.iter().all(|relation| {
+                    relation.source_name != name && relation.target_name != name
+                })
+            );
+        }
+        assert!(graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Calls
+                && relation.source_name == "named_method"
+                && relation.target_name == "named_helper"
+        }));
+        assert!(graph.relations.iter().all(|relation| {
+            !matches!(
+                relation.target_name.as_str(),
+                "anonymous_helper" | "nested_helper"
+            )
+        }));
+        assert!(!graph.relations.iter().any(|relation| {
+            relation.kind == RelationKind::Imports && relation.target_name == "Auditable"
+        }));
     }
 }

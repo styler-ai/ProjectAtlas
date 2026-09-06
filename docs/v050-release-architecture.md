@@ -238,14 +238,26 @@ rows and valid graph rows at the previous complete generation.
 
 ## Built-in PHP parser and graph publication
 
+PHP call matching uses case-insensitive names and proven namespace/type ownership, including known global callers and explicit `namespace\` references. Qualified names expand against the known caller namespace when namespace imports cannot alias them. A namespace-use symbol introduces alias uncertainty for an ordinary unrooted call when it occurs on an earlier line within the same named namespace declaration block, or no later in parser relation order on a same line whose import symbols and relations pair losslessly. A simple same-line import after the caller does not suppress that earlier call. Grouped or multi-clause same-line imports with unmatched symbol/relation counts remain conservative. An import in an earlier reopened block does not suppress a later block's proven local call. Tied line-only boundaries and omitted namespace declarations remain conservative. Include/require and type-owned trait-use facts do not introduce alias uncertainty, including when unrelated dynamic code makes coverage partial. Include relations retain bounded source syntax so the shared import kind cannot be mistaken for a namespace alias. Missing namespace-import symbols and unknown or legacy import contexts remain conservative. `self::`, fully qualified, and explicit namespace-relative calls retain their independent scope checks. Dynamic dispatch and unproven scopes remain unresolved. Namespace identities beyond the parser's identity bound, or malformed semicolon namespaces, omit dependent facts and report partial coverage instead of publishing global declarations. A declaration rejected by identity or symbol-count limits admits no descendant symbols or relations; admitted siblings remain available and coverage is partial.
+
+A proven outer-scope `__halt_compiler();` directive ends PHP traversal; the remaining bytes are embedded data and publish no declarations or calls.
+
+Anonymous function and arrow-function bodies have no supported stable owner, so their subtrees are omitted with partial coverage instead of attributing calls to an enclosing named function. Grouped imports bound the prefix and combined target before allocation; omitted targets mark coverage partial while admitted imports remain available. If no complete target fits, a bounded grammar-owned alias or terminal binding remains an Import symbol, preserving alias uncertainty without fabricating a target relation. Short-tag code whose first identifier starts with `xml` remains PHP; only the XML declaration prefix is excluded as a prolog.
+
+Call-source ownership and target scope share one lookup that prefers a unique line-containing PHP callable over unrelated same-name types or imports, then falls back to a namespace owner. Unknown or ambiguous callers retain file ownership, including namespace/callable collisions on a callable boundary line where line-only facts cannot prove the owner. Semicolon namespace declarations still own their later top-level calls. Reopened blocks with the same namespace name share one logical namespace owner for top-level calls. Trait-owned `self::` targets remain unresolved because the consuming class can override the trait member and trait composition is not modeled.
+
+Non-PHP source provenance records the parser that produced the graph, including fallback. PHP retains Tree-sitter source provenance when bounded or unsupported behavior makes its grammar-produced facts partial fallback evidence. If an erroneous PHP parse yields no facts and the generic extractor rescues declarations, both source and fact provenance record fallback.
+
+Scoped calls match methods and ordinary calls match functions; a namespace and class sharing a name cannot substitute one callable kind for the other. Named PHP function and type declarations belong to their active namespace even inside a function or method. Their declaration identity does not imply that conditional runtime execution has already made them available.
+
 ```mermaid
 flowchart LR
     php[.php bytes] --> registry[Language capability registry]
-    registry --> grammar[Pinned built-in tree-sitter-php]
+    registry --> grammar[Pinned built-in tree-sitter-php 0.24.2]
     grammar --> mapping[PHP node-to-symbol mapping]
-    mapping --> exact[Exact symbols, parents, spans, provenance]
-    mapping --> relations[Conservative namespace, import, include, call relations]
-    mapping --> dynamic[Typed partial coverage for dynamic constructs]
+    mapping --> exact[Admitted symbols, parents, spans, source/fact provenance]
+    mapping --> relations[Conservative relations from admitted declarations]
+    mapping --> dynamic[Typed partial coverage: dynamic or bounded facts]
     exact --> published_graph[(Existing graph publication)]
     relations --> published_graph
     dynamic --> published_graph

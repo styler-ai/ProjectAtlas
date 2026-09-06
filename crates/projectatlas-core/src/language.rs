@@ -17,7 +17,7 @@ pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 4;
 pub const SEMANTIC_PROVIDER_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the accepted language capability floor.
-pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 12;
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 13;
 
 /// Version of exact detector precedence and content-matching semantics.
 pub const LANGUAGE_DETECTION_POLICY_VERSION: u32 = 1;
@@ -105,6 +105,10 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V11_DIGEST: &str =
 /// binding ProjectAtlas-owned parser provenance to the 0.4.5 runtime.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V12_DIGEST: &str =
     "bae01db588d8e6c8666bb1afd66ffcbffb3022c23c68df52f9822c291f9d895c";
+
+/// Acceptance seal for the built-in PHP grammar capability set.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST: &str =
+    "63ccc321601fcc207a7540163abb9cff9547d41e43b8b696073e22707db4a3d1";
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.
 pub const LANGUAGE_CONTENT_DETECTION_MAX_BYTES: usize = 512;
@@ -277,6 +281,8 @@ pub enum TreeSitterGrammar {
     C,
     /// C++ grammar.
     Cpp,
+    /// PHP grammar.
+    Php,
 }
 
 impl TreeSitterGrammar {
@@ -295,6 +301,7 @@ impl TreeSitterGrammar {
         Self::Zig,
         Self::C,
         Self::Cpp,
+        Self::Php,
     ];
 
     /// Return the exact Cargo package that provides this built-in grammar.
@@ -313,6 +320,7 @@ impl TreeSitterGrammar {
             Self::Zig => "tree-sitter-zig",
             Self::C => "tree-sitter-c",
             Self::Cpp => "tree-sitter-cpp",
+            Self::Php => "tree-sitter-php",
         }
     }
 
@@ -320,7 +328,7 @@ impl TreeSitterGrammar {
     #[must_use]
     pub const fn version(self) -> &'static str {
         match self {
-            Self::Rust | Self::C => "0.24.2",
+            Self::Rust | Self::C | Self::Php => "0.24.2",
             Self::Python | Self::JavaScript | Self::Go => "0.25.0",
             Self::TypeScript | Self::Tsx => "0.23.2",
             Self::Java | Self::CSharp => "0.23.5",
@@ -1094,7 +1102,7 @@ define_language_registry! {
         "graphql" => { aliases: ["gql"], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.gql", negative: "fixture.gql.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "config" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::ConfigText), support: SUPPORTED_STRUCTURAL, positive: "fixture.ini", negative: "fixture.ini.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "ruby" => { aliases: ["rb"], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.rb", negative: "fixture.rb.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "php" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.php", negative: "fixture.php.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "php" => { aliases: [], parser_support: Native, symbol_parser: SymbolParserOwner::TreeSitter(TreeSitterGrammar::Php), structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.php", negative: "fixture.php.bak", provenance: CapabilityProvenance::TreeSitter(TreeSitterGrammar::Php) },
         "swift" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.swift", negative: "fixture.swift.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "scala" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.scala", negative: "fixture.scala.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "shell" => { aliases: ["sh"], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.sh", negative: "fixture.sh.bak", provenance: CapabilityProvenance::ProjectAtlas },
@@ -2333,6 +2341,7 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
         10 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V10_DIGEST,
         11 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V11_DIGEST,
         12 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V12_DIGEST,
+        13 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST,
         version => {
             return Err(LanguageRegistryError::new(format!(
                 "accepted language capability-set version {version} lacks a historical digest seal"
