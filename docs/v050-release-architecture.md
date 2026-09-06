@@ -232,6 +232,8 @@ Anonymous function and arrow-function bodies have no supported stable owner, so 
 
 Call-source ownership and target scope share one lookup that prefers a unique line-containing PHP callable over unrelated same-name types or imports, then falls back to a namespace owner. Unknown or ambiguous callers retain file ownership, including namespace/callable collisions on a callable boundary line where line-only facts cannot prove the owner. Semicolon namespace declarations still own their later top-level calls. Trait-owned `self::` targets remain unresolved because the consuming class can override the trait member and trait composition is not modeled.
 
+Scoped calls match methods and ordinary calls match functions; a namespace and class sharing a name cannot substitute one callable kind for the other. Named PHP function and type declarations belong to their active namespace even inside a function or method. Their declaration identity does not imply that conditional runtime execution has already made them available.
+
 ```mermaid
 flowchart LR
     php[.php bytes] --> registry[Language capability registry]

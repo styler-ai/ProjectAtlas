@@ -1349,7 +1349,12 @@ fn visit_node<E>(
             graph,
             node,
             content,
-            effective_declaration_kind(node, kind),
+            if is_php_language(graph.language.as_deref()) && node.kind() == "function_definition" {
+                // PHP methods have their own grammar node; nested functions stay functions.
+                kind
+            } else {
+                effective_declaration_kind(node, kind)
+            },
             php_namespace_context.as_deref_mut(),
         );
     }
@@ -1810,6 +1815,24 @@ fn symbol_parent(
 ) -> Option<String> {
     if is_inside_php_anonymous_class(node) {
         return None;
+    }
+    if php_namespace_context.is_some()
+        && matches!(
+            node.kind(),
+            "function_definition"
+                | "class_declaration"
+                | "interface_declaration"
+                | "trait_declaration"
+                | "enum_declaration"
+        )
+    {
+        // Named PHP declarations belong to their namespace even inside a callable.
+        return if let Some(namespace) = nearest_ancestor_kind(node.parent(), "namespace_definition")
+        {
+            php_bounded_namespace_name(namespace, content)
+        } else {
+            php_semicolon_namespace_parent(node, php_namespace_context)
+        };
     }
     if let Some(owner) = object_literal_method_owner(node, content) {
         return Some(owner.name);
@@ -5209,6 +5232,49 @@ version = "0.60.0"
 
     #[test]
     fn extracts_php_symbols_relations_and_exact_selectors() {
+        for (source, parent) in [
+            (
+                "<?php namespace N; function outer() { function inner() {} class InnerType {} }",
+                Some("N"),
+            ),
+            (
+                "<?php namespace N { class OuterType { function outer() { function inner() {} class InnerType {} } } }",
+                Some("N"),
+            ),
+            (
+                "<?php function outer() { function inner() {} class InnerType {} }",
+                None,
+            ),
+            (
+                "<?php namespace { function outer() { function inner() {} class InnerType {} } }",
+                None,
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/nested.php", Some("php"), source);
+            for name in ["inner", "InnerType"] {
+                let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
+                assert_eq!(
+                    symbol.map(|symbol| (symbol.parent.as_deref(), symbol.kind)),
+                    Some((
+                        parent,
+                        if name == "inner" {
+                            SymbolKind::Function
+                        } else {
+                            SymbolKind::Class
+                        }
+                    )),
+                    "{source}: {name}"
+                );
+            }
+            assert!(
+                !graph
+                    .relations
+                    .iter()
+                    .any(|relation| relation.kind == RelationKind::Contains
+                        && relation.source_name == "outer"
+                        && matches!(relation.target_name.as_str(), "inner" | "InnerType"))
+            );
+        }
         for source in [
             "<?xml(); function boot(): void {}",
             "HTML<?xml_parser(); function boot(): void {}",
@@ -6289,7 +6355,7 @@ class Owner {
             }));
         }
 
-        for (name, parent) in [("run", "Owner"), ("nested", "run")] {
+        for (name, parent) in [("run", "Owner"), ("nested", "Conditional")] {
             let symbol = graph.symbols.iter().find(|symbol| symbol.name == name);
             assert!(symbol.is_some(), "missing nested PHP symbol {name}");
             let Some(symbol) = symbol else { return };
@@ -6299,7 +6365,6 @@ class Owner {
                     && relation.source_name == parent
                     && relation.target_name == name
             }));
-            assert_ne!(symbol.parent.as_deref(), Some("Conditional"));
         }
     }
 

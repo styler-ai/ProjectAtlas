@@ -4987,6 +4987,13 @@ fn local_relation_matches<'a>(
                     symbol.name == lookup_name
                 };
                 name_matches
+                    && (!is_php_call
+                        || symbol.kind
+                            == if scoped_parent.is_some() {
+                                SymbolKind::Method
+                            } else {
+                                SymbolKind::Function
+                            })
                     && scoped_parent.is_none_or(|parent| {
                         symbol.parent.as_deref().is_some_and(|symbol_parent| {
                             if is_php_call {
@@ -10931,6 +10938,43 @@ class DuplicateB {
             )
         };
         let staged = finish_graph(&php_graph)?;
+        for source in [
+            "<?php namespace Service { function boot() {} } namespace { class Service {} Service::boot(); }",
+            "<?php namespace Service {} namespace { class Service { static function boot() {} } \\Service\\boot(); }",
+        ] {
+            let graph = extract_symbol_graph("src/call-kind.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            let calls: Vec<_> = staged
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                })
+                .collect();
+            require_eq(&calls.len(), &1, "PHP callable-kind collision fixture")?;
+            require(
+                matches!(calls[0].resolution(), RelationResolution::Unresolved { .. }),
+                "PHP calls must not resolve across function and method kinds",
+            )?;
+        }
+        for (source, parent) in [
+            (
+                "<?php namespace N; function outer() { function inner() {} } function caller() { inner(); }",
+                Some("N"),
+            ),
+            (
+                "<?php namespace N { class OuterType { function outer() { function inner() {} } } function caller() { inner(); } }",
+                Some("N"),
+            ),
+            (
+                "<?php function outer() { function inner() {} } function caller() { inner(); }",
+                None,
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/nested-call.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            require(staged.relations.iter().any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls) && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. } if symbol.name.as_str() == "inner" && symbol.kind == SymbolKind::Function && symbol.parent.as_ref().map(GraphIdentityText::as_str) == parent)), &format!("nested PHP function identity must resolve in its namespace: {source}"))?;
+        }
         let calls = staged
             .relations
             .iter()
