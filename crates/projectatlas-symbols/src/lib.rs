@@ -935,8 +935,8 @@ struct PhpNamespaceRange {
     start_byte: usize,
     /// First byte of the next namespace declaration or end of source.
     end_byte: usize,
-    /// Namespace name owned by this range.
-    name: String,
+    /// Bounded namespace identity; absent when its scope cannot be represented.
+    name: Option<String>,
 }
 
 impl PhpNamespaceContext {
@@ -972,10 +972,10 @@ impl PhpNamespaceContext {
                     name,
                 });
             }
-            if !child.has_error()
-                && child.child_by_field_name("body").is_none()
-                && let Some(name) = php_bounded_namespace_name(child, content)
-            {
+            if child.child_by_field_name("body").is_none() {
+                let name = (!child.has_error())
+                    .then(|| php_bounded_namespace_name(child, content))
+                    .flatten();
                 active = Some((child.end_byte(), name));
             }
         }
@@ -995,6 +995,11 @@ impl PhpNamespaceContext {
         {
             self.parent_lookups += 1;
         }
+        self.range_for(node).and_then(|range| range.name.clone())
+    }
+
+    /// Locate the next node's namespace without allocating its identity.
+    fn range_for(&mut self, node: Node<'_>) -> Option<&PhpNamespaceRange> {
         while self
             .ranges
             .get(self.next_range)
@@ -1002,12 +1007,9 @@ impl PhpNamespaceContext {
         {
             self.next_range += 1;
         }
-        self.ranges
-            .get(self.next_range)
-            .filter(|range| {
-                range.start_byte <= node.start_byte() && node.start_byte() < range.end_byte
-            })
-            .map(|range| range.name.clone())
+        self.ranges.get(self.next_range).filter(|range| {
+            range.start_byte <= node.start_byte() && node.start_byte() < range.end_byte
+        })
     }
 }
 
@@ -1303,6 +1305,19 @@ fn visit_node<E>(
     incomplete: &mut bool,
 ) -> Result<(), E> {
     check()?;
+    if is_php_language(graph.language.as_deref())
+        && ((node.kind() == "namespace_definition"
+            && node.child_by_field_name("name").is_some()
+            && php_bounded_namespace_name(node, content).is_none())
+            || php_namespace_context.as_deref_mut().is_some_and(|context| {
+                context
+                    .range_for(node)
+                    .is_some_and(|range| range.name.is_none())
+            }))
+    {
+        *incomplete = true;
+        return Ok(());
+    }
     if is_php_language(graph.language.as_deref()) && php_node_is_incomplete(node, content) {
         *incomplete = true;
     }
@@ -6072,11 +6087,12 @@ class OutsideGlobal {}
             symbol.name == "BeforeService" && symbol.parent.as_deref() == Some("Before")
         }));
         assert!(
-            malformed
+            !malformed
                 .symbols
                 .iter()
-                .any(|symbol| { symbol.name == "AfterMalformed" && symbol.parent.is_none() })
+                .any(|symbol| symbol.name == "AfterMalformed")
         );
+        assert_eq!(malformed.parser, ParserKind::Fallback);
         assert!(!malformed.relations.iter().any(|relation| {
             relation.kind == RelationKind::Contains && relation.target_name == "AfterMalformed"
         }));
@@ -6256,18 +6272,43 @@ class Owner {
         let context =
             PhpNamespaceContext::from_program(parsed.tree.root_node(), &source, &mut context_check)
                 .expect("oversized namespace context should remain bounded");
-        assert!(context.ranges.is_empty());
+        assert_eq!(context.ranges.len(), 1);
+        assert!(context.ranges[0].name.is_none());
 
         let graph = extract_symbol_graph("src/OversizedNamespace.php", Some("php"), &source);
-        assert_eq!(graph.parser, ParserKind::TreeSitter, "graph: {graph:?}");
-        assert_eq!(graph.symbols.len(), MAX_SYMBOLS_PER_FILE);
-        assert!(graph.symbols.iter().all(|symbol| symbol.parent.is_none()));
-        assert!(
-            graph
-                .symbols
-                .iter()
-                .all(|symbol| symbol.name.chars().count() <= MAX_SNIPPET_CHARS)
-        );
+        assert_eq!(graph.parser, ParserKind::Fallback, "graph: {graph:?}");
+        assert!(graph.symbols.is_empty());
+        assert!(graph.relations.is_empty());
+    }
+
+    #[test]
+    fn php_unrepresentable_namespace_does_not_publish_global_facts() {
+        let namespace = "N".repeat(MAX_SNIPPET_CHARS + 1);
+        for source in [
+            format!(
+                "<?php\nnamespace {namespace};\nfunction hidden() {{ hidden(); }}\nnamespace Visible;\nfunction kept() {{}}"
+            ),
+            format!(
+                "<?php\nnamespace {namespace} {{ function hidden() {{ hidden(); }} }}\nnamespace Visible {{ function kept() {{}} }}"
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/scopes.php", Some("php"), &source);
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            assert!(graph.symbols.iter().all(|symbol| symbol.name != "hidden"));
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.target_name != "hidden")
+            );
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == "kept"
+                        && symbol.parent.as_deref() == Some("Visible"))
+            );
+        }
     }
 
     #[test]

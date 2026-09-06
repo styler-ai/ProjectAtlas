@@ -119,10 +119,10 @@
 
 ## 18. Native non-UTF-8 worktree identity (#484)
 
-- [ ] 18.1 After #481, reuse its native identity and lossless/versioned SQLite codec for worktree root, Git common directory, and Git administrative directory; land the smallest key/constraint/migration/transaction/rollback/recovery delta with real write/read and duplicate-key proof before adapters change.
-- [ ] 18.2 Remove premature UTF-8 conversion from registration, alias routing, duplicate detection, retirement, capacity, watcher, filesystem, Git process, CLI, and MCP boundaries; keep identity native and make UTF-8 display a terminal typed-unavailable conversion.
-- [ ] 18.3 Cover invalid UTF-8 bytes independently in root/common/admin paths, valid Unicode, aliases, duplicate native registration, capacity, retirement, watcher and Git command invocation, UTF-8-only CLI/MCP output, migration, injected failure, rollback, retry, and supported Linux/macOS compatibility.
-- [ ] 18.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 18.1 After #481, reuse its native identity and lossless/versioned SQLite codec for worktree root, Git common directory, and Git administrative directory; land the smallest key/constraint/migration/transaction/rollback/recovery delta with real write/read and duplicate-key proof before adapters change.
+- [x] 18.2 Remove premature UTF-8 conversion from registration, alias routing, duplicate detection, retirement, capacity, watcher, filesystem, Git process, CLI, and MCP boundaries; keep identity native and make UTF-8 display a terminal typed-unavailable conversion.
+- [x] 18.3 Cover invalid UTF-8 bytes independently in root/common/admin paths, valid Unicode, aliases, duplicate native registration, capacity, retirement, watcher and Git command invocation, UTF-8-only CLI/MCP output, migration, injected failure, rollback, retry, and supported Linux/macOS compatibility.
+- [x] 18.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 19. Clean macOS Apple Silicon installed lifecycle (#485)
 
@@ -140,10 +140,10 @@
 
 ## 21. CLI E2E suite contract split (#487)
 
-- [ ] 21.1 Produce and accept a complete test-to-domain move map for every `e2e.rs` test/helper/platform gate using `e2e_lifecycle.rs`, `e2e_delivery.rs`, `e2e_navigation.rs`, `e2e_worktrees.rs`, `e2e_maintenance.rs`, and existing separate suites; identify exact shared-support users and merge any proposed binary whose inventory proves no cohesive boundary rather than preserving symmetry.
-- [ ] 21.2 Move one coherent domain at a time, extracting only multiply-owned process/repository/JSON/platform/package support, preserving durable test names and ignored/platform attributes, and keeping each intermediate integration binary runnable.
-- [ ] 21.3 Compare pre/post test inventory and CI command selection and prove no test, assertion, ignored contract, platform gate, timeout, cleanup, process isolation, packaged-product path, or release selection was dropped or silently weakened; run each binary plus workspace/all-feature gates on affected platforms.
-- [ ] 21.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 21.1 Produce and accept a complete test-to-domain move map for every `e2e.rs` test/helper/platform gate using `e2e_lifecycle.rs`, `e2e_delivery.rs`, `e2e_navigation.rs`, `e2e_worktrees.rs`, `e2e_maintenance.rs`, and existing separate suites; identify exact shared-support users and merge any proposed binary whose inventory proves no cohesive boundary rather than preserving symmetry.
+- [x] 21.2 Move one coherent domain at a time, extracting only multiply-owned process/repository/JSON/platform/package support, preserving durable test names and ignored/platform attributes, and keeping each intermediate integration binary runnable.
+- [x] 21.3 Compare pre/post test inventory and CI command selection and prove no test, assertion, ignored contract, platform gate, timeout, cleanup, process isolation, packaged-product path, or release selection was dropped or silently weakened; run each binary plus workspace/all-feature gates on affected platforms.
+- [x] 21.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 22. Production module responsibility decision (#488)
 

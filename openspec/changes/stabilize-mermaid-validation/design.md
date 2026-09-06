@@ -50,12 +50,19 @@ The architecture-link validator still accepts a target when any non-empty fenced
 
 Focused self-tests inject parser outcomes and count attempts. They cover timeout recovery, terminal timeout, validation-run budget exhaustion without another spawn, invalid syntax without retry, unavailable execution without retry, exact attempt bounds, target-specific diagnostics, and the unchanged planned-issue and milestone checks. A real locked-validator integration check also distinguishes an invalid diagram from a controlled dependency/bootstrap failure by process result, so the Python mapping is not proven only by a mocked return code. No wall-clock sleep or real timeout is needed for causal unit proof.
 
+### Keep one real-process self-test owner
+
+The explicit `issue-checklists.py --self-test` steps in the local pre-push hook and hosted IssueOps, CI, and release workflows own the real locked-validator process check. The parallel Rust workflow-contract test verifies those commands and the surrounding contract from source but does not launch the complete Python self-test again. This removes the redundant parser process at peak workspace-test contention while retaining the real-process gate in every delivery path that needs it.
+
+Alternative rejected: increasing timeouts or adding more retries makes the duplicate probe slower without adding coverage.
+
 ## Risks / Trade-offs
 
 - Two real timeouts can extend one failing diagram check to at most 60 seconds. → Keep the existing 30-second per-attempt bound and exactly one retry.
 - Serial stalled blocks can multiply that cost across a validation run. → Admit a new block only when the shared fixed deadline can contain both attempts; otherwise fail with the target-specific timeout class without spawning.
 - Cached terminal outcomes could hide a later recovery in the same process. → Cache only the final validation result after the bounded retry, preserving the existing per-diagram cache contract.
 - Multiple failing blocks can produce ambiguous classification. → Report the bounded set of observed terminal classes for the target rather than inventing one source defect.
+- A static Rust contract check could drift from the real self-test command. → Keep exact command assertions for the explicit pre-push and hosted owners while the owners execute the real Python self-test directly.
 
 ## Migration Plan
 

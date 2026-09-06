@@ -13,13 +13,25 @@ flowchart LR
     Acceptance --> Gates[Five ordered review gates]
     Sync --> Contract
     Gates --> Contract
-    PR[PR candidate branch] --> Owner[One open owner against live state]
+    PR[Hosted PR candidate] --> Owner[One open owner against live state]
     PR --> Base[Unrelated open slices against accepted PR base]
+    Push[Git pre-push ref-update records] --> MainTarget["Exactly one refs/heads/main target"]
+    Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
+    Push --> InvalidTarget["Zero or multiple records; deletions; malformed or unsupported targets"]
+    MainTarget --> Global[Global live-state validation]
+    CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
+    CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes; no hidden flags; issue map, mapped tasks, and linked docs are regular candidate-tree files read from their blobs with replacement refs disabled"]
+    CandidateClean --> Candidate[Local candidate branch]
+    Candidate --> CandidateOwner["Each post-base subject has one same-owner (#NNN) reference"]
+    Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract
     Base --> Contract
+    CandidateOwner --> Contract
+    CandidateBase --> Contract
     Closed[Already CLOSED mapped issue] --> Inert[Native closed state only; no body migration or validation]
     Reopened[Reopened mapped issue] --> Implementation
     Hidden[Hidden, duplicate, or legacy open fields] --> Reject[Fail closed]
+    InvalidTarget --> Reject
     Contract --> Ready[Truthful incremental or closure-ready state]
 ```
 
@@ -214,6 +226,8 @@ rows and valid graph rows at the previous complete generation.
 
 ## Built-in PHP parser and graph publication
 
+PHP call matching uses case-insensitive names and proven namespace/type ownership. A file with import facts keeps unqualified calls unresolved because those facts do not provide namespace-local alias bindings; `self::` and fully qualified calls retain their independent scope checks. Dynamic dispatch and unproven scopes remain unresolved. Namespace identities beyond the parser's identity bound, or malformed semicolon namespaces, omit dependent facts and report partial coverage instead of publishing global declarations.
+
 ```mermaid
 flowchart LR
     php[.php bytes] --> registry[Language capability registry]
@@ -341,7 +355,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    support[Shared process, repo, JSON, platform, package support]
+    support[Shared test support owner: crates/projectatlas-cli/tests/support/mod.rs]
     lifecycle[Lifecycle and database contracts] --> support
     delivery[Installer and release contracts] --> support
     navigation[CLI, MCP, graph, document, language contracts] --> support
@@ -369,7 +383,16 @@ flowchart TB
     poll -->|published before same deadline| validate{Exact identity valid before same deadline?}
     validate -->|no| fail
     validate -->|yes| installer[Run existing installer handoff assertions]
-    installer --> cleanup[Owned parent and child cleanup]
+    installer --> cleanup[Attempt exact child stop]
+    fail --> cleanup
+    cleanup -->|stop helper stalls or fails| fallback[One bounded exact-identity cleanup fallback]
+    fallback -->|child stopped or already gone| reap[Kill and reap owned parent]
+    fallback -->|fallback stalls or fails| final[One bounded helper-free native exact-identity stop]
+    final -->|child stopped or already gone| reap
+    final -->|cleanup cannot prove ownership or stop child| reap
+    reap -->|all cleanup complete| done[Owned cleanup complete]
+    reap -->|any cleanup failure| diagnostic[Fail closed with cleanup diagnostic]
+    cleanup -->|child stopped| reap
 ```
 
 ## Production module ownership decision

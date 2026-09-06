@@ -2054,6 +2054,8 @@ struct GraphSymbolIndex<'graph> {
     indices_by_name: BTreeMap<&'graph str, Vec<usize>>,
     /// PHP call target indices grouped by their case-insensitive source name.
     php_call_indices_by_name: BTreeMap<String, Vec<usize>>,
+    /// Imports prevent proving unqualified PHP names without an import resolver.
+    has_php_imports: bool,
 }
 
 impl<'graph> GraphSymbolIndex<'graph> {
@@ -2061,6 +2063,7 @@ impl<'graph> GraphSymbolIndex<'graph> {
     fn new(graph: &'graph SymbolGraph, control: &IndexWorkControl) -> Result<Self, CliError> {
         let mut indices_by_name = BTreeMap::new();
         let mut php_call_indices_by_name = BTreeMap::new();
+        let mut has_php_imports = false;
         let is_php = graph
             .language
             .as_deref()
@@ -2078,9 +2081,19 @@ impl<'graph> GraphSymbolIndex<'graph> {
                     .push(index);
             }
         }
+        if is_php {
+            for (index, relation) in graph.relations.iter().enumerate() {
+                check_graph_work(control, index)?;
+                if relation.kind == RelationKind::Imports {
+                    has_php_imports = true;
+                    break;
+                }
+            }
+        }
         Ok(Self {
             indices_by_name,
             php_call_indices_by_name,
+            has_php_imports,
         })
     }
 
@@ -4811,6 +4824,20 @@ fn local_relation_matches<'a>(
             .language
             .as_deref()
             .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    if is_php_call
+        && symbol_index.has_php_imports
+        && !target_name.starts_with('\\')
+        && !target_name
+            .split_once("::")
+            .is_some_and(|(scope, _)| scope.eq_ignore_ascii_case("self"))
+    {
+        // Import facts do not carry namespace-local alias bindings. Keep the
+        // call unresolved instead of assuming a same-file declaration wins.
+        return Ok(ResolutionMatches {
+            first: None,
+            count: 0,
+        });
+    }
     let source_parent = if relation.kind == RelationKind::Calls {
         unique_source_parent(
             graph,
@@ -4822,7 +4849,7 @@ fn local_relation_matches<'a>(
     } else {
         None
     };
-    let (lookup_name, scoped_parent, scoped_namespace, target_namespace) = if is_php_call {
+    let (lookup_name, scoped_parent, mut scoped_namespace, target_namespace) = if is_php_call {
         let Some(lookup) = php_call_lookup(target_name, source_parent) else {
             return Ok(ResolutionMatches {
                 first: None,
@@ -4833,11 +4860,26 @@ fn local_relation_matches<'a>(
     } else {
         (target_name, None, None, None)
     };
+    if is_php_call && scoped_parent.is_some() && scoped_namespace.is_none() {
+        scoped_namespace = unique_php_source_namespace(
+            graph,
+            symbol_index,
+            source_parent,
+            relation.line,
+            control,
+        )?;
+        if scoped_namespace.is_none() {
+            return Ok(ResolutionMatches {
+                first: None,
+                count: 0,
+            });
+        }
+    }
     let source_namespace = if is_php_call && scoped_parent.is_none() {
         if target_namespace.is_some() {
             target_namespace
         } else {
-            unique_php_source_namespace(graph, symbol_index, source_parent, control)?
+            unique_php_source_namespace(graph, symbol_index, source_parent, relation.line, control)?
         }
     } else {
         None
@@ -5018,6 +5060,7 @@ fn unique_php_source_namespace<'a>(
     graph: &'a SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
     source_parent: Option<&str>,
+    source_line: usize,
     control: &IndexWorkControl,
 ) -> Result<Option<&'a str>, CliError> {
     let Some(source_parent) = source_parent else {
@@ -5032,7 +5075,10 @@ fn unique_php_source_namespace<'a>(
         })?;
         let candidate = match symbol.kind {
             SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Enum => {
-                symbol.parent.as_deref()
+                if source_line < symbol.line_start || source_line > symbol.line_end {
+                    continue;
+                }
+                Some(symbol.parent.as_deref().unwrap_or(""))
             }
             SymbolKind::Module if symbol.name == source_parent => Some(symbol.name.as_str()),
             _ => continue,
@@ -8196,6 +8242,16 @@ mod tests {
         Ok(())
     }
 
+    /// Downgrade a current fixture to the released schema-19 worktree shape.
+    fn drop_native_worktree_identity_schema(connection: &Connection) -> rusqlite::Result<()> {
+        connection.execute_batch(
+            "DROP INDEX IF EXISTS idx_worktree_registrations_active_native_administrative_directory;
+             DROP INDEX IF EXISTS idx_worktree_registrations_active_native_root;
+             ALTER TABLE worktree_registrations DROP COLUMN git_common_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN git_administrative_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN last_root_identity;",
+        )
+    }
     #[cfg(unix)]
     fn create_directory_link(target: &Path, link: &Path) -> io::Result<()> {
         std::os::unix::fs::symlink(target, link)
@@ -9327,6 +9383,7 @@ mod tests {
                     stage_project,
                 )?);
                 let connection = Connection::open(database)?;
+                drop_native_worktree_identity_schema(&connection)?;
                 connection.execute_batch(
                     "DROP TABLE project_root_identity;
                  DROP TABLE IF EXISTS graph_identity_rejections;
@@ -10785,12 +10842,14 @@ class DuplicateB {
             matches!(
                 staged_call("QualifiedService::boot", "qualified_run")
                     .map(projectatlas_core::graph::LogicalRelation::resolution),
-                Some(RelationResolution::Ambiguous {
-                    reference,
-                    candidates,
-                }) if reference.as_str() == "QualifiedService::boot" && candidates.get() == 2
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "boot"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                        == Some("Atlas\\Domain::QualifiedService")
             ),
-            "unqualified PHP class scope must preserve ambiguity",
+            "unqualified PHP class scope must select its caller namespace",
         )?;
         for target in [
             "Atlas\\Domain\\QualifiedService::boot",
@@ -11059,6 +11118,50 @@ function fallback_run(): void {
                 )
             }),
             "case-insensitive PHP duplicate declarations must remain ambiguous",
+        )?;
+
+        let imported_graph = extract_symbol_graph(
+            "src/imports.php",
+            Some("php"),
+            r"<?php
+namespace Local {
+    use Remote\Service;
+    use function Remote\helper;
+    function run() { Service::boot(); helper(); }
+}
+namespace Local {
+    class Service { public static function boot() {} }
+    function helper() {}
+}
+",
+        );
+        let staged = finish_graph(&imported_graph)?;
+        for target in ["Service::boot", "helper"] {
+            require(
+                staged.relations.iter().any(|relation| {
+                    matches!(
+                        relation.resolution(),
+                        RelationResolution::Unresolved { reference } if reference.as_str() == target
+                    )
+                }),
+                "PHP imports must not be bypassed by same-file unqualified call matching",
+            )?;
+        }
+
+        let wrong_namespace_graph = extract_symbol_graph(
+            "src/scoped.php",
+            Some("php"),
+            "<?php\nnamespace Caller { function run(): void { Service::boot(); } }\nnamespace Other { class Service { public static function boot(): void {} } }\n",
+        );
+        let staged = finish_graph(&wrong_namespace_graph)?;
+        require(
+            staged.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Unresolved { reference } if reference.as_str() == "Service::boot"
+                )
+            }),
+            "unqualified PHP static calls must not resolve to a class in another namespace",
         )?;
 
         let case_sensitive_graph = extract_symbol_graph(
