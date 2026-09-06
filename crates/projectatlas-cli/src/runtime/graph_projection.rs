@@ -2072,8 +2072,10 @@ struct GraphSymbolIndex<'graph> {
     indices_by_name: BTreeMap<&'graph str, Vec<usize>>,
     /// PHP call target indices grouped by their case-insensitive source name.
     php_call_indices_by_name: BTreeMap<String, Vec<usize>>,
-    /// Namespace imports or incomplete import evidence can alias PHP call names.
-    php_imports_may_alias: bool,
+    /// PHP namespace names whose imports can alias unrooted calls.
+    php_import_namespaces: BTreeSet<String>,
+    /// Omitted import declarations cannot prove a namespace-local alias boundary.
+    php_imports_have_unknown_scope: bool,
 }
 
 impl<'graph> GraphSymbolIndex<'graph> {
@@ -2081,7 +2083,8 @@ impl<'graph> GraphSymbolIndex<'graph> {
     fn new(graph: &'graph SymbolGraph, control: &IndexWorkControl) -> Result<Self, CliError> {
         let mut indices_by_name = BTreeMap::new();
         let mut php_call_indices_by_name = BTreeMap::new();
-        let mut php_imports_may_alias = false;
+        let mut php_import_namespaces = BTreeSet::new();
+        let mut php_imports_have_unknown_scope = false;
         let is_php = graph
             .language
             .as_deref()
@@ -2089,7 +2092,10 @@ impl<'graph> GraphSymbolIndex<'graph> {
         for (index, symbol) in graph.symbols.iter().enumerate() {
             check_graph_work(control, index)?;
             // PHP emits import symbols only for namespace use, not includes or traits.
-            php_imports_may_alias |= is_php && symbol.kind == SymbolKind::Import;
+            if is_php && symbol.kind == SymbolKind::Import {
+                php_import_namespaces
+                    .insert(symbol.parent.as_deref().unwrap_or("").to_ascii_lowercase());
+            }
             indices_by_name
                 .entry(symbol.name.as_str())
                 .or_insert_with(Vec::new)
@@ -2109,7 +2115,7 @@ impl<'graph> GraphSymbolIndex<'graph> {
                     && relation.source_name == MODULE_RELATION_SOURCE
                     && !php_file_include_context(&relation.context)
                 {
-                    php_imports_may_alias = true;
+                    php_imports_have_unknown_scope = true;
                     break;
                 }
             }
@@ -2117,7 +2123,8 @@ impl<'graph> GraphSymbolIndex<'graph> {
         Ok(Self {
             indices_by_name,
             php_call_indices_by_name,
-            php_imports_may_alias,
+            php_import_namespaces,
+            php_imports_have_unknown_scope,
         })
     }
 
@@ -4933,10 +4940,19 @@ fn local_relation_matches<'a>(
             }
         }
     }
+    let php_imports_may_alias = symbol_index.php_imports_have_unknown_scope
+        || known_source_namespace.map_or(
+            !symbol_index.php_import_namespaces.is_empty(),
+            |namespace| {
+                symbol_index
+                    .php_import_namespaces
+                    .contains(&namespace.to_ascii_lowercase())
+            },
+        );
     let namespace_relative_target = if is_php_call
         && let Some((prefix, relative)) = target_name.split_once('\\')
         && !prefix.is_empty()
-        && (prefix.eq_ignore_ascii_case("namespace") || !symbol_index.php_imports_may_alias)
+        && (prefix.eq_ignore_ascii_case("namespace") || !php_imports_may_alias)
     {
         let Some(namespace) = known_source_namespace else {
             return Ok(ResolutionMatches {
@@ -4959,14 +4975,14 @@ fn local_relation_matches<'a>(
     };
     let lookup_target = namespace_relative_target.as_deref().unwrap_or(target_name);
     if is_php_call
-        && symbol_index.php_imports_may_alias
+        && php_imports_may_alias
         && !lookup_target.starts_with('\\')
         && !lookup_target
             .split_once("::")
             .is_some_and(|(scope, _)| scope.eq_ignore_ascii_case("self"))
     {
-        // Import facts do not carry namespace-local alias bindings. Keep the
-        // call unresolved instead of assuming a same-file declaration wins.
+        // An import in this namespace, or an import with unknown scope, can
+        // replace an unrooted name. Do not assume a same-file declaration wins.
         return Ok(ResolutionMatches {
             first: None,
             count: 0,
@@ -11722,6 +11738,35 @@ namespace Local\Sub { function helper() {} }
                     )
                 }),
                 "PHP imports must not be bypassed by same-file unqualified call matching",
+            )?;
+        }
+
+        for source in [
+            r"<?php
+namespace A { use function Vendor\helper; function run_a() { helper(); } }
+namespace B { function helper() {} function run_b() { helper(); } }
+",
+            r"<?php
+namespace A;
+use function Vendor\helper;
+function run_a() { helper(); }
+namespace B;
+function helper() {}
+function run_b() { helper(); }
+",
+        ] {
+            let graph = extract_symbol_graph("src/import-scopes.php", Some("php"), source);
+            let scoped = finish_graph(&graph)?;
+            require(
+                scoped.relations.iter().any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                        if symbol.name.as_str() == "helper" && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("B"))),
+                "PHP import in namespace A must not suppress a proven namespace B call",
+            )?;
+            require(
+                scoped.relations.iter().any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    && matches!(relation.resolution(), RelationResolution::Unresolved { reference } if reference.as_str() == "helper")),
+                "PHP imported alias remains unresolved in its owning namespace",
             )?;
         }
 

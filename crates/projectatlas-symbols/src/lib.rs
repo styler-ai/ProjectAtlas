@@ -127,7 +127,7 @@ fn extract_symbol_graph_checked<E>(
         extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
     {
         restore_php_selector_columns(&mut parsed.graph, content);
-        if parsed.incomplete {
+        if parsed.incomplete || parsed.graph.parser == ParserKind::Fallback {
             mark_graph_fallback(&mut parsed.graph);
         }
         if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
@@ -1341,6 +1341,15 @@ fn visit_node<E>(
     if is_php_language(graph.language.as_deref()) && php_node_is_incomplete(node, content) {
         *incomplete = true;
     }
+    if is_php_language(graph.language.as_deref()) {
+        *incomplete |= (graph.symbols.len() >= MAX_SYMBOLS_PER_FILE
+            && declaration_kind(node.kind()).is_some()
+            && should_emit_declaration_symbol(node, content))
+            || (graph.relations.len() >= MAX_RELATIONS_PER_FILE
+                && (is_php_trait_use_declaration(node)
+                    || is_import_node(node.kind())
+                    || is_call_node(node.kind())));
+    }
     if graph.symbols.len() < MAX_SYMBOLS_PER_FILE
         && let Some(kind) = declaration_kind(node.kind())
         && should_emit_declaration_symbol(node, content)
@@ -2009,12 +2018,12 @@ fn php_trait_use_owner(node: Node<'_>, content: &str) -> Option<String> {
 }
 
 /// Return direct trait targets, excluding alias and adaptation clause names.
-fn php_trait_use_targets(node: Node<'_>, content: &str) -> Vec<String> {
+fn php_trait_use_targets(node: Node<'_>, content: &str) -> (Vec<String>, bool) {
     let mut targets = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if targets.len() >= MAX_RELATIONS_PER_FILE {
-            break;
+            return (targets, true);
         }
         if matches!(child.kind(), "name" | "qualified_name" | "relative_name")
             && let Some(target) = named_text(child, content)
@@ -2023,7 +2032,7 @@ fn php_trait_use_targets(node: Node<'_>, content: &str) -> Vec<String> {
             targets.push(target);
         }
     }
-    targets
+    (targets, false)
 }
 
 /// Publish exact trait-composition targets under their owning PHP type.
@@ -2034,8 +2043,13 @@ fn push_php_trait_use_relations(graph: &mut SymbolGraph, node: Node<'_>, content
     let Some(owner) = php_trait_use_owner(node, content) else {
         return;
     };
-    for target in php_trait_use_targets(node, content) {
+    let (targets, incomplete) = php_trait_use_targets(node, content);
+    if incomplete {
+        graph.parser = ParserKind::Fallback;
+    }
+    for target in targets {
         if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
+            graph.parser = ParserKind::Fallback;
             break;
         }
         push_relation(
@@ -2393,6 +2407,7 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
     if node.kind() == "namespace_use_declaration" {
         for import_text in php_namespace_use_targets(node, content).0 {
             if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
+                graph.parser = ParserKind::Fallback;
                 break;
             }
             if !import_text.is_empty() && import_text.chars().count() <= MAX_SNIPPET_CHARS {
@@ -3380,6 +3395,9 @@ fn push_relation(
     context: &str,
 ) {
     if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
+        if is_php_language(graph.language.as_deref()) {
+            graph.parser = ParserKind::Fallback;
+        }
         return;
     }
     let target = compact_text(target_name);
@@ -3406,6 +3424,10 @@ fn push_relation_preserving_target(
     line: usize,
     context: &str,
 ) {
+    if graph.relations.len() >= MAX_RELATIONS_PER_FILE && is_php_language(graph.language.as_deref())
+    {
+        graph.parser = ParserKind::Fallback;
+    }
     if graph.relations.len() >= MAX_RELATIONS_PER_FILE
         || target_name.is_empty()
         || target_name.chars().count() > MAX_SNIPPET_CHARS
@@ -3488,7 +3510,7 @@ fn is_snippet_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, PhpNamespaceContext,
+        MAX_RELATIONS_PER_FILE, MAX_SNIPPET_CHARS, MAX_SYMBOLS_PER_FILE, PhpNamespaceContext,
         QUALIFIED_SYMBOL_SCOPE_PREFIX, compact_symbol_identity,
         content_without_leading_purpose_header, empty_graph, extract_cargo_manifest_graph_checked,
         extract_fallback_graph, extract_fallback_graph_checked, extract_powershell_graph_checked,
@@ -6511,8 +6533,71 @@ class Owner {
         assert_eq!(context.next_range, context.ranges.len() - 1);
 
         let bounded = extract_symbol_graph("src/large.php", Some("php"), &source);
-        assert_eq!(bounded.parser, ParserKind::TreeSitter);
+        assert_eq!(bounded.parser, ParserKind::Fallback);
         assert_eq!(bounded.symbols.len(), MAX_SYMBOLS_PER_FILE);
+        for count in [
+            MAX_SYMBOLS_PER_FILE - 1,
+            MAX_SYMBOLS_PER_FILE,
+            MAX_SYMBOLS_PER_FILE + 1,
+        ] {
+            let mut source = String::from("<?php\n");
+            for index in 0..count {
+                assert!(writeln!(source, "function function_{index}(): void {{}}").is_ok());
+            }
+            let graph = extract_symbol_graph("src/capped.php", Some("php"), &source);
+            let expected = if count > MAX_SYMBOLS_PER_FILE {
+                ParserKind::Fallback
+            } else {
+                ParserKind::TreeSitter
+            };
+            assert_eq!(graph.parser, expected, "PHP symbol-cap coverage at {count}");
+            assert_eq!(graph.symbols.len(), count.min(MAX_SYMBOLS_PER_FILE));
+            assert!(graph.symbols.iter().all(|symbol| symbol.parser == expected));
+        }
+    }
+
+    #[test]
+    fn php_relation_caps_report_partial_coverage() {
+        for count in [
+            MAX_RELATIONS_PER_FILE - 1,
+            MAX_RELATIONS_PER_FILE,
+            MAX_RELATIONS_PER_FILE + 1,
+        ] {
+            let calls = format!("<?php\n{}", "helper();\n".repeat(count));
+            let graph = extract_symbol_graph("src/calls.php", Some("php"), &calls);
+            let expected = if count > MAX_RELATIONS_PER_FILE {
+                ParserKind::Fallback
+            } else {
+                ParserKind::TreeSitter
+            };
+            assert_eq!(graph.parser, expected, "PHP call-cap coverage at {count}");
+            assert_eq!(graph.relations.len(), count.min(MAX_RELATIONS_PER_FILE));
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.parser == expected)
+            );
+        }
+        let targets = (0..MAX_RELATIONS_PER_FILE)
+            .map(|index| format!("T{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for source in [
+            format!("<?php\nhelper();\nuse Vendor\\{{{targets}}};"),
+            format!("<?php\nhelper();\nclass Owner {{ use {targets}; }}"),
+            format!("<?php\nclass Owner {{ use {targets}, Overflow; }}"),
+        ] {
+            let graph = extract_symbol_graph("src/imports.php", Some("php"), &source);
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            assert_eq!(graph.relations.len(), MAX_RELATIONS_PER_FILE);
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.parser == ParserKind::Fallback)
+            );
+        }
     }
 
     #[test]
