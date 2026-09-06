@@ -2119,7 +2119,7 @@ impl<'graph> GraphSymbolIndex<'graph> {
                 let ordinal = import_counts
                     .get(&symbol.line_start)
                     .filter(|(symbols, relations)| symbols == relations)
-                    .and_then(|_| paired_imports.as_ref())
+                    .and(paired_imports.as_ref())
                     .and_then(|paired| paired.by_symbol.get(index).copied().flatten());
                 php_import_positions
                     .entry(symbol.parent.as_deref().unwrap_or("").to_ascii_lowercase())
