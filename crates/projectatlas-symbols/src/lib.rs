@@ -5134,6 +5134,17 @@ version = "0.60.0"
 
     #[test]
     fn extracts_php_symbols_relations_and_exact_selectors() {
+        let enum_graph = extract_symbol_graph(
+            "src/State.php",
+            Some("php"),
+            "<?php enum State { public function run(): void {} }",
+        );
+        assert_eq!(enum_graph.parser, ParserKind::TreeSitter);
+        assert!(enum_graph.symbols.iter().any(|symbol| {
+            symbol.name == "run"
+                && symbol.kind == SymbolKind::Method
+                && symbol.parent.as_deref() == Some("State")
+        }));
         let source = r#"<?php
 namespace Atlas\Domain;
 use Vendor\Thing as ThingAlias;
@@ -5141,7 +5152,11 @@ require_once "bootstrap.php";
 include $dynamic;
 interface Contract {}
 trait Auditable {}
-enum State: string { case Ready = 'ready'; }
+enum State: string {
+    case Ready = 'ready';
+    public function state_label(): void {}
+    public static function state_boot(): void {}
+}
 class Service {
     public const VERSION = 1;
     private string $name = 'service';
@@ -5179,6 +5194,8 @@ function helper(string $value): void {}
             ("Auditable", SymbolKind::Trait, Some("Atlas\\Domain")),
             ("State", SymbolKind::Enum, Some("Atlas\\Domain")),
             ("Ready", SymbolKind::Value, Some("State")),
+            ("state_label", SymbolKind::Method, Some("State")),
+            ("state_boot", SymbolKind::Method, Some("State")),
             ("Service", SymbolKind::Class, Some("Atlas\\Domain")),
             ("VERSION", SymbolKind::Value, Some("Service")),
             ("name", SymbolKind::Value, Some("Service")),

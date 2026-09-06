@@ -5091,9 +5091,8 @@ fn unique_php_source_namespace<'a>(
     control: &IndexWorkControl,
 ) -> Result<Option<&'a str>, CliError> {
     let Some(source_parent) = source_parent else {
-        if relation.source_name == MODULE_RELATION_SOURCE
-            && relation.parser == ParserKind::TreeSitter
-        {
+        // Partial PHP coverage retains the grammar's proven global source marker.
+        if relation.source_name == MODULE_RELATION_SOURCE {
             return Ok(Some(""));
         }
         let mut global_function = false;
@@ -11186,6 +11185,16 @@ function fallback_run(): void {
 
         let mut scope_failures = Vec::new();
         for (source, target, expected_parent) in [
+            (
+                "<?php\nclass Service { public static function boot() {} }\nService::boot();\n$callable();",
+                "partial global static call",
+                Some("Service"),
+            ),
+            (
+                "<?php\nfunction helper() {}\nhelper();\n$callable();",
+                "partial global function call",
+                None,
+            ),
             (
                 "<?php\nrequire 'bootstrap.php';\nfunction helper() {}\nfunction run() { helper(); }",
                 "require and local helper",
