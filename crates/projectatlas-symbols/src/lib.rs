@@ -5409,13 +5409,20 @@ version = "0.60.0"
             ("FIRST", "public const", "FIRST = 1"),
             ("SECOND", "public const", "SECOND = 2"),
         ] {
-            let symbol = fields
-                .symbols
-                .iter()
-                .find(|symbol| symbol.name == name)
-                .unwrap();
-            let selector = symbol.source_selector.unwrap();
-            assert_eq!(selector.byte_start, shared_headers.find(header).unwrap());
+            let symbol = fields.symbols.iter().find(|symbol| symbol.name == name);
+            assert!(
+                symbol.is_some(),
+                "shared PHP declaration {name} should exist"
+            );
+            let Some(symbol) = symbol else { return };
+            assert!(
+                symbol.source_selector.is_some(),
+                "PHP declaration should have an exact selector"
+            );
+            let Some(selector) = symbol.source_selector else {
+                return;
+            };
+            assert_eq!(Some(selector.byte_start), shared_headers.find(header));
             assert_eq!(selector.column_start, 4);
             assert_eq!(
                 symbol.line_start,
