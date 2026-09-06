@@ -2020,19 +2020,23 @@ fn php_trait_use_owner(node: Node<'_>, content: &str) -> Option<String> {
 /// Return direct trait targets, excluding alias and adaptation clause names.
 fn php_trait_use_targets(node: Node<'_>, content: &str) -> (Vec<String>, bool) {
     let mut targets = Vec::new();
+    let mut incomplete = false;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if targets.len() >= MAX_RELATIONS_PER_FILE {
             return (targets, true);
         }
-        if matches!(child.kind(), "name" | "qualified_name" | "relative_name")
-            && let Some(target) = named_text(child, content)
-            && target.chars().count() <= MAX_SNIPPET_CHARS
-        {
-            targets.push(target);
+        if matches!(child.kind(), "name" | "qualified_name" | "relative_name") {
+            if let Some(target) = named_text(child, content)
+                && target.chars().count() <= MAX_SNIPPET_CHARS
+            {
+                targets.push(target);
+            } else {
+                incomplete = true;
+            }
         }
     }
-    (targets, false)
+    (targets, incomplete)
 }
 
 /// Publish exact trait-composition targets under their owning PHP type.
@@ -6558,6 +6562,45 @@ class Owner {
 
     #[test]
     fn php_relation_caps_report_partial_coverage() {
+        for length in [
+            MAX_SNIPPET_CHARS - 1,
+            MAX_SNIPPET_CHARS,
+            MAX_SNIPPET_CHARS + 1,
+        ] {
+            let target = "T".repeat(length);
+            let source = format!("<?php class Owner {{ use {target}, Kept; }}");
+            let graph = extract_symbol_graph("src/trait-name.php", Some("php"), &source);
+            let expected = if length > MAX_SNIPPET_CHARS {
+                ParserKind::Fallback
+            } else {
+                ParserKind::TreeSitter
+            };
+            assert_eq!(
+                graph.parser, expected,
+                "PHP trait-name coverage at {length}"
+            );
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .any(|relation| relation.kind == RelationKind::Imports
+                        && relation.target_name == "Kept")
+            );
+            assert_eq!(
+                graph
+                    .relations
+                    .iter()
+                    .filter(|relation| relation.kind == RelationKind::Imports)
+                    .count(),
+                if length > MAX_SNIPPET_CHARS { 1 } else { 2 }
+            );
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.parser == expected)
+            );
+        }
         for count in [
             MAX_RELATIONS_PER_FILE - 1,
             MAX_RELATIONS_PER_FILE,

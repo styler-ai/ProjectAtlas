@@ -2072,8 +2072,8 @@ struct GraphSymbolIndex<'graph> {
     indices_by_name: BTreeMap<&'graph str, Vec<usize>>,
     /// PHP call target indices grouped by their case-insensitive source name.
     php_call_indices_by_name: BTreeMap<String, Vec<usize>>,
-    /// PHP namespace names whose imports can alias unrooted calls.
-    php_import_namespaces: BTreeSet<String>,
+    /// First import line in each PHP namespace; earlier lines cannot use it.
+    php_import_first_lines: BTreeMap<String, usize>,
     /// Omitted import declarations cannot prove a namespace-local alias boundary.
     php_imports_have_unknown_scope: bool,
 }
@@ -2083,7 +2083,7 @@ impl<'graph> GraphSymbolIndex<'graph> {
     fn new(graph: &'graph SymbolGraph, control: &IndexWorkControl) -> Result<Self, CliError> {
         let mut indices_by_name = BTreeMap::new();
         let mut php_call_indices_by_name = BTreeMap::new();
-        let mut php_import_namespaces = BTreeSet::new();
+        let mut php_import_first_lines = BTreeMap::<String, usize>::new();
         let mut php_imports_have_unknown_scope = false;
         let is_php = graph
             .language
@@ -2093,8 +2093,10 @@ impl<'graph> GraphSymbolIndex<'graph> {
             check_graph_work(control, index)?;
             // PHP emits import symbols only for namespace use, not includes or traits.
             if is_php && symbol.kind == SymbolKind::Import {
-                php_import_namespaces
-                    .insert(symbol.parent.as_deref().unwrap_or("").to_ascii_lowercase());
+                php_import_first_lines
+                    .entry(symbol.parent.as_deref().unwrap_or("").to_ascii_lowercase())
+                    .and_modify(|line| *line = (*line).min(symbol.line_start))
+                    .or_insert(symbol.line_start);
             }
             indices_by_name
                 .entry(symbol.name.as_str())
@@ -2123,7 +2125,7 @@ impl<'graph> GraphSymbolIndex<'graph> {
         Ok(Self {
             indices_by_name,
             php_call_indices_by_name,
-            php_import_namespaces,
+            php_import_first_lines,
             php_imports_have_unknown_scope,
         })
     }
@@ -4942,11 +4944,12 @@ fn local_relation_matches<'a>(
     }
     let php_imports_may_alias = symbol_index.php_imports_have_unknown_scope
         || known_source_namespace.map_or(
-            !symbol_index.php_import_namespaces.is_empty(),
+            !symbol_index.php_import_first_lines.is_empty(),
             |namespace| {
                 symbol_index
-                    .php_import_namespaces
-                    .contains(&namespace.to_ascii_lowercase())
+                    .php_import_first_lines
+                    .get(&namespace.to_ascii_lowercase())
+                    .is_some_and(|line| relation.line >= *line)
             },
         );
     let namespace_relative_target = if is_php_call
@@ -11768,6 +11771,39 @@ function run_b() { helper(); }
                     && matches!(relation.resolution(), RelationResolution::Unresolved { reference } if reference.as_str() == "helper")),
                 "PHP imported alias remains unresolved in its owning namespace",
             )?;
+        }
+
+        for source in [
+            r"<?php
+namespace { function helper() {} }
+namespace A {
+function before() { helper(); }
+use function Vendor\helper;
+function after() { helper(); }
+}
+",
+            r"<?php
+namespace A;
+function before() { Sub\helper(); }
+use Vendor as Sub;
+function after() { Sub\helper(); }
+namespace A\Sub;
+function helper() {}
+",
+        ] {
+            let graph = extract_symbol_graph("src/import-order.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            for (caller, resolved) in [("before", true), ("after", false)] {
+                require(
+                    staged.relations.iter().any(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                            && matches!(relation.resolution(), RelationResolution::Resolved { .. }) == resolved
+                            && staged.entities.iter().any(|entity| entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == caller))
+                    }),
+                    &format!("PHP {caller} call must apply only imports already declared"),
+                )?;
+            }
         }
 
         let oversized_prefix = "N".repeat(241);
