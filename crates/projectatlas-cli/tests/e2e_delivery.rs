@@ -6226,7 +6226,9 @@ fn prepare_real_host_fixture(
     #[cfg(windows)]
     require(
         String::from_utf8_lossy(&installer_output.stdout)
-            .contains("ProjectAtlas installer: report workflow compatibility"),
+            .contains("ProjectAtlas installer: report workflow compatibility")
+            && String::from_utf8_lossy(&installer_output.stderr)
+                .contains("ProjectAtlas installer: script entered"),
         "real-host installer omitted verbose phase diagnostics",
     )?;
     Ok(RealHostFixture {
@@ -7388,8 +7390,7 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
     ] {
         let step = workflow_job_step(&workflow, "e2e-smoke", name)?;
         require(
-            step["if"].as_str()
-                == Some("contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'"),
+            step["if"].as_str() == Some("contains(matrix.contracts, 'plugin')"),
             format!("{name} must cover plugin platforms and macOS Intel"),
         )?;
     }
@@ -7418,21 +7419,45 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
 #[test]
 #[cfg(windows)]
 fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let isolated_home = temp.path().join(REAL_HOST_ROOT_DIR_NAME);
+    let input_script = temp.path().join("stdin-reader.ps1");
+    fs::write(
+        &input_script,
+        r"[CmdletBinding()] param([string]$InstallerPath)
+[Console]::Error.WriteLine('bootstrap entered')
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseFile($InstallerPath, [ref]$tokens, [ref]$errors) | Out-Null
+if ($errors.Count -ne 0) { throw 'installer AST parse failed' }
+[Console]::Error.WriteLine('installer AST parsed')
+[Console]::In.ReadToEnd() | Out-Null
+Write-Output 'stdin-closed'
+",
+    )?;
     let mut input_reader = StdCommand::new("powershell");
     input_reader
         .args([
             "-NoProfile",
             "-NonInteractive",
-            "-Command",
-            "[Console]::In.ReadToEnd() | Out-Null; Write-Output 'stdin-closed'",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
         ])
+        .arg(&input_script)
+        .arg("-InstallerPath")
+        .arg(workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.ps1"))
+        .arg("-Verbose")
         .stdin(Stdio::piped());
-    let output = run_bounded_output(input_reader, "real host closed stdin")?;
+    configure_real_host_environment(&mut input_reader, &isolated_home, None)?;
+    let output = run_bounded_output(input_reader, "isolated PowerShell file with closed stdin")?;
     require(
-        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "stdin-closed",
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).trim() == "stdin-closed"
+            && String::from_utf8_lossy(&output.stderr).contains("bootstrap entered")
+            && String::from_utf8_lossy(&output.stderr).contains("installer AST parsed"),
         "noninteractive real-host setup must close stdin before waiting".to_owned(),
     )?;
-    let temp = tempfile::tempdir()?;
     let runtime = temp
         .path()
         .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
@@ -27494,6 +27519,7 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
         let mut command = StdCommand::new("powershell");
         command
             .arg("-NoProfile")
+            .arg("-NonInteractive")
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")

@@ -11,6 +11,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($VerbosePreference -eq "Continue") {
+    [Console]::Error.WriteLine("ProjectAtlas installer: script entered")
+}
 
 function Resolve-DefaultProjectRoot {
     (Get-Location).Path
