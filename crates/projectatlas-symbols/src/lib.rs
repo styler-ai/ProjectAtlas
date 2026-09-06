@@ -1780,11 +1780,19 @@ fn push_tree_symbol(
         || object_literal_method_owner(node, content).is_some_and(|owner| owner.exported)
         || is_exported_symbol(graph.language.as_deref(), node, content, &name, &signature);
     let documentation = symbol_documentation(node, content);
+    // Each PHP element shares its declaration header but ends at its own value.
+    let span_start = if is_php_language(graph.language.as_deref())
+        && matches!(node.kind(), "property_element" | "const_element")
+    {
+        node.parent().unwrap_or(node)
+    } else {
+        node
+    };
     let admitted = push_symbol_with_metadata(
         graph,
         &name,
         symbol_kind,
-        node.start_position().row + 1,
+        span_start.start_position().row + 1,
         node.end_position().row + 1,
         parent.clone(),
         Some(node.kind()),
@@ -1796,7 +1804,7 @@ fn push_tree_symbol(
         && is_php_language(graph.language.as_deref())
         && let Some(symbol) = graph.symbols.last_mut()
     {
-        symbol.source_selector = Some(tree_source_selector(node));
+        symbol.source_selector = Some(tree_source_selector(span_start, node));
     }
     if admitted && let Some(parent_name) = parent {
         push_relation(
@@ -1804,7 +1812,7 @@ fn push_tree_symbol(
             &parent_name,
             &name,
             RelationKind::Contains,
-            node.start_position().row + 1,
+            span_start.start_position().row + 1,
             node.kind(),
         );
     }
@@ -1812,12 +1820,12 @@ fn push_tree_symbol(
 }
 
 /// Retain byte offsets and columns until normalization against the original source.
-fn tree_source_selector(node: Node<'_>) -> SymbolSourceSelector {
+fn tree_source_selector(start: Node<'_>, end: Node<'_>) -> SymbolSourceSelector {
     SymbolSourceSelector {
-        byte_start: node.start_byte(),
-        byte_end: node.end_byte(),
-        column_start: node.start_position().column,
-        column_end: node.end_position().column,
+        byte_start: start.start_byte(),
+        byte_end: end.end_byte(),
+        column_start: start.start_position().column,
+        column_end: end.end_position().column,
     }
 }
 
@@ -5393,6 +5401,36 @@ version = "0.60.0"
 
     #[test]
     fn extracts_php_symbols_relations_and_exact_selectors() {
+        let shared_headers = "<?php class Fields {\n    public string\n        $name,\n        $other;\n    public const\n        FIRST = 1,\n        SECOND = 2;\n}";
+        let fields = extract_symbol_graph("src/fields.php", Some("php"), shared_headers);
+        for (name, header, end) in [
+            ("name", "public string", "$name"),
+            ("other", "public string", "$other"),
+            ("FIRST", "public const", "FIRST = 1"),
+            ("SECOND", "public const", "SECOND = 2"),
+        ] {
+            let symbol = fields
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .unwrap();
+            let selector = symbol.source_selector.unwrap();
+            assert_eq!(selector.byte_start, shared_headers.find(header).unwrap());
+            assert_eq!(selector.column_start, 4);
+            assert_eq!(
+                symbol.line_start,
+                if name.starts_with(char::is_uppercase) {
+                    5
+                } else {
+                    2
+                }
+            );
+            let slice = &shared_headers[selector.byte_start..selector.byte_end];
+            assert!(
+                slice.starts_with(header) && slice.ends_with(end),
+                "{name}: {slice}"
+            );
+        }
         for directive in [
             "__halt_compiler();",
             "__HALT_COMPILER /* comment */ ( /* comment */ );",

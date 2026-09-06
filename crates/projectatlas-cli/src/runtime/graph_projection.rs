@@ -2073,7 +2073,7 @@ struct GraphSymbolIndex<'graph> {
     /// PHP call target indices grouped by their case-insensitive source name.
     php_call_indices_by_name: BTreeMap<String, Vec<usize>>,
     /// Import positions retained separately across repeated namespace declarations.
-    php_import_lines: BTreeMap<String, BTreeSet<usize>>,
+    php_import_positions: BTreeMap<String, BTreeMap<usize, Option<usize>>>,
     /// Named namespace declaration boundaries; tied line-only blocks stay conservative.
     php_namespace_start_lines: BTreeMap<String, BTreeSet<usize>>,
     /// Omitted import declarations cannot prove a namespace-local alias boundary.
@@ -2085,21 +2085,47 @@ impl<'graph> GraphSymbolIndex<'graph> {
     fn new(graph: &'graph SymbolGraph, control: &IndexWorkControl) -> Result<Self, CliError> {
         let mut indices_by_name = BTreeMap::new();
         let mut php_call_indices_by_name = BTreeMap::new();
-        let mut php_import_lines = BTreeMap::<String, BTreeSet<usize>>::new();
+        let mut php_import_positions = BTreeMap::<String, BTreeMap<usize, Option<usize>>>::new();
         let mut php_namespace_start_lines = BTreeMap::<String, BTreeSet<usize>>::new();
         let mut php_imports_have_unknown_scope = false;
         let is_php = graph
             .language
             .as_deref()
             .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+        // Grouped PHP uses emit one symbol but several relations. Only equal
+        // per-line counts prove that occurrence pairing preserves source order.
+        let mut import_counts = HashMap::<usize, (usize, usize)>::new();
+        let paired_imports = if is_php {
+            for (index, symbol) in graph.symbols.iter().enumerate() {
+                check_graph_work(control, index)?;
+                if symbol.kind == SymbolKind::Import {
+                    import_counts.entry(symbol.line_start).or_default().0 += 1;
+                }
+            }
+            for (index, relation) in graph.relations.iter().enumerate() {
+                check_graph_work(control, index)?;
+                if relation.kind == RelationKind::Imports {
+                    import_counts.entry(relation.line).or_default().1 += 1;
+                }
+            }
+            Some(paired_import_relations(graph, control)?)
+        } else {
+            None
+        };
         for (index, symbol) in graph.symbols.iter().enumerate() {
             check_graph_work(control, index)?;
             // PHP emits import symbols only for namespace use, not includes or traits.
             if is_php && symbol.kind == SymbolKind::Import {
-                php_import_lines
+                let ordinal = import_counts
+                    .get(&symbol.line_start)
+                    .filter(|(symbols, relations)| symbols == relations)
+                    .and_then(|_| paired_imports.as_ref())
+                    .and_then(|paired| paired.by_symbol.get(index).copied().flatten());
+                php_import_positions
                     .entry(symbol.parent.as_deref().unwrap_or("").to_ascii_lowercase())
                     .or_default()
-                    .insert(symbol.line_start);
+                    .entry(symbol.line_start)
+                    .or_insert(ordinal);
             }
             if is_php && symbol.kind == SymbolKind::Module {
                 php_namespace_start_lines
@@ -2134,7 +2160,7 @@ impl<'graph> GraphSymbolIndex<'graph> {
         Ok(Self {
             indices_by_name,
             php_call_indices_by_name,
-            php_import_lines,
+            php_import_positions,
             php_namespace_start_lines,
             php_imports_have_unknown_scope,
         })
@@ -2264,6 +2290,10 @@ fn is_cargo_manifest_path(path: &str) -> bool {
 fn qualified_symbol_parents(
     graph: &SymbolGraph,
 ) -> Result<Vec<Option<GraphIdentityText>>, CliError> {
+    let is_php = graph
+        .language
+        .as_deref()
+        .is_some_and(|language| language.eq_ignore_ascii_case("php"));
     let mut order = (0..graph.symbols.len()).collect::<Vec<_>>();
     order.sort_by_key(|&index| (graph.symbols[index].line_start, index));
     let mut active_by_name = BTreeMap::<&str, Vec<usize>>::new();
@@ -2281,7 +2311,18 @@ fn qualified_symbol_parents(
             && let Some(candidates) = active_by_name.get_mut(immediate_parent.as_str())
         {
             while candidates.last().is_some_and(|&candidate_index| {
-                graph.symbols[candidate_index].line_end < symbol.line_end
+                let candidate = &graph.symbols[candidate_index];
+                // Namespace headers may precede their body; concrete PHP scopes
+                // have exact ends even when the next declaration shares a line.
+                if is_php
+                    && candidate.kind != SymbolKind::Module
+                    && let Some((outer, inner)) =
+                        candidate.source_selector.zip(symbol.source_selector)
+                {
+                    outer.byte_end < inner.byte_end
+                } else {
+                    candidate.line_end < symbol.line_end
+                }
             }) {
                 candidates.pop();
             }
@@ -3812,6 +3853,7 @@ fn project_graph_rows(
             project,
             generation,
             source_relation,
+            Some(relation_index),
             &owners,
             graph,
             &symbol_index,
@@ -4452,6 +4494,7 @@ fn derived_relation_resolution<'a>(
             project,
             generation,
             &fact.relation,
+            None,
             owners,
             graph,
             symbol_index,
@@ -4816,6 +4859,7 @@ fn relation_resolution<'a>(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     relation: &projectatlas_core::symbols::SymbolRelation,
+    relation_index: Option<usize>,
     owners: &GraphOwners,
     graph: &SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
@@ -4828,6 +4872,7 @@ fn relation_resolution<'a>(
     let matches = match relation.kind {
         RelationKind::Contains => local_relation_matches(
             relation,
+            relation_index,
             owners,
             graph,
             symbol_index,
@@ -4837,6 +4882,7 @@ fn relation_resolution<'a>(
         RelationKind::Calls => {
             let local = local_relation_matches(
                 relation,
+                relation_index,
                 owners,
                 graph,
                 symbol_index,
@@ -4888,6 +4934,7 @@ fn relation_resolution<'a>(
 /// Resolve exact declarations owned by the relation's source file.
 fn local_relation_matches<'a>(
     relation: &projectatlas_core::symbols::SymbolRelation,
+    relation_index: Option<usize>,
     owners: &GraphOwners,
     graph: &SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
@@ -4953,19 +5000,28 @@ fn local_relation_matches<'a>(
         }
     }
     let php_imports_may_alias = symbol_index.php_imports_have_unknown_scope
-        || known_source_namespace.map_or(!symbol_index.php_import_lines.is_empty(), |namespace| {
-            let namespace = namespace.to_ascii_lowercase();
-            let block_start = symbol_index
-                .php_namespace_start_lines
-                .get(&namespace)
-                .and_then(|starts| starts.range(..=relation.line).next_back())
-                .copied()
-                .unwrap_or(0);
-            symbol_index
-                .php_import_lines
-                .get(&namespace)
-                .is_some_and(|lines| lines.range(block_start..=relation.line).next().is_some())
-        });
+        || known_source_namespace.map_or(
+            !symbol_index.php_import_positions.is_empty(),
+            |namespace| {
+                let namespace = namespace.to_ascii_lowercase();
+                let block_start = symbol_index
+                    .php_namespace_start_lines
+                    .get(&namespace)
+                    .and_then(|starts| starts.range(..=relation.line).next_back())
+                    .copied()
+                    .unwrap_or(0);
+                symbol_index
+                    .php_import_positions
+                    .get(&namespace)
+                    .and_then(|positions| positions.range(block_start..=relation.line).next())
+                    .is_some_and(|(&line, &import_index)| {
+                        line < relation.line
+                            || import_index
+                                .zip(relation_index)
+                                .is_none_or(|(import, call)| import <= call)
+                    })
+            },
+        );
     let namespace_relative_target = if is_php_call
         && let Some((prefix, relative)) = target_name.split_once('\\')
         && !prefix.is_empty()
@@ -5331,23 +5387,50 @@ fn unique_source_parent<'a>(
     Ok(parent)
 }
 
-/// Select a unique PHP namespace or containing type without guessing across line-only facts.
+/// Select a PHP containment owner from the target's exact declaration span.
 fn unique_php_containment_source(
     graph: &SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
     relation: &SymbolRelation,
     control: &IndexWorkControl,
 ) -> Result<Option<usize>, CliError> {
+    let mut target = None;
+    for (candidate_index, &index) in symbol_index.get(&relation.target_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        if symbol.parent.as_deref() == Some(relation.source_name.as_str())
+            && symbol.line_start == relation.line
+            && target.replace(index).is_some()
+        {
+            return Ok(None);
+        }
+    }
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let Some(target_span) = graph.symbols[target].source_selector else {
+        return Ok(None);
+    };
     let mut matched = None;
+    let mut module = None;
     for (candidate_index, &index) in symbol_index.get(&relation.source_name).iter().enumerate() {
         check_graph_work(control, candidate_index)?;
         let symbol = graph.symbols.get(index).ok_or_else(|| {
             CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
         })?;
         let contains = match symbol.kind {
-            SymbolKind::Module => true,
+            SymbolKind::Module => {
+                module.get_or_insert(index);
+                false
+            }
             SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Enum => {
-                symbol.line_start <= relation.line && relation.line <= symbol.line_end
+                index != target
+                    && symbol.source_selector.is_some_and(|span| {
+                        span.byte_start <= target_span.byte_start
+                            && target_span.byte_end <= span.byte_end
+                    })
             }
             _ => false,
         };
@@ -5355,7 +5438,7 @@ fn unique_php_containment_source(
             return Ok(None);
         }
     }
-    Ok(matched)
+    Ok(matched.or(module))
 }
 
 /// Prefer a proven PHP callable source, falling back to a unique namespace owner.
@@ -11063,11 +11146,27 @@ class DuplicateB {
             "trait Service {\nconst FLAG = 1;\npublic $value;\nfunction run() {}\n}",
             "enum Service {\ncase Ready;\nconst FLAG = 1;\nfunction run() {}\n}",
         ] {
-            for source in [
-                format!(
-                    "<?php namespace A {{\n{declaration}\n}}\nnamespace B {{\n{declaration}\n}}"
+            for (source, namespaces) in [
+                (
+                    format!(
+                        "<?php namespace A {{\n{declaration}\n}}\nnamespace B {{\n{declaration}\n}}"
+                    ),
+                    ["A", "B"],
                 ),
-                format!("<?php namespace A;\n{declaration}\nnamespace B;\n{declaration}"),
+                (
+                    format!("<?php namespace A;\n{declaration}\nnamespace B;\n{declaration}"),
+                    ["A", "B"],
+                ),
+                (
+                    format!(
+                        "<?php namespace Service {{\n{declaration}\n}}\nnamespace B {{\n{declaration}\n}}"
+                    ),
+                    ["Service", "B"],
+                ),
+                (
+                    format!("<?php namespace Service;\n{declaration}\nnamespace B;\n{declaration}"),
+                    ["Service", "B"],
+                ),
             ] {
                 let graph = extract_symbol_graph("src/containment.php", Some("php"), &source);
                 require_eq(
@@ -11082,7 +11181,7 @@ class DuplicateB {
                     "PHP parser retains unqualified member parents",
                 )?;
                 let contained = finish_graph(&graph)?;
-                for namespace in ["A", "B"] {
+                for namespace in namespaces {
                     let parent = format!("{namespace}::Service");
                     for name in ["run", "FLAG"] {
                         require(
@@ -11775,6 +11874,50 @@ function fallback_run(): void {
             )?;
         }
 
+        for source in [
+            r"<?php namespace A { function helper() {} function before() { helper(); } use function Vendor\{helper, other}; function after() { helper(); } }",
+            r"<?php namespace A; function helper() {} function before() { helper(); } use function Vendor\helper, Vendor\other; function after() { helper(); }",
+            r"<?php namespace A { use function Vendor\{helper, other}; } namespace B { function helper() {} function before() { helper(); } use function Remote\helper; function after() { helper(); } }",
+        ] {
+            let graph = extract_symbol_graph("src/import-groups.php", Some("php"), source);
+            let grouped = finish_graph(&graph)?;
+            for caller in ["before", "after"] {
+                require(
+                    grouped.relations.iter().any(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                            && matches!(relation.resolution(), RelationResolution::Unresolved { .. })
+                            && grouped.entities.iter().any(|entity| entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == caller))
+                    }),
+                    "PHP grouped imports with unmatched source occurrences must stay conservative",
+                )?;
+            }
+        }
+
+        let collision = extract_symbol_graph(
+            "src/containment-collision.php",
+            Some("php"),
+            "<?php namespace Service { class Service { function run() {} } function outside() {} }",
+        );
+        let contained = finish_graph(&collision)?;
+        for (name, parent) in [
+            ("Service", "Service"),
+            ("run", "Service::Service"),
+            ("outside", "Service"),
+        ] {
+            require(
+                contained.relations.iter().any(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                        && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                            if symbol.name.as_str() == name && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(parent))
+                        && contained.entities.iter().any(|entity| entity.key() == relation.source()
+                            && matches!(entity.selector(), EntitySelector::Symbol { symbol }
+                                if symbol.name.as_str() == "Service" && symbol.parent.as_ref().map(GraphIdentityText::as_str) == if name == "run" { Some("Service") } else { None }))
+                }),
+                &format!("PHP same-line namespace and type collisions must use exact containment spans: {name} {parent}"),
+            )?;
+        }
+
         let imported_graph = extract_symbol_graph(
             "src/imports.php",
             Some("php"),
@@ -11835,6 +11978,9 @@ function run_b() { helper(); }
         }
 
         for source in [
+            r"<?php namespace A { function helper() {} function before() { helper(); } use function Vendor\helper; function after() { helper(); } }",
+            r"<?php namespace A; function before() { Sub\helper(); } use Vendor as Sub; function after() { Sub\helper(); } namespace A\Sub; function helper() {}",
+            r"<?php namespace A { function helper() {} function before() { helper(); } use function Vendor\helper; use Vendor\Other; function after() { helper(); } } namespace B { use function Vendor\helper; function run_b() { helper(); } }",
             r"<?php
 namespace { function helper() {} }
 namespace A {
@@ -12446,6 +12592,7 @@ function helper() {}
                 project,
                 generation,
                 &case.relation,
+                None,
                 &owners,
                 &case.graph,
                 &symbol_index,
