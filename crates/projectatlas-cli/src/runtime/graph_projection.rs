@@ -3759,8 +3759,10 @@ fn project_graph_rows(
         let source = relation_source(
             &owners,
             &entities.entity_by_digest,
+            graph,
             &symbol_index,
             source_relation,
+            control,
         )?;
         let dependency_keys = keys_by_relation
             .get(&relation_index)
@@ -3861,8 +3863,10 @@ fn project_graph_rows(
         let source = relation_source(
             &owners,
             &entities.entity_by_digest,
+            graph,
             &symbol_index,
             &fact.relation,
+            control,
         )?;
         let resolution = derived_relation_resolution(
             project,
@@ -4702,14 +4706,33 @@ fn file_has_extension(file: &str, expected: &str) -> bool {
 fn relation_source<'a>(
     owners: &GraphOwners,
     entities: &'a BTreeMap<String, GraphEntity>,
+    graph: &SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
     relation: &SymbolRelation,
+    control: &IndexWorkControl,
 ) -> Result<&'a GraphEntity, CliError> {
     let file = entities.get(&owners.file_digest).ok_or_else(|| {
         CliError::InvalidInput("graph file owner entity was not staged".to_string())
     })?;
+    let is_php_call = relation.kind == RelationKind::Calls
+        && graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
     let mut matched = None;
-    for &index in symbol_index.get(&relation.source_name) {
+    for (candidate_index, &index) in symbol_index.get(&relation.source_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        if is_php_call {
+            let symbol = graph.symbols.get(index).ok_or_else(|| {
+                CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+            })?;
+            // Semicolon namespace declarations do not span their later top-level calls.
+            if symbol.kind != SymbolKind::Module
+                && (relation.line < symbol.line_start || relation.line > symbol.line_end)
+            {
+                continue;
+            }
+        }
         let digest = owners.symbol_digests.get(index).ok_or_else(|| {
             CliError::InvalidInput("graph symbol owner index was not staged".to_string())
         })?;
@@ -4843,6 +4866,29 @@ fn local_relation_matches<'a>(
     } else {
         None
     };
+    if is_php_call
+        && target_name
+            .split_once("::")
+            .is_some_and(|(scope, _)| scope.eq_ignore_ascii_case("self"))
+        && let Some(parent) = source_parent
+    {
+        for (candidate_index, &index) in symbol_index.get(parent).iter().enumerate() {
+            check_graph_work(control, candidate_index)?;
+            let owner = graph.symbols.get(index).ok_or_else(|| {
+                CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+            })?;
+            if owner.kind == SymbolKind::Trait
+                && owner.line_start <= relation.line
+                && relation.line <= owner.line_end
+            {
+                // A consuming class can override the trait member selected by self.
+                return Ok(ResolutionMatches {
+                    first: None,
+                    count: 0,
+                });
+            }
+        }
+    }
     let namespace_relative_target = if is_php_call
         && let Some((prefix, relative)) = target_name.split_once('\\')
         && !prefix.is_empty()
@@ -11017,6 +11063,37 @@ class DuplicateB {
             &BTreeSet::from(["Foo::DuplicateA", "Foo::DuplicateB", "Service"]),
             "PHP method callers retain their distinct source owners",
         )?;
+        let duplicate_sources = calls
+            .iter()
+            .filter_map(|relation| {
+                let entity = staged
+                    .entities
+                    .iter()
+                    .find(|entity| entity.key() == relation.source())?;
+                match entity.selector() {
+                    EntitySelector::Symbol { symbol }
+                        if symbol.name.as_str() == "collision_run" =>
+                    {
+                        symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        require_eq(
+            &duplicate_sources,
+            &BTreeSet::from(["Foo::DuplicateA", "Foo::DuplicateB"]),
+            "duplicate PHP calls must originate from their actual method entities",
+        )?;
+        let namespace_call = staged_call("top_level_helper", "TopLevel");
+        require(namespace_call.is_some_and(|relation| staged.entities.iter().any(|entity| entity.key() == relation.source() && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == "TopLevel"))), "semicolon PHP namespace retains top-level call ownership")?;
+        let trait_graph = extract_symbol_graph(
+            "src/trait.php",
+            Some("php"),
+            "<?php trait T { function run() { self::target(); } function target() {} } class C { use T; function target() {} }",
+        );
+        let trait_staged = finish_graph(&trait_graph)?;
+        require(trait_staged.relations.iter().any(|relation| matches!(relation.resolution(), RelationResolution::Unresolved { reference } if reference.as_str() == "self::target")), "PHP trait self calls depend on the consuming class")?;
         let enum_graph = extract_symbol_graph(
             "src/enum.php",
             Some("php"),
@@ -11297,6 +11374,21 @@ function fallback_run(): void {
         );
         for graph in [&unknown_caller, &ambiguous_caller] {
             let staged = finish_graph(graph)?;
+            require(
+                staged
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    })
+                    .all(|relation| {
+                        staged.entities.iter().any(|entity| {
+                            entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::File { .. })
+                        })
+                    }),
+                "unknown and same-line ambiguous PHP callers must retain file ownership",
+            )?;
             require(
                 staged.relations.iter().any(|relation| {
                     matches!(

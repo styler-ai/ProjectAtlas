@@ -230,6 +230,8 @@ PHP call matching uses case-insensitive names and proven namespace/type ownershi
 
 Anonymous function and arrow-function bodies have no supported stable owner, so their subtrees are omitted with partial coverage instead of attributing calls to an enclosing named function. Grouped imports bound the prefix and combined target before allocation; omitted targets mark coverage partial while admitted imports remain available. If no complete target fits, a bounded grammar-owned alias or terminal binding remains an Import symbol, preserving alias uncertainty without fabricating a target relation. Short-tag code whose first identifier starts with `xml` remains PHP; only the XML declaration prefix is excluded as a prolog.
 
+Call-source ownership uses the relation line to distinguish duplicate PHP method names; unknown or same-line ambiguous callers retain file ownership. Semicolon namespace declarations still own their later top-level calls. Trait-owned `self::` targets remain unresolved because the consuming class can override the trait member and trait composition is not modeled.
+
 ```mermaid
 flowchart LR
     php[.php bytes] --> registry[Language capability registry]
