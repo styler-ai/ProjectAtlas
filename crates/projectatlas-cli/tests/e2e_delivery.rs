@@ -9098,7 +9098,7 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
     }
     let runtime_link = temp.path().join("projectatlas-runtime-link");
     symlink(&runtime, &runtime_link)?;
-    let home = temp.path().join(TEST_HOME_DIR_NAME);
+    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
 
     let installer_output = run_projectatlas_plugin_installer_with_optional_path_and_home(
         &workspace_root,
@@ -30812,7 +30812,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     permissions.set_mode(0o755);
     fs::set_permissions(&runtime, permissions)?;
 
-    let home = temp.path().join(TEST_HOME_DIR_NAME);
+    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
     let workspace_root = workspace_root()?;
     let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
