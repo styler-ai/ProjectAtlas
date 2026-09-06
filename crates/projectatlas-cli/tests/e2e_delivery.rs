@@ -498,7 +498,7 @@ const CLI_E2E_ENVIRONMENT_FACETS_DIGEST: &str =
     "addd2e61ae70c2a11c1acb53abfb49d8dff160d0eda87b1e48164270a0c651a4";
 
 const CLI_E2E_TIMEOUT_FACETS_DIGEST: &str =
-    "d342a5ccc1c1022a5ec329fa63bb6deb34c5e7bbc219de7856a3b5c4975fbe49";
+    "3d6c8c52adfa4ce1eacefc8a880bdf1e964fa18e9f8e6d1e91c90f5432d299a0";
 
 const CLI_E2E_CLEANUP_FACETS_DIGEST: &str =
     "9282ebf08fd5952b243454de85d6b9d0a8a84ff2144caa324423b8e07427afd8";
@@ -20849,7 +20849,12 @@ fn serve_release_assets(
 fn release_asset_server_completion_result(
     served_archive: bool,
     served_checksums: bool,
+    deadline: Instant,
+    timeout_message: &'static str,
 ) -> Result<(), io::Error> {
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
+    }
     if served_archive && served_checksums {
         Ok(())
     } else {
@@ -20887,7 +20892,12 @@ fn write_release_asset_bytes(
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 match completion_receiver.recv_timeout(remaining.min(Duration::from_millis(50))) {
                     Ok(()) => {
-                        release_asset_server_completion_result(served_archive, served_checksums)?;
+                        release_asset_server_completion_result(
+                            served_archive,
+                            served_checksums,
+                            deadline,
+                            "timed out writing release asset response",
+                        )?;
                         return Ok(false);
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -20928,11 +20938,19 @@ fn serve_release_assets_with_deadline(
         let mut served_archive = false;
         let mut served_checksums = false;
         loop {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for release asset request",
+                ));
+            }
             match completion_receiver.try_recv() {
                 Ok(()) => {
                     return release_asset_server_completion_result(
                         served_archive,
                         served_checksums,
+                        deadline,
+                        "timed out waiting for release asset request",
                     );
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -20964,6 +20982,8 @@ fn serve_release_assets_with_deadline(
                                         return release_asset_server_completion_result(
                                             served_archive,
                                             served_checksums,
+                                            deadline,
+                                            "timed out waiting for release asset request",
                                         );
                                     }
                                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -21039,11 +21059,15 @@ fn serve_release_assets_with_deadline(
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    match completion_receiver.recv_timeout(Duration::from_millis(50)) {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    match completion_receiver.recv_timeout(remaining.min(Duration::from_millis(50)))
+                    {
                         Ok(()) => {
                             return release_asset_server_completion_result(
                                 served_archive,
                                 served_checksums,
+                                deadline,
+                                "timed out waiting for release asset request",
                             );
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -21129,6 +21153,45 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
             Err(io::Error::other(message).into())
         }
     };
+    for (complete, message) in [
+        (false, "timed out waiting for release asset request"),
+        (true, "timed out writing release asset response"),
+    ] {
+        let Err(error) =
+            release_asset_server_completion_result(complete, complete, Instant::now(), message)
+        else {
+            return Err(io::Error::other(
+                "expired release asset completion unexpectedly succeeded",
+            )
+            .into());
+        };
+        require(
+            error.kind() == io::ErrorKind::TimedOut,
+            "expired completion must take precedence over served assets",
+        )?;
+        require(
+            error.to_string() == message,
+            "expired completion retains its operation diagnostic",
+        )?;
+    }
+    let timely_deadline = Instant::now() + RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT;
+    release_asset_server_completion_result(true, true, timely_deadline, "unexpected timeout")?;
+    let Err(incomplete) =
+        release_asset_server_completion_result(false, false, timely_deadline, "unexpected timeout")
+    else {
+        return Err(io::Error::other("incomplete timely completion unexpectedly succeeded").into());
+    };
+    require(
+        incomplete.kind() == io::ErrorKind::Other,
+        "timely incomplete completion retains its error kind",
+    )?;
+    require(
+        incomplete
+            .to_string()
+            .contains("stopped before receiving both requests"),
+        "timely incomplete completion retains its diagnostic",
+    )?;
+
     let new_server = || {
         serve_release_assets_with_deadline(&archive, None, Instant::now() + Duration::from_secs(2))
     };
@@ -21309,7 +21372,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         stalled_error
             .to_string()
             .contains("timed out waiting for release asset request"),
-        "stalled request did not enforce its absolute deadline",
+        &format!("stalled request did not enforce its absolute deadline: {stalled_error}"),
     )?;
     require(
         join_started.elapsed() < Duration::from_secs(1),

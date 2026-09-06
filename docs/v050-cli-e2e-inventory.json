@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "909e25795c7970a2bd7519e4da3fb69ce8ca9fdc2eaa2637b0f52e105245e2fc",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "bf5c4c2af006e99546500377f8db8d7866988be4ca7426f816656332aa16b7c9",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "35c4cf8a4e3e69ffd4fb3ca18b191d5c79ea27646ba9fd7d3d21f5c0788aab32",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "72b95317626c27cbe036b8fc02d2749a302347c4fb1f3fb961f1e86d9bcee397",
@@ -11063,7 +11063,7 @@
       },
       {
         "line": 20993,
-        "text": "                    match completion_receiver.recv_timeout(Duration::from_millis(50)) {"
+        "text": "                    match completion_receiver.recv_timeout(remaining.min(Duration::from_millis(50)))"
       },
       {
         "line": 35664,
