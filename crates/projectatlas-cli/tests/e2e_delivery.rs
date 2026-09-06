@@ -21454,10 +21454,12 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
 
     #[cfg(windows)]
     let completed_parent_with_descendant = || {
-        let mut command = StdCommand::new("powershell");
-        command.arg("-NoProfile").arg("-Command").arg(
-            r#"$script = '$child = [Diagnostics.ProcessStartInfo]::new(); $child.FileName = ''ping.exe''; $child.Arguments = ''-n 16 127.0.0.1''; $child.UseShellExecute = $false; $child.CreateNoWindow = $true; [void][Diagnostics.Process]::Start($child)'; $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script)); $middle = [Diagnostics.ProcessStartInfo]::new(); $middle.FileName = 'powershell.exe'; $middle.Arguments = "-NoProfile -EncodedCommand $encoded"; $middle.UseShellExecute = $false; $middle.CreateNoWindow = $true; $middleProcess = [Diagnostics.Process]::Start($middle); $middleProcess.WaitForExit(); if ($middleProcess.ExitCode -ne 0) { exit $middleProcess.ExitCode }"#,
-        );
+        let mut command = StdCommand::new("cmd.exe");
+        command.args([
+            "/D",
+            "/C",
+            "cmd.exe /D /C start /B ping.exe -n 16 127.0.0.1",
+        ]);
         command
     };
     #[cfg(unix)]
@@ -21466,6 +21468,47 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         command.arg("-c").arg("sleep 15 &");
         command
     };
+
+    // Withhold cleanup once to prove the same fixture actually leaves a pipe
+    // holder after successful parent exit, rather than passing with an empty tree.
+    let mut retained_pipe_command = completed_parent_with_descendant();
+    retained_pipe_command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut parent_observed_at = None;
+    let retained_pipe_output =
+        wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
+            spawn_plugin_installer_process(&mut retained_pipe_command)?,
+            "fixture-completed-parent-pipe-control",
+            Duration::from_secs(10),
+            None,
+            None,
+            None,
+            &mut |child| {
+                if !child.try_wait()?.is_some_and(|status| status.success()) {
+                    return Err(io::Error::other(
+                        "pipe control did not establish successful parent exit before cleanup",
+                    ));
+                }
+                parent_observed_at = Some(Instant::now());
+                Ok(())
+            },
+            None,
+        )?;
+    let retained_pipe_duration = parent_observed_at
+        .ok_or_else(|| io::Error::other("pipe control did not observe parent completion"))?
+        .elapsed();
+    require(
+        retained_pipe_output.status.success(),
+        "pipe control did not preserve successful parent status",
+    )?;
+    if retained_pipe_duration <= Duration::from_secs(10) {
+        return Err(io::Error::other(format!(
+            "completed parent fixture did not retain a descendant pipe beyond the cleanup bound: {retained_pipe_duration:?}",
+        ))
+        .into());
+    }
 
     let server = new_server()?;
     let mut completed_parent_command = completed_parent_with_descendant();
