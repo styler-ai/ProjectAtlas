@@ -8225,10 +8225,25 @@ fn verify_claude_native_reader(
         .join(ISOLATED_CLAUDE_CONFIG_DIR_NAME)
         .join(".claude.json");
     let native_state_before = read_json_file(&native_state_file)?;
-    let canonical_project = repo.canonicalize()?.to_string_lossy().replace('\\', "/");
-    let project_key = canonical_project
-        .strip_prefix("//?/")
-        .unwrap_or(&canonical_project);
+    let canonical_project = repo.canonicalize()?;
+    let native_projects = native_state_before
+        .get("projects")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("Claude native state omitted its projects object"))?;
+    // Native hosts can retain Windows short paths or POSIX aliases as JSON keys.
+    // Select the exact filesystem identity while retaining the host-authored key.
+    let mut matching_projects = native_projects.keys().filter(|key| {
+        Path::new(key)
+            .canonicalize()
+            .is_ok_and(|path| path == canonical_project)
+    });
+    let project_key = matching_projects
+        .next()
+        .ok_or_else(|| io::Error::other("Claude native state omitted the selected project"))?;
+    require(
+        matching_projects.next().is_none(),
+        "Claude native state contains ambiguous keys for the selected project",
+    )?;
     let unrelated_native_entry = native_state_before
         .get("projects")
         .and_then(|projects| projects.get(project_key))
