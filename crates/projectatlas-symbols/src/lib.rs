@@ -2251,12 +2251,35 @@ fn php_namespace_use_clause_target(
     Some(target)
 }
 
-/// Return the first static namespace path from a PHP `use` declaration.
+/// Retain a proven local binding when an import's complete target is overbound.
 fn php_namespace_use_target(node: Node<'_>, content: &str) -> Option<String> {
     php_namespace_use_targets(node, content)
         .0
         .into_iter()
         .next()
+        .or_else(|| php_namespace_use_binding(node, content))
+}
+
+/// Select an actual alias or terminal import name without inventing a target.
+fn php_namespace_use_binding(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "namespace_use_clause" {
+        let name = node.child_by_field_name("alias").or_else(|| {
+            let target = first_named_child(node)?;
+            if target.kind() == "name" {
+                Some(target)
+            } else {
+                let mut cursor = target.walk();
+                target
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() == "name")
+            }
+        })?;
+        return php_bounded_name_text(name, content);
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| matches!(child.kind(), "namespace_use_clause" | "namespace_use_group"))
+        .find_map(|child| php_namespace_use_binding(child, content))
 }
 
 /// Return a conservative PHP call target, suppressing dynamic calls.

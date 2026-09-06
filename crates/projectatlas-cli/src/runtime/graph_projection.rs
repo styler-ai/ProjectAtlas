@@ -11338,6 +11338,40 @@ namespace Local\Sub { function helper() {} }
             )?;
         }
 
+        let oversized_prefix = "N".repeat(241);
+        for import in [
+            format!("use Vendor\\{oversized_prefix} as Sub;"),
+            format!("use Vendor\\{oversized_prefix}\\Sub;"),
+            format!("use {oversized_prefix}\\{{Sub}};"),
+            format!("use {}\\{{Sub}};", "N".repeat(238)),
+            format!("use Vendor\\Kept, Vendor\\{oversized_prefix} as Sub;"),
+        ] {
+            let source = format!(
+                "<?php namespace Foo {{ {import} function run() {{ Sub\\helper(); namespace\\Sub\\helper(); }} function absolute() {{ \\Foo\\Sub\\helper(); }} }} namespace Foo\\Sub {{ function helper() {{}} }}"
+            );
+            let graph = extract_symbol_graph("src/oversized-imports.php", Some("php"), &source);
+            let staged = finish_graph(&graph)?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    matches!(relation.resolution(), RelationResolution::Unresolved { reference }
+                        if reference.as_str() == "Sub\\helper")
+                }),
+                &format!("omitted PHP import must retain alias uncertainty: {import}"),
+            )?;
+            require_eq(
+                &staged
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                            && matches!(relation.resolution(), RelationResolution::Resolved { .. })
+                    })
+                    .count(),
+                &2,
+                "rooted and namespace-relative PHP calls must remain independently resolvable",
+            )?;
+        }
+
         let mut partial_imports = imported_graph;
         partial_imports.parser = ParserKind::Fallback;
         partial_imports
