@@ -4,8 +4,8 @@
 
 ## 2. Fixture and verification
 
-- [ ] 2.1 Correct the completed-parent fixture in the existing delivery-test owner, proving successful parent exit with a retained descendant pipe and prompt owned cleanup without changing operation or workflow deadlines.
-- [ ] 2.2 Preserve and verify successful status, late-observation classification, live-parent timeout, output draining, cleanup failure, and supported-platform behavior through the existing lifecycle and observer tests; update only required frozen source identities and pass required local and hosted gates.
+- [x] 2.1 Correct the completed-parent fixture in the existing delivery-test owner, proving successful parent exit with a retained descendant pipe and prompt owned cleanup without changing operation or workflow deadlines.
+- [x] 2.2 Preserve and verify successful status, late-observation classification, live-parent timeout, output draining, cleanup failure, and supported-platform behavior through the existing lifecycle and observer tests; update only required frozen source identities and pass required local and hosted gates.
 
 ## Verification
 
