@@ -28832,8 +28832,11 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
     #[cfg(unix)]
     require(
-        !home.join(TEST_POSIX_INSTALLER_STATE_DIR).exists(),
-        "POSIX forwarder lifecycle fixture must begin without installer state",
+        fs::read_dir(home.join(TEST_POSIX_INSTALLER_STATE_DIR))?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .iter()
+            .all(|entry| entry.path().extension() != Some(OsStr::new("state"))),
+        "POSIX collision published a forwarder capability state",
     )?;
     let first_output = run_install()?;
     require(
@@ -28884,8 +28887,11 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     } else {
         home.join(TEST_POSIX_INSTALLER_STATE_DIR)
     };
-    let installer_states =
-        fs::read_dir(&installer_state_dir)?.collect::<Result<Vec<_>, io::Error>>()?;
+    let installer_states = fs::read_dir(&installer_state_dir)?
+        .collect::<Result<Vec<_>, io::Error>>()?
+        .into_iter()
+        .filter(|entry| entry.path().extension() == Some(OsStr::new("state")))
+        .collect::<Vec<_>>();
     require(
         installer_states.len() == 1
             && installer_states[0]
@@ -29061,7 +29067,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         );
         let remaining_states = installer_state_dir
             .read_dir()?
-            .collect::<Result<Vec<_>, io::Error>>()?;
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .into_iter()
+            .filter(|entry| entry.path() != installer_state.with_extension("lock"))
+            .collect::<Vec<_>>();
         require(
             !early_collision.status.success()
                 && early_collision_text.contains("provenance collision")
@@ -29836,7 +29845,10 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     let first_provenance_before_failure = fs::read(&first_provenance)?;
     let first_states = installer_state_dir
         .read_dir()?
-        .collect::<Result<Vec<_>, io::Error>>()?;
+        .collect::<Result<Vec<_>, io::Error>>()?
+        .into_iter()
+        .filter(|entry| entry.path().extension() == Some(OsStr::new("state")))
+        .collect::<Vec<_>>();
     require(
         first_states.len() == 1,
         "migration fixture did not publish exactly one initial capability state",
@@ -29943,7 +29955,10 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     let state_files_before_state_failure = installer_state_dir
         .read_dir()?
         .map(|entry| entry.map(|value| value.path()))
-        .collect::<Result<Vec<_>, io::Error>>()?;
+        .collect::<Result<Vec<_>, io::Error>>()?
+        .into_iter()
+        .filter(|path| path.extension() == Some(OsStr::new("state")))
+        .collect::<Vec<_>>();
     require(
         state_files_before_state_failure.len() == 2,
         "migration fixture lost a capability state before retirement-failure proof",
@@ -29997,7 +30012,9 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
         installer_state_dir
             .read_dir()?
             .collect::<Result<Vec<_>, io::Error>>()?
-            .len()
+            .iter()
+            .filter(|entry| entry.path().extension() == Some(OsStr::new("state")))
+            .count()
             == 1,
         "migration did not retire the old private capability state",
     )?;
@@ -30041,7 +30058,8 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
                 && installer_state_dir
                     .read_dir()?
                     .collect::<Result<Vec<_>, io::Error>>()?
-                    .is_empty(),
+                    .iter()
+                    .all(|entry| entry.path().extension() != Some(OsStr::new("state"))),
             format!(
                 "owned POSIX forwarder uninstall did not retire only the migrated pair:\n{}\n{}",
                 String::from_utf8_lossy(&uninstall_output.stdout),
@@ -30120,7 +30138,9 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         command
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
-            .env("PATH", path);
+            .env("PATH", path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(discovery_gate) = discovery_gate {
             command.env(
                 "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_DISCOVERY_GATE",
@@ -30307,7 +30327,9 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     require(
         output_a.status.success() && output_b.status.success(),
         format!(
-            "opposite forwarder migrations did not both complete under total lock order:\nA stdout:\n{}\nA stderr:\n{}\nB stdout:\n{}\nB stderr:\n{}",
+            "opposite forwarder migrations did not both complete under total lock order (A={}, B={}):\nA stdout:\n{}\nA stderr:\n{}\nB stdout:\n{}\nB stderr:\n{}",
+            output_a.status,
+            output_b.status,
             String::from_utf8_lossy(&output_a.stdout),
             String::from_utf8_lossy(&output_a.stderr),
             String::from_utf8_lossy(&output_b.stdout),
@@ -30813,16 +30835,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join("projectatlas");
     let real_runtime = mcp_contract_executable();
-    let real_runtime_quoted = real_runtime
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    fs::write(
-        &runtime,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--signal-test\" ]; then\n  trap 'printf \"interrupted\\n\" >&2; exit 130' INT\n  : > \"$2\"\n  while :; do sleep 1; done\nfi\nexec \"{real_runtime_quoted}\" \"$@\"\n"
-        ),
-    )?;
+    fs::copy(&real_runtime, &runtime)?;
     let mut permissions = fs::metadata(&runtime)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&runtime, permissions)?;
@@ -30899,6 +30912,17 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
             && direct_info.stdout == alias_info.stdout
             && direct_info.stderr == alias_info.stderr,
         "POSIX atlas forwarder changed the runtime stream or argument contract",
+    )?;
+
+    let real_runtime_quoted = real_runtime
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    fs::write(
+        &runtime,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--signal-test\" ]; then\n  trap 'printf \"interrupted\\n\" >&2; exit 130' INT\n  : > \"$2\"\n  while :; do sleep 1; done\nfi\nexec \"{real_runtime_quoted}\" \"$@\"\n"
+        ),
     )?;
 
     let signal_ready = temp.path().join("signal handler ready");

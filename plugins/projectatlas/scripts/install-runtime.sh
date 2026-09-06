@@ -541,14 +541,14 @@ atlas_forwarder_provenance_content() {
   printf '%s\n' "runtime: $canonical_verified"
 }
 
-is_direct_regular_file() {
+is_direct_regular_file() (
   candidate=$1
   [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
   candidate_links=$(stat -c %h -- "$candidate" 2>/dev/null || stat -f %l "$candidate" 2>/dev/null || true)
   [ "$candidate_links" = 1 ]
-}
+)
 
-is_atlas_forwarder_provenance() {
+is_atlas_forwarder_provenance() (
   provenance=$1
   forwarder=$2
   verified=$3
@@ -557,7 +557,7 @@ is_atlas_forwarder_provenance() {
   expected_content=$(atlas_forwarder_provenance_content "$forwarder" "$verified") || return 1
   actual_content=$(cat "$provenance" 2>/dev/null || true)
   [ "$actual_content" = "$expected_content" ]
-}
+)
 
 remove_published_atlas_forwarder_provenance() {
   provenance=$1
@@ -652,21 +652,21 @@ managed_atlas_forwarder_target() {
   printf '%s\n' "$canonical_target"
 }
 
-is_managed_atlas_forwarder() {
+is_managed_atlas_forwarder() (
   candidate=$1
   verified=$2
   [ -n "$verified" ] || return 1
   managed_target=$(managed_atlas_forwarder_target "$candidate") || return 1
   [ "$managed_target" = "$(canonical_file "$verified")" ]
-}
+)
 
 migrate_managed_atlas_forwarder_locked() {
   candidate=$1
-  verified=$2
+  migration_runtime=$2
   allow_same_target=${3:-0}
-  [ -n "$verified" ] || return 1
+  [ -n "$migration_runtime" ] || return 1
   managed_target=$(managed_atlas_forwarder_target "$candidate") || return 1
-  [ "$managed_target" != "$(canonical_file "$verified")" ] || [ "$allow_same_target" -eq 1 ] || return 1
+  [ "$managed_target" != "$(canonical_file "$migration_runtime")" ] || [ "$allow_same_target" -eq 1 ] || return 1
   if ! is_managed_atlas_forwarder "$candidate" "$managed_target"; then
     return 1
   fi
@@ -703,14 +703,14 @@ migrate_managed_atlas_forwarder_locked() {
     return 1
   fi
   rm -f -- "$forwarder_quarantine" "$provenance_quarantine"
-  printf '%s\n' "Migrated ProjectAtlas atlas forwarder: $candidate -> $(atlas_forwarder_path "$(canonical_file "$verified")")"
+  printf '%s\n' "Migrated ProjectAtlas atlas forwarder: $candidate -> $(atlas_forwarder_path "$(canonical_file "$migration_runtime")")"
 }
 
-is_owned_atlas_forwarder() {
+is_owned_atlas_forwarder() (
   managed_atlas_forwarder_target "$1" >/dev/null 2>&1
-}
+)
 
-ensure_atlas_forwarder_collision_free() {
+ensure_atlas_forwarder_collision_free() (
   forwarder=$1
   verified=$2
   if [ -e "$forwarder" ] || [ -L "$forwarder" ]; then
@@ -726,7 +726,7 @@ ensure_atlas_forwarder_collision_free() {
       return 1
     fi
   fi
-}
+)
 
 inject_atlas_forwarder_publication_race() {
   race_path=${PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH:-}
@@ -794,14 +794,14 @@ pause_atlas_forwarder_after_lock_acquisition() {
 }
 
 write_atlas_forwarder() {
-  verified=$(canonical_file "$1") || return 1
-  forwarder=$(atlas_forwarder_path "$verified")
+  destination_runtime=$(canonical_file "$1") || return 1
+  destination_forwarder=$(atlas_forwarder_path "$destination_runtime")
   previous_candidate=$(command -v atlas 2>/dev/null || true)
   previous_candidate_identity=
   previous_atlas_owned_at_discovery=0
   previous_atlas_identity=
   if [ -n "$previous_candidate" ] &&
-    [ "$(canonical_file "$previous_candidate")" != "$(canonical_file "$forwarder")" ]; then
+    [ "$(canonical_file "$previous_candidate")" != "$(canonical_file "$destination_forwarder")" ]; then
     previous_candidate_identity=$(canonical_file "$previous_candidate") || return 1
     if is_owned_atlas_forwarder "$previous_candidate"; then
       previous_atlas_owned_at_discovery=1
@@ -812,7 +812,7 @@ write_atlas_forwarder() {
   fi
   pause_atlas_forwarder_after_lock_discovery
   signal_atlas_forwarder_lock_attempt
-  acquire_atlas_forwarder_lifecycle_lock_set "$forwarder" "$previous_candidate" || return 1
+  acquire_atlas_forwarder_lifecycle_lock_set "$destination_forwarder" "$previous_candidate" || return 1
   pause_atlas_forwarder_after_lock_acquisition
   result=0
   previous_atlas=
@@ -834,12 +834,12 @@ write_atlas_forwarder() {
       previous_atlas=$previous_candidate
     fi
   elif [ -n "$current_atlas" ] &&
-    [ "$(canonical_file "$current_atlas")" != "$(canonical_file "$forwarder")" ]; then
+    [ "$(canonical_file "$current_atlas")" != "$(canonical_file "$destination_forwarder")" ]; then
     printf '%s\n' "ProjectAtlas effective atlas command appeared while acquiring its lifecycle locks; refusing to publish: $current_atlas" >&2
     result=1
   fi
   if [ "$result" -eq 0 ]; then
-    write_atlas_forwarder_locked "$verified" "$previous_atlas" "$previous_atlas_identity" || result=$?
+    write_atlas_forwarder_locked "$destination_runtime" "$previous_atlas" "$previous_atlas_identity" || result=$?
   fi
   release_result=0
   release_atlas_forwarder_lifecycle_lock_set || release_result=$?
@@ -850,22 +850,22 @@ write_atlas_forwarder() {
 }
 
 write_atlas_forwarder_locked() {
-  verified=$1
+  destination_runtime=$1
   previous_atlas=${2:-}
   previous_atlas_identity=${3:-}
-  forwarder=$(atlas_forwarder_path "$verified")
-  provenance=$(atlas_forwarder_provenance_path "$forwarder")
-  state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
+  destination_forwarder=$(atlas_forwarder_path "$destination_runtime")
+  provenance=$(atlas_forwarder_provenance_path "$destination_forwarder")
+  state_path=$(atlas_forwarder_state_path "$destination_forwarder") || return 1
   if [ -n "$previous_atlas" ] &&
     { [ "$(canonical_file "$previous_atlas")" != "$previous_atlas_identity" ] ||
       ! is_owned_atlas_forwarder "$previous_atlas"; }; then
     printf '%s\n' "ProjectAtlas atlas forwarder migration source changed or is no longer managed: $previous_atlas" >&2
     return 1
   fi
-  ensure_atlas_forwarder_collision_free "$forwarder" "$verified" || return 1
-  runtime_dir=$(dirname -- "$verified")
+  ensure_atlas_forwarder_collision_free "$destination_forwarder" "$destination_runtime" || return 1
+  runtime_dir=$(dirname -- "$destination_runtime")
   temporary=$(mktemp "$runtime_dir/.atlas-forwarder.XXXXXX") || {
-    printf '%s\n' "ProjectAtlas could not stage the atlas forwarder beside the verified runtime: $forwarder" >&2
+    printf '%s\n' "ProjectAtlas could not stage the atlas forwarder beside the verified runtime: $destination_forwarder" >&2
     return 1
   }
   temporary_provenance=$(mktemp "$runtime_dir/.atlas-forwarder-provenance.XXXXXX") || {
@@ -873,8 +873,8 @@ write_atlas_forwarder_locked() {
     printf '%s\n' "ProjectAtlas could not stage atlas forwarder provenance beside the verified runtime: $provenance" >&2
     return 1
   }
-  if ! atlas_forwarder_content "$verified" >"$temporary" ||
-    ! atlas_forwarder_provenance_content "$forwarder" "$verified" >"$temporary_provenance"; then
+  if ! atlas_forwarder_content "$destination_runtime" >"$temporary" ||
+    ! atlas_forwarder_provenance_content "$destination_forwarder" "$destination_runtime" >"$temporary_provenance"; then
     rm -f "$temporary"
     rm -f "$temporary_provenance"
     return 1
@@ -897,7 +897,7 @@ write_atlas_forwarder_locked() {
     rm -f "$temporary" "$temporary_provenance"
     return 1
   }
-  if ! ensure_atlas_forwarder_state "$forwarder" "$verified"; then
+  if ! ensure_atlas_forwarder_state "$destination_forwarder" "$destination_runtime"; then
     rm -f -- "$temporary" "$temporary_provenance"
     return 1
   fi
@@ -908,8 +908,8 @@ write_atlas_forwarder_locked() {
   provenance_published=0
   inject_atlas_forwarder_provenance_check_race "$provenance"
   if [ -e "$provenance" ] || [ -L "$provenance" ]; then
-    if ! is_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
-      if [ "$state_published" -eq 1 ] && ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+    if ! is_atlas_forwarder_provenance "$provenance" "$destination_forwarder" "$destination_runtime"; then
+      if [ "$state_published" -eq 1 ] && ! remove_atlas_forwarder_state "$destination_forwarder" "$destination_runtime"; then
         printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
       fi
       rm -f "$temporary" "$temporary_provenance"
@@ -919,7 +919,7 @@ write_atlas_forwarder_locked() {
   else
     if ! inject_atlas_forwarder_provenance_publication_race "$provenance" || ! ln "$temporary_provenance" "$provenance"; then
       if [ "$state_published" -eq 1 ]; then
-        if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+        if ! remove_atlas_forwarder_state "$destination_forwarder" "$destination_runtime"; then
           printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
         fi
       fi
@@ -930,60 +930,60 @@ write_atlas_forwarder_locked() {
     rm -f "$temporary_provenance"
     provenance_published=1
   fi
-  if ! ensure_atlas_forwarder_collision_free "$forwarder" "$verified"; then
+  if ! ensure_atlas_forwarder_collision_free "$destination_forwarder" "$destination_runtime"; then
     if [ "$provenance_published" -eq 1 ]; then
-      if ! remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
+      if ! remove_published_atlas_forwarder_provenance "$provenance" "$destination_forwarder" "$destination_runtime"; then
         printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder provenance: $provenance" >&2
       fi
     fi
     if [ "$state_published" -eq 1 ]; then
-      if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+      if ! remove_atlas_forwarder_state "$destination_forwarder" "$destination_runtime"; then
         printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
       fi
     fi
     rm -f "$temporary"
     return 1
   fi
-  if [ ! -e "$forwarder" ] && [ ! -L "$forwarder" ]; then
-    if ! inject_atlas_forwarder_publication_race "$forwarder" || ! ln "$temporary" "$forwarder"; then
+  if [ ! -e "$destination_forwarder" ] && [ ! -L "$destination_forwarder" ]; then
+    if ! inject_atlas_forwarder_publication_race "$destination_forwarder" || ! ln "$temporary" "$destination_forwarder"; then
       if [ "$provenance_published" -eq 1 ]; then
-        if ! remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
+        if ! remove_published_atlas_forwarder_provenance "$provenance" "$destination_forwarder" "$destination_runtime"; then
           printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder provenance: $provenance" >&2
         fi
       fi
       if [ "$state_published" -eq 1 ]; then
-        if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+        if ! remove_atlas_forwarder_state "$destination_forwarder" "$destination_runtime"; then
           printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
         fi
       fi
       rm -f "$temporary"
-      printf '%s\n' "ProjectAtlas atlas forwarder publication collided; refusing to overwrite: $forwarder" >&2
+      printf '%s\n' "ProjectAtlas atlas forwarder publication collided; refusing to overwrite: $destination_forwarder" >&2
       return 1
     fi
     rm -f "$temporary"
   else
     rm -f "$temporary"
   fi
-  if ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
+  if ! is_managed_atlas_forwarder "$destination_forwarder" "$destination_runtime"; then
     if [ "$provenance_published" -eq 1 ]; then
-      if ! remove_published_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
+      if ! remove_published_atlas_forwarder_provenance "$provenance" "$destination_forwarder" "$destination_runtime"; then
         printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder provenance: $provenance" >&2
       fi
     fi
     if [ "$state_published" -eq 1 ]; then
-      if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
+      if ! remove_atlas_forwarder_state "$destination_forwarder" "$destination_runtime"; then
         printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder installer state: $state_path" >&2
       fi
     fi
     rm -f -- "$temporary"
-    printf '%s\n' "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder" >&2
+    printf '%s\n' "ProjectAtlas atlas forwarder failed final ownership verification: $destination_forwarder" >&2
     return 1
   fi
   if [ -n "$previous_atlas" ]; then
-    migrate_managed_atlas_forwarder_locked "$previous_atlas" "$verified" || return 1
+    migrate_managed_atlas_forwarder_locked "$previous_atlas" "$destination_runtime" || return 1
     hash -r 2>/dev/null || true
   fi
-  printf 'ProjectAtlas atlas forwarder installed and verified: %s -> %s\n' "$forwarder" "$verified"
+  printf 'ProjectAtlas atlas forwarder installed and verified: %s -> %s\n' "$destination_forwarder" "$destination_runtime"
 }
 
 remove_atlas_forwarder() {
