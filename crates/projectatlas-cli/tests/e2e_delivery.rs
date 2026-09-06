@@ -7374,6 +7374,17 @@ fn required_real_host_readers_reject_missing_discovery() -> Result<(), Box<dyn E
 #[test]
 fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> {
     let workflow = fs::read_to_string(workspace_root()?.join(CI_WORKFLOW_RELATIVE_PATH))?;
+    for name in [
+        "Install exact real host CLIs for native reader proof",
+        "Real installed host reader proof",
+    ] {
+        let step = workflow_job_step(&workflow, "e2e-smoke", name)?;
+        require(
+            step["if"].as_str()
+                == Some("contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'"),
+            format!("{name} must cover plugin platforms and macOS Intel"),
+        )?;
+    }
     let step = workflow_job_step(&workflow, "e2e-smoke", "Real installed host reader proof")?;
     require(
         step["env"][REQUIRE_REAL_HOST_READERS_ENV].as_str() == Some("1"),

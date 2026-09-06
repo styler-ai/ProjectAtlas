@@ -446,13 +446,13 @@ jobs:
           fi
 
       - name: Install exact real host CLIs for native reader proof
-        if: contains(matrix.contracts, 'plugin')
+        if: contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'
         timeout-minutes: 10
         shell: bash
         run: npm install --global @anthropic-ai/claude-code@2.1.201 opencode-ai@1.18.10
 
       - name: Real installed host reader proof
-        if: contains(matrix.contracts, 'plugin')
+        if: contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'
         timeout-minutes: 15
         shell: bash
         env:
