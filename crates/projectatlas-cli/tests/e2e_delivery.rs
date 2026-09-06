@@ -7386,6 +7386,16 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
         )?;
     }
     let step = workflow_job_step(&workflow, "e2e-smoke", "Real installed host reader proof")?;
+    let commands = step["run"].as_str().unwrap_or_default();
+    for command in [
+        "cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery real_host_reader_ -- --nocapture",
+        "cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture",
+    ] {
+        require(
+            commands.lines().any(|line| line.trim() == command),
+            format!("real host proof must execute {command}"),
+        )?;
+    }
     require(
         step["env"][REQUIRE_REAL_HOST_READERS_ENV].as_str() == Some("1"),
         "real installed host reader proof must enable required-reader mode".to_owned(),

@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "722f40f4ac9d998e856626127d7819f8e4352212cec5fe4ebbec5e1dcc6d56ff",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "2277efff57c48be84530d66e74dc939978e1dad7ef36daedf88afa26ecfcdf99",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "35c4cf8a4e3e69ffd4fb3ca18b191d5c79ea27646ba9fd7d3d21f5c0788aab32",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "72b95317626c27cbe036b8fc02d2749a302347c4fb1f3fb961f1e86d9bcee397",
@@ -19403,8 +19403,13 @@
   "selectors_after_move": [
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 460,
-      "text": "        run: cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture"
+      "line": 461,
+      "text": "          cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery real_host_reader_ -- --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 462,
+      "text": "          cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
