@@ -5264,6 +5264,7 @@ fn unique_php_source_namespace<'a>(
         return Ok(if global_function { Some("") } else { namespace });
     };
     let mut namespace = None;
+    let mut module_namespace = None;
     let mut source_found = false;
     for (candidate_index, &row_index) in symbol_index.get(source_parent).iter().enumerate() {
         check_graph_work(control, candidate_index)?;
@@ -5277,7 +5278,10 @@ fn unique_php_source_namespace<'a>(
                 }
                 Some(symbol.parent.as_deref().unwrap_or(""))
             }
-            SymbolKind::Module if symbol.name == source_parent => Some(symbol.name.as_str()),
+            SymbolKind::Module if symbol.name == source_parent => {
+                module_namespace = Some(symbol.name.as_str());
+                continue;
+            }
             _ => continue,
         };
         if !source_found {
@@ -5287,7 +5291,8 @@ fn unique_php_source_namespace<'a>(
             return Ok(None);
         }
     }
-    Ok(namespace)
+    // A line-matched containing type owns the call before a same-named namespace.
+    Ok(namespace.or(module_namespace))
 }
 
 /// Return one unambiguous containing scope for the parser relation source.
@@ -11103,6 +11108,48 @@ class DuplicateB {
                         "PHP namespace containment retains its declared type",
                     )?;
                 }
+            }
+        }
+        for declaration in [
+            "class N { function caller() { helper(); } }",
+            "trait N { function caller() { helper(); } }",
+            "enum N { case Ready; function caller() { helper(); } }",
+        ] {
+            for source in [
+                format!(
+                    "<?php namespace N {{ function helper() {{}} }}\nnamespace M {{ function helper() {{}} {declaration} }}"
+                ),
+                format!(
+                    "<?php namespace M {{ function helper() {{}} {declaration} }}\nnamespace N {{ function helper() {{}} }}"
+                ),
+                format!(
+                    "<?php namespace N; function helper() {{}}\nnamespace M; function helper() {{}} {declaration}"
+                ),
+                format!(
+                    "<?php namespace M; function helper() {{}} {declaration}\nnamespace N; function helper() {{}}"
+                ),
+            ] {
+                let graph = extract_symbol_graph("src/type-namespace.php", Some("php"), &source);
+                let projected = finish_graph(&graph)?;
+                let calls = projected
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    })
+                    .collect::<Vec<_>>();
+                require_eq(
+                    &calls.len(),
+                    &1,
+                    "PHP type/namespace collision retains its call",
+                )?;
+                require(
+                    matches!(calls[0].resolution(), RelationResolution::Resolved {
+                        selector: ReusableTargetSelector::Symbol { symbol }, ..
+                    } if symbol.name.as_str() == "helper"
+                        && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("M")),
+                    "PHP containing type must retain its namespace despite a same-named module",
+                )?;
             }
         }
         let overlapping = extract_symbol_graph(
