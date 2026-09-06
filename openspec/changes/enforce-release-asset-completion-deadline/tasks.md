@@ -4,8 +4,8 @@
 
 ## 2. Completion deadline and proof
 
-- [ ] 2.1 Enforce the existing absolute deadline at the shared release-asset completion decision for all receive paths and bound idle waits without changing ownership or timeout values.
-- [ ] 2.2 Prove expired and timely complete/incomplete decisions, preserve real lifecycle and observer compatibility, improve causal failure diagnostics, update required frozen source identities, and pass required local and hosted platform gates.
+- [x] 2.1 Enforce the existing absolute deadline at the shared release-asset completion decision for all receive paths and bound idle waits without changing ownership or timeout values.
+- [x] 2.2 Prove expired and timely complete/incomplete decisions, preserve real lifecycle and observer compatibility, improve causal failure diagnostics, update required frozen source identities, and pass required local and hosted platform gates.
 
 ## Verification
 
