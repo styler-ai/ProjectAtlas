@@ -38,8 +38,8 @@ use projectatlas_core::health::{
 use projectatlas_core::language::{
     ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION, ContentClassification, ContentSelection,
     LANGUAGE_CAPABILITY_REGISTRY_VERSION, LanguageRegistryReport, SymbolParserOwner,
-    accepted_language_capability_digest, content_classification, language_capability,
-    language_registry_digest, language_registry_report,
+    TreeSitterGrammar, accepted_language_capability_digest, content_classification,
+    language_capability, language_registry_digest, language_registry_report,
 };
 #[cfg(all(test, feature = "optional-parser-supervisor"))]
 use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
@@ -6656,7 +6656,9 @@ fn parse_admitted_symbol_job(
             .as_deref()
             .and_then(language_capability)
             .and_then(|capability| match capability.symbol_parser {
-                SymbolParserOwner::TreeSitter(_) => Some(ParserKind::TreeSitter),
+                SymbolParserOwner::TreeSitter(TreeSitterGrammar::Php) => {
+                    Some(ParserKind::TreeSitter)
+                }
                 _ => None,
             })
             .unwrap_or(graph.parser)
@@ -10464,6 +10466,44 @@ mod tests {
             &current_source.to_string(),
             "current source after contention",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn non_php_fallback_retains_actual_source_provenance() -> Result<(), Box<dyn Error>> {
+        let job = SymbolParseJob {
+            path: "src/recovered.rs".to_string(),
+            native_path: PathBuf::new(),
+            expected_content_hash: String::new(),
+            language: Some("rust".to_string()),
+            fallback_summary: None,
+            purpose_needs_suggestion: false,
+        };
+        for (content, parser) in [
+            ("fn recovered() {}", ParserKind::TreeSitter),
+            ("def recovered(): pass", ParserKind::Fallback),
+        ] {
+            let SymbolParseOutcome::Parsed(parsed) = parse_admitted_symbol_job(
+                &job,
+                content,
+                None,
+                &SymbolBuildOptions::new(1_024, Some(1), None),
+                &standalone_index_work_control(),
+            ) else {
+                return Err(io::Error::other("source provenance fixture did not parse").into());
+            };
+            require_eq(&parsed.graph.parser, &parser, "observed fact parser")?;
+            require_eq(&parsed.source_parser, &parser, "observed source parser")?;
+            require_eq(
+                &parsed
+                    .graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == "recovered"),
+                &true,
+                "recovered declaration",
+            )?;
+        }
         Ok(())
     }
 
