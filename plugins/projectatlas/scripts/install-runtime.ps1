@@ -97,6 +97,7 @@ function Initialize-ProjectAtlasRuntimeProbe {
     if ("ProjectAtlas.Installer.RuntimeProbeProcess" -as [type]) {
         return
     }
+    Write-Verbose "ProjectAtlas runtime probe: compile native process owner"
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -1205,13 +1206,16 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
     $probePayload = $null
     $probeCleanupSucceeded = $false
     try {
+        Write-Verbose "ProjectAtlas runtime probe: initialize native process owner"
         Initialize-ProjectAtlasRuntimeProbe
+        Write-Verbose "ProjectAtlas runtime probe: start command"
         $process = [ProjectAtlas.Installer.RuntimeProbeProcess]::Start(
             $FilePath,
             $Arguments,
             $standardOutput,
             $standardError
         )
+        Write-Verbose "ProjectAtlas runtime probe: child started"
         $probeClock = [Diagnostics.Stopwatch]::StartNew()
         do {
             $exited = $process.WaitForExit(25)
@@ -1233,6 +1237,7 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
         }
         while (-not $exited)
         $exitCode = $process.ExitCode
+        Write-Verbose "ProjectAtlas runtime probe: child exited with $exitCode; reap owned descendants"
         # The job survives the launcher, so this also reaps asynchronously spawned descendants.
         $process.Stop($probeTimeoutMs)
         if ($exitCode -ne 0) {
@@ -1245,6 +1250,7 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
                 return $null
             }
         }
+        Write-Verbose "ProjectAtlas runtime probe: read bounded JSON output"
         $jsonStream = $null
         try {
             $jsonStream = [IO.File]::Open(
@@ -1283,6 +1289,7 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
         if (-not $jsonText.TrimStart().StartsWith("{", [System.StringComparison]::Ordinal)) {
             return $null
         }
+        Write-Verbose "ProjectAtlas runtime probe: decode JSON output"
         $payload = ConvertFrom-Json -InputObject $jsonText
         if (-not (Test-ProjectAtlasJsonObject $payload)) {
             return $null
@@ -1293,6 +1300,7 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
         return $null
     }
     finally {
+        Write-Verbose "ProjectAtlas runtime probe: clean owned temporary output"
         $probeCleanupFailure = $null
         if ($process) {
             try {
@@ -1326,6 +1334,7 @@ function Invoke-ProjectAtlasBoundedJsonCommand {
     if (-not $probeCleanupSucceeded) {
         return $null
     }
+    Write-Verbose "ProjectAtlas runtime probe: complete"
     return $probePayload
 }
 
@@ -2102,7 +2111,9 @@ function Sync-ProjectAtlasRuntimeToLocalAppData {
     }
     if ((Get-NormalizedPathEntry $FilePath) -ne (Get-NormalizedPathEntry $target)) {
         try {
+            Write-Verbose "ProjectAtlas runtime mirror: copy verified runtime"
             Copy-Item -LiteralPath $FilePath -Destination $target -Force
+            Write-Verbose "ProjectAtlas runtime mirror: copy complete"
         }
         catch {
             Write-Warning "ProjectAtlas LocalAppData mirror is locked: $($_.Exception.Message) The installer will verify durable absolute MCP configuration before attempting an exact obsolete-child handoff. Codex MCP and generated configs continue to use verified runtime $FilePath."
@@ -3845,12 +3856,16 @@ $futureProcessPathReady = $false
 
 Write-Verbose "ProjectAtlas installer: verify and synchronize runtime"
 if ($RuntimePath) {
+    Write-Verbose "ProjectAtlas installer: validate provided runtime"
     $projectAtlas = (Resolve-Path $RuntimePath).Path
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
         throw "Provided ProjectAtlas runtime does not satisfy the ProjectAtlas runtime/version contract: $projectAtlas"
     }
+    Write-Verbose "ProjectAtlas installer: provided runtime verified; synchronize mirror"
     $stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData $projectAtlas $ProjectAtlasVersion
+    Write-Verbose "ProjectAtlas installer: mirror synchronization complete; update process PATH"
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
+    Write-Verbose "ProjectAtlas installer: process PATH update complete"
 }
 else {
     $cargo = Find-Cargo
