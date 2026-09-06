@@ -2154,9 +2154,9 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     let e2e_smoke = workflow_job_block(&ci_workflow, "e2e-smoke")?;
     let forwarder_lifecycle_step =
         workflow_job_step(&ci_workflow, "e2e-smoke", "Atlas forwarder lifecycle E2E")?;
-    if forwarder_lifecycle_step["if"].as_str().is_some() {
+    if forwarder_lifecycle_step["if"].as_str() != Some("contains(matrix.contracts, 'plugin')") {
         return Err(io::Error::other(
-            "atlas forwarder lifecycle E2E must run on every e2e-smoke matrix row",
+            "atlas forwarder lifecycle E2E must run on every affected plugin platform",
         )
         .into());
     }
