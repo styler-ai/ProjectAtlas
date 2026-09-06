@@ -9368,6 +9368,8 @@ function save(): void {}
             require_json_string_from_value(row, "path", "src/Atlas/Service.php")?;
             let expected_context = if kind == "calls" {
                 format!("{target}()")
+            } else if target == "vendor\\bootstrap.php" {
+                r"require ('vendor\\bootstrap.php')".to_string()
             } else {
                 target.to_string()
             };
