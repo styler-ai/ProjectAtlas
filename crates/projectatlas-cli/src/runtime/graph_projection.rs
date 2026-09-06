@@ -4740,6 +4740,11 @@ fn relation_source<'a>(
             .language
             .as_deref()
             .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    let is_php_contains = relation.kind == RelationKind::Contains
+        && graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
     let php_source = if is_php_call {
         unique_php_call_source(
             graph,
@@ -4748,10 +4753,12 @@ fn relation_source<'a>(
             relation.line,
             control,
         )?
+    } else if is_php_contains {
+        unique_php_containment_source(graph, symbol_index, relation, control)?
     } else {
         None
     };
-    let indices = if is_php_call {
+    let indices = if is_php_call || is_php_contains {
         php_source.as_slice()
     } else {
         symbol_index.get(&relation.source_name)
@@ -4876,6 +4883,17 @@ fn local_relation_matches<'a>(
             .language
             .as_deref()
             .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    let is_php_contains = relation.kind == RelationKind::Contains
+        && graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    let php_containment_source = if is_php_contains {
+        unique_php_containment_source(graph, symbol_index, relation, control)?
+            .and_then(|index| graph.symbols.get(index))
+    } else {
+        None
+    };
     let source_parent = if relation.kind == RelationKind::Calls {
         unique_source_parent(
             graph,
@@ -5000,6 +5018,21 @@ fn local_relation_matches<'a>(
             RelationKind::Contains => {
                 symbol.name == lookup_name
                     && symbol.parent.as_deref() == Some(relation.source_name.as_str())
+                    && if is_php_contains {
+                        if let Some(source) = php_containment_source {
+                            symbol.line_start == relation.line
+                                && php_entity_matches_qualified_scope(
+                                    staged_entities,
+                                    digest.as_ref(),
+                                    &source.name,
+                                    source.parent.as_deref().unwrap_or(""),
+                                )?
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    }
             }
             RelationKind::Calls => {
                 let name_matches = if is_php_call {
@@ -5132,7 +5165,7 @@ fn php_call_lookup<'a>(
     Some((member, Some(scope), namespace, None))
 }
 
-/// Confirm a PHP method entity belongs to a qualified call scope.
+/// Confirm a PHP entity belongs to a qualified owner scope.
 fn php_entity_matches_qualified_scope(
     staged_entities: &BTreeMap<String, GraphEntity>,
     digest: Option<&String>,
@@ -5258,6 +5291,33 @@ fn unique_source_parent<'a>(
         }
     }
     Ok(parent)
+}
+
+/// Select a unique PHP namespace or containing type without guessing across line-only facts.
+fn unique_php_containment_source(
+    graph: &SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
+    relation: &SymbolRelation,
+    control: &IndexWorkControl,
+) -> Result<Option<usize>, CliError> {
+    let mut matched = None;
+    for (candidate_index, &index) in symbol_index.get(&relation.source_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        let contains = match symbol.kind {
+            SymbolKind::Module => true,
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Enum => {
+                symbol.line_start <= relation.line && relation.line <= symbol.line_end
+            }
+            _ => false,
+        };
+        if contains && matched.replace(index).is_some() {
+            return Ok(None);
+        }
+    }
+    Ok(matched)
 }
 
 /// Prefer a proven PHP callable source, falling back to a unique namespace owner.
@@ -10959,6 +11019,77 @@ class DuplicateB {
             )
         };
         let staged = finish_graph(&php_graph)?;
+        for declaration in [
+            "class Service {\nconst FLAG = 1;\npublic $value;\nfunction run() {}\n}",
+            "interface Service {\nconst FLAG = 1;\nfunction run();\n}",
+            "trait Service {\nconst FLAG = 1;\npublic $value;\nfunction run() {}\n}",
+            "enum Service {\ncase Ready;\nconst FLAG = 1;\nfunction run() {}\n}",
+        ] {
+            for source in [
+                format!(
+                    "<?php namespace A {{\n{declaration}\n}}\nnamespace B {{\n{declaration}\n}}"
+                ),
+                format!("<?php namespace A;\n{declaration}\nnamespace B;\n{declaration}"),
+            ] {
+                let graph = extract_symbol_graph("src/containment.php", Some("php"), &source);
+                require_eq(
+                    &graph
+                        .symbols
+                        .iter()
+                        .filter(|symbol| {
+                            symbol.name == "run" && symbol.parent.as_deref() == Some("Service")
+                        })
+                        .count(),
+                    &2,
+                    "PHP parser retains unqualified member parents",
+                )?;
+                let contained = finish_graph(&graph)?;
+                for namespace in ["A", "B"] {
+                    let parent = format!("{namespace}::Service");
+                    for name in ["run", "FLAG"] {
+                        require(
+                            contained.relations.iter().any(|relation| {
+                                relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                                    && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                                        if symbol.name.as_str() == name && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(parent.as_str()))
+                                    && contained.entities.iter().any(|entity| entity.key() == relation.source()
+                                        && matches!(entity.selector(), EntitySelector::Symbol { symbol }
+                                            if symbol.name.as_str() == "Service" && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(namespace)))
+                            }),
+                            &format!("PHP containment must keep its exact namespace owner: {parent}::{name}"),
+                        )?;
+                    }
+                    require(
+                        contained.relations.iter().any(|relation| {
+                            relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                                && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                                    if symbol.name.as_str() == "Service" && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(namespace))
+                                && contained.entities.iter().any(|entity| entity.key() == relation.source()
+                                    && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == namespace))
+                        }),
+                        "PHP namespace containment retains its declared type",
+                    )?;
+                }
+            }
+        }
+        let overlapping = extract_symbol_graph(
+            "src/containment.php",
+            Some("php"),
+            "<?php namespace A { class Service { function run() {} } } namespace B { class Service { function run() {} } }",
+        );
+        let contained = finish_graph(&overlapping)?;
+        require(
+            contained.relations.iter().any(|relation| {
+                relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                    && !matches!(relation.resolution(), RelationResolution::Resolved { .. })
+            }),
+            "PHP overlapping line-only owners remain unresolved",
+        )?;
+        require(
+            !contained.relations.iter().any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. } if symbol.name.as_str() == "run")),
+            "PHP overlapping line-only owners must not invent member containment",
+        )?;
         for source in [
             "<?php namespace Service { function boot() {} } namespace { class Service {} Service::boot(); }",
             "<?php namespace Service {} namespace { class Service { static function boot() {} } \\Service\\boot(); }",
