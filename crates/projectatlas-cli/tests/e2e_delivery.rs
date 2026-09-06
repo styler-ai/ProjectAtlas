@@ -7500,6 +7500,9 @@ pid_file=$2
 if [ "$mode" = "success" ]; then
     exit 0
 fi
+if [ "$mode" = "timeout" ]; then
+    sleep 1
+fi
 (sleep 300) &
 child=$!
 printf '%s\n' "$child" > "$pid_file"
@@ -7570,15 +7573,25 @@ done
 
     let timeout_pid_file = temp.path().join(REAL_HOST_TIMEOUT_PID_FILE_NAME);
     let timeout_pid_file_text = timeout_pid_file.to_string_lossy().into_owned();
-    let timeout_result = run_real_host_command_with_test_timeout(
-        &fixture,
-        &repo,
-        &host_root,
-        None,
-        &["timeout".to_owned(), timeout_pid_file_text],
-        &[],
-        REAL_HOST_READER_TIMEOUT,
-    );
+    let mut command = host_command(&fixture);
+    command
+        .current_dir(&repo)
+        .args(["timeout".to_owned(), timeout_pid_file_text])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_real_host_environment(&mut command, &host_root, None)?;
+    let readiness_started = Instant::now();
+    let host = spawn_plugin_installer_process(&mut command)?;
+    // Fixture startup must finish before the short cleanup observer begins.
+    while !timeout_pid_file.is_file() && readiness_started.elapsed() < Duration::from_secs(30) {
+        thread::sleep(Duration::from_millis(25));
+    }
+    let ready = timeout_pid_file.is_file();
+    // Always retire the owned group, including when fixture readiness fails.
+    let timeout_result =
+        wait_for_plugin_installer_output(host, "real host reader", REAL_HOST_READER_TIMEOUT);
+    require(ready, "POSIX host fixture did not publish its child PID")?;
     let timeout_text = timeout_result
         .as_ref()
         .err()
