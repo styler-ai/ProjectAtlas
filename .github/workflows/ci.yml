@@ -147,7 +147,7 @@ jobs:
                   {
                       "label": "macos-x64",
                       "os": "macos-15-intel",
-                      "contracts": ["compile", "mac-quality", "parser"],
+                      "contracts": ["compile", "mac-quality", "parser", "plugin"],
                   },
                   {
                       "label": "macos-arm64",
@@ -444,6 +444,22 @@ jobs:
           if (( ${#target_args[@]} > 0 )); then
             cargo check -p projectatlas-cli "${target_args[@]}" --all-features --locked
           fi
+
+      - name: Install exact real host CLIs for native reader proof
+        if: contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'
+        timeout-minutes: 10
+        shell: bash
+        run: npm install --global @anthropic-ai/claude-code@2.1.201 opencode-ai@1.18.10
+
+      - name: Real installed host reader proof
+        if: contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'
+        timeout-minutes: 15
+        shell: bash
+        env:
+          PROJECTATLAS_REQUIRE_REAL_HOST_READERS: "1"
+        run: |
+          cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery real_host_reader_ -- --nocapture
+          cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture
 
       - name: macOS all-features warning gate
         if: runner.os == 'macOS' && contains(matrix.contracts, 'mac-quality')

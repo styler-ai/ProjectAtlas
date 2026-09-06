@@ -302,6 +302,14 @@ const WINDOWS_POWERSHELL_VERSION_DIR: &str = "v1.0";
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_EXECUTABLE: &str = "powershell.exe";
 
+/// Repository-owned Windows installer used by native process fixtures.
+#[cfg(windows)]
+const WINDOWS_INSTALLER_SCRIPT: &str = "plugins/projectatlas/scripts/install-runtime.ps1";
+
+/// PowerShell runtime shim used by command-precedence fixtures.
+#[cfg(windows)]
+const POWERSHELL_RUNTIME_SCRIPT: &str = "projectatlas.ps1";
+
 #[cfg(windows)]
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT: Duration = Duration::from_mins(4);
@@ -1809,7 +1817,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .join("plugins")
             .join("projectatlas")
             .join("opencode")
-            .join("opencode.json"),
+            .join(OPENCODE_CONFIG_FILE_NAME),
     )?;
     let opencode_native_plugin_dir = workspace_root
         .join("plugins")
@@ -1864,7 +1872,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
-        "$inheritedProjectAtlasCommand = Get-Command projectatlas",
+        "$inheritedProjectAtlasCommand = Get-ProjectAtlasShellCommand projectatlas",
         "$stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData",
         "$inheritedSynchronizedMirrorReady = $stableMirrorReady",
         "$futureProcessPathReady = Set-ProjectAtlasPathPrecedence",
@@ -2403,6 +2411,122 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     .join(WINDOWS_POWERSHELL_DIR)
     .join(WINDOWS_POWERSHELL_VERSION_DIR)
     .join(WINDOWS_POWERSHELL_EXECUTABLE);
+    let discovery_bin = temp.path().join("discovery-bin");
+    fs::create_dir_all(&discovery_bin)?;
+    let module_root = temp.path().join("discovery-modules");
+    let module = module_root.join("AtlasDiscoveryProbe");
+    fs::create_dir_all(&module)?;
+    fs::write(
+        module.join("AtlasDiscoveryProbe.psm1"),
+        "[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_MARKER, 'imported')\nfunction projectatlas {}\nfunction codex {}\nfunction cargo {}\nExport-ModuleMember -Function projectatlas,codex,cargo\n",
+    )?;
+    let discovery_script = temp.path().join("command-discovery.ps1");
+    fs::write(
+        &discovery_script,
+        r#"
+$ErrorActionPreference = 'Stop'
+$source = [IO.File]::ReadAllText($env:PROJECTATLAS_DISCOVERY_INSTALLER)
+foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
+    $definition = [regex]::Match($source, "(?ms)^function $name \{.*?^\}")
+    if (-not $definition.Success) { throw "Missing command discovery owner: $name" }
+    Invoke-Expression $definition.Value
+}
+[void](Resolve-Path $env:PROJECTATLAS_DISCOVERY_EMPTY)
+$env:PSModulePath = $env:PROJECTATLAS_DISCOVERY_MODULES
+$env:Path = $env:PROJECTATLAS_DISCOVERY_EMPTY
+if (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT) {
+    throw 'Module-only command was classified as a PATH runtime'
+}
+if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) {
+    throw 'PATH discovery imported an unrelated module'
+}
+if ($null -ne $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')) {
+    throw 'Command discovery did not restore absent preference'
+}
+$env:PROJECTATLAS_CODEX_COMMAND = $null
+if (Test-ProjectAtlasCodexCommandAvailable) { throw 'Module-only Codex command was classified as available' }
+if (Resolve-ProjectAtlasCodexCommand 'discovery fixture') { throw 'Module-only Codex command resolved' }
+$env:PROJECTATLAS_CODEX_COMMAND = 'codex'
+if (Test-ProjectAtlasCodexCommandAvailable) { throw 'Module-only Codex override was classified as available' }
+if (Resolve-ProjectAtlasCodexCommand 'discovery fixture') { throw 'Module-only Codex override resolved' }
+$env:USERPROFILE = $env:PROJECTATLAS_DISCOVERY_EMPTY
+if (Find-Cargo) { throw 'Module-only Cargo command resolved' }
+if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) { throw 'Host command discovery imported a module' }
+Set-Variable PSModuleAutoLoadingPreference -Scope Global -Value None -Option ReadOnly
+if (Get-ProjectAtlasShellCommand projectatlas) { throw 'Read-only None preference admitted a module-only command' }
+$immutable = $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')
+if ($immutable.Value -ne 'None' -or $immutable.Options -ne [System.Management.Automation.ScopedItemOptions]::ReadOnly) {
+    throw 'Command discovery mutated an immutable preference'
+}
+if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) { throw 'Read-only None discovery imported a module' }
+Set-Variable PSModuleAutoLoadingPreference -Scope Global -Value All -Option None -Force
+[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_SCRIPT, "'script'")
+$env:Path = [IO.Path]::GetDirectoryName($env:PROJECTATLAS_DISCOVERY_SCRIPT)
+if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT)) {
+    throw 'Command discovery lost PowerShell script compatibility'
+}
+$env:PROJECTATLAS_CODEX_COMMAND = $env:PROJECTATLAS_DISCOVERY_SCRIPT
+if (-not (Test-ProjectAtlasCodexCommandAvailable) -or (Resolve-ProjectAtlasCodexCommand 'discovery fixture') -ne $env:PROJECTATLAS_DISCOVERY_SCRIPT) {
+    throw 'Absolute Codex command override changed'
+}
+$env:PROJECTATLAS_CODEX_COMMAND = $null
+function git {}
+if ((Get-ProjectAtlasShellCommand git).CommandType -ne 'Function') { throw 'Git function precedence changed' }
+if (Get-ProjectAtlasShellCommand git -CommandType Application) { throw 'Git application lookup admitted a function' }
+$gitPath = [IO.Path]::Combine([IO.Path]::GetDirectoryName($env:PROJECTATLAS_DISCOVERY_SCRIPT), 'git.cmd')
+[IO.File]::WriteAllText($gitPath, '@exit /b 0')
+if ((Get-ProjectAtlasShellCommand git -CommandType Application).Source -ne $gitPath) {
+    throw 'Git application lookup lost its PATH command'
+}
+$global:PSModuleAutoLoadingPreference = 'All'
+function projectatlas { 'shadow' }
+if ((Get-ProjectAtlasShellCommand projectatlas).CommandType -ne 'Function') { throw 'Function precedence changed' }
+if ($global:PSModuleAutoLoadingPreference -ne 'All') { throw 'Existing preference was not restored' }
+Set-Alias projectatlas Get-Date
+if ((Get-ProjectAtlasShellCommand projectatlas).CommandType -ne 'Alias') { throw 'Alias precedence changed' }
+if ($global:PSModuleAutoLoadingPreference -ne 'All') { throw 'Alias lookup changed preference' }
+if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) { throw 'Discovery imported a module' }
+function Get-Command { throw 'command discovery failure' }
+$failed = $false
+try { Get-ProjectAtlasShellCommand projectatlas } catch { $failed = $_.Exception.Message -eq 'command discovery failure' }
+if (-not $failed -or $global:PSModuleAutoLoadingPreference -ne 'All') {
+    throw 'Failed discovery did not preserve its error and restore preference'
+}
+
+"#,
+    )?;
+    let mut discovery = StdCommand::new(&system_powershell);
+    discovery
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&discovery_script)
+        .env(
+            "PROJECTATLAS_DISCOVERY_INSTALLER",
+            workspace_root()?.join(WINDOWS_INSTALLER_SCRIPT),
+        )
+        .env("PROJECTATLAS_DISCOVERY_MODULES", &module_root)
+        .env("PROJECTATLAS_DISCOVERY_EMPTY", &empty_bin)
+        .env(
+            "PROJECTATLAS_DISCOVERY_SCRIPT",
+            discovery_bin.join(POWERSHELL_RUNTIME_SCRIPT),
+        )
+        .env(
+            "PROJECTATLAS_DISCOVERY_MARKER",
+            temp.path().join("module-imported.marker"),
+        );
+    let discovery_output = run_bounded_output(discovery, "Windows PATH command discovery")?;
+    require(
+        discovery_output.status.success(),
+        format!(
+            "Windows command discovery failed: {}",
+            String::from_utf8_lossy(&discovery_output.stderr)
+        ),
+    )?;
     fs::write(machine_bin.join("projectatlas.cmd"), "@exit /b 0\r\n")?;
     let verified_runtime = user_bin.join("projectatlas.cmd");
     fs::write(&verified_runtime, "@exit /b 0\r\n")?;
@@ -2426,7 +2550,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         &async_runtime,
         "@echo off\r\nstart \"\" /b powershell -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  powershell -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
     )?;
-    let powershell_runtime = temp.path().join("projectatlas.ps1");
+    let powershell_runtime = temp.path().join(POWERSHELL_RUNTIME_SCRIPT);
     fs::write(
         &powershell_runtime,
         "[Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\r\n",
@@ -2516,6 +2640,7 @@ if ($errors.Count -ne 0) {
 $names = @(
     "Convert-ProjectAtlasVersionTag",
     "Get-NormalizedPathEntry",
+    "Get-ProjectAtlasShellCommand",
     "Initialize-ProjectAtlasRuntimeProbe",
     "Invoke-ProjectAtlasBoundedJsonCommand",
     "Invoke-ProjectAtlasRuntimeInfo",
@@ -6114,6 +6239,2803 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
     )?;
 
     Ok(())
+}
+
+const CI_WORKFLOW_RELATIVE_PATH: &str = ".github/workflows/ci.yml";
+const ISOLATED_CLAUDE_CONFIG_DIR_NAME: &str = "claude-config";
+#[cfg(any(unix, windows))]
+const REAL_HOST_READER_TIMEOUT: Duration = Duration::from_millis(250);
+const REQUIRE_REAL_HOST_READERS_ENV: &str = "PROJECTATLAS_REQUIRE_REAL_HOST_READERS";
+#[cfg(any(unix, windows))]
+const REAL_HOST_READER_REAP_BUDGET: Duration = Duration::from_secs(5);
+const REAL_HOST_ROOT_DIR_NAME: &str = "host-root";
+#[cfg(unix)]
+const REAL_HOST_TIMEOUT_PID_FILE_NAME: &str = "timeout.pid";
+const REAL_HOST_SPECIAL_PATH_COMPONENT: &str = "host reader path with space-\u{00fc}";
+const E2E_TEMP_DIR_NAME: &str = "temp";
+const MCP_PROJECT_CONFIG_FILE_NAME: &str = ".mcp.json";
+const OPENCODE_CONFIG_DIR_NAME: &str = "opencode";
+const OPENCODE_CONFIG_FILE_NAME: &str = "opencode.json";
+const ISOLATED_LOCAL_APP_DATA_DIR_NAME: &str = "local-app-data";
+const ISOLATED_XDG_CONFIG_DIR_NAME: &str = "xdg-config";
+const MISSING_PROJECTATLAS_RUNTIME_NAME: &str = "missing-projectatlas-runtime";
+
+struct RealHostFixture {
+    name: String,
+    repo: PathBuf,
+    database: PathBuf,
+    claude_config: PathBuf,
+    opencode_config: PathBuf,
+    source_marker: String,
+}
+
+fn copy_runtime_into_special_path(
+    runtime: &Path,
+    temp_root: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let runtime_directory = temp_root.join(REAL_HOST_SPECIAL_PATH_COMPONENT);
+    fs::create_dir_all(&runtime_directory)?;
+    let runtime_name = runtime
+        .file_name()
+        .ok_or_else(|| io::Error::other("ProjectAtlas runtime path omitted its file name"))?;
+    let copied_runtime = runtime_directory.join(runtime_name);
+    fs::copy(runtime, &copied_runtime)?;
+    Ok(copied_runtime)
+}
+
+fn prepare_real_host_fixture(
+    temp_root: &Path,
+    name: &str,
+    source_marker: &str,
+    runtime: &Path,
+    workspace_root: &Path,
+    host_root: &Path,
+) -> Result<RealHostFixture, Box<dyn Error>> {
+    let repo = temp_root.join(name);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("host_reader_fixture.rs"),
+        format!(
+            "pub fn host_reader_fixture_evidence() -> &'static str {{ \"{source_marker}\" }}\n"
+        ),
+    )?;
+    let database = atlas_dir.join("projectatlas.db");
+    let init = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .arg("--config")
+        .arg(atlas_dir.join("config.toml"))
+        .arg("init")
+        .output()?;
+    require(
+        init.status.success(),
+        format!(
+            "fixture {name} initialization failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+
+    let mut installer = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        workspace_root,
+        &repo,
+        runtime,
+        None,
+        Some(host_root),
+    )?;
+    #[cfg(windows)]
+    installer.arg("-Verbose");
+    configure_real_host_environment(&mut installer, host_root, None)?;
+    installer
+        .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PROJECTATLAS_RUNTIME_PATH", runtime)
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1");
+    let installer_output = run_bounded_output(installer, "real-host installer")?;
+    require(
+        installer_output.status.success(),
+        format!(
+            "real-host installer for {name} failed: {}{}",
+            String::from_utf8_lossy(&installer_output.stdout),
+            String::from_utf8_lossy(&installer_output.stderr)
+        ),
+    )?;
+
+    #[cfg(windows)]
+    require(
+        String::from_utf8_lossy(&installer_output.stdout)
+            .contains("ProjectAtlas installer: report workflow compatibility")
+            && String::from_utf8_lossy(&installer_output.stderr)
+                .contains("ProjectAtlas installer: script entered"),
+        "real-host installer omitted verbose phase diagnostics",
+    )?;
+    Ok(RealHostFixture {
+        name: name.to_owned(),
+        repo,
+        database,
+        claude_config: atlas_dir.join("projectatlas.claude.mcp.json"),
+        opencode_config: atlas_dir.join("projectatlas.opencode.json"),
+        source_marker: source_marker.to_owned(),
+    })
+}
+
+fn run_real_host_installer_repair(
+    repo: &Path,
+    runtime: &Path,
+    host_root: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let workspace_root = workspace_root()?;
+    let mut installer = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        repo,
+        runtime,
+        None,
+        Some(host_root),
+    )?;
+    configure_real_host_environment(&mut installer, host_root, None)?;
+    installer
+        .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PROJECTATLAS_RUNTIME_PATH", runtime)
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1");
+    let output = run_bounded_output(installer, "real-host installer repair")?;
+    require(
+        output.status.success(),
+        format!(
+            "real-host installer repair failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+fn snapshot_real_host_tree(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Box<dyn Error>> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut snapshot = BTreeMap::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root)?.to_owned();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() && !file_type.is_symlink() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                snapshot.insert(relative, fs::read(path)?);
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
+const REAL_HOST_LOOPBACK_MAX_HEADER_BYTES: usize = 64 * 1024;
+const REAL_HOST_LOOPBACK_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const REAL_HOST_LOOPBACK_MAX_REQUESTS: usize = 8;
+const REAL_HOST_LOOPBACK_TOOL_CALL_ID: &str = "projectatlas-loopback-tool-call";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoopbackModelProtocol {
+    AnthropicMessages,
+    OpenAiCompatible,
+}
+
+#[derive(Debug)]
+struct LoopbackModelObservation {
+    requests: usize,
+    tool_name: String,
+    tool_call_id: String,
+    source_marker: String,
+}
+
+#[derive(Debug)]
+struct LoopbackModelServer {
+    address: std::net::SocketAddr,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<thread::JoinHandle<Result<LoopbackModelObservation, String>>>,
+}
+
+impl LoopbackModelServer {
+    fn start(protocol: LoopbackModelProtocol, source_marker: &str) -> Result<Self, Box<dyn Error>> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        let source_marker = source_marker.to_owned();
+        let join = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            let mut model_requests = 0;
+            loop {
+                if thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err("loopback model server stopped before host evidence".to_owned());
+                }
+                if Instant::now() >= deadline {
+                    return Err("loopback model server exceeded 45-second deadline".to_owned());
+                }
+                match listener.accept() {
+                    Ok((mut stream, peer)) => {
+                        if !peer.ip().is_loopback() {
+                            return Err(
+                                "loopback model server accepted a non-loopback peer".to_owned()
+                            );
+                        }
+                        stream.set_nonblocking(false).map_err(|error| {
+                            format!("loopback blocking mode setup failed: {error}")
+                        })?;
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .map_err(|error| {
+                                format!("loopback read timeout setup failed: {error}")
+                            })?;
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(2)))
+                            .map_err(|error| {
+                                format!("loopback write timeout setup failed: {error}")
+                            })?;
+                        let request = read_loopback_http_request(&mut stream)?;
+                        if matches!(request.method.as_str(), "GET" | "HEAD")
+                            && (request.path == "/" || request.path.ends_with("/models"))
+                        {
+                            write_loopback_http_response(
+                                &mut stream,
+                                "application/json",
+                                br#"{"data":[]}"#,
+                            )?;
+                            continue;
+                        }
+                        if request.method != "POST" {
+                            return Err(
+                                "loopback model request used an unexpected method".to_owned()
+                            );
+                        }
+                        if protocol == LoopbackModelProtocol::AnthropicMessages
+                            && request
+                                .path
+                                .split('?')
+                                .next()
+                                .is_some_and(|path| path.ends_with("/count_tokens"))
+                        {
+                            write_loopback_http_response(
+                                &mut stream,
+                                "application/json",
+                                br#"{"input_tokens":1}"#,
+                            )?;
+                            continue;
+                        }
+                        if model_requests >= REAL_HOST_LOOPBACK_MAX_REQUESTS {
+                            return Err(
+                                "loopback model server received too many model requests".to_owned()
+                            );
+                        }
+                        let response = loopback_model_response(
+                            protocol,
+                            model_requests,
+                            &request,
+                            &source_marker,
+                        )?;
+                        write_loopback_http_response(
+                            &mut stream,
+                            response.content_type,
+                            response.body.as_bytes(),
+                        )?;
+                        model_requests += 1;
+                        if let Some(observation) = response.observation {
+                            return Ok(LoopbackModelObservation {
+                                requests: model_requests,
+                                tool_name: observation.tool_name,
+                                tool_call_id: observation.tool_call_id,
+                                source_marker,
+                            });
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(error) => {
+                        return Err(format!("loopback model server accept failed: {error}"));
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            address,
+            stop,
+            join: Some(join),
+        })
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    fn finish(mut self) -> Result<LoopbackModelObservation, Box<dyn Error>> {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let join = self
+            .join
+            .take()
+            .ok_or_else(|| io::Error::other("loopback model server was already joined"))?;
+        match join.join() {
+            Ok(Ok(observation)) => Ok(observation),
+            Ok(Err(error)) => Err(io::Error::other(error).into()),
+            Err(_) => Err(io::Error::other("loopback model server thread panicked").into()),
+        }
+    }
+}
+
+impl Drop for LoopbackModelServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take()
+            && let Err(_panic) = join.join()
+        {}
+    }
+}
+
+struct LoopbackHttpRequest {
+    method: String,
+    path: String,
+    body: Value,
+}
+
+struct LoopbackHttpResponse {
+    content_type: &'static str,
+    body: String,
+    observation: Option<LoopbackToolObservation>,
+}
+
+struct LoopbackToolObservation {
+    tool_name: String,
+    tool_call_id: String,
+}
+
+fn read_loopback_http_request(
+    stream: &mut std::net::TcpStream,
+) -> Result<LoopbackHttpRequest, String> {
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    let header_end = loop {
+        if let Some(offset) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let end = offset + 4;
+            if end > REAL_HOST_LOOPBACK_MAX_HEADER_BYTES {
+                return Err("loopback request headers exceeded 64 KiB".to_owned());
+            }
+            break end;
+        }
+        if bytes.len() >= REAL_HOST_LOOPBACK_MAX_HEADER_BYTES {
+            return Err("loopback request headers omitted a bounded terminator".to_owned());
+        }
+        let mut chunk = [0_u8; 8192];
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| format!("loopback request header read failed: {error}"))?;
+        if read == 0 {
+            return Err("loopback request ended before headers".to_owned());
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    };
+    let (method, path, content_length, chunked, has_content_length) = {
+        let headers = std::str::from_utf8(&bytes[..header_end])
+            .map_err(|error| format!("loopback request headers were not UTF-8: {error}"))?;
+        let mut lines = headers.split("\r\n");
+        let request_line = lines
+            .next()
+            .ok_or_else(|| "loopback request omitted a request line".to_owned())?;
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap_or_default();
+        let path = request_parts.next().unwrap_or_default();
+        if path.is_empty() {
+            return Err("loopback request omitted its path".to_owned());
+        }
+        let mut content_length = None;
+        let mut chunked = false;
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let (name, value) = line
+                .split_once(':')
+                .ok_or_else(|| "loopback request had a malformed header".to_owned())?;
+            if name.eq_ignore_ascii_case("content-length") {
+                if content_length.is_some() {
+                    return Err("loopback request repeated Content-Length".to_owned());
+                }
+                content_length = Some(value.trim().parse::<usize>().map_err(|error| {
+                    format!("loopback request Content-Length was invalid: {error}")
+                })?);
+            }
+            if name.eq_ignore_ascii_case("transfer-encoding")
+                && value.trim().eq_ignore_ascii_case("chunked")
+            {
+                chunked = true;
+            }
+        }
+        let has_content_length = content_length.is_some();
+        let content_length = match content_length {
+            Some(content_length) => content_length,
+            None if matches!(method, "GET" | "HEAD") => 0,
+            None if chunked => 0,
+            None => 0,
+        };
+        (
+            method.to_owned(),
+            path.to_owned(),
+            content_length,
+            chunked,
+            has_content_length,
+        )
+    };
+    if !chunked && content_length > REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+        return Err("loopback request body exceeded 2 MiB".to_owned());
+    }
+    let body_bytes = if chunked {
+        read_loopback_chunked_body(stream, &mut bytes, header_end)?
+    } else if !has_content_length && method == "POST" {
+        let mut body = bytes[header_end..].to_vec();
+        while body.len() < REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+            let mut chunk = [0_u8; 8192];
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => body.extend_from_slice(&chunk[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(format!("loopback unframed body read failed: {error}")),
+            }
+        }
+        if body.len() > REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+            return Err("loopback unframed request body exceeded 2 MiB".to_owned());
+        }
+        body
+    } else {
+        while bytes.len() < header_end + content_length {
+            let mut chunk = [0_u8; 8192];
+            let read = stream
+                .read(&mut chunk)
+                .map_err(|error| format!("loopback request body read failed: {error}"))?;
+            if read == 0 {
+                return Err("loopback request ended before Content-Length bytes".to_owned());
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        bytes[header_end..header_end + content_length].to_vec()
+    };
+    let body = if body_bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body_bytes)
+            .map_err(|error| format!("loopback request body was not JSON: {error}"))?
+    };
+    Ok(LoopbackHttpRequest { method, path, body })
+}
+
+fn read_loopback_chunked_body(
+    stream: &mut std::net::TcpStream,
+    bytes: &mut Vec<u8>,
+    header_end: usize,
+) -> Result<Vec<u8>, String> {
+    let mut cursor = header_end;
+    let mut body = Vec::new();
+    loop {
+        let line_end = loop {
+            if let Some(offset) = bytes[cursor..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+            {
+                break cursor + offset;
+            }
+            if bytes.len() >= header_end + REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+                return Err("loopback chunked request exceeded 2 MiB".to_owned());
+            }
+            let mut chunk = [0_u8; 8192];
+            let read = stream
+                .read(&mut chunk)
+                .map_err(|error| format!("loopback chunk size read failed: {error}"))?;
+            if read == 0 {
+                return Err("loopback chunked request ended before chunk size".to_owned());
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        };
+        let size_text = std::str::from_utf8(&bytes[cursor..line_end])
+            .map_err(|error| format!("loopback chunk size was not UTF-8: {error}"))?
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|error| format!("loopback chunk size was not hexadecimal: {error}"))?;
+        cursor = line_end + 2;
+        if size == 0 {
+            return Ok(body);
+        }
+        if body.len().saturating_add(size) > REAL_HOST_LOOPBACK_MAX_BODY_BYTES {
+            return Err("loopback chunked request body exceeded 2 MiB".to_owned());
+        }
+        while bytes.len() < cursor + size + 2 {
+            let mut chunk = [0_u8; 8192];
+            let read = stream
+                .read(&mut chunk)
+                .map_err(|error| format!("loopback chunk body read failed: {error}"))?;
+            if read == 0 {
+                return Err("loopback chunked request ended before chunk body".to_owned());
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        body.extend_from_slice(&bytes[cursor..cursor + size]);
+        if &bytes[cursor + size..cursor + size + 2] != b"\r\n" {
+            return Err("loopback chunked request omitted its terminator".to_owned());
+        }
+        cursor += size + 2;
+    }
+}
+
+fn write_loopback_http_response(
+    stream: &mut std::net::TcpStream,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .and_then(|()| stream.write_all(body))
+        .map_err(|error| format!("loopback response write failed: {error}"))
+}
+
+fn loopback_model_response(
+    protocol: LoopbackModelProtocol,
+    request_number: usize,
+    request: &LoopbackHttpRequest,
+    source_marker: &str,
+) -> Result<LoopbackHttpResponse, String> {
+    let first_path = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => "/messages",
+        LoopbackModelProtocol::OpenAiCompatible => "/chat/completions",
+    };
+    if !request
+        .path
+        .split('?')
+        .next()
+        .is_some_and(|path| path.ends_with(first_path))
+    {
+        return Err(format!(
+            "loopback model request used an unexpected endpoint: {}",
+            request.path
+        ));
+    }
+    if protocol == LoopbackModelProtocol::OpenAiCompatible
+        && request_number == 0
+        && request.body["tools"].as_array().is_none_or(Vec::is_empty)
+    {
+        return Ok(LoopbackHttpResponse {
+            content_type: "text/event-stream",
+            body: openai_title_response()?,
+            observation: None,
+        });
+    }
+    let tool_name = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => "mcp__projectatlas__atlas_slice",
+        LoopbackModelProtocol::OpenAiCompatible => "projectatlas_atlas_slice",
+    };
+    let tool_request_number = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => 0,
+        LoopbackModelProtocol::OpenAiCompatible => 1,
+    };
+    if request_number == tool_request_number {
+        if !request.body["model"].is_string() {
+            return Err("loopback model request omitted its model".to_owned());
+        }
+        return Ok(LoopbackHttpResponse {
+            content_type: "text/event-stream",
+            body: match protocol {
+                LoopbackModelProtocol::AnthropicMessages => {
+                    anthropic_tool_call_response(tool_name)?
+                }
+                LoopbackModelProtocol::OpenAiCompatible => openai_tool_call_response(tool_name)?,
+            },
+            observation: None,
+        });
+    }
+    let result_request_number = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => 1,
+        LoopbackModelProtocol::OpenAiCompatible => 2,
+    };
+    if request_number != result_request_number {
+        return Err("loopback model request count exceeded the two-turn proof".to_owned());
+    }
+    let has_tool_result = match protocol {
+        LoopbackModelProtocol::AnthropicMessages => {
+            has_anthropic_tool_call(&request.body)
+                && has_anthropic_tool_result(&request.body, source_marker)
+        }
+        LoopbackModelProtocol::OpenAiCompatible => {
+            has_openai_tool_call(&request.body)
+                && has_openai_tool_result(&request.body, source_marker)
+        }
+    };
+    if !has_tool_result {
+        return Err(format!(
+            "loopback model did not receive the exact MCP source marker; request shape={}",
+            loopback_request_shape(&request.body)
+        ));
+    }
+    Ok(LoopbackHttpResponse {
+        content_type: "text/event-stream",
+        body: match protocol {
+            LoopbackModelProtocol::AnthropicMessages => anthropic_final_response(source_marker)?,
+            LoopbackModelProtocol::OpenAiCompatible => openai_final_response(source_marker)?,
+        },
+        observation: Some(LoopbackToolObservation {
+            tool_name: tool_name.to_owned(),
+            tool_call_id: REAL_HOST_LOOPBACK_TOOL_CALL_ID.to_owned(),
+        }),
+    })
+}
+
+fn loopback_request_shape(value: &Value) -> String {
+    let mut entries = Vec::new();
+    if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(object) = message.as_object() {
+                let keys = object.keys().cloned().collect::<Vec<_>>().join(",");
+                let role = object.get("role").and_then(Value::as_str).unwrap_or("-");
+                let kind = object.get("type").and_then(Value::as_str).unwrap_or("-");
+                let call_id = object
+                    .get("tool_call_id")
+                    .or_else(|| object.get("toolCallId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                entries.push(format!(
+                    "keys={keys};role={role};type={kind};call_id={call_id}"
+                ));
+            }
+        }
+    }
+    format!("messages=[{}]", entries.join(" | "))
+}
+
+fn anthropic_sse_event(event: &str, payload: &Value) -> Result<String, String> {
+    Ok(format!(
+        "event: {event}\ndata: {}\n\n",
+        serde_json::to_string(payload)
+            .map_err(|error| { format!("loopback Anthropic event was not JSON: {error}") })?
+    ))
+}
+
+fn anthropic_tool_call_response(tool_name: &str) -> Result<String, String> {
+    let input = json!({
+        "file": "src/host_reader_fixture.rs",
+        "start_line": 1,
+        "end_line": 1,
+    });
+    let input_json = serde_json::to_string(&input)
+        .map_err(|error| format!("loopback Anthropic tool input was not JSON: {error}"))?;
+    let mut body = String::new();
+    body.push_str(&anthropic_sse_event(
+        "message_start",
+        &json!({"type":"message_start","message":{"id":"msg_projectatlas","type":"message","role":"assistant","model":"sonnet","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_start",
+        &json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":REAL_HOST_LOOPBACK_TOOL_CALL_ID,"name":tool_name,"input":{}}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_delta",
+        &json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input_json}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_stop",
+        &json!({"type":"content_block_stop","index":0}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "message_delta",
+        &json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":1}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "message_stop",
+        &json!({"type":"message_stop"}),
+    )?);
+    Ok(body)
+}
+
+fn anthropic_final_response(source_marker: &str) -> Result<String, String> {
+    let mut body = String::new();
+    body.push_str(&anthropic_sse_event(
+        "message_start",
+        &json!({"type":"message_start","message":{"id":"msg_projectatlas_final","type":"message","role":"assistant","model":"sonnet","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_start",
+        &json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_delta",
+        &json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":source_marker}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "content_block_stop",
+        &json!({"type":"content_block_stop","index":0}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "message_delta",
+        &json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}),
+    )?);
+    body.push_str(&anthropic_sse_event(
+        "message_stop",
+        &json!({"type":"message_stop"}),
+    )?);
+    Ok(body)
+}
+
+fn openai_sse_chunk(payload: &Value) -> Result<String, String> {
+    Ok(format!(
+        "data: {}\n\n",
+        serde_json::to_string(payload)
+            .map_err(|error| format!("loopback OpenAI event was not JSON: {error}"))?
+    ))
+}
+
+fn openai_tool_call_response(tool_name: &str) -> Result<String, String> {
+    let input = serde_json::to_string(&json!({
+        "file": "src/host_reader_fixture.rs",
+        "start_line": 1,
+        "end_line": 1,
+    }))
+    .map_err(|error| format!("loopback OpenAI tool input was not JSON: {error}"))?;
+    let mut body = openai_sse_chunk(
+        &json!({"id":"chatcmpl_projectatlas","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":REAL_HOST_LOOPBACK_TOOL_CALL_ID,"type":"function","function":{"name":tool_name,"arguments":input}}]},"finish_reason":null}]}),
+    )?;
+    body.push_str(&openai_sse_chunk(&json!({"id":"chatcmpl_projectatlas","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}))?);
+    body.push_str("data: [DONE]\n\n");
+    Ok(body)
+}
+
+fn openai_title_response() -> Result<String, String> {
+    let mut body = openai_sse_chunk(
+        &json!({"id":"chatcmpl_projectatlas_title","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ProjectAtlas source evidence"},"finish_reason":null}]}),
+    )?;
+    body.push_str(&openai_sse_chunk(&json!({"id":"chatcmpl_projectatlas_title","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}))?);
+    body.push_str("data: [DONE]\n\n");
+    Ok(body)
+}
+
+fn openai_final_response(source_marker: &str) -> Result<String, String> {
+    let mut body = openai_sse_chunk(
+        &json!({"id":"chatcmpl_projectatlas_final","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{"role":"assistant","content":source_marker},"finish_reason":null}]}),
+    )?;
+    body.push_str(&openai_sse_chunk(&json!({"id":"chatcmpl_projectatlas_final","object":"chat.completion.chunk","created":1,"model":"loopback-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}))?);
+    body.push_str("data: [DONE]\n\n");
+    Ok(body)
+}
+
+fn has_anthropic_tool_result(value: &Value, source_marker: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| has_anthropic_tool_result(value, source_marker)),
+        Value::Object(object) => {
+            (object.get("type").and_then(Value::as_str) == Some("tool_result")
+                && object.get("tool_use_id").and_then(Value::as_str)
+                    == Some(REAL_HOST_LOOPBACK_TOOL_CALL_ID)
+                && value_contains_string(value, source_marker))
+                || object
+                    .values()
+                    .any(|value| has_anthropic_tool_result(value, source_marker))
+        }
+        _ => false,
+    }
+}
+
+fn has_anthropic_tool_call(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(has_anthropic_tool_call),
+        Value::Object(object) => {
+            (object.get("type").and_then(Value::as_str) == Some("tool_use")
+                && object.get("id").and_then(Value::as_str)
+                    == Some(REAL_HOST_LOOPBACK_TOOL_CALL_ID)
+                && object.get("name").and_then(Value::as_str)
+                    == Some("mcp__projectatlas__atlas_slice"))
+                || object.values().any(has_anthropic_tool_call)
+        }
+        _ => false,
+    }
+}
+
+fn has_openai_tool_result(value: &Value, source_marker: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| has_openai_tool_result(value, source_marker)),
+        Value::Object(object) => {
+            let tool_call_id = object
+                .get("tool_call_id")
+                .or_else(|| object.get("toolCallId"))
+                .and_then(Value::as_str);
+            (object.get("role").and_then(Value::as_str) == Some("tool")
+                && tool_call_id == Some(REAL_HOST_LOOPBACK_TOOL_CALL_ID)
+                && value_contains_string(value, source_marker))
+                || object
+                    .values()
+                    .any(|value| has_openai_tool_result(value, source_marker))
+        }
+        _ => false,
+    }
+}
+
+fn has_openai_tool_call(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(has_openai_tool_call),
+        Value::Object(object) => {
+            (object.get("id").and_then(Value::as_str) == Some(REAL_HOST_LOOPBACK_TOOL_CALL_ID)
+                && object.get("type").and_then(Value::as_str) == Some("function")
+                && object
+                    .get("function")
+                    .and_then(Value::as_object)
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                    == Some("projectatlas_atlas_slice"))
+                || object.values().any(has_openai_tool_call)
+        }
+        _ => false,
+    }
+}
+
+fn value_contains_string(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(expected),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_string(value, expected)),
+        Value::Object(object) => object
+            .values()
+            .any(|value| value_contains_string(value, expected)),
+        _ => false,
+    }
+}
+
+#[test]
+#[ignore = "runs installed Claude Code/OpenCode readers; missing hosts are typed skips"]
+fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let host_root = temp
+        .path()
+        .join(format!("isolated-{REAL_HOST_SPECIAL_PATH_COMPONENT}"));
+    fs::create_dir_all(&host_root)?;
+
+    let runtime = mcp_contract_executable();
+    let special_runtime = copy_runtime_into_special_path(&runtime, temp.path())?;
+    let workspace_root = workspace_root()?;
+    let fixtures = [
+        prepare_real_host_fixture(
+            temp.path(),
+            format!("repo-a-{REAL_HOST_SPECIAL_PATH_COMPONENT}").as_str(),
+            "host-reader-fixture-a",
+            &special_runtime,
+            &workspace_root,
+            &host_root,
+        )?,
+        prepare_real_host_fixture(
+            temp.path(),
+            "repo-b",
+            "host-reader-fixture-b",
+            &runtime,
+            &workspace_root,
+            &host_root,
+        )?,
+    ];
+    let claude = find_host_executable("claude");
+    let opencode = find_host_executable("opencode");
+    let hosts = [
+        ("Claude Code", "claude", claude.as_deref()),
+        ("OpenCode", "opencode", opencode.as_deref()),
+    ];
+    ensure_required_real_host_readers(&hosts, required_real_host_readers_enabled())?;
+    let availability = hosts
+        .iter()
+        .map(|(_, name, executable)| {
+            (
+                *name,
+                NativeHostAvailability::from_installed(executable.is_some()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut host_versions = Vec::new();
+    let mut host_statuses = Vec::new();
+    for &(label, harness, executable) in &hosts {
+        if let Some(executable) = executable {
+            let version = host_version(executable, &host_root)?;
+            let expected = if harness == "claude" {
+                "2.1.201"
+            } else {
+                "1.18.10"
+            };
+            require_exact_host_version(label, &version, expected)?;
+            host_versions.push((label, version));
+        }
+    }
+    for fixture in &fixtures {
+        let project_before = snapshot_real_host_tree(&fixture.repo)?;
+        let claude_config = read_json_file(&fixture.claude_config)?;
+        let opencode_config = read_json_file(&fixture.opencode_config)?;
+        let (claude_runtime, claude_arguments) = generated_host_launch(&claude_config, "claude")?;
+        let (opencode_runtime, opencode_arguments) =
+            generated_host_launch(&opencode_config, "opencode")?;
+        if fixture.name.contains(REAL_HOST_SPECIAL_PATH_COMPONENT) {
+            let project_config = fixture.repo.join(ATLAS_DIR_NAME).join("config.toml");
+            for path in [
+                &fixture.repo,
+                &special_runtime,
+                &fixture.database,
+                &project_config,
+            ] {
+                require(
+                    path.to_string_lossy()
+                        .contains(REAL_HOST_SPECIAL_PATH_COMPONENT),
+                    format!(
+                        "special real-host fixture path omitted whitespace/non-ASCII component: {}",
+                        path.display()
+                    ),
+                )?;
+            }
+            let rendered_claude = serde_json::to_string(&claude_config)?;
+            let rendered_opencode = serde_json::to_string(&opencode_config)?;
+            for (harness, rendered, runtime, arguments) in [
+                (
+                    "Claude Code",
+                    rendered_claude,
+                    &claude_runtime,
+                    &claude_arguments,
+                ),
+                (
+                    "OpenCode",
+                    rendered_opencode,
+                    &opencode_runtime,
+                    &opencode_arguments,
+                ),
+            ] {
+                require(
+                    rendered.contains(&runtime.to_string_lossy().replace('\\', "\\\\"))
+                        || rendered.contains(&runtime.to_string_lossy().to_string()),
+                    format!("{harness} generated config omitted special runtime path: {rendered}"),
+                )?;
+                require(
+                    arguments.iter().any(|argument| {
+                        argument.contains(fixture.database.to_string_lossy().as_ref())
+                            && argument.contains(REAL_HOST_SPECIAL_PATH_COMPONENT)
+                    }),
+                    format!("{harness} generated config omitted special database path"),
+                )?;
+                require(
+                    arguments.iter().any(|argument| {
+                        argument.contains(project_config.to_string_lossy().as_ref())
+                            && argument.contains(REAL_HOST_SPECIAL_PATH_COMPONENT)
+                    }),
+                    format!("{harness} generated config omitted special config path"),
+                )?;
+            }
+        }
+
+        for &(label, harness, executable) in &hosts {
+            let status = run_native_host_reader(
+                label,
+                harness,
+                executable,
+                fixture,
+                &host_root,
+                &claude_runtime,
+                &claude_arguments,
+            )?;
+            host_statuses.push((label, fixture.name.as_str(), status));
+        }
+        let project_after = snapshot_real_host_tree(&fixture.repo)?;
+        require(
+            project_before
+                .iter()
+                .filter(|(path, _)| path.as_path() != Path::new(".mcp.json"))
+                .eq(project_after
+                    .iter()
+                    .filter(|(path, _)| path.as_path() != Path::new(".mcp.json"))),
+            format!(
+                "native host changed unrelated project data in {}",
+                fixture.name
+            ),
+        )?;
+    }
+
+    require(
+        host_statuses.len() == hosts.len() * fixtures.len(),
+        format!(
+            "real-host availability did not account for each fixture: statuses={host_statuses:?}, availability={availability:?}, versions={host_versions:?}"
+        ),
+    )?;
+    let mut connected = 0;
+    let mut skipped = 0;
+    for (label, fixture, status) in &host_statuses {
+        match status {
+            NativeHostStatus::Connected { .. } => {
+                connected += 1;
+                require(
+                    status.is_connected(),
+                    format!("connected native host outcome was not connected: {label}/{fixture}"),
+                )?;
+            }
+            NativeHostStatus::Skipped {
+                host,
+                fixture: skipped_fixture,
+                reason: _,
+            } => {
+                skipped += 1;
+                require(
+                    host == label && skipped_fixture == fixture,
+                    format!(
+                        "native host skip lost its host/fixture identity: expected={label}/{fixture}, outcome={status:?}"
+                    ),
+                )?;
+            }
+        }
+    }
+    let installed_fixture_count = availability
+        .iter()
+        .filter(|(_, status)| matches!(status, NativeHostAvailability::Installed))
+        .count()
+        * fixtures.len();
+    let missing_fixture_count = availability
+        .iter()
+        .filter(|(_, status)| matches!(status, NativeHostAvailability::Missing))
+        .count()
+        * fixtures.len();
+    require(
+        connected == installed_fixture_count && skipped == missing_fixture_count,
+        format!(
+            "real-host runner outcomes did not match discovered availability: connected={connected} expected_connected={installed_fixture_count} skipped={skipped} expected_skipped={missing_fixture_count} statuses={host_statuses:?} availability={availability:?} versions={host_versions:?}"
+        ),
+    )?;
+    Ok(())
+}
+
+#[derive(Debug)]
+enum NativeHostSourceEvidence {
+    Observed {
+        source_marker: String,
+        tool_name: String,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum NativeHostAvailability {
+    Installed,
+    Missing,
+}
+
+impl NativeHostAvailability {
+    fn from_installed(installed: bool) -> Self {
+        if installed {
+            Self::Installed
+        } else {
+            Self::Missing
+        }
+    }
+}
+
+fn required_real_host_readers_enabled() -> bool {
+    std::env::var(REQUIRE_REAL_HOST_READERS_ENV).as_deref() == Ok("1")
+}
+
+fn ensure_required_real_host_readers(
+    hosts: &[(&str, &str, Option<&Path>)],
+    required: bool,
+) -> Result<(), Box<dyn Error>> {
+    if !required {
+        return Ok(());
+    }
+    for &(label, harness, executable) in hosts {
+        require(
+            executable.is_some(),
+            format!("required real host reader is not installed: host={label} harness={harness}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum NativeHostStatus {
+    Connected {
+        source_evidence: NativeHostSourceEvidence,
+    },
+    Skipped {
+        host: String,
+        fixture: String,
+        reason: NativeHostSkipReason,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum NativeHostSkipReason {
+    ExecutableNotInstalled,
+}
+
+impl NativeHostStatus {
+    fn is_connected(&self) -> bool {
+        matches!(
+            self,
+            Self::Connected {
+                source_evidence: NativeHostSourceEvidence::Observed {
+                    source_marker,
+                    tool_name,
+                }
+            } if !source_marker.is_empty() && !tool_name.is_empty()
+        )
+    }
+}
+
+fn run_native_host_reader(
+    host: &str,
+    harness: &str,
+    executable: Option<&Path>,
+    fixture: &RealHostFixture,
+    host_root: &Path,
+    claude_runtime: &Path,
+    claude_arguments: &[String],
+) -> Result<NativeHostStatus, Box<dyn Error>> {
+    let Some(executable) = executable else {
+        let status = NativeHostStatus::Skipped {
+            host: host.to_owned(),
+            fixture: fixture.name.clone(),
+            reason: NativeHostSkipReason::ExecutableNotInstalled,
+        };
+        writeln!(
+            io::stderr(),
+            "real host reader skipped: host={host} fixture={} reason=executable-not-installed",
+            fixture.name
+        )?;
+        return Ok(status);
+    };
+    match harness {
+        "claude" => verify_claude_native_reader(
+            executable,
+            &fixture.claude_config,
+            &fixture.repo,
+            &fixture.database,
+            &fixture.source_marker,
+            host_root,
+            claude_runtime,
+            claude_arguments,
+        ),
+        "opencode" => verify_opencode_native_reader(
+            executable,
+            &fixture.opencode_config,
+            &fixture.repo,
+            &fixture.database,
+            &fixture.source_marker,
+            host_root,
+        ),
+        other => Err(io::Error::other(format!("unsupported native host harness {other}")).into()),
+    }
+}
+
+#[test]
+fn missing_real_host_is_reported_without_native_acceptance() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let fixture = RealHostFixture {
+        name: "missing-host-fixture".to_owned(),
+        repo: temp.path().join(TEST_REPO_DIR),
+        database: temp.path().join("projectatlas.db"),
+        claude_config: temp.path().join("claude.json"),
+        opencode_config: temp.path().join(OPENCODE_CONFIG_FILE_NAME),
+        source_marker: "missing-host-marker".to_owned(),
+    };
+    for (host, harness) in [("Claude Code", "claude"), ("OpenCode", "opencode")] {
+        let outcome = run_native_host_reader(
+            host,
+            harness,
+            None,
+            &fixture,
+            temp.path(),
+            Path::new("unused-runtime"),
+            &[],
+        )?;
+        match outcome {
+            NativeHostStatus::Skipped {
+                host: outcome_host,
+                fixture: outcome_fixture,
+                reason: NativeHostSkipReason::ExecutableNotInstalled,
+            } if outcome_host == host && outcome_fixture == fixture.name => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "missing real host did not produce its visible typed skip outcome: host={host} harness={harness} outcome={other:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn required_real_host_readers_reject_missing_discovery() -> Result<(), Box<dyn Error>> {
+    let installed = Path::new("installed-host");
+    let inventories = [
+        (
+            "both hosts missing",
+            [
+                ("Claude Code", "claude", None),
+                ("OpenCode", "opencode", None),
+            ],
+        ),
+        (
+            "Claude Code missing",
+            [
+                ("Claude Code", "claude", None),
+                ("OpenCode", "opencode", Some(installed)),
+            ],
+        ),
+    ];
+    for (description, hosts) in inventories {
+        if ensure_required_real_host_readers(&hosts, true).is_ok() {
+            return Err(io::Error::other(format!(
+                "required real host reader mode accepted {description}"
+            ))
+            .into());
+        }
+    }
+    let installed_hosts = [
+        ("Claude Code", "claude", Some(installed)),
+        ("OpenCode", "opencode", Some(installed)),
+    ];
+    require(
+        ensure_required_real_host_readers(&installed_hosts, true).is_ok(),
+        "required real host reader mode rejected complete discovery".to_owned(),
+    )?;
+    require(
+        ensure_required_real_host_readers(&inventories[0].1, false).is_ok(),
+        "ordinary real host reader mode did not preserve typed-skip admission".to_owned(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> {
+    let workflow = fs::read_to_string(workspace_root()?.join(CI_WORKFLOW_RELATIVE_PATH))?;
+    let intel_bootstrap = workflow
+        .split_once("\"label\": \"macos-x64\"")
+        .and_then(|(_, row)| row.split_once('}').map(|(row, _)| row))
+        .ok_or_else(|| io::Error::other("Intel bootstrap platform is missing"))?;
+    require(
+        intel_bootstrap.contains("\"plugin\""),
+        "bootstrap proof must run real host readers on Intel macOS",
+    )?;
+    for name in [
+        "Install exact real host CLIs for native reader proof",
+        "Real installed host reader proof",
+    ] {
+        let step = workflow_job_step(&workflow, "e2e-smoke", name)?;
+        require(
+            step["if"].as_str()
+                == Some("contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'"),
+            format!("{name} must cover plugin platforms and macOS Intel"),
+        )?;
+    }
+    let step = workflow_job_step(&workflow, "e2e-smoke", "Real installed host reader proof")?;
+    let commands = step["run"].as_str().unwrap_or_default();
+    for command in [
+        "cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery real_host_reader_ -- --nocapture",
+        "cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture",
+    ] {
+        require(
+            commands.lines().any(|line| line.trim() == command),
+            format!("real host proof must execute {command}"),
+        )?;
+    }
+    require(
+        step["env"][REQUIRE_REAL_HOST_READERS_ENV].as_str() == Some("1"),
+        "real installed host reader proof must enable required-reader mode".to_owned(),
+    )?;
+    require(
+        workflow.matches(REQUIRE_REAL_HOST_READERS_ENV).count() == 1,
+        "required-reader mode must be scoped only to the installed-host proof step".to_owned(),
+    )?;
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let isolated_home = temp.path().join(REAL_HOST_ROOT_DIR_NAME);
+    let module_root = temp.path().join("ambient-modules");
+    let utility_module = module_root.join("Microsoft.PowerShell.Utility");
+    fs::create_dir_all(&utility_module)?;
+    fs::write(
+        utility_module.join("Microsoft.PowerShell.Utility.psm1"),
+        "function Write-Verbose { throw 'ambient Utility module was imported' }\nExport-ModuleMember -Function Write-Verbose\n",
+    )?;
+    let management_module = module_root.join("Microsoft.PowerShell.Management");
+    fs::create_dir_all(&management_module)?;
+    fs::write(
+        management_module.join("Microsoft.PowerShell.Management.psm1"),
+        "function Get-Item { throw 'ambient Management module was imported' }\nExport-ModuleMember -Function Get-Item\n",
+    )?;
+    let input_script = temp.path().join("stdin-reader.ps1");
+    fs::write(
+        &input_script,
+        r"[CmdletBinding()] param([string]$InstallerPath)
+[Console]::Error.WriteLine('bootstrap entered')
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($InstallerPath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'installer AST parse failed' }
+[Console]::Error.WriteLine('installer AST parsed')
+$bootstrapEnd = $null
+foreach ($statement in $ast.EndBlock.Statements) {
+    if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+        $bootstrapEnd = $statement.Extent.StartOffset
+        break
+    }
+}
+if ($null -eq $bootstrapEnd) { throw 'installer bootstrap boundary missing' }
+$source = [IO.File]::ReadAllText($InstallerPath)
+$bootstrapStart = $ast.ParamBlock.Extent.EndOffset
+. ([scriptblock]::Create($source.Substring($bootstrapStart, $bootstrapEnd - $bootstrapStart)))
+Write-Verbose 'installer bootstrap dependencies verified' -Verbose
+[void](Get-Item -LiteralPath $InstallerPath -ErrorAction Stop)
+[Console]::In.ReadToEnd() | Out-Null
+[Console]::Error.WriteLine('stdin reached EOF')
+# Keep this stdin probe independent of Utility module autoload.
+[Console]::Out.WriteLine('stdin-closed')
+",
+    )?;
+    let mut engines = vec![PathBuf::from("powershell")];
+    engines.extend(find_host_executable("pwsh"));
+    for engine in engines {
+        let mut input_reader = StdCommand::new(&engine);
+        input_reader
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&input_script)
+            .arg("-InstallerPath")
+            .arg(workspace_root()?.join(WINDOWS_INSTALLER_SCRIPT))
+            .arg("-Verbose")
+            .stdin(Stdio::piped());
+        configure_real_host_environment(&mut input_reader, &isolated_home, None)?;
+        input_reader.env("PSModulePath", &module_root);
+        let output =
+            run_bounded_output(input_reader, "isolated PowerShell file with closed stdin")?;
+        require(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).lines().last() == Some("stdin-closed")
+                && String::from_utf8_lossy(&output.stderr).contains("bootstrap entered")
+                && String::from_utf8_lossy(&output.stderr).contains("installer AST parsed")
+                && String::from_utf8_lossy(&output.stderr).contains("stdin reached EOF"),
+            format!(
+                "isolated installer bootstrap/EOF failed for {}: {}{}",
+                engine.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+    }
+    let runtime = temp
+        .path()
+        .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
+    compile_obsolete_projectatlas_fixture(&runtime)?;
+    let native_host_fixture = temp.path().join("native-host-owner.exe");
+    compile_codex_mcp_owner_fixture(&native_host_fixture)?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let host_root = temp.path().join(REAL_HOST_ROOT_DIR_NAME);
+    fs::create_dir_all(&repo)?;
+    fs::create_dir_all(&host_root)?;
+    let identity_file = temp.path().join("native-host-owned.pid");
+    let arguments = vec![
+        identity_file.to_string_lossy().into_owned(),
+        runtime.to_string_lossy().into_owned(),
+        temp.path()
+            .join("projectatlas.db")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    let mut command = host_command(&native_host_fixture);
+    command
+        .current_dir(&repo)
+        .args(&arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_real_host_environment(&mut command, &host_root, None)?;
+    let host = spawn_plugin_installer_process(&mut command)?;
+    // Establish a live descendant before timing its retirement. CLR startup is
+    // fixture setup, not part of the 250 ms observer deadline under test.
+    let readiness_deadline = codex_owner_readiness_deadline(Instant::now())?;
+    let retained_identity = codex_owner_retained_identity_path(&identity_file);
+    while !retained_identity.is_file() {
+        let remaining = readiness_deadline.saturating_duration_since(Instant::now());
+        require(
+            !remaining.is_zero(),
+            "native host fixture did not publish its child identity",
+        )?;
+        thread::sleep(Duration::from_millis(25).min(remaining));
+    }
+    let child_identity = read_codex_owner_child_identity_with_test_delay(
+        &retained_identity,
+        &runtime,
+        readiness_deadline,
+        None,
+    )?;
+    let started = Instant::now();
+    let result =
+        wait_for_plugin_installer_output(host, "real host reader", REAL_HOST_READER_TIMEOUT);
+    let error = result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    require(
+        result.is_err()
+            && error.contains("real host reader plugin installer exceeded")
+            && error.contains("status="),
+        format!("native host runner lost timeout classification: {result:?}"),
+    )?;
+    require(
+        started.elapsed() <= REAL_HOST_READER_TIMEOUT + REAL_HOST_READER_REAP_BUDGET,
+        "native host runner exceeded its complete cleanup bound",
+    )?;
+    require(
+        !windows_process_is_alive(&child_identity)?,
+        format!("native host job left its matching MCP descendant alive: {child_identity:?}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn real_host_reader_posix_process_group_reaps_owned_descendants() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let fixture = temp.path().join("real-host-posix-fixture");
+    write_executable_script(
+        &fixture,
+        r#"#!/bin/sh
+set -eu
+mode=$1
+pid_file=$2
+sleep 1
+if [ "$mode" = "success" ]; then
+    exit 0
+fi
+(sleep 300) &
+child=$!
+printf '%s\n' "$child" > "$pid_file"
+if [ "$mode" = "early" ]; then
+    exit 0
+fi
+if [ "$mode" = "failure" ]; then
+    exit 17
+fi
+while :; do
+    sleep 1
+done
+"#,
+    )?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let host_root = temp.path().join(REAL_HOST_ROOT_DIR_NAME);
+    fs::create_dir_all(&repo)?;
+    fs::create_dir_all(&host_root)?;
+
+    let success_pid_file = temp.path().join("success.pid");
+    let success_pid_file_text = success_pid_file.to_string_lossy().into_owned();
+    let success = run_real_host_command_with_environment(
+        &fixture,
+        &repo,
+        &host_root,
+        None,
+        &["success".to_owned(), success_pid_file_text],
+        &[],
+    )?;
+    require(
+        success.status.success(),
+        format!(
+            "POSIX real host reader completed fixture unsuccessfully: status={} stderr={}",
+            success.status,
+            String::from_utf8_lossy(&success.stderr)
+        ),
+    )?;
+
+    for (mode, expected_status) in [("early", 0), ("failure", 17)] {
+        let pid_file = temp.path().join(format!("{mode}.pid"));
+        let pid_file_text = pid_file.to_string_lossy().into_owned();
+        let result = run_real_host_command_with_environment(
+            &fixture,
+            &repo,
+            &host_root,
+            None,
+            &[mode.to_owned(), pid_file_text],
+            &[],
+        )?;
+        require(
+            result.status.code() == Some(expected_status),
+            format!(
+                "POSIX real host reader {mode} fixture returned unexpected status: {} stderr={}",
+                result.status,
+                String::from_utf8_lossy(&result.stderr)
+            ),
+        )?;
+        let child_pid = fs::read_to_string(&pid_file)?.trim().parse::<u32>()?;
+        wait_for_posix_process_exit(
+            child_pid,
+            Instant::now()
+                .checked_add(REAL_HOST_READER_REAP_BUDGET)
+                .ok_or_else(|| io::Error::other("POSIX early-exit reap deadline overflowed"))?,
+        )?;
+    }
+
+    let timeout_pid_file = temp.path().join(REAL_HOST_TIMEOUT_PID_FILE_NAME);
+    let timeout_pid_file_text = timeout_pid_file.to_string_lossy().into_owned();
+    let mut command = host_command(&fixture);
+    command
+        .current_dir(&repo)
+        .args(["timeout".to_owned(), timeout_pid_file_text])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_real_host_environment(&mut command, &host_root, None)?;
+    let readiness_deadline = Instant::now()
+        .checked_add(Duration::from_secs(30))
+        .ok_or_else(|| io::Error::other("POSIX host readiness deadline overflowed"))?;
+    let host = spawn_plugin_installer_process(&mut command)?;
+    // Fixture startup must finish before the short cleanup observer begins.
+    while !timeout_pid_file.is_file() {
+        let remaining = readiness_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
+    }
+    let ready = timeout_pid_file.is_file();
+    // Always retire the owned group, including when fixture readiness fails.
+    let timeout_result =
+        wait_for_plugin_installer_output(host, "real host reader", REAL_HOST_READER_TIMEOUT);
+    require(ready, "POSIX host fixture did not publish its child PID")?;
+    let timeout_text = timeout_result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    require(
+        timeout_result.is_err()
+            && timeout_text.contains("real host reader plugin installer exceeded")
+            && timeout_text.contains("status="),
+        format!(
+            "POSIX real host reader timeout did not preserve bounded classification: {timeout_result:?}"
+        ),
+    )?;
+    let child_pid = fs::read_to_string(&timeout_pid_file)?
+        .trim()
+        .parse::<u32>()?;
+    wait_for_posix_process_exit(
+        child_pid,
+        Instant::now()
+            .checked_add(REAL_HOST_READER_REAP_BUDGET)
+            .ok_or_else(|| io::Error::other("POSIX descendant reap deadline overflowed"))?,
+    )?;
+    Ok(())
+}
+
+fn require_exact_host_version(
+    host: &str,
+    observed: &str,
+    expected: &str,
+) -> Result<(), Box<dyn Error>> {
+    require(
+        observed.split_whitespace().any(|token| {
+            token.trim_matches(|character: char| !character.is_ascii_digit() && character != '.')
+                == expected
+        }),
+        format!("{host} version is not the required {expected}: {observed}"),
+    )
+}
+
+/// Return the runtime and arguments from one generated host-specific config.
+fn generated_host_launch(
+    config: &Value,
+    harness: &str,
+) -> Result<(PathBuf, Vec<String>), Box<dyn Error>> {
+    let (command, arguments) = match harness {
+        "claude" => (
+            json_string_at(config, &["mcpServers", "projectatlas", "command"])?.to_owned(),
+            config["mcpServers"]["projectatlas"]["args"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("Claude Code generated args were not an array"))?
+                .as_slice(),
+        ),
+        "opencode" => {
+            let command = config["mcp"]["projectatlas"]["command"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("OpenCode generated command was not an array"))?;
+            let runtime = command
+                .first()
+                .and_then(Value::as_str)
+                .ok_or_else(|| io::Error::other("OpenCode generated command omitted runtime"))?;
+            (runtime.to_owned(), &command[1..])
+        }
+        other => return Err(io::Error::other(format!("unsupported host harness {other}")).into()),
+    };
+    let arguments = arguments
+        .iter()
+        .map(|argument| {
+            argument.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                io::Error::other(format!("{harness} generated argument was not a string"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((PathBuf::from(command), arguments))
+}
+
+/// Find a supported host without consulting its ambient config or credentials.
+fn find_host_executable(name: &str) -> Option<PathBuf> {
+    let locator = if cfg!(windows) { "where.exe" } else { "which" };
+    let output = StdCommand::new(locator).arg(name).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let located_paths = String::from_utf8_lossy(&output.stdout);
+    let paths = located_paths
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    #[cfg(windows)]
+    let paths = paths.filter(|path| {
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("cmd")
+                    || extension.eq_ignore_ascii_case("exe")
+                    || extension.eq_ignore_ascii_case("bat")
+                    || extension.eq_ignore_ascii_case("ps1")
+            })
+    });
+    paths.map(PathBuf::from).next()
+}
+
+/// Build a host invocation that also supports npm PowerShell shims on Windows.
+fn host_command(executable: &Path) -> StdCommand {
+    #[cfg(windows)]
+    if executable
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
+    {
+        let mut command = StdCommand::new("powershell");
+        command
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(executable);
+        return command;
+    }
+    StdCommand::new(executable)
+}
+
+/// Return one host's installed version while all host state remains isolated.
+fn host_version(executable: &Path, host_root: &Path) -> Result<String, Box<dyn Error>> {
+    let mut command = host_command(executable);
+    configure_real_host_environment(&mut command, host_root, None)?;
+    command.arg("--version");
+    let output = run_bounded_output(command, "real host version")?;
+    require(
+        output.status.success(),
+        format!(
+            "{} --version failed: {}",
+            executable.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    require(
+        !version.is_empty(),
+        format!("{} --version returned no version", executable.display()),
+    )?;
+    Ok(version)
+}
+
+/// Redirect every host-specific config/data root to the test fixture.
+fn configure_real_host_environment(
+    command: &mut StdCommand,
+    host_root: &Path,
+    opencode_config: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    // Host CLIs must not inherit credentials, provider settings, or ambient
+    // config/data roots from the developer machine. Keep only the platform
+    // process plumbing needed to launch an installed npm shim and an isolated
+    // ProjectAtlas runtime.
+    command.env_clear();
+    for key in ["PATH", "LANG", "LC_ALL", "TMPDIR", "TERM"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    #[cfg(windows)]
+    for key in [
+        "SystemRoot",
+        "SystemDrive",
+        "ComSpec",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "WINDIR",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    let app_data = host_root.join("app-data");
+    let local_app_data = host_root.join(ISOLATED_LOCAL_APP_DATA_DIR_NAME);
+    let temp_dir = host_root.join(E2E_TEMP_DIR_NAME);
+    let claude_config = host_root.join(ISOLATED_CLAUDE_CONFIG_DIR_NAME);
+    let xdg_config = host_root.join(ISOLATED_XDG_CONFIG_DIR_NAME);
+    let xdg_data = host_root.join("xdg-data");
+    let xdg_state = host_root.join("xdg-state");
+    let opencode_config_dir = host_root.join("opencode-config");
+    for path in [
+        &app_data,
+        &local_app_data,
+        &temp_dir,
+        &claude_config,
+        &xdg_config,
+        &xdg_data,
+        &xdg_state,
+        &opencode_config_dir,
+    ] {
+        fs::create_dir_all(path)?;
+    }
+    command
+        .env("HOME", host_root)
+        .env("USERPROFILE", host_root)
+        .env("APPDATA", &app_data)
+        .env("LOCALAPPDATA", &local_app_data)
+        .env("TMPDIR", &temp_dir)
+        .env("TEMP", &temp_dir)
+        .env("TMP", &temp_dir)
+        .env("CLAUDE_CONFIG_DIR", &claude_config)
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_STATE_HOME", &xdg_state)
+        .env("OPENCODE_CONFIG_DIR", &opencode_config_dir)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    if let Some(config) = opencode_config {
+        command.env("OPENCODE_CONFIG", config);
+    } else {
+        command.env_remove("OPENCODE_CONFIG");
+    }
+    Ok(())
+}
+
+/// Run one native host reader with bounded output and no ambient host state.
+fn run_real_host_command(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    opencode_config: Option<&Path>,
+    arguments: &[String],
+) -> Result<std::process::Output, Box<dyn Error>> {
+    run_real_host_command_with_environment(
+        executable,
+        repo,
+        host_root,
+        opencode_config,
+        arguments,
+        &[],
+    )
+}
+
+fn run_real_host_command_with_environment(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    opencode_config: Option<&Path>,
+    arguments: &[String],
+    environment: &[(&str, &str)],
+) -> Result<std::process::Output, Box<dyn Error>> {
+    run_real_host_command_inner(
+        executable,
+        repo,
+        host_root,
+        opencode_config,
+        arguments,
+        environment,
+        Duration::from_secs(30),
+    )
+}
+
+fn run_real_host_command_inner(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    opencode_config: Option<&Path>,
+    arguments: &[String],
+    environment: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let mut command = host_command(executable);
+    command
+        .current_dir(repo)
+        .args(arguments)
+        .stdin(Stdio::null());
+    configure_real_host_environment(&mut command, host_root, opencode_config)?;
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    wait_for_plugin_installer_output(
+        spawn_plugin_installer_process(&mut command)?,
+        "real host reader",
+        timeout,
+    )
+}
+
+fn host_output_text(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn redacted_host_output(output: &std::process::Output) -> String {
+    host_output_text(output).replace("synthetic-projectatlas-test-key", "<redacted>")
+}
+
+fn host_output_contains_path(text: &str, path: &Path) -> bool {
+    let display = path.display().to_string();
+    text.contains(&display) || text.contains(&display.replace('\\', "\\\\"))
+}
+
+fn host_output_contains_argument(text: &str, argument: &str) -> bool {
+    text.contains(argument) || text.contains(&argument.replace('\\', "\\\\"))
+}
+
+fn claude_mcp_list(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    debug_file: Option<&Path>,
+) -> Result<String, Box<dyn Error>> {
+    let mut arguments = vec!["--bare".to_owned()];
+    if let Some(debug_file) = debug_file {
+        arguments.extend([
+            "--debug-file".to_owned(),
+            debug_file.to_string_lossy().into_owned(),
+        ]);
+    }
+    arguments.extend(["mcp".to_owned(), "list".to_owned()]);
+    let output = run_real_host_command(executable, repo, host_root, None, &arguments)?;
+    require(
+        output.status.success(),
+        format!("Claude Code mcp list failed: {}", host_output_text(&output)),
+    )?;
+    Ok(host_output_text(&output))
+}
+
+fn claude_mcp_add(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    scope: &str,
+    name: &str,
+    runtime: &Path,
+    arguments: &[String],
+) -> Result<(), Box<dyn Error>> {
+    let mut command_arguments = vec![
+        "--bare".to_owned(),
+        "mcp".to_owned(),
+        "add".to_owned(),
+        "--scope".to_owned(),
+        scope.to_owned(),
+        name.to_owned(),
+        "--".to_owned(),
+        runtime.to_string_lossy().into_owned(),
+    ];
+    command_arguments.extend(arguments.iter().cloned());
+    let output = run_real_host_command(executable, repo, host_root, None, &command_arguments)?;
+    require(
+        output.status.success(),
+        format!("Claude Code mcp add failed: {}", host_output_text(&output)),
+    )
+}
+
+fn claude_mcp_remove(
+    executable: &Path,
+    repo: &Path,
+    host_root: &Path,
+    scope: &str,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        None,
+        &[
+            "--bare".to_owned(),
+            "mcp".to_owned(),
+            "remove".to_owned(),
+            name.to_owned(),
+            "--scope".to_owned(),
+            scope.to_owned(),
+        ],
+    )?;
+    require(
+        output.status.success(),
+        format!(
+            "Claude Code mcp remove failed: {}",
+            host_output_text(&output)
+        ),
+    )
+}
+
+/// Verify Claude Code's native project reader and explicit config reader.
+fn verify_claude_native_reader(
+    executable: &Path,
+    generated_config: &Path,
+    repo: &Path,
+    database: &Path,
+    source_marker: &str,
+    host_root: &Path,
+    runtime: &Path,
+    arguments: &[String],
+) -> Result<NativeHostStatus, Box<dyn Error>> {
+    let project_config = repo.join(MCP_PROJECT_CONFIG_FILE_NAME);
+    fs::copy(generated_config, &project_config)?;
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        text.contains("projectatlas") && text.to_ascii_lowercase().contains("pending approval"),
+        format!(
+            "Claude Code native reader did not report generated project config as pending: {text}"
+        ),
+    )?;
+
+    // A project .mcp.json is intentionally pending until the native Claude
+    // command approves it. Add the same generated command through Claude's
+    // own writer, then let `mcp list` perform the real host health check.
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "projectatlas",
+        runtime,
+        arguments,
+    )?;
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "unrelated",
+        runtime,
+        arguments,
+    )?;
+    let debug_file = host_root.join("claude-mcp-list.debug.log");
+    let text = claude_mcp_list(executable, repo, host_root, Some(&debug_file))?;
+    require(
+        text.contains("projectatlas")
+            && text.contains("unrelated")
+            && text.to_ascii_lowercase().contains("connected"),
+        format!("Claude Code native reader did not connect generated command: {text}"),
+    )?;
+    let debug = fs::read_to_string(&debug_file)?;
+    let debug_lower = debug.to_ascii_lowercase();
+    require(
+        debug_lower.contains("hastools\":true")
+            && debug_lower.contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))),
+        format!("Claude Code native MCP health check omitted tools/runtime identity: {debug}"),
+    )?;
+
+    // Keep the unrelated native project entry as the host-state witness while
+    // corrupting only the installer-owned generated ProjectAtlas entry. Rerun
+    // the real installer, then make Claude consume the repaired generated file
+    // through its strict native reader.
+    let unrelated_native_state = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        unrelated_native_state.contains("unrelated"),
+        format!(
+            "Claude native host reader did not expose the unrelated entry before installer repair: {unrelated_native_state}"
+        ),
+    )?;
+    let native_state_file = host_root
+        .join(ISOLATED_CLAUDE_CONFIG_DIR_NAME)
+        .join(".claude.json");
+    let native_state_before = read_json_file(&native_state_file)?;
+    let canonical_project = repo.canonicalize()?;
+    let native_projects = native_state_before
+        .get("projects")
+        .and_then(Value::as_object)
+        .ok_or_else(|| io::Error::other("Claude native state omitted its projects object"))?;
+    // Native hosts can retain Windows short paths or POSIX aliases as JSON keys.
+    // Select the exact filesystem identity while retaining the host-authored key.
+    let mut matching_projects = native_projects.keys().filter(|key| {
+        Path::new(key)
+            .canonicalize()
+            .is_ok_and(|path| path == canonical_project)
+    });
+    let project_key = matching_projects
+        .next()
+        .ok_or_else(|| io::Error::other("Claude native state omitted the selected project"))?;
+    require(
+        matching_projects.next().is_none(),
+        "Claude native state contains ambiguous keys for the selected project",
+    )?;
+    let unrelated_native_entry = native_state_before
+        .get("projects")
+        .and_then(|projects| projects.get(project_key))
+        .and_then(|project| project.get("mcpServers"))
+        .and_then(|servers| servers.get("unrelated"))
+        .cloned()
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "Claude native state omitted the complete unrelated entry subtree: file={} project_key={project_key} state={native_state_before}",
+                native_state_file.display()
+            ))
+        })?;
+    let mut corrupted_generated = read_json_file(generated_config)?;
+    corrupted_generated["mcpServers"]["projectatlas"]["command"] = Value::String(
+        host_root
+            .join(MISSING_PROJECTATLAS_RUNTIME_NAME)
+            .display()
+            .to_string(),
+    );
+    let corrupted_arguments = corrupted_generated["mcpServers"]["projectatlas"]["args"]
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("Claude generated args were not mutable"))?;
+    let version_index = corrupted_arguments
+        .iter()
+        .position(|argument| argument.as_str() == Some("--require-version"))
+        .and_then(|index| index.checked_add(1))
+        .ok_or_else(|| io::Error::other("Claude generated args omitted version guard"))?;
+    corrupted_arguments[version_index] = Value::String("0.0.0".to_owned());
+    fs::write(
+        generated_config,
+        serde_json::to_vec_pretty(&corrupted_generated)?,
+    )?;
+    let stale_reader_arguments = vec![
+        "--bare".to_owned(),
+        "--debug-file".to_owned(),
+        host_root
+            .join("claude-stale-reader.debug.log")
+            .to_string_lossy()
+            .into_owned(),
+        "--strict-mcp-config".to_owned(),
+        "--mcp-config".to_owned(),
+        generated_config.to_string_lossy().into_owned(),
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "Return exactly OK.".to_owned(),
+    ];
+    let stale_reader =
+        run_real_host_command(executable, repo, host_root, None, &stale_reader_arguments)?;
+    let stale_reader_text = host_output_text(&stale_reader);
+    let stale_reader_debug = fs::read_to_string(host_root.join("claude-stale-reader.debug.log"))?;
+    require(
+        !stale_reader.status.success()
+            && stale_reader_debug
+                .to_ascii_lowercase()
+                .contains("connection failed")
+            && stale_reader_debug.contains(MISSING_PROJECTATLAS_RUNTIME_NAME)
+            && !stale_reader_text.contains(source_marker),
+        format!(
+            "Claude native reader unexpectedly accepted the unrepaired generated config: output={stale_reader_text} debug={stale_reader_debug}"
+        ),
+    )?;
+    run_real_host_installer_repair(repo, runtime, host_root)?;
+    let repaired_generated = read_json_file(generated_config)?;
+    let (repaired_runtime, repaired_arguments) =
+        generated_host_launch(&repaired_generated, "claude")?;
+    require(
+        repaired_runtime == runtime.to_path_buf()
+            && repaired_arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--require-version" && pair[1] == env!("CARGO_PKG_VERSION")),
+        format!(
+            "Claude installer repair did not restore its owned generated entry: {repaired_generated}"
+        ),
+    )?;
+    let repaired_reader_arguments = vec![
+        "--bare".to_owned(),
+        "--debug-file".to_owned(),
+        host_root
+            .join("claude-repaired-reader.debug.log")
+            .to_string_lossy()
+            .into_owned(),
+        "--strict-mcp-config".to_owned(),
+        "--mcp-config".to_owned(),
+        generated_config.to_string_lossy().into_owned(),
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "Return exactly OK.".to_owned(),
+    ];
+    let repaired_reader = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        None,
+        &repaired_reader_arguments,
+    )?;
+    let repaired_reader_text = host_output_text(&repaired_reader);
+    let repaired_reader_debug =
+        fs::read_to_string(host_root.join("claude-repaired-reader.debug.log"))?;
+    require(
+        !repaired_reader.status.success()
+            && repaired_reader_text
+                .to_ascii_lowercase()
+                .contains("not logged in"),
+        format!(
+            "Claude native reader did not consume the installer-repaired generated config before its expected unauthenticated refusal: {repaired_reader_text}"
+        ),
+    )?;
+    let repaired_reader_debug_lower = repaired_reader_debug.to_ascii_lowercase();
+    require(
+        repaired_reader_debug_lower.contains("hastools\":true")
+            && repaired_reader_debug_lower
+                .contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION")))
+            && !repaired_reader_debug_lower.contains("connection failed"),
+        format!(
+            "Claude native reader did not initialize the installer-repaired generated artifact: {repaired_reader_debug}"
+        ),
+    )?;
+    let native_state_after = read_json_file(&native_state_file)?;
+    require(
+        native_state_after
+            .get("projects")
+            .and_then(|projects| projects.get(project_key))
+            .and_then(|project| project.get("mcpServers"))
+            .and_then(|servers| servers.get("unrelated"))
+            == Some(&unrelated_native_entry),
+        format!(
+            "Claude installer repair changed the complete unrelated native entry subtree: {native_state_after}"
+        ),
+    )?;
+    let repaired_native_state = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        repaired_native_state.contains("unrelated"),
+        format!(
+            "Claude installer repair changed the unrelated native project entry: {repaired_native_state}"
+        ),
+    )?;
+    let get_output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        None,
+        &[
+            "--bare".to_owned(),
+            "mcp".to_owned(),
+            "get".to_owned(),
+            "projectatlas".to_owned(),
+        ],
+    )?;
+    let get_text = host_output_text(&get_output);
+    require(
+        get_output.status.success()
+            && get_text.contains("projectatlas")
+            && get_text.to_ascii_lowercase().contains("connected")
+            && arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--db" && get_text.contains(&pair[1]))
+            && arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--config" && get_text.contains(&pair[1])),
+        format!("Claude Code native reader changed generated routing: {get_text}"),
+    )?;
+
+    // Claude's non-model CLI has no tool-call/source route. Prove that the
+    // route is unavailable without credentials instead of treating a failed
+    // model invocation as host evidence.
+    let explicit_arguments = [
+        "--bare".to_owned(),
+        "--mcp-config".to_owned(),
+        generated_config.to_string_lossy().into_owned(),
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "Return exactly OK.".to_owned(),
+    ];
+    let output = run_real_host_command(executable, repo, host_root, None, &explicit_arguments)?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    require(
+        !output.status.success() && text.to_ascii_lowercase().contains("not logged in"),
+        format!("Claude Code did not fail closed without authentication: {text}"),
+    )?;
+
+    let malformed_config = host_root.join("claude-malformed.json");
+    fs::write(&malformed_config, "{\n")?;
+    let malformed_path = malformed_config.to_string_lossy().into_owned();
+    let malformed_arguments = [
+        "--bare".to_owned(),
+        "--mcp-config".to_owned(),
+        malformed_path,
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "Return exactly OK.".to_owned(),
+    ];
+    let output = run_real_host_command(executable, repo, host_root, None, &malformed_arguments)?;
+    let text = host_output_text(&output);
+    require(
+        !output.status.success() && text.to_ascii_lowercase().contains("invalid mcp"),
+        format!("Claude Code did not fail closed for malformed MCP config: {text}"),
+    )?;
+
+    claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
+    let missing_runtime = host_root.join(MISSING_PROJECTATLAS_RUNTIME_NAME);
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "projectatlas",
+        &missing_runtime,
+        arguments,
+    )?;
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        text.contains("projectatlas") && text.to_ascii_lowercase().contains("failed to connect"),
+        format!("Claude Code did not fail closed for stale runtime config: {text}"),
+    )?;
+    claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
+    let wrong_version_arguments = arguments
+        .iter()
+        .map(|argument| {
+            if argument == env!("CARGO_PKG_VERSION") {
+                "0.0.0".to_owned()
+            } else {
+                argument.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "projectatlas",
+        runtime,
+        &wrong_version_arguments,
+    )?;
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        text.contains("projectatlas") && text.to_ascii_lowercase().contains("failed to connect"),
+        format!("Claude Code did not fail closed for wrong-version config: {text}"),
+    )?;
+    claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "local",
+        "projectatlas",
+        runtime,
+        arguments,
+    )?;
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        text.contains("projectatlas")
+            && text.contains("unrelated")
+            && !text.to_ascii_lowercase().contains("failed to connect"),
+        format!("Claude Code native repair did not restore generated config: {text}"),
+    )?;
+    claude_mcp_remove(executable, repo, host_root, "local", "projectatlas")?;
+    fs::remove_file(&project_config)?;
+    // Claude's user scope is its shared registry. With the project-local
+    // entry removed, the same generated command must still connect through
+    // the shared route and retain the exact project database/config paths.
+    claude_mcp_add(
+        executable,
+        repo,
+        host_root,
+        "user",
+        "projectatlas",
+        runtime,
+        arguments,
+    )?;
+    let shared_text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        shared_text.contains("projectatlas")
+            && shared_text.to_ascii_lowercase().contains("connected")
+            && arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--db" && shared_text.contains(&pair[1]))
+            && arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--config" && shared_text.contains(&pair[1])),
+        format!(
+            "Claude Code shared native registry did not preserve project routing: {shared_text}"
+        ),
+    )?;
+    claude_mcp_remove(executable, repo, host_root, "user", "projectatlas")?;
+    let text = claude_mcp_list(executable, repo, host_root, None)?;
+    require(
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("projectatlas:"))
+            && text.contains("unrelated"),
+        format!("Claude Code uninstall removed unrelated native config: {text}"),
+    )?;
+    claude_mcp_remove(executable, repo, host_root, "local", "unrelated")?;
+    require(
+        !project_config.exists(),
+        "Claude source-evidence loopback must consume the repaired generated artifact, not the project .mcp.json copy",
+    )?;
+    let loopback =
+        LoopbackModelServer::start(LoopbackModelProtocol::AnthropicMessages, source_marker)?;
+    let base_url = loopback.base_url();
+    let model_arguments = vec![
+        "--bare".to_owned(),
+        "--strict-mcp-config".to_owned(),
+        "--mcp-config".to_owned(),
+        generated_config.to_string_lossy().into_owned(),
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "--no-session-persistence".to_owned(),
+        "--permission-mode".to_owned(),
+        "dontAsk".to_owned(),
+        "--allowedTools".to_owned(),
+        "mcp__projectatlas__atlas_slice".to_owned(),
+        "--model".to_owned(),
+        "sonnet".to_owned(),
+        format!(
+            "Use the projectatlas_atlas_slice tool exactly once for src/host_reader_fixture.rs lines 1-1, then return exactly this source marker: {source_marker}"
+        ),
+    ];
+    let model_environment = [
+        ("ANTHROPIC_API_KEY", "synthetic-projectatlas-test-key"),
+        ("ANTHROPIC_BASE_URL", base_url.as_str()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+        ("CLAUDE_CODE_DISABLE_BETAS", "1"),
+        ("DISABLE_AUTOUPDATER", "1"),
+        ("DISABLE_TELEMETRY", "1"),
+        ("DISABLE_ERROR_REPORTING", "1"),
+        ("CLAUDE_CODE_DISABLE_CLAUDEAI_MCP_SERVERS", "1"),
+    ];
+    let model_output_result = run_real_host_command_with_environment(
+        executable,
+        repo,
+        host_root,
+        None,
+        &model_arguments,
+        &model_environment,
+    );
+    let observation_result = loopback.finish();
+    let model_output = model_output_result.map_err(|error| {
+        if let Err(server_error) = &observation_result {
+            io::Error::other(format!("{error}; loopback observation: {server_error}"))
+        } else {
+            io::Error::other(error.to_string())
+        }
+    })?;
+    let observation = observation_result.map_err(|error| {
+        io::Error::other(format!(
+            "Claude Code host exited with {}; loopback observation: {error}; output={}",
+            model_output.status,
+            redacted_host_output(&model_output)
+        ))
+    })?;
+    let model_text = String::from_utf8_lossy(&model_output.stdout);
+    require(
+        model_output.status.success() && model_text.contains(source_marker),
+        format!(
+            "Claude Code host-mediated model run did not return fixture evidence for {}: status={} stderr={}",
+            database.display(),
+            model_output.status,
+            redacted_host_output(&model_output)
+        ),
+    )?;
+    require(
+        observation.source_marker == source_marker
+            && observation.tool_name == "mcp__projectatlas__atlas_slice"
+            && observation.tool_call_id == REAL_HOST_LOOPBACK_TOOL_CALL_ID
+            && observation.requests == 2,
+        format!(
+            "Claude Code loopback did not observe a causal two-turn tool exchange: {observation:?}"
+        ),
+    )?;
+    Ok(NativeHostStatus::Connected {
+        source_evidence: NativeHostSourceEvidence::Observed {
+            source_marker: source_marker.to_owned(),
+            tool_name: observation.tool_name,
+        },
+    })
+}
+
+/// Verify `OpenCode`'s native reader starts the generated MCP server in isolation.
+fn verify_opencode_native_reader(
+    executable: &Path,
+    generated_config: &Path,
+    repo: &Path,
+    database: &Path,
+    source_marker: &str,
+    host_root: &Path,
+) -> Result<NativeHostStatus, Box<dyn Error>> {
+    let generated = read_json_file(generated_config)?;
+    let (generated_runtime, generated_arguments) = generated_host_launch(&generated, "opencode")?;
+    let resolved = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(generated_config),
+        &["debug", "config"].map(str::to_owned),
+    )?;
+    let resolved_text = host_output_text(&resolved);
+    require(
+        resolved.status.success() && host_output_contains_path(&resolved_text, &generated_runtime),
+        format!("OpenCode debug config did not consume generated config: {resolved_text}"),
+    )?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(generated_config),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success()
+            && text.contains("projectatlas")
+            && text.to_ascii_lowercase().contains("connected"),
+        format!("OpenCode native reader did not connect generated MCP entry: {text}"),
+    )?;
+    require(
+        host_output_contains_path(&text, &generated_runtime)
+            && generated_arguments
+                .iter()
+                .all(|argument| host_output_contains_argument(&text, argument)),
+        format!("OpenCode native reader did not report the generated runtime route: {text}"),
+    )?;
+
+    let malformed_config = host_root.join("opencode-malformed.json");
+    fs::write(&malformed_config, b"{\n")?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(&malformed_config),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        !output.status.success() && text.to_ascii_lowercase().contains("not valid json"),
+        format!("OpenCode did not fail closed for malformed config: {text}"),
+    )?;
+
+    let mut invalid_runtime = read_json_file(generated_config)?;
+    invalid_runtime["mcp"]["projectatlas"]["command"][0] = Value::String(
+        host_root
+            .join(MISSING_PROJECTATLAS_RUNTIME_NAME)
+            .display()
+            .to_string(),
+    );
+    let invalid_runtime_path = host_root.join("opencode-invalid-runtime.json");
+    fs::write(
+        &invalid_runtime_path,
+        serde_json::to_vec_pretty(&invalid_runtime)?,
+    )?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(&invalid_runtime_path),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success()
+            && text.to_ascii_lowercase().contains("failed")
+            && !text.to_ascii_lowercase().contains("connected"),
+        format!("OpenCode did not fail closed for stale runtime config: {text}"),
+    )?;
+
+    let mut wrong_version = read_json_file(generated_config)?;
+    let command = wrong_version["mcp"]["projectatlas"]["command"]
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("OpenCode generated command was not mutable"))?;
+    let version_index = command
+        .iter()
+        .position(|argument| argument.as_str() == Some("--require-version"))
+        .and_then(|index| index.checked_add(1))
+        .ok_or_else(|| io::Error::other("OpenCode generated command omitted version guard"))?;
+    command[version_index] = Value::String("0.0.0".to_owned());
+    let wrong_version_path = host_root.join("opencode-wrong-version.json");
+    fs::write(
+        &wrong_version_path,
+        serde_json::to_vec_pretty(&wrong_version)?,
+    )?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(&wrong_version_path),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success()
+            && text.to_ascii_lowercase().contains("failed")
+            && !text.to_ascii_lowercase().contains("connected"),
+        format!("OpenCode did not fail closed for wrong-version config: {text}"),
+    )?;
+
+    // Keep an unrelated native registry entry as the host-state witness while
+    // corrupting only the installer-owned generated ProjectAtlas entry. Rerun
+    // the real installer, then make OpenCode consume the repaired generated
+    // file through its native reader.
+    let shared_config = host_root
+        .join(ISOLATED_XDG_CONFIG_DIR_NAME)
+        .join(OPENCODE_CONFIG_DIR_NAME)
+        .join(OPENCODE_CONFIG_FILE_NAME);
+    let shared_parent = shared_config
+        .parent()
+        .ok_or_else(|| io::Error::other("shared OpenCode config has no parent"))?;
+    fs::create_dir_all(shared_parent)?;
+    let mut unrelated_registry = generated;
+    unrelated_registry["mcp"]["unrelated"] = unrelated_registry["mcp"]["projectatlas"].clone();
+    fs::write(
+        &shared_config,
+        serde_json::to_vec_pretty(&unrelated_registry)?,
+    )?;
+    let unrelated_host_state = fs::read(&shared_config)?;
+
+    let mut corrupted_generated = read_json_file(generated_config)?;
+    corrupted_generated["mcp"]["projectatlas"]["command"][0] = Value::String(
+        host_root
+            .join(MISSING_PROJECTATLAS_RUNTIME_NAME)
+            .display()
+            .to_string(),
+    );
+    let corrupted_command = corrupted_generated["mcp"]["projectatlas"]["command"]
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("OpenCode generated command was not mutable"))?;
+    let corrupted_version_index = corrupted_command
+        .iter()
+        .position(|argument| argument.as_str() == Some("--require-version"))
+        .and_then(|index| index.checked_add(1))
+        .ok_or_else(|| io::Error::other("OpenCode generated command omitted version guard"))?;
+    corrupted_command[corrupted_version_index] = Value::String("0.0.0".to_owned());
+    fs::write(
+        generated_config,
+        serde_json::to_vec_pretty(&corrupted_generated)?,
+    )?;
+    run_real_host_installer_repair(repo, &generated_runtime, host_root)?;
+    let repaired_generated = read_json_file(generated_config)?;
+    let (repaired_runtime, repaired_arguments) =
+        generated_host_launch(&repaired_generated, "opencode")?;
+    require(
+        repaired_runtime == generated_runtime
+            && repaired_arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--require-version" && pair[1] == env!("CARGO_PKG_VERSION")),
+        format!(
+            "OpenCode installer repair did not restore its owned generated entry: {repaired_generated}"
+        ),
+    )?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(generated_config),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success()
+            && text.contains("projectatlas")
+            && text.to_ascii_lowercase().contains("connected"),
+        format!(
+            "OpenCode native reader did not consume the installer-repaired generated config: {text}"
+        ),
+    )?;
+
+    // The shared default registry and the explicit generated path must both
+    // consume the same project-scoped entry without ambient user state.
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        None,
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success()
+            && text.contains("projectatlas")
+            && text.contains("unrelated")
+            && text.to_ascii_lowercase().contains("connected")
+            && fs::read(&shared_config)? == unrelated_host_state,
+        format!("OpenCode installer repair changed unrelated native registry state: {text}"),
+    )?;
+
+    fs::remove_file(&shared_config)?;
+    let empty_config = host_root.join("opencode-uninstalled.json");
+    fs::write(&empty_config, b"{}\n")?;
+    let output = run_real_host_command(
+        executable,
+        repo,
+        host_root,
+        Some(&empty_config),
+        &["mcp", "list"].map(str::to_owned),
+    )?;
+    let text = host_output_text(&output);
+    require(
+        output.status.success() && !text.contains("projectatlas"),
+        format!("OpenCode still reported removed MCP config: {text}"),
+    )?;
+    let loopback =
+        LoopbackModelServer::start(LoopbackModelProtocol::OpenAiCompatible, source_marker)?;
+    let base_url = loopback.base_url();
+    let overlay = serde_json::to_string(&json!({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "loopback": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "loopback",
+                "options": {
+                    "baseURL": format!("{base_url}/v1"),
+                    "apiKey": "synthetic-projectatlas-test-key"
+                },
+                "models": {
+                    "loopback-model": {"name": "loopback-model"}
+                }
+            }
+        },
+        "model": "loopback/loopback-model",
+        "enabled_providers": ["loopback"],
+        "permission": {"*": "deny", "projectatlas_atlas_slice": "allow"},
+        "autoupdate": false,
+        "snapshot": false,
+        "share": "disabled",
+        "plugin": [],
+        "instructions": []
+    }))?;
+    let model_arguments = vec![
+        "run".to_owned(),
+        "--pure".to_owned(),
+        "--format".to_owned(),
+        "json".to_owned(),
+        "--model".to_owned(),
+        "loopback/loopback-model".to_owned(),
+        format!(
+            "Use the projectatlas_atlas_slice tool exactly once for src/host_reader_fixture.rs lines 1-1, then return exactly this source marker: {source_marker}"
+        ),
+    ];
+    let model_environment = [
+        ("OPENCODE_CONFIG_CONTENT", overlay.as_str()),
+        ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
+        ("OPENCODE_DISABLE_CLAUDE", "1"),
+        ("OPENCODE_DISABLE_TELEMETRY", "1"),
+        ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
+        ("OPENCODE_DISABLE_SNAPSHOT", "1"),
+        ("OPENCODE_DISABLE_SHARE", "1"),
+        ("DO_NOT_TRACK", "1"),
+    ];
+    let model_output_result = run_real_host_command_with_environment(
+        executable,
+        repo,
+        host_root,
+        Some(generated_config),
+        &model_arguments,
+        &model_environment,
+    );
+    let observation_result = loopback.finish();
+    let model_output = model_output_result.map_err(|error| {
+        if let Err(server_error) = &observation_result {
+            io::Error::other(format!("{error}; loopback observation: {server_error}"))
+        } else {
+            io::Error::other(error.to_string())
+        }
+    })?;
+    let observation = observation_result.map_err(|error| {
+        io::Error::other(format!(
+            "OpenCode host exited with {}; loopback observation: {error}; output={}",
+            model_output.status,
+            redacted_host_output(&model_output)
+        ))
+    })?;
+    let model_text = String::from_utf8_lossy(&model_output.stdout);
+    require(
+        model_output.status.success() && model_text.contains(source_marker),
+        format!(
+            "OpenCode host-mediated model run did not return fixture evidence for {}: status={} stderr={}",
+            database.display(),
+            model_output.status,
+            redacted_host_output(&model_output)
+        ),
+    )?;
+    require(
+        observation.source_marker == source_marker
+            && observation.tool_name == "projectatlas_atlas_slice"
+            && observation.tool_call_id == REAL_HOST_LOOPBACK_TOOL_CALL_ID
+            && observation.requests == 3,
+        format!(
+            "OpenCode loopback did not observe a causal title/tool/result exchange: {observation:?}"
+        ),
+    )?;
+    Ok(NativeHostStatus::Connected {
+        source_evidence: NativeHostSourceEvidence::Observed {
+            source_marker: source_marker.to_owned(),
+            tool_name: observation.tool_name,
+        },
+    })
+}
+
+#[cfg(unix)]
+fn posix_process_is_alive(pid: u32) -> io::Result<bool> {
+    Ok(StdCommand::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()?
+        .success())
+}
+
+#[cfg(unix)]
+fn wait_for_posix_process_exit(pid: u32, deadline: Instant) -> io::Result<()> {
+    loop {
+        if !posix_process_is_alive(pid)? {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("POSIX process {pid} remained alive at its bounded reap deadline"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
+    }
+}
+
+/// Run one external reader using the existing owned process and output observer.
+fn run_bounded_output(
+    mut command: StdCommand,
+    label: &str,
+) -> Result<std::process::Output, Box<dyn Error>> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    wait_for_plugin_installer_output(
+        spawn_plugin_installer_process(&mut command)?,
+        label,
+        Duration::from_secs(30),
+    )
+}
+
+/// Convert one host-reader invariant into an integration-test error.
+fn require(condition: bool, message: impl Into<String>) -> Result<(), Box<dyn Error>> {
+    if condition {
+        Ok(())
+    } else {
+        Err(io::Error::other(message.into()).into())
+    }
 }
 
 #[test]
@@ -24786,6 +27708,7 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
         let mut command = StdCommand::new("powershell");
         command
             .arg("-NoProfile")
+            .arg("-NonInteractive")
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")
