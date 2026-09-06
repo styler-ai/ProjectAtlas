@@ -302,6 +302,14 @@ const WINDOWS_POWERSHELL_VERSION_DIR: &str = "v1.0";
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_EXECUTABLE: &str = "powershell.exe";
 
+/// Repository-owned Windows installer used by native process fixtures.
+#[cfg(windows)]
+const WINDOWS_INSTALLER_SCRIPT: &str = "plugins/projectatlas/scripts/install-runtime.ps1";
+
+/// PowerShell runtime shim used by command-precedence fixtures.
+#[cfg(windows)]
+const POWERSHELL_RUNTIME_SCRIPT: &str = "projectatlas.ps1";
+
 #[cfg(windows)]
 static WINDOWS_RELEASE_ASSET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT: Duration = Duration::from_mins(4);
@@ -2476,13 +2484,13 @@ if (-not $failed -or $global:PSModuleAutoLoadingPreference -ne 'All') {
         .arg(&discovery_script)
         .env(
             "PROJECTATLAS_DISCOVERY_INSTALLER",
-            workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.ps1"),
+            workspace_root()?.join(WINDOWS_INSTALLER_SCRIPT),
         )
         .env("PROJECTATLAS_DISCOVERY_MODULES", &module_root)
         .env("PROJECTATLAS_DISCOVERY_EMPTY", &empty_bin)
         .env(
             "PROJECTATLAS_DISCOVERY_SCRIPT",
-            discovery_bin.join("projectatlas.ps1"),
+            discovery_bin.join(POWERSHELL_RUNTIME_SCRIPT),
         )
         .env(
             "PROJECTATLAS_DISCOVERY_MARKER",
@@ -2519,7 +2527,7 @@ if (-not $failed -or $global:PSModuleAutoLoadingPreference -ne 'All') {
         &async_runtime,
         "@echo off\r\nstart \"\" /b powershell -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  powershell -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
     )?;
-    let powershell_runtime = temp.path().join("projectatlas.ps1");
+    let powershell_runtime = temp.path().join(POWERSHELL_RUNTIME_SCRIPT);
     fs::write(
         &powershell_runtime,
         "[Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\r\n",
@@ -7549,7 +7557,7 @@ Write-Output 'stdin-closed'
         ])
         .arg(&input_script)
         .arg("-InstallerPath")
-        .arg(workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.ps1"))
+        .arg(workspace_root()?.join(WINDOWS_INSTALLER_SCRIPT))
         .arg("-Verbose")
         .stdin(Stdio::piped());
     configure_real_host_environment(&mut input_reader, &isolated_home, None)?;
