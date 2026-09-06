@@ -15,6 +15,13 @@ if ($VerbosePreference -eq "Continue") {
     [Console]::Error.WriteLine("ProjectAtlas installer: script entered")
 }
 
+# Load the running engine's dependencies without searching ambient PSModulePath.
+foreach ($powerShellModule in @("Microsoft.PowerShell.Utility", "Microsoft.PowerShell.Management")) {
+    Microsoft.PowerShell.Core\Import-Module -Name ([IO.Path]::Combine(
+        $PSHOME, "Modules", $powerShellModule, "$powerShellModule.psd1"
+    )) -ErrorAction Stop -Verbose:$false
+}
+
 function Resolve-DefaultProjectRoot {
     (Get-Location).Path
 }

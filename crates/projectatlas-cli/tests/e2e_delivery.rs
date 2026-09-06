@@ -7555,6 +7555,19 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
 fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let isolated_home = temp.path().join(REAL_HOST_ROOT_DIR_NAME);
+    let module_root = temp.path().join("ambient-modules");
+    let utility_module = module_root.join("Microsoft.PowerShell.Utility");
+    fs::create_dir_all(&utility_module)?;
+    fs::write(
+        utility_module.join("Microsoft.PowerShell.Utility.psm1"),
+        "function Write-Verbose { throw 'ambient Utility module was imported' }\nExport-ModuleMember -Function Write-Verbose\n",
+    )?;
+    let management_module = module_root.join("Microsoft.PowerShell.Management");
+    fs::create_dir_all(&management_module)?;
+    fs::write(
+        management_module.join("Microsoft.PowerShell.Management.psm1"),
+        "function Get-Item { throw 'ambient Management module was imported' }\nExport-ModuleMember -Function Get-Item\n",
+    )?;
     let input_script = temp.path().join("stdin-reader.ps1");
     fs::write(
         &input_script,
@@ -7562,39 +7575,63 @@ fn real_host_reader_timeout_reaps_exact_owned_mcp_tree() -> Result<(), Box<dyn E
 [Console]::Error.WriteLine('bootstrap entered')
 $tokens = $null
 $errors = $null
-[System.Management.Automation.Language.Parser]::ParseFile($InstallerPath, [ref]$tokens, [ref]$errors) | Out-Null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($InstallerPath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -ne 0) { throw 'installer AST parse failed' }
 [Console]::Error.WriteLine('installer AST parsed')
+$bootstrapEnd = $null
+foreach ($statement in $ast.EndBlock.Statements) {
+    if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+        $bootstrapEnd = $statement.Extent.StartOffset
+        break
+    }
+}
+if ($null -eq $bootstrapEnd) { throw 'installer bootstrap boundary missing' }
+$source = [IO.File]::ReadAllText($InstallerPath)
+$bootstrapStart = $ast.ParamBlock.Extent.EndOffset
+. ([scriptblock]::Create($source.Substring($bootstrapStart, $bootstrapEnd - $bootstrapStart)))
+Write-Verbose 'installer bootstrap dependencies verified' -Verbose
+[void](Get-Item -LiteralPath $InstallerPath -ErrorAction Stop)
 [Console]::In.ReadToEnd() | Out-Null
 [Console]::Error.WriteLine('stdin reached EOF')
 # Keep this stdin probe independent of Utility module autoload.
 [Console]::Out.WriteLine('stdin-closed')
 ",
     )?;
-    let mut input_reader = StdCommand::new("powershell");
-    input_reader
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(&input_script)
-        .arg("-InstallerPath")
-        .arg(workspace_root()?.join(WINDOWS_INSTALLER_SCRIPT))
-        .arg("-Verbose")
-        .stdin(Stdio::piped());
-    configure_real_host_environment(&mut input_reader, &isolated_home, None)?;
-    let output = run_bounded_output(input_reader, "isolated PowerShell file with closed stdin")?;
-    require(
-        output.status.success()
-            && String::from_utf8_lossy(&output.stdout).trim() == "stdin-closed"
-            && String::from_utf8_lossy(&output.stderr).contains("bootstrap entered")
-            && String::from_utf8_lossy(&output.stderr).contains("installer AST parsed")
-            && String::from_utf8_lossy(&output.stderr).contains("stdin reached EOF"),
-        "noninteractive real-host setup must close stdin before waiting".to_owned(),
-    )?;
+    let mut engines = vec![PathBuf::from("powershell")];
+    engines.extend(find_host_executable("pwsh"));
+    for engine in engines {
+        let mut input_reader = StdCommand::new(&engine);
+        input_reader
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&input_script)
+            .arg("-InstallerPath")
+            .arg(workspace_root()?.join(WINDOWS_INSTALLER_SCRIPT))
+            .arg("-Verbose")
+            .stdin(Stdio::piped());
+        configure_real_host_environment(&mut input_reader, &isolated_home, None)?;
+        input_reader.env("PSModulePath", &module_root);
+        let output =
+            run_bounded_output(input_reader, "isolated PowerShell file with closed stdin")?;
+        require(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).lines().last() == Some("stdin-closed")
+                && String::from_utf8_lossy(&output.stderr).contains("bootstrap entered")
+                && String::from_utf8_lossy(&output.stderr).contains("installer AST parsed")
+                && String::from_utf8_lossy(&output.stderr).contains("stdin reached EOF"),
+            format!(
+                "isolated installer bootstrap/EOF failed for {}: {}{}",
+                engine.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+    }
     let runtime = temp
         .path()
         .join(OBSOLETE_PROJECTATLAS_FIXTURE_EXECUTABLE_FILE_NAME);
