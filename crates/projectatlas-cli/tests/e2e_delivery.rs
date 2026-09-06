@@ -6204,6 +6204,8 @@ fn prepare_real_host_fixture(
         None,
         Some(host_root),
     )?;
+    #[cfg(windows)]
+    installer.arg("-Verbose");
     configure_real_host_environment(&mut installer, host_root, None)?;
     installer
         .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
@@ -6221,6 +6223,12 @@ fn prepare_real_host_fixture(
         ),
     )?;
 
+    #[cfg(windows)]
+    require(
+        String::from_utf8_lossy(&installer_output.stdout)
+            .contains("ProjectAtlas installer: report workflow compatibility"),
+        "real-host installer omitted verbose phase diagnostics",
+    )?;
     Ok(RealHostFixture {
         name: name.to_owned(),
         repo,
@@ -7507,11 +7515,9 @@ fn real_host_reader_posix_process_group_reaps_owned_descendants() -> Result<(), 
 set -eu
 mode=$1
 pid_file=$2
+sleep 1
 if [ "$mode" = "success" ]; then
     exit 0
-fi
-if [ "$mode" = "timeout" ]; then
-    sleep 1
 fi
 (sleep 300) &
 child=$!
@@ -7534,14 +7540,13 @@ done
 
     let success_pid_file = temp.path().join("success.pid");
     let success_pid_file_text = success_pid_file.to_string_lossy().into_owned();
-    let success = run_real_host_command_with_test_timeout(
+    let success = run_real_host_command_with_environment(
         &fixture,
         &repo,
         &host_root,
         None,
         &["success".to_owned(), success_pid_file_text],
         &[],
-        REAL_HOST_READER_TIMEOUT,
     )?;
     require(
         success.status.success(),
@@ -7555,14 +7560,13 @@ done
     for (mode, expected_status) in [("early", 0), ("failure", 17)] {
         let pid_file = temp.path().join(format!("{mode}.pid"));
         let pid_file_text = pid_file.to_string_lossy().into_owned();
-        let result = run_real_host_command_with_test_timeout(
+        let result = run_real_host_command_with_environment(
             &fixture,
             &repo,
             &host_root,
             None,
             &[mode.to_owned(), pid_file_text],
             &[],
-            REAL_HOST_READER_TIMEOUT,
         )?;
         require(
             result.status.code() == Some(expected_status),
@@ -7857,27 +7861,6 @@ fn run_real_host_command_with_environment(
         arguments,
         environment,
         Duration::from_secs(30),
-    )
-}
-
-#[cfg(unix)]
-fn run_real_host_command_with_test_timeout(
-    executable: &Path,
-    repo: &Path,
-    host_root: &Path,
-    opencode_config: Option<&Path>,
-    arguments: &[String],
-    environment: &[(&str, &str)],
-    timeout: Duration,
-) -> Result<std::process::Output, Box<dyn Error>> {
-    run_real_host_command_inner(
-        executable,
-        repo,
-        host_root,
-        opencode_config,
-        arguments,
-        environment,
-        timeout,
     )
 }
 

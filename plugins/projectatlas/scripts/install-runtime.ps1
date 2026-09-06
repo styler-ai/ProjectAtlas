@@ -1,5 +1,6 @@
 # Purpose: Install or update the ProjectAtlas plugin runtime and Windows MCP configs.
 
+[CmdletBinding()]
 param(
     [string]$ProjectRoot,
     [string]$Repository = "https://github.com/styler-ai/ProjectAtlas",
@@ -3777,6 +3778,7 @@ function Install-ReleaseBinary {
     }
 }
 
+Write-Verbose "ProjectAtlas installer: resolve project and version"
 if (-not $ProjectRoot) {
     $ProjectRoot = Resolve-DefaultProjectRoot
 }
@@ -3799,10 +3801,12 @@ $ProjectRoot = (Resolve-Path $ProjectRoot).Path
 $atlasDir = Join-Path $ProjectRoot ".projectatlas"
 Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 $inheritedProcessPath = $env:Path
+Write-Verbose "ProjectAtlas installer: discover inherited runtime"
 $inheritedProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyContinue | Select-Object -First 1
 $inheritedProjectAtlasPath = if ($inheritedProjectAtlasCommand) { $inheritedProjectAtlasCommand.Source } else { $null }
 $futureProcessPathReady = $false
 
+Write-Verbose "ProjectAtlas installer: verify and synchronize runtime"
 if ($RuntimePath) {
     $projectAtlas = (Resolve-Path $RuntimePath).Path
     if (-not (Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion)) {
@@ -3847,10 +3851,13 @@ else {
 
     Set-ProjectAtlasProcessPathPrecedence $projectAtlas
 }
+Write-Verbose "ProjectAtlas installer: verify runtime command"
 Invoke-Checked $projectAtlas @("--format", "json", "runtime-info") | Out-Null
+Write-Verbose "ProjectAtlas installer: verify command resolution"
 Confirm-ProjectAtlasBareCommandResolution $projectAtlas $ProjectAtlasVersion
 $verifiedRuntimePath = Get-NormalizedPathEntry $projectAtlas
 $stableMirrorPath = Get-NormalizedPathEntry (Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe")
+Write-Verbose "ProjectAtlas installer: reconcile command paths"
 Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
 if (-not $RuntimePath) {
     $futureProcessPathReady = Set-ProjectAtlasPathPrecedence $projectAtlas
@@ -3916,12 +3923,15 @@ function Write-ProjectAtlasMcpConfig {
     }
 }
 
+Write-Verbose "ProjectAtlas installer: generate host configs"
 Write-ProjectAtlasMcpConfig $mcpConfigPath $null
 Write-ProjectAtlasMcpConfig $claudeMcpConfigPath "claude-code"
 Write-ProjectAtlasMcpConfig $opencodeConfigPath "opencode"
+Write-Verbose "ProjectAtlas installer: verify host configs"
 $mcpConfigSha256 = Confirm-ProjectAtlasGeneratedMcpConfig $mcpConfigPath "Codex" $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath $ProjectRoot
 $claudeMcpConfigSha256 = Confirm-ProjectAtlasGeneratedMcpConfig $claudeMcpConfigPath "Claude Code" $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath $ProjectRoot
 $opencodeConfigSha256 = Confirm-ProjectAtlasGeneratedMcpConfig $opencodeConfigPath "OpenCode" $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath $ProjectRoot
+Write-Verbose "ProjectAtlas installer: reconcile Codex integration"
 Update-ProjectAtlasCodexPlugin $ProjectAtlasVersion
 Update-ProjectAtlasCodexMcpRegistry $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
 $codexIntegrationManaged = Test-ProjectAtlasCodexCommandAvailable
@@ -3958,6 +3968,7 @@ $installerProjectAtlasCommand = Get-Command projectatlas -ErrorAction SilentlyCo
 $installerProjectAtlasPath = if ($installerProjectAtlasCommand) { $installerProjectAtlasCommand.Source } else { $null }
 $installerCommandMatchesRuntime = -not [string]::IsNullOrWhiteSpace($installerProjectAtlasPath) `
     -and (Get-NormalizedPathEntry $installerProjectAtlasPath) -eq $verifiedRuntimePath
+Write-Verbose "ProjectAtlas installer: verify final readiness"
 $codexPluginReady = Test-ProjectAtlasCodexPluginReady $ProjectAtlasVersion
 $codexRegistryReady = Test-ProjectAtlasCodexMcpRegistryReady $projectAtlas $ProjectAtlasVersion $dbPath $projectConfigPath $flatConfigPath
 $generatedMcpConfigsReady = Test-ProjectAtlasGeneratedMcpConfigReadiness `
@@ -3988,6 +3999,7 @@ if ($verifiedRuntimeReady) {
 else {
     Write-Warning "ProjectAtlas PATH shadow report skipped because the requested absolute runtime failed final verification."
 }
+Write-Verbose "ProjectAtlas installer: report workflow compatibility"
 Write-ProjectAtlasWorkflowPinReport $ProjectRoot $ProjectAtlasVersion
 
 if ($verifiedRuntimeReady) {
