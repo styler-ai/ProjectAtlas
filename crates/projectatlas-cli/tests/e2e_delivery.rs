@@ -7581,11 +7581,17 @@ done
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_real_host_environment(&mut command, &host_root, None)?;
-    let readiness_started = Instant::now();
+    let readiness_deadline = Instant::now()
+        .checked_add(Duration::from_secs(30))
+        .ok_or_else(|| io::Error::other("POSIX host readiness deadline overflowed"))?;
     let host = spawn_plugin_installer_process(&mut command)?;
     // Fixture startup must finish before the short cleanup observer begins.
-    while !timeout_pid_file.is_file() && readiness_started.elapsed() < Duration::from_secs(30) {
-        thread::sleep(Duration::from_millis(25));
+    while !timeout_pid_file.is_file() {
+        let remaining = readiness_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
     }
     let ready = timeout_pid_file.is_file();
     // Always retire the owned group, including when fixture readiness fails.
