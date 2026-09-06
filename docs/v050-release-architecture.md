@@ -226,7 +226,7 @@ rows and valid graph rows at the previous complete generation.
 
 ## Built-in PHP parser and graph publication
 
-PHP call matching uses case-insensitive names and proven namespace/type ownership, including known global callers and explicit `namespace\` references. A file with import facts keeps unqualified calls unresolved because those facts do not provide namespace-local alias bindings; `self::`, fully qualified, and explicit namespace-relative calls retain their independent scope checks. Dynamic dispatch and unproven scopes remain unresolved. Namespace identities beyond the parser's identity bound, or malformed semicolon namespaces, omit dependent facts and report partial coverage instead of publishing global declarations.
+PHP call matching uses case-insensitive names and proven namespace/type ownership, including known global callers and explicit `namespace\` references. Qualified names expand against the known caller namespace when namespace imports cannot alias them. Namespace-use symbols make ordinary unrooted calls unresolved because they do not provide namespace-local alias bindings; complete include/require and trait-use facts do not introduce that uncertainty. Partial import extraction remains conservative. `self::`, fully qualified, and explicit namespace-relative calls retain their independent scope checks. Dynamic dispatch and unproven scopes remain unresolved. Namespace identities beyond the parser's identity bound, or malformed semicolon namespaces, omit dependent facts and report partial coverage instead of publishing global declarations.
 
 ```mermaid
 flowchart LR

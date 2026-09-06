@@ -2054,8 +2054,8 @@ struct GraphSymbolIndex<'graph> {
     indices_by_name: BTreeMap<&'graph str, Vec<usize>>,
     /// PHP call target indices grouped by their case-insensitive source name.
     php_call_indices_by_name: BTreeMap<String, Vec<usize>>,
-    /// Imports prevent proving unqualified PHP names without an import resolver.
-    has_php_imports: bool,
+    /// Namespace imports or incomplete import evidence can alias PHP call names.
+    php_imports_may_alias: bool,
 }
 
 impl<'graph> GraphSymbolIndex<'graph> {
@@ -2063,13 +2063,15 @@ impl<'graph> GraphSymbolIndex<'graph> {
     fn new(graph: &'graph SymbolGraph, control: &IndexWorkControl) -> Result<Self, CliError> {
         let mut indices_by_name = BTreeMap::new();
         let mut php_call_indices_by_name = BTreeMap::new();
-        let mut has_php_imports = false;
+        let mut php_imports_may_alias = false;
         let is_php = graph
             .language
             .as_deref()
             .is_some_and(|language| language.eq_ignore_ascii_case("php"));
         for (index, symbol) in graph.symbols.iter().enumerate() {
             check_graph_work(control, index)?;
+            // PHP emits import symbols only for namespace use, not includes or traits.
+            php_imports_may_alias |= is_php && symbol.kind == SymbolKind::Import;
             indices_by_name
                 .entry(symbol.name.as_str())
                 .or_insert_with(Vec::new)
@@ -2081,11 +2083,12 @@ impl<'graph> GraphSymbolIndex<'graph> {
                     .push(index);
             }
         }
-        if is_php {
+        // Partial extraction may retain an import relation after its symbol was omitted.
+        if is_php && graph.parser != ParserKind::TreeSitter {
             for (index, relation) in graph.relations.iter().enumerate() {
                 check_graph_work(control, index)?;
                 if relation.kind == RelationKind::Imports {
-                    has_php_imports = true;
+                    php_imports_may_alias = true;
                     break;
                 }
             }
@@ -2093,7 +2096,7 @@ impl<'graph> GraphSymbolIndex<'graph> {
         Ok(Self {
             indices_by_name,
             php_call_indices_by_name,
-            has_php_imports,
+            php_imports_may_alias,
         })
     }
 
@@ -4842,13 +4845,19 @@ fn local_relation_matches<'a>(
     };
     let namespace_relative_target = if is_php_call
         && let Some((prefix, relative)) = target_name.split_once('\\')
-        && prefix.eq_ignore_ascii_case("namespace")
+        && !prefix.is_empty()
+        && (prefix.eq_ignore_ascii_case("namespace") || !symbol_index.php_imports_may_alias)
     {
         let Some(namespace) = known_source_namespace else {
             return Ok(ResolutionMatches {
                 first: None,
                 count: 0,
             });
+        };
+        let relative = if prefix.eq_ignore_ascii_case("namespace") {
+            relative
+        } else {
+            target_name
         };
         Some(if namespace.is_empty() {
             format!("\\{relative}")
@@ -4860,7 +4869,7 @@ fn local_relation_matches<'a>(
     };
     let lookup_target = namespace_relative_target.as_deref().unwrap_or(target_name);
     if is_php_call
-        && symbol_index.has_php_imports
+        && symbol_index.php_imports_may_alias
         && !lookup_target.starts_with('\\')
         && !lookup_target
             .split_once("::")
@@ -11178,6 +11187,36 @@ function fallback_run(): void {
         let mut scope_failures = Vec::new();
         for (source, target, expected_parent) in [
             (
+                "<?php\nrequire 'bootstrap.php';\nfunction helper() {}\nfunction run() { helper(); }",
+                "require and local helper",
+                None,
+            ),
+            (
+                "<?php\ninclude 'a.php'; include_once 'b.php'; require_once 'c.php';\nfunction helper() {}\nfunction run() { helper(); }",
+                "other include forms and local helper",
+                None,
+            ),
+            (
+                "<?php\ntrait Shared {}\nclass Service { use Shared; public static function boot() {} }\nfunction run() { Service::boot(); }",
+                "trait import and local static call",
+                Some("Service"),
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction run() { Sub\\helper(); }\nnamespace Foo\\Sub;\nfunction helper() {}",
+                "relative qualified helper",
+                Some("Foo\\Sub"),
+            ),
+            (
+                "<?php\nnamespace { function run() { Sub\\helper(); } }\nnamespace Sub { function helper() {} }",
+                "global qualified helper",
+                Some("Sub"),
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction run() { Sub\\Service::boot(); }\nnamespace Foo\\Sub;\nclass Service { public static function boot() {} }",
+                "relative qualified static method",
+                Some("Foo\\Sub::Service"),
+            ),
+            (
                 "<?php\nclass Service { public static function boot() {} }\nfunction run() { Service::boot(); }",
                 "Service::boot",
                 Some("Service"),
@@ -11266,17 +11305,19 @@ function fallback_run(): void {
             r"<?php
 namespace Local {
     use Remote\Service;
+    use Remote\NamespaceAlias as Sub;
     use function Remote\helper;
-    function run() { Service::boot(); helper(); }
+    function run() { Service::boot(); helper(); Sub\helper(); }
 }
 namespace Local {
     class Service { public static function boot() {} }
     function helper() {}
 }
+namespace Local\Sub { function helper() {} }
 ",
         );
         let staged = finish_graph(&imported_graph)?;
-        for target in ["Service::boot", "helper"] {
+        for target in ["Service::boot", "helper", "Sub\\helper"] {
             require(
                 staged.relations.iter().any(|relation| {
                     matches!(
@@ -11287,6 +11328,33 @@ namespace Local {
                 "PHP imports must not be bypassed by same-file unqualified call matching",
             )?;
         }
+
+        let mut partial_imports = imported_graph;
+        partial_imports.parser = ParserKind::Fallback;
+        partial_imports
+            .symbols
+            .retain(|symbol| symbol.kind != SymbolKind::Import);
+        let partial_staged = finish_graph(&partial_imports)?;
+        require(
+            partial_staged.relations.iter().any(|relation| {
+                matches!(relation.resolution(), RelationResolution::Unresolved { reference }
+                    if reference.as_str() == "Sub\\helper")
+            }),
+            "partial PHP import evidence must not prove absence of namespace aliases",
+        )?;
+        let missing_relative = extract_symbol_graph(
+            "src/missing-relative.php",
+            Some("php"),
+            "<?php\nnamespace { function helper() {} }\nnamespace Foo { function run() { Missing\\helper(); } }",
+        );
+        let staged = finish_graph(&missing_relative)?;
+        require(
+            staged.relations.iter().any(|relation| {
+                matches!(relation.resolution(), RelationResolution::Unresolved { reference }
+                    if reference.as_str() == "Missing\\helper")
+            }),
+            "qualified PHP functions must not fall back to the global function",
+        )?;
 
         let wrong_namespace_graph = extract_symbol_graph(
             "src/scoped.php",
