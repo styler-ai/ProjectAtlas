@@ -7566,7 +7566,9 @@ $errors = $null
 if ($errors.Count -ne 0) { throw 'installer AST parse failed' }
 [Console]::Error.WriteLine('installer AST parsed')
 [Console]::In.ReadToEnd() | Out-Null
-Write-Output 'stdin-closed'
+[Console]::Error.WriteLine('stdin reached EOF')
+# Keep this stdin probe independent of Utility module autoload.
+[Console]::Out.WriteLine('stdin-closed')
 ",
     )?;
     let mut input_reader = StdCommand::new("powershell");
@@ -7589,7 +7591,8 @@ Write-Output 'stdin-closed'
         output.status.success()
             && String::from_utf8_lossy(&output.stdout).trim() == "stdin-closed"
             && String::from_utf8_lossy(&output.stderr).contains("bootstrap entered")
-            && String::from_utf8_lossy(&output.stderr).contains("installer AST parsed"),
+            && String::from_utf8_lossy(&output.stderr).contains("installer AST parsed")
+            && String::from_utf8_lossy(&output.stderr).contains("stdin reached EOF"),
         "noninteractive real-host setup must close stdin before waiting".to_owned(),
     )?;
     let runtime = temp
