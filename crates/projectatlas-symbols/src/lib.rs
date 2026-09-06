@@ -1342,30 +1342,33 @@ fn visit_node<E>(
         *incomplete = true;
     }
     if is_php_language(graph.language.as_deref()) {
-        *incomplete |= (graph.symbols.len() >= MAX_SYMBOLS_PER_FILE
-            && declaration_kind(node.kind()).is_some()
-            && should_emit_declaration_symbol(node, content))
-            || (graph.relations.len() >= MAX_RELATIONS_PER_FILE
-                && (is_php_trait_use_declaration(node)
-                    || is_import_node(node.kind())
-                    || is_call_node(node.kind())));
+        *incomplete |= graph.relations.len() >= MAX_RELATIONS_PER_FILE
+            && (is_php_trait_use_declaration(node)
+                || is_import_node(node.kind())
+                || is_call_node(node.kind()));
     }
-    if graph.symbols.len() < MAX_SYMBOLS_PER_FILE
-        && let Some(kind) = declaration_kind(node.kind())
+    if let Some(kind) = declaration_kind(node.kind())
         && should_emit_declaration_symbol(node, content)
     {
-        push_tree_symbol(
-            graph,
-            node,
-            content,
-            if is_php_language(graph.language.as_deref()) && node.kind() == "function_definition" {
-                // PHP methods have their own grammar node; nested functions stay functions.
-                kind
-            } else {
-                effective_declaration_kind(node, kind)
-            },
-            php_namespace_context.as_deref_mut(),
-        );
+        let admitted = graph.symbols.len() < MAX_SYMBOLS_PER_FILE
+            && push_tree_symbol(
+                graph,
+                node,
+                content,
+                if is_php_language(graph.language.as_deref())
+                    && node.kind() == "function_definition"
+                {
+                    // PHP methods have their own grammar node; nested functions stay functions.
+                    kind
+                } else {
+                    effective_declaration_kind(node, kind)
+                },
+                php_namespace_context.as_deref_mut(),
+            );
+        if !admitted && is_php_language(graph.language.as_deref()) {
+            *incomplete = true;
+            return Ok(());
+        }
     }
     if graph.relations.len() < MAX_RELATIONS_PER_FILE {
         if is_php_trait_use_declaration(node) {
@@ -1429,6 +1432,9 @@ fn declaration_is_method_context(node: Node<'_>) -> bool {
 
 /// Return whether this declaration node should become its own symbol row.
 fn should_emit_declaration_symbol(node: Node<'_>, content: &str) -> bool {
+    if node.kind() == "namespace_definition" && node.child_by_field_name("name").is_none() {
+        return false;
+    }
     if is_inside_php_anonymous_class(node) {
         return false;
     }
@@ -1669,9 +1675,9 @@ fn push_tree_symbol(
     content: &str,
     symbol_kind: SymbolKind,
     php_namespace_context: Option<&mut PhpNamespaceContext>,
-) {
+) -> bool {
     let Some(name) = node_name(node, content) else {
-        return;
+        return false;
     };
     let signature = declaration_signature(node, content);
     let parent = symbol_parent(node, content, php_namespace_context)
@@ -1708,6 +1714,7 @@ fn push_tree_symbol(
             node.kind(),
         );
     }
+    admitted
 }
 
 /// Build the exact persisted selector represented by a Tree-sitter node.
@@ -6562,6 +6569,49 @@ class Owner {
 
     #[test]
     fn php_relation_caps_report_partial_coverage() {
+        for length in [
+            MAX_SNIPPET_CHARS - 1,
+            MAX_SNIPPET_CHARS,
+            MAX_SNIPPET_CHARS + 1,
+        ] {
+            let name = "N".repeat(length);
+            for declaration in [
+                format!("class {name} {{ function child() {{ helper(); }} }}"),
+                format!("trait {name} {{ function child() {{ helper(); }} }}"),
+                format!("interface {name} {{ function child(); }}"),
+                format!("enum {name} {{ function child() {{ helper(); }} }}"),
+                format!("function {name}() {{ function child() {{ helper(); }} }}"),
+            ] {
+                let source = format!("<?php {declaration} function kept() {{}}");
+                let graph = extract_symbol_graph("src/declaration-name.php", Some("php"), &source);
+                let rejected = length > MAX_SNIPPET_CHARS;
+                let expected = if rejected {
+                    ParserKind::Fallback
+                } else {
+                    ParserKind::TreeSitter
+                };
+                assert_eq!(
+                    graph.parser, expected,
+                    "PHP declaration admission: {declaration}"
+                );
+                assert!(graph.symbols.iter().any(|symbol| symbol.name == "kept"));
+                assert_eq!(
+                    graph.symbols.iter().any(|symbol| symbol.name == "child"),
+                    !rejected
+                );
+                if rejected {
+                    assert_eq!(graph.symbols.len(), 1);
+                    assert!(graph.relations.is_empty());
+                }
+                assert!(graph.symbols.iter().all(|symbol| symbol.parser == expected));
+                assert!(
+                    graph
+                        .relations
+                        .iter()
+                        .all(|relation| relation.parser == expected)
+                );
+            }
+        }
         for length in [
             MAX_SNIPPET_CHARS - 1,
             MAX_SNIPPET_CHARS,
