@@ -2084,10 +2084,15 @@ fn mark_graph_fallback(graph: &mut SymbolGraph) {
 
 /// Return a static PHP include target, omitting dynamic or ambiguous expressions.
 fn php_static_include_target(node: Node<'_>, content: &str) -> Option<String> {
-    let mut expression = first_named_child(node)?;
+    let mut cursor = node.walk();
+    let mut expression = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() != "comment")?;
     if expression.kind() == "parenthesized_expression" {
         let mut cursor = expression.walk();
-        let mut children = expression.named_children(&mut cursor);
+        let mut children = expression
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() != "comment");
         let inner = children.next()?;
         if children.next().is_some() {
             return None;
@@ -2417,13 +2422,20 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
         return;
     }
     if is_php_include_node(node.kind()) {
+        // Keep bounded source syntax so partial graphs distinguish includes from aliases.
+        let context = node
+            .utf8_text(content.as_bytes())
+            .unwrap_or_default()
+            .chars()
+            .take(MAX_SNIPPET_CHARS)
+            .collect::<String>();
         push_relation_preserving_target(
             graph,
             MODULE_RELATION_SOURCE,
             &import_text,
             RelationKind::Imports,
             node.start_position().row + 1,
-            &import_text,
+            &compact_text(&context),
         );
     } else {
         push_relation(
@@ -5914,7 +5926,16 @@ function run(): void {
                 .filter(|relation| relation.target_name == target)
                 .map(|relation| {
                     assert_eq!(relation.path, "src/Callable.php");
-                    assert_eq!(relation.context, target);
+                    let expected_context = if relation.line >= 4 {
+                        source
+                            .lines()
+                            .nth(relation.line - 1)
+                            .unwrap_or_default()
+                            .trim_end_matches(';')
+                    } else {
+                        target
+                    };
+                    assert_eq!(relation.context, expected_context);
                     relation.line
                 })
                 .collect::<Vec<_>>();
@@ -5988,11 +6009,15 @@ require 'dir  bootstrap.php';
             .filter(|relation| relation.kind == RelationKind::Imports)
             .collect::<Vec<_>>();
 
-        for (target, line) in [
-            ("vendor\\bootstrap.php", 2),
-            ("vendor\"quoted.php", 3),
-            ("dollar$name.php", 5),
-            ("dir  bootstrap.php", 12),
+        for (target, line, context) in [
+            (
+                "vendor\\bootstrap.php",
+                2,
+                r#"require "vendor\\bootstrap.php""#,
+            ),
+            ("vendor\"quoted.php", 3, r#"require "vendor\"quoted.php""#),
+            ("dollar$name.php", 5, r#"require "dollar\$name.php""#),
+            ("dir  bootstrap.php", 12, "require 'dir bootstrap.php'"),
         ] {
             let matches = imports
                 .iter()
@@ -6006,7 +6031,7 @@ require 'dir  bootstrap.php';
             let relation = matches[0];
             assert_eq!(relation.path, "src/StaticIncludes.php");
             assert_eq!(relation.line, line);
-            assert_eq!(relation.context, target);
+            assert_eq!(relation.context, context);
         }
         assert!(imports.iter().all(|relation| {
             relation.target_name != "control\npath.php"
@@ -6055,7 +6080,7 @@ require <<<'PATH'
                 .find(|relation| relation.target_name == target && relation.line == line)
             {
                 assert_eq!(relation.path, "src/NowdocIncludes.php");
-                assert_eq!(relation.context, target);
+                assert_eq!(relation.context, format!("require <<<'PATH' {target} PATH"));
                 assert_eq!(relation.parser, ParserKind::TreeSitter);
             }
         }
@@ -6114,9 +6139,25 @@ require $dynamic;
     }
 
     #[test]
+    fn php_include_context_is_bounded_without_truncating_the_target() {
+        let target = "é".repeat(MAX_SNIPPET_CHARS);
+        let source = format!("<?php require /*{}*/ '{target}';", "comment ".repeat(1_000));
+        let graph = extract_symbol_graph("src/IncludeContext.php", Some("php"), &source);
+        let imports = graph
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == RelationKind::Imports)
+            .collect::<Vec<_>>();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].target_name, target);
+        assert!(imports[0].context.starts_with("require /*comment"));
+        assert!(imports[0].context.chars().count() <= MAX_SNIPPET_CHARS);
+    }
+
+    #[test]
     fn php_parenthesized_static_include_targets_stay_precise() {
         let source = r#"<?php
-require('parenthesized.php');
+require(/*before*/'parenthesized.php'/*after*/);
 include_once("parent-config.php");
 require(('nested.php'));
 require("malformed.php" + );
@@ -6146,7 +6187,14 @@ include_once(Vendor\BOOTSTRAP);
             let relation = matches[0];
             assert_eq!(relation.path, "src/Includes.php");
             assert_eq!(relation.line, line);
-            assert_eq!(relation.context, target);
+            assert_eq!(
+                relation.context,
+                source
+                    .lines()
+                    .nth(line - 1)
+                    .unwrap_or_default()
+                    .trim_end_matches(';')
+            );
         }
         assert!(imports.iter().all(|relation| {
             !matches!(

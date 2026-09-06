@@ -2048,6 +2048,24 @@ struct GraphOwners {
     symbol_digests: Vec<Option<String>>,
 }
 
+/// Recognize include syntax without treating unknown or legacy import text as alias-free.
+fn php_file_include_context(context: &str) -> bool {
+    let context = context.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    ["include", "include_once", "require", "require_once"]
+        .iter()
+        .any(|keyword| {
+            context
+                .get(..keyword.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+                && context.get(keyword.len()..).is_some_and(|suffix| {
+                    suffix.starts_with(|character: char| character.is_ascii_whitespace())
+                        || suffix.starts_with(['(', '\'', '"', '#'])
+                        || suffix.starts_with("/*")
+                        || suffix.starts_with("//")
+                })
+        })
+}
+
 /// Borrowed per-graph symbol lookup used by every relation in that file.
 struct GraphSymbolIndex<'graph> {
     /// Parser symbol indices grouped by exact source name.
@@ -2087,7 +2105,10 @@ impl<'graph> GraphSymbolIndex<'graph> {
         if is_php && graph.parser != ParserKind::TreeSitter {
             for (index, relation) in graph.relations.iter().enumerate() {
                 check_graph_work(control, index)?;
-                if relation.kind == RelationKind::Imports {
+                if relation.kind == RelationKind::Imports
+                    && relation.source_name == MODULE_RELATION_SOURCE
+                    && !php_file_include_context(&relation.context)
+                {
                     php_imports_may_alias = true;
                     break;
                 }
@@ -11384,6 +11405,26 @@ function fallback_run(): void {
                 None,
             ),
             (
+                "<?php\nrequire 'bootstrap.php';\nfunction helper() {}\nfunction run() { helper(); $callable(); }",
+                "partial require and local helper",
+                None,
+            ),
+            (
+                "<?php\ninclude 'a.php'; include_once 'b.php'; require_once 'c.php';\nfunction helper() {}\nfunction run() { helper(); $callable(); }",
+                "partial include forms and local helper",
+                None,
+            ),
+            (
+                "<?php\nrequire/* comment */('bootstrap'); include_once(\"config\"); REQUIRE_ONCE # comment\n'library';\nfunction helper() {}\nfunction run() { helper(); $callable(); }",
+                "partial commented and parenthesized includes",
+                None,
+            ),
+            (
+                "<?php\ntrait Shared {}\nclass Service { use Shared; public static function boot() {} }\nfunction run() { Service::boot(); $callable(); }",
+                "partial trait import and local static call",
+                Some("Service"),
+            ),
+            (
                 "<?php\ntrait Shared {}\nclass Service { use Shared; public static function boot() {} }\nfunction run() { Service::boot(); }",
                 "trait import and local static call",
                 Some("Service"),
@@ -11600,6 +11641,28 @@ namespace Local\Sub { function helper() {} }
             }),
             "partial PHP import evidence must not prove absence of namespace aliases",
         )?;
+        for context in [
+            "require\\Sub",
+            "include_once\\Sub",
+            "requireé",
+            "require\u{a0}Alias",
+            "",
+            "use function Vendor\\helper;",
+        ] {
+            for relation in &mut partial_imports.relations {
+                if relation.kind == RelationKind::Imports {
+                    relation.context = context.to_string();
+                }
+            }
+            let staged = finish_graph(&partial_imports)?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    matches!(relation.resolution(), RelationResolution::Unresolved { reference }
+                        if reference.as_str() == "Sub\\helper")
+                }),
+                "unknown, namespace-prefix, and fallback use contexts must retain alias uncertainty",
+            )?;
+        }
         let missing_relative = extract_symbol_graph(
             "src/missing-relative.php",
             Some("php"),
