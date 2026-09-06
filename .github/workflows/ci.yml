@@ -147,7 +147,7 @@ jobs:
                   {
                       "label": "macos-x64",
                       "os": "macos-15-intel",
-                      "contracts": ["compile", "mac-quality", "parser"],
+                      "contracts": ["compile", "mac-quality", "parser", "plugin"],
                   },
                   {
                       "label": "macos-arm64",

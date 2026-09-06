@@ -7384,6 +7384,14 @@ fn required_real_host_readers_reject_missing_discovery() -> Result<(), Box<dyn E
 #[test]
 fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> {
     let workflow = fs::read_to_string(workspace_root()?.join(CI_WORKFLOW_RELATIVE_PATH))?;
+    let intel_bootstrap = workflow
+        .split_once("\"label\": \"macos-x64\"")
+        .and_then(|(_, row)| row.split_once('}').map(|(row, _)| row))
+        .ok_or_else(|| io::Error::other("Intel bootstrap platform is missing"))?;
+    require(
+        intel_bootstrap.contains("\"plugin\""),
+        "bootstrap proof must run real host readers on Intel macOS",
+    )?;
     for name in [
         "Install exact real host CLIs for native reader proof",
         "Real installed host reader proof",

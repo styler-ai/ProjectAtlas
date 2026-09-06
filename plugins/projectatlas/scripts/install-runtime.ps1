@@ -1903,9 +1903,7 @@ function Quarantine-ProjectAtlasStaleShims {
         return
     }
     $verified = Get-NormalizedPathEntry $VerifiedPath
-    $candidates = @()
-    $candidates += @(where.exe projectatlas 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $candidates += Get-KnownProjectAtlasShimPaths
+    $candidates = Get-KnownProjectAtlasShimPaths
     $seen = @{}
     foreach ($candidate in $candidates) {
         if (-not (Test-Path -LiteralPath $candidate)) {
@@ -3862,6 +3860,7 @@ $verifiedRuntimePath = Get-NormalizedPathEntry $projectAtlas
 $stableMirrorPath = Get-NormalizedPathEntry (Join-Path $env:LOCALAPPDATA "ProjectAtlas\bin\projectatlas.exe")
 Write-Verbose "ProjectAtlas installer: reconcile command paths"
 Quarantine-ProjectAtlasStaleShims $projectAtlas $ProjectAtlasVersion
+Write-Verbose "ProjectAtlas installer: verify persisted command resolution"
 if (-not $RuntimePath) {
     $futureProcessPathReady = Set-ProjectAtlasPathPrecedence $projectAtlas
 }
