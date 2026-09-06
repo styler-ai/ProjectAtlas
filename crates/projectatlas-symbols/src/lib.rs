@@ -1016,11 +1016,16 @@ impl PhpNamespaceContext {
 /// Return a namespace name only when its compact identity can remain bounded.
 fn php_bounded_namespace_name(node: Node<'_>, content: &str) -> Option<String> {
     let name = node.child_by_field_name("name")?;
-    let text = name.utf8_text(content.as_bytes()).ok()?;
+    php_bounded_name_text(name, content)
+}
+
+/// Bound PHP identities before copying or composing their source text.
+fn php_bounded_name_text(node: Node<'_>, content: &str) -> Option<String> {
+    let text = node.utf8_text(content.as_bytes()).ok()?;
     if text.chars().take(MAX_SNIPPET_CHARS + 1).count() > MAX_SNIPPET_CHARS {
         return None;
     }
-    named_text(name, content)
+    named_text(node, content)
 }
 
 /// Select the official PHP-only or mixed grammar from their parsed roots.
@@ -1043,7 +1048,7 @@ fn parse_php_tree<E>(
     let first_content_start = content.find(|character: char| !character.is_whitespace());
     let first_tag_is_xml = content
         .get(first_tag_start..)
-        .is_some_and(|suffix| suffix.starts_with("<?xml"));
+        .is_some_and(is_xml_declaration_start);
     if !mixed.root_node().has_error()
         && first_content_start == Some(first_tag_start)
         && !first_tag_is_xml
@@ -1209,7 +1214,7 @@ fn tree_contains_php_tag_outside_ranges<E>(
     if node.kind() == "php_tag"
         && !content
             .get(node.start_byte()..)
-            .is_some_and(|suffix| suffix.starts_with("<?xml"))
+            .is_some_and(is_xml_declaration_start)
     {
         while *next_opaque < opaque_ranges.len()
             && opaque_ranges[*next_opaque].1 <= node.start_byte()
@@ -1242,6 +1247,20 @@ fn tree_contains_php_tag_outside_ranges<E>(
         }
     }
     Ok(false)
+}
+
+/// Distinguish an XML declaration from short-tag PHP calling an `xml` identifier.
+fn is_xml_declaration_start(content: &str) -> bool {
+    let Some(tail) = content.strip_prefix("<?xml") else {
+        return false;
+    };
+    let trimmed = tail.trim_start_matches([' ', '\t', '\r', '\n']);
+    tail.len() != trimmed.len()
+        && trimmed.strip_prefix("version").is_some_and(|version| {
+            version
+                .trim_start_matches([' ', '\t', '\r', '\n'])
+                .starts_with('=')
+        })
 }
 
 /// Return whether inline output text directly precedes a PHP opening tag.
@@ -1306,9 +1325,10 @@ fn visit_node<E>(
 ) -> Result<(), E> {
     check()?;
     if is_php_language(graph.language.as_deref())
-        && ((node.kind() == "namespace_definition"
-            && node.child_by_field_name("name").is_some()
-            && php_bounded_namespace_name(node, content).is_none())
+        && (matches!(node.kind(), "anonymous_function" | "arrow_function")
+            || (node.kind() == "namespace_definition"
+                && node.child_by_field_name("name").is_some()
+                && php_bounded_namespace_name(node, content).is_none())
             || php_namespace_context.as_deref_mut().is_some_and(|context| {
                 context
                     .range_for(node)
@@ -2016,6 +2036,9 @@ fn php_node_is_incomplete(node: Node<'_>, content: &str) -> bool {
     if node.kind() == "anonymous_class" {
         return true;
     }
+    if node.kind() == "namespace_use_declaration" {
+        return php_namespace_use_targets(node, content).1;
+    }
     if is_call_node(node.kind()) {
         if is_php_first_class_callable_acquisition(node) {
             return false;
@@ -2139,49 +2162,68 @@ fn php_double_quoted_escape_target(node: Node<'_>, content: &str) -> Option<&'st
     }
 }
 
-/// Return every static namespace path from a PHP `use` declaration.
-fn php_namespace_use_targets(node: Node<'_>, content: &str) -> Vec<String> {
+/// Return bounded PHP namespace-use targets and whether any target was omitted.
+fn php_namespace_use_targets(node: Node<'_>, content: &str) -> (Vec<String>, bool) {
     let mut targets = Vec::new();
+    let mut incomplete = false;
     let mut prefix = None;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if targets.len() >= MAX_RELATIONS_PER_FILE {
+            incomplete = true;
             break;
         }
         match child.kind() {
             "namespace_use_clause" => {
                 if let Some(target) = php_namespace_use_clause_target(child, content, None) {
                     targets.push(target);
+                } else {
+                    incomplete = true;
                 }
             }
-            "namespace_name" => prefix = named_text(child, content),
+            "namespace_name" => {
+                prefix = php_bounded_name_text(child, content);
+                if prefix.is_none() {
+                    return (targets, true);
+                }
+            }
             "namespace_use_group" => {
-                php_namespace_use_group_targets(child, content, prefix.as_deref(), &mut targets);
+                incomplete |= php_namespace_use_group_targets(
+                    child,
+                    content,
+                    prefix.as_deref(),
+                    &mut targets,
+                );
             }
             _ => {}
         }
     }
-    targets
+    (targets, incomplete)
 }
 
-/// Collect the clauses in a grouped PHP `use` declaration.
+/// Collect grouped PHP namespace-use targets, reporting omitted clauses.
 fn php_namespace_use_group_targets(
     node: Node<'_>,
     content: &str,
     prefix: Option<&str>,
     targets: &mut Vec<String>,
-) {
+) -> bool {
+    let mut incomplete = false;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if targets.len() >= MAX_RELATIONS_PER_FILE {
+            incomplete = true;
             break;
         }
-        if child.kind() == "namespace_use_clause"
-            && let Some(target) = php_namespace_use_clause_target(child, content, prefix)
-        {
-            targets.push(target);
+        if child.kind() == "namespace_use_clause" {
+            if let Some(target) = php_namespace_use_clause_target(child, content, prefix) {
+                targets.push(target);
+            } else {
+                incomplete = true;
+            }
         }
     }
+    incomplete
 }
 
 /// Compose one PHP namespace-use clause with an optional grouped prefix.
@@ -2192,19 +2234,29 @@ fn php_namespace_use_clause_target(
 ) -> Option<String> {
     let target = first_named_child(node).and_then(|child| {
         matches!(child.kind(), "name" | "qualified_name" | "relative_name")
-            .then(|| named_text(child, content))
+            .then(|| php_bounded_name_text(child, content))
             .flatten()
     })?;
     let target = match prefix {
-        Some(prefix) if !prefix.is_empty() => format!("{prefix}\\{target}"),
+        Some(prefix) if !prefix.is_empty() => {
+            if prefix.chars().take(MAX_SNIPPET_CHARS + 1).count() + 1 + target.chars().count()
+                > MAX_SNIPPET_CHARS
+            {
+                return None;
+            }
+            format!("{prefix}\\{target}")
+        }
         _ => target,
     };
-    (target.chars().count() <= MAX_SNIPPET_CHARS).then_some(target)
+    Some(target)
 }
 
 /// Return the first static namespace path from a PHP `use` declaration.
 fn php_namespace_use_target(node: Node<'_>, content: &str) -> Option<String> {
-    php_namespace_use_targets(node, content).into_iter().next()
+    php_namespace_use_targets(node, content)
+        .0
+        .into_iter()
+        .next()
 }
 
 /// Return a conservative PHP call target, suppressing dynamic calls.
@@ -2288,7 +2340,7 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
         return;
     }
     if node.kind() == "namespace_use_declaration" {
-        for import_text in php_namespace_use_targets(node, content) {
+        for import_text in php_namespace_use_targets(node, content).0 {
             if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
                 break;
             }
@@ -5134,6 +5186,75 @@ version = "0.60.0"
 
     #[test]
     fn extracts_php_symbols_relations_and_exact_selectors() {
+        for source in [
+            "<?xml(); function boot(): void {}",
+            "HTML<?xml_parser(); function boot(): void {}",
+            "<?xml (); function boot(): void {}",
+        ] {
+            let graph = extract_symbol_graph("src/short.php", Some("php"), source);
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == "boot"),
+                "{source}: {graph:?}"
+            );
+            assert_eq!(graph.parser, ParserKind::TreeSitter);
+        }
+        for callback in [
+            "function () { hidden(); }",
+            "fn() => hidden()",
+            "static function () { require 'hidden.php'; hidden(); }",
+            "static fn() => hidden()",
+            "function () { $nested = fn() => hidden(); }",
+        ] {
+            let source = format!("<?php function outer() {{ $callback = {callback}; visible(); }}");
+            let graph = extract_symbol_graph("src/callback.php", Some("php"), &source);
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.target_name != "hidden"),
+                "{graph:?}"
+            );
+            assert!(graph.relations.iter().any(
+                |relation| relation.source_name == "outer" && relation.target_name == "visible"
+            ));
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.kind != RelationKind::Imports)
+            );
+        }
+        for prefix_length in [MAX_SNIPPET_CHARS + 1, 1_900_000] {
+            let prefix = "N".repeat(prefix_length);
+            let clauses = (0..2_000)
+                .map(|index| format!("A{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let source = format!("<?php use {prefix}\\{{{clauses}}}; function kept() {{}}");
+            let graph = extract_symbol_graph("src/imports.php", Some("php"), &source);
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            assert!(
+                graph
+                    .relations
+                    .iter()
+                    .all(|relation| relation.kind != RelationKind::Imports)
+            );
+            assert!(graph.symbols.iter().any(|symbol| symbol.name == "kept"));
+        }
+        for character in ["N", "界"] {
+            let prefix = character.repeat(MAX_SNIPPET_CHARS - 2);
+            let source = format!("<?php use {prefix}\\{{A, BB}}; function kept() {{}}");
+            let graph = extract_symbol_graph("src/imports.php", Some("php"), &source);
+            assert_eq!(graph.parser, ParserKind::Fallback);
+            let imports: Vec<_> = graph
+                .relations
+                .iter()
+                .filter(|relation| relation.kind == RelationKind::Imports)
+                .collect();
+            assert_eq!(imports.len(), 1);
+            assert_eq!(imports[0].target_name, format!("{prefix}\\A"));
+        }
         let enum_graph = extract_symbol_graph(
             "src/State.php",
             Some("php"),
@@ -6369,6 +6490,7 @@ TEXT;
             "function marker(): string { return `echo <?`; }",
             "<?xml version=\"1.0\"?><root />",
             "HTML<?xml version=\"1.0\"?><root />",
+            "<?xml\nversion = '1.0' ?><root />",
         ] {
             assert!(
                 !super::contains_php_opening_tag(source),
