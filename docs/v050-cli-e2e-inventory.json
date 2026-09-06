@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "bf5c4c2af006e99546500377f8db8d7866988be4ca7426f816656332aa16b7c9",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "b9cab59f920e50d814e46c0d7d1473f5ea8d0ea08e28acb7339c456f3919ee3f",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "35c4cf8a4e3e69ffd4fb3ca18b191d5c79ea27646ba9fd7d3d21f5c0788aab32",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "910c770ebf1bc427dd08dfee19fcd22b817bdd85f9d08cd36682fbffee127efb",
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 181,
+  "test_count": 187,
   "symbol_count": 431,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -1667,6 +1667,51 @@
       "owner": "e2e_delivery",
       "attributes": [
         "#[test]"
+      ]
+    },
+    {
+      "name": "installed_hosts_read_generated_configs_and_report_native_status",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[ignore = \"runs installed Claude Code/OpenCode readers; missing hosts are typed skips\"]"
+      ]
+    },
+    {
+      "name": "missing_real_host_is_reported_without_native_acceptance",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "required_real_host_readers_reject_missing_discovery",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "real_host_reader_ci_step_requires_both_hosts",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "real_host_reader_timeout_reaps_exact_owned_mcp_tree",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(windows)]"
+      ]
+    },
+    {
+      "name": "real_host_reader_posix_process_group_reaps_owned_descendants",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[cfg(unix)]"
       ]
     }
   ],
@@ -19367,6 +19412,16 @@
       "workflow": ".github/workflows/ci.yml",
       "line": 455,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 461,
+      "text": "          cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery real_host_reader_ -- --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 462,
+      "text": "          cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",

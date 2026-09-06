@@ -73,7 +73,7 @@ REPOSITORY_CONTRACTS = (
 PLATFORM_CONTRACTS = {
     "linux": ("compile", "worktree", "process", "navigation", "tui", "btrfs", "plugin", "mcp"),
     "windows": ("compile", "worktree", "process", "plugin", "windows", "mcp"),
-    "macos-x64": ("compile", "mac-quality", "parser"),
+    "macos-x64": ("compile", "mac-quality", "parser", "plugin"),
     "macos-arm64": (
         "compile",
         "mac-quality",
@@ -114,6 +114,7 @@ PLATFORM_OS = {
     "macos-arm64": "macos-14",
 }
 OS_PLATFORM_LABELS = ("linux", "windows", "macos-arm64")
+PLUGIN_PLATFORM_LABELS = ("linux", "windows", "macos-x64", "macos-arm64")
 UNIX_PLATFORM_LABELS = ("linux", "macos-arm64")
 SOURCE_UNIX_PLATFORM_LABELS = ("linux", "macos-x64", "macos-arm64")
 MAC_PLATFORM_LABELS = ("macos-x64", "macos-arm64")
@@ -531,7 +532,7 @@ def platform_owners(
     if "/mcp" in path or path.endswith("/mcp.rs"):
         add_platform(platforms, OS_PLATFORM_LABELS, "mcp")
     if path.startswith("plugins/") or path.startswith("install") or "plugin" in path:
-        add_platform(platforms, OS_PLATFORM_LABELS, "plugin")
+        add_platform(platforms, PLUGIN_PLATFORM_LABELS, "plugin")
     if path.endswith(".ps1"):
         add_platform(platforms, ("windows",), "windows")
 
@@ -540,7 +541,8 @@ def test_platform_owners(target: str, platforms: dict[str, set[str]]) -> None:
     if target == "e2e_worktrees":
         add_platform(platforms, OS_PLATFORM_LABELS, "worktree")
     elif target == "e2e_delivery":
-        add_platform(platforms, OS_PLATFORM_LABELS, "process", "plugin")
+        add_platform(platforms, OS_PLATFORM_LABELS, "process")
+        add_platform(platforms, PLUGIN_PLATFORM_LABELS, "plugin")
         add_platform(platforms, ("windows",), "windows")
     elif target == "e2e_lifecycle":
         add_platform(platforms, OS_PLATFORM_LABELS, "mcp")
@@ -1437,12 +1439,32 @@ def self_test() -> None:
         graph=graph,
     )
     assert [item["label"] for item in platform["platform_matrix"]["include"]] == list(
-        OS_PLATFORM_LABELS
+        PLUGIN_PLATFORM_LABELS
     )
     assert all(
         "plugin" in item["contracts"] for item in platform["platform_matrix"]["include"]
     )
     assert platform["test_targets"] == ["e2e_delivery", "installer_trust_boundaries"]
+
+    for plugin_change in (
+        *INSTALLER_SCRIPT_PATHS,
+        "plugins/projectatlas/.codex-plugin/plugin.json",
+        "crates/projectatlas-cli/tests/e2e_delivery.rs",
+    ):
+        plugin_proof = plan_changes(
+            base="a" * 40,
+            head="b" * 40,
+            event="pull_request",
+            changes=[Change("M", (plugin_change,))],
+            graph=graph,
+        )
+        rows = plugin_proof["platform_matrix"]["include"]
+        assert [row["label"] for row in rows] == [
+            "linux", "windows", "macos-x64", "macos-arm64"
+        ], plugin_change
+        assert next(row["contracts"] for row in rows if row["label"] == "macos-x64") == [
+            "plugin"
+        ], plugin_change
 
     for installer_script in INSTALLER_SCRIPT_PATHS:
         plugin_script = plan_changes(
