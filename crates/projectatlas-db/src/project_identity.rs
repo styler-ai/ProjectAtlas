@@ -1747,6 +1747,7 @@ mod tests {
             .project_instance_id()?
             .ok_or_else(|| io::Error::other("schema-19 detach fixture identity is missing"))?;
         seed_authored_and_graph_state(&mut store, previous_project)?;
+        crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -1802,6 +1803,7 @@ mod tests {
 
         let missing_database = temp.path().join("schema-19-detach-missing.db");
         let missing_store = AtlasStore::open_for_project(&missing_database, &source_root)?;
+        crate::schema::drop_worktree_native_identity_schema(&missing_store.connection)?;
         missing_store
             .connection
             .execute_batch("DROP TABLE project_root_identity; DROP TABLE IF EXISTS graph_identity_rejections; UPDATE metadata SET value = '19' WHERE key = 'schema_version';")?;
@@ -1847,6 +1849,7 @@ mod tests {
         let publication_before = store.index_publication()?;
         let usage_before = store.usage_events(Some("identity-test"))?;
         let overview_before = store.token_overview(Some("identity-test"))?;
+        crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -2014,6 +2017,7 @@ mod tests {
         assert_usage_report(&store, true)?;
         assert_runtime_scope(&store, project, 1, 0, 1)?;
         assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
+        crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;
@@ -2325,6 +2329,7 @@ mod tests {
         assert_runtime_scope(&store, project, 1, 0, 1)?;
         assert_graph_counts(&store, [2, 1, 1, 1, 1, 1, 1])?;
 
+        crate::schema::drop_worktree_native_identity_schema(&store.connection)?;
         store.connection.execute_batch(
             "DROP TABLE project_root_identity;
              DROP TABLE IF EXISTS graph_identity_rejections;

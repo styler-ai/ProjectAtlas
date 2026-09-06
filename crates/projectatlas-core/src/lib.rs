@@ -678,31 +678,48 @@ fn windows_verbatim_semantics_require_prefix(path: &Path) -> bool {
     if !value.starts_with("\\\\?\\") {
         return false;
     }
-
-    // A project root is immediately extended with ProjectAtlas children.
-    // Preserve the namespace before the ordinary Win32 limit is reached so
-    // that the child path remains usable without changing its semantics.
-    let normalized = normalize_native_path_display_str(value);
-    let project_atlas_suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
-    if normalized
-        .encode_utf16()
-        .count()
-        .saturating_add(project_atlas_suffix_units)
-        >= 260
-    {
-        return true;
-    }
-
     windows_path_requires_verbatim_semantics(path)
 }
 
-/// Return whether a Windows path contains a component that requires verbatim semantics.
+/// Return whether a Windows path requires a verbatim native spelling.
 ///
-/// This predicate deliberately operates on native path components rather than display text
-/// normalization. The database crate also uses it to reject historical display projections that
-/// cannot establish native authority after verbatim semantics were stripped.
+/// The database crate uses this predicate to reject historical display
+/// projections that cannot establish native authority after a required
+/// extended prefix was stripped. The length threshold includes the database
+/// suffix used by live project-root identities.
 #[must_use]
 pub fn windows_path_requires_verbatim_semantics(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let Some(value) = path.to_str() else {
+            return true;
+        };
+        let normalized = normalize_native_path_display_str(value);
+        // A project root is immediately extended with ProjectAtlas children.
+        let project_atlas_suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
+        if normalized
+            .encode_utf16()
+            .count()
+            .saturating_add(project_atlas_suffix_units)
+            >= 260
+        {
+            return true;
+        }
+        windows_path_has_verbatim_only_components(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Return whether a Windows path contains components whose spelling requires verbatim semantics.
+///
+/// Ordinary Win32 canonicalization may reinterpret these components, so a
+/// prefix-stripped historical path cannot safely establish their identity.
+#[must_use]
+pub fn windows_path_has_verbatim_only_components(path: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::path::Component;
@@ -1038,6 +1055,22 @@ mod tests {
                 return Err(
                     format!("ordinary component was classified as verbatim: {path}").into(),
                 );
+            }
+        }
+        let long_path = format!(r"C:\{}", "a".repeat(260));
+        if !super::windows_path_requires_verbatim_semantics(Path::new(&long_path)) {
+            return Err("long path was not classified as verbatim".into());
+        }
+        let suffix_units = r"\.projectatlas\projectatlas.db".encode_utf16().count();
+        for units in [260 - suffix_units - 1, 260 - suffix_units] {
+            let path = format!(r"C:\{}", "a".repeat(units - 3));
+            let required = units + suffix_units >= 260;
+            if super::windows_path_requires_verbatim_semantics(Path::new(&path)) != required {
+                return Err("legacy classifier differs from the live root suffix threshold".into());
+            }
+            let extended = format!(r"\\?\{path}");
+            if super::windows_verbatim_semantics_require_prefix(Path::new(&extended)) != required {
+                return Err("live root prefix threshold differs from the legacy classifier".into());
             }
         }
         Ok(())

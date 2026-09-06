@@ -13,13 +13,25 @@ flowchart LR
     Acceptance --> Gates[Five ordered review gates]
     Sync --> Contract
     Gates --> Contract
-    PR[PR candidate branch] --> Owner[One open owner against live state]
+    PR[Hosted PR candidate] --> Owner[One open owner against live state]
     PR --> Base[Unrelated open slices against accepted PR base]
+    Push[Git pre-push ref-update records] --> MainTarget["Exactly one refs/heads/main target"]
+    Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
+    Push --> InvalidTarget["Zero or multiple records; deletions; malformed or unsupported targets"]
+    MainTarget --> Global[Global live-state validation]
+    CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
+    CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes; no hidden flags; issue map, mapped tasks, and linked docs are regular candidate-tree files read from their blobs with replacement refs disabled"]
+    CandidateClean --> Candidate[Local candidate branch]
+    Candidate --> CandidateOwner["Each post-base subject has one same-owner (#NNN) reference"]
+    Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract
     Base --> Contract
+    CandidateOwner --> Contract
+    CandidateBase --> Contract
     Closed[Already CLOSED mapped issue] --> Inert[Native closed state only; no body migration or validation]
     Reopened[Reopened mapped issue] --> Implementation
     Hidden[Hidden, duplicate, or legacy open fields] --> Reject[Fail closed]
+    InvalidTarget --> Reject
     Contract --> Ready[Truthful incremental or closure-ready state]
 ```
 
@@ -138,12 +150,24 @@ sequenceDiagram
   participant H as Real host CLI
   participant M as Generated ProjectAtlas MCP config
   participant R as Verified runtime
+  participant L as Isolated loopback model endpoint
   I->>C: write host-specific config and plugin/skill state
   H->>C: parse/list configuration through native reader
-  H->>M: consume generated MCP entry
-  H->>R: start exact installed runtime
-  R-->>H: initialize + tools/list + bounded tool call
-  H-->>I: isolated success or typed reader/startup failure
+  H->>M: consume generated MCP entry from native config
+  H->>R: launch generated runtime with exact root/database/config/version
+  R-->>H: initialize + tools/list
+  alt OpenCode native title preflight
+    H->>L: no-tools title request
+    L-->>H: bounded title response
+  end
+  H->>L: model request with ProjectAtlas tool schema
+  L-->>H: exactly one tool_use/tool_call
+  H->>R: invoke atlas_slice through the launched MCP session
+  R-->>H: source evidence for the isolated fixture
+  H->>L: matching tool_result with the source marker
+  L-->>H: final bounded marker and end_turn/[DONE]
+  H-->>I: host output plus causal isolated source evidence
+  Note over H,L: Synthetic key, localhost only, isolated roots, no ambient credentials
 ```
 
 ## Released-main database baseline decision
@@ -214,14 +238,26 @@ rows and valid graph rows at the previous complete generation.
 
 ## Built-in PHP parser and graph publication
 
+PHP call matching uses case-insensitive names and proven namespace/type ownership, including known global callers and explicit `namespace\` references. Qualified names expand against the known caller namespace when namespace imports cannot alias them. A namespace-use symbol introduces alias uncertainty for an ordinary unrooted call when it occurs on an earlier line within the same named namespace declaration block, or no later in parser relation order on a same line whose import symbols and relations pair losslessly. A simple same-line import after the caller does not suppress that earlier call. Grouped or multi-clause same-line imports with unmatched symbol/relation counts remain conservative. An import in an earlier reopened block does not suppress a later block's proven local call. Tied line-only boundaries and omitted namespace declarations remain conservative. Include/require and type-owned trait-use facts do not introduce alias uncertainty, including when unrelated dynamic code makes coverage partial. Include relations retain bounded source syntax so the shared import kind cannot be mistaken for a namespace alias. Missing namespace-import symbols and unknown or legacy import contexts remain conservative. `self::`, fully qualified, and explicit namespace-relative calls retain their independent scope checks. Dynamic dispatch and unproven scopes remain unresolved. Namespace identities beyond the parser's identity bound, or malformed semicolon namespaces, omit dependent facts and report partial coverage instead of publishing global declarations. A declaration rejected by identity or symbol-count limits admits no descendant symbols or relations; admitted siblings remain available and coverage is partial.
+
+A proven outer-scope `__halt_compiler();` directive ends PHP traversal; the remaining bytes are embedded data and publish no declarations or calls.
+
+Anonymous function and arrow-function bodies have no supported stable owner, so their subtrees are omitted with partial coverage instead of attributing calls to an enclosing named function. Grouped imports bound the prefix and combined target before allocation; omitted targets mark coverage partial while admitted imports remain available. If no complete target fits, a bounded grammar-owned alias or terminal binding remains an Import symbol, preserving alias uncertainty without fabricating a target relation. Short-tag code whose first identifier starts with `xml` remains PHP; only the XML declaration prefix is excluded as a prolog.
+
+Call-source ownership and target scope share one lookup that prefers a unique line-containing PHP callable over unrelated same-name types or imports, then falls back to a namespace owner. Unknown or ambiguous callers retain file ownership, including namespace/callable collisions on a callable boundary line where line-only facts cannot prove the owner. Semicolon namespace declarations still own their later top-level calls. Reopened blocks with the same namespace name share one logical namespace owner for top-level calls. Trait-owned `self::` targets remain unresolved because the consuming class can override the trait member and trait composition is not modeled.
+
+Non-PHP source provenance records the parser that produced the graph, including fallback. PHP retains Tree-sitter source provenance when bounded or unsupported behavior makes its grammar-produced facts partial fallback evidence. If an erroneous PHP parse yields no facts and the generic extractor rescues declarations, both source and fact provenance record fallback.
+
+Scoped calls match methods and ordinary calls match functions; a namespace and class sharing a name cannot substitute one callable kind for the other. Named PHP function and type declarations belong to their active namespace even inside a function or method. Their declaration identity does not imply that conditional runtime execution has already made them available.
+
 ```mermaid
 flowchart LR
     php[.php bytes] --> registry[Language capability registry]
-    registry --> grammar[Pinned built-in tree-sitter-php]
+    registry --> grammar[Pinned built-in tree-sitter-php 0.24.2]
     grammar --> mapping[PHP node-to-symbol mapping]
-    mapping --> exact[Exact symbols, parents, spans, provenance]
-    mapping --> relations[Conservative namespace, import, include, call relations]
-    mapping --> dynamic[Typed partial coverage for dynamic constructs]
+    mapping --> exact[Admitted symbols, parents, spans, source/fact provenance]
+    mapping --> relations[Conservative relations from admitted declarations]
+    mapping --> dynamic[Typed partial coverage: dynamic or bounded facts]
     exact --> published_graph[(Existing graph publication)]
     relations --> published_graph
     dynamic --> published_graph
@@ -341,7 +377,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    support[Shared process, repo, JSON, platform, package support]
+    support[Shared test support owner: crates/projectatlas-cli/tests/support/mod.rs]
     lifecycle[Lifecycle and database contracts] --> support
     delivery[Installer and release contracts] --> support
     navigation[CLI, MCP, graph, document, language contracts] --> support
@@ -369,7 +405,16 @@ flowchart TB
     poll -->|published before same deadline| validate{Exact identity valid before same deadline?}
     validate -->|no| fail
     validate -->|yes| installer[Run existing installer handoff assertions]
-    installer --> cleanup[Owned parent and child cleanup]
+    installer --> cleanup[Attempt exact child stop]
+    fail --> cleanup
+    cleanup -->|stop helper stalls or fails| fallback[One bounded exact-identity cleanup fallback]
+    fallback -->|child stopped or already gone| reap[Kill and reap owned parent]
+    fallback -->|fallback stalls or fails| final[One bounded helper-free native exact-identity stop]
+    final -->|child stopped or already gone| reap
+    final -->|cleanup cannot prove ownership or stop child| reap
+    reap -->|all cleanup complete| done[Owned cleanup complete]
+    reap -->|any cleanup failure| diagnostic[Fail closed with cleanup diagnostic]
+    cleanup -->|child stopped| reap
 ```
 
 ## Production module ownership decision
@@ -439,8 +484,8 @@ flowchart TB
   provenance -->|no| state_cleanup[Quarantine and verify newly owned state]
   state_cleanup -->|retired| reject_publication[Fail; preserve foreign provenance and unrelated bytes]
   state_cleanup -->|retirement fails| retained[Retain exact state; report cleanup failure]
-  retained --> refuse[Later install refuses state without a managed pair]
-  refuse --> recover[Explicit safe retirement/removal enables recovery]
+  retained --> refuse[Later install refuses unretired orphan state]
+  refuse --> recover[Proven-owned retirement enables retry]
   provenance -->|yes| forwarder{Publish shim no-clobber succeeds?}
   forwarder -->|no| pair_cleanup[Retire only newly owned provenance and state]
   pair_cleanup -->|retired| reject_publication
@@ -448,8 +493,8 @@ flowchart TB
   forwarder -->|yes| shim[Publish verified managed shim]
   shim --> migrate[Quarantine and verify prior owned pair before identity-safe retirement]
   migrate --> discover[PATH discovery; preserve concurrent foreign replacements]
-  discover --> aliases[atlas top-level command aliases]
-  aliases --> canonical[Canonical projectatlas command handlers]
+  discover --> aliases[Complete argv forwarded unchanged]
+  aliases --> canonical[Canonical handlers including health report]
   aliases --> resolve[atlas health resolve]
   aliases --> legacy[atlas health-check remains compatible]
   shim --> uninstall[Managed uninstall/repair]
