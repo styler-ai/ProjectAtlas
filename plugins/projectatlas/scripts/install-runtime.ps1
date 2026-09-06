@@ -76,7 +76,7 @@ function Find-Cargo {
     if (Test-Path -LiteralPath $cargoHome) {
         return $cargoHome
     }
-    $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
+    $cargoCommand = Get-ProjectAtlasShellCommand cargo
     if ($cargoCommand) {
         return $cargoCommand.Source
     }
@@ -1975,19 +1975,29 @@ function Set-ProjectAtlasProcessPathPrecedence {
 
 # PowerShell 5.1 command discovery reads this preference from global scope.
 # Snapshot the value, not its mutable PSVariable container, and restore it on failure too.
-function Get-ProjectAtlasCommand {
+function Get-ProjectAtlasShellCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [System.Management.Automation.CommandTypes]$CommandType
+    )
+    # Forward only requested filters; explicit All changes native command precedence.
+    $lookup = @{ Name = $Name; ErrorAction = 'SilentlyContinue' }
+    if ($PSBoundParameters.ContainsKey('CommandType')) {
+        $lookup.CommandType = $CommandType
+    }
     $prior = $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')
     # An immutable caller preference remains authoritative.
     if ($null -ne $prior -and ($prior.Options -band (
         [System.Management.Automation.ScopedItemOptions]::ReadOnly -bor
         [System.Management.Automation.ScopedItemOptions]::Constant
     ))) {
-        return Get-Command projectatlas -ErrorAction SilentlyContinue
+        return Get-Command @lookup
     }
     $priorValue = if ($null -ne $prior) { $prior.Value } else { $null }
     try {
         $global:PSModuleAutoLoadingPreference = 'None'
-        Get-Command projectatlas -ErrorAction SilentlyContinue
+        Get-Command @lookup
     }
     finally {
         if ($null -eq $prior) {
@@ -2007,7 +2017,7 @@ function Test-ProjectAtlasBareCommandResolutionOnPath {
     $installerProcessPath = $env:Path
     try {
         $env:Path = [Environment]::ExpandEnvironmentVariables($PathValue)
-        $command = Get-ProjectAtlasCommand
+        $command = Get-ProjectAtlasShellCommand projectatlas
         return $command `
             -and (Get-NormalizedPathEntry $command.Source) -eq (Get-NormalizedPathEntry $VerifiedPath)
     }
@@ -2058,7 +2068,7 @@ function Confirm-ProjectAtlasBareCommandResolution {
         return
     }
     $verified = Get-NormalizedPathEntry $VerifiedPath
-    $projectAtlasCommand = Get-ProjectAtlasCommand
+    $projectAtlasCommand = Get-ProjectAtlasShellCommand projectatlas
     if (-not $projectAtlasCommand) {
         Write-Warning "Active process still cannot resolve bare 'projectatlas'. Generated MCP configs use the verified absolute runtime: $VerifiedPath. Restart Codex or the shell before relying on bare projectatlas."
         return
@@ -2115,7 +2125,7 @@ function Find-ProjectAtlas {
             return $candidate
         }
     }
-    $projectAtlasCommand = Get-ProjectAtlasCommand
+    $projectAtlasCommand = Get-ProjectAtlasShellCommand projectatlas
     if ($projectAtlasCommand -and (Test-ProjectAtlasRuntime $projectAtlasCommand.Source $ExpectedVersion)) {
         return $projectAtlasCommand.Source
     }
@@ -2455,7 +2465,7 @@ function Resolve-ProjectAtlasCodexCommand {
     if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_CODEX_COMMAND)) {
         $codexCommandPath = (Resolve-Path $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue).Path
         if (-not $codexCommandPath) {
-            $codexCommand = Get-Command $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue
+            $codexCommand = Get-ProjectAtlasShellCommand $env:PROJECTATLAS_CODEX_COMMAND
             if ($codexCommand) {
                 $codexCommandPath = $codexCommand.Source
             }
@@ -2466,7 +2476,7 @@ function Resolve-ProjectAtlasCodexCommand {
         }
     }
     else {
-        $codexCommand = Get-Command codex -ErrorAction SilentlyContinue
+        $codexCommand = Get-ProjectAtlasShellCommand codex
         if ($codexCommand) {
             $codexCommandPath = $codexCommand.Source
         }
@@ -3387,7 +3397,7 @@ function Update-ProjectAtlasCodexPlugin {
         try {
             $marketplaceGit = Join-Path $stateSnapshot.MarketplaceRootPath ".git"
             if (Test-Path -LiteralPath $marketplaceGit) {
-                if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
+                if (-not (Get-ProjectAtlasShellCommand git -CommandType Application)) {
                     Write-Warning "Codex ProjectAtlas plugin update failed: git is unavailable to fetch release tag $releaseTag."
                     return
                 }
@@ -3550,9 +3560,9 @@ function Update-ProjectAtlasCodexMcpRegistry {
 function Test-ProjectAtlasCodexCommandAvailable {
     if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_CODEX_COMMAND)) {
         return [bool]((Resolve-Path $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue) `
-                -or (Get-Command $env:PROJECTATLAS_CODEX_COMMAND -ErrorAction SilentlyContinue))
+                -or (Get-ProjectAtlasShellCommand $env:PROJECTATLAS_CODEX_COMMAND))
     }
-    return [bool](Get-Command codex -ErrorAction SilentlyContinue)
+    return [bool](Get-ProjectAtlasShellCommand codex)
 }
 
 function Get-ProjectAtlasCodexMcpRegistryEntry {
@@ -3829,7 +3839,7 @@ $atlasDir = Join-Path $ProjectRoot ".projectatlas"
 Assert-ProjectAtlasDirectPath $atlasDir "ProjectAtlas project state directory"
 $inheritedProcessPath = $env:Path
 Write-Verbose "ProjectAtlas installer: discover inherited runtime"
-$inheritedProjectAtlasCommand = Get-ProjectAtlasCommand
+$inheritedProjectAtlasCommand = Get-ProjectAtlasShellCommand projectatlas
 $inheritedProjectAtlasPath = if ($inheritedProjectAtlasCommand) { $inheritedProjectAtlasCommand.Source } else { $null }
 $futureProcessPathReady = $false
 
@@ -3898,7 +3908,7 @@ if ([string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) -or -not (
     $installerProcessPath = $env:Path
     try {
         $env:Path = $inheritedProcessPath
-        $effectiveInheritedProjectAtlasCommand = Get-ProjectAtlasCommand
+        $effectiveInheritedProjectAtlasCommand = Get-ProjectAtlasShellCommand projectatlas
         $effectiveInheritedProjectAtlasPath = if ($effectiveInheritedProjectAtlasCommand) { $effectiveInheritedProjectAtlasCommand.Source } else { $null }
     }
     finally {
@@ -3992,7 +4002,7 @@ $inheritedCommandMatchesRuntime = -not [string]::IsNullOrWhiteSpace($effectiveIn
     -and (Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath) -eq $verifiedRuntimePath
 $inheritedCommandMatchesMirror = -not [string]::IsNullOrWhiteSpace($effectiveInheritedProjectAtlasPath) `
     -and (Get-NormalizedPathEntry $effectiveInheritedProjectAtlasPath) -eq $stableMirrorPath
-$installerProjectAtlasCommand = Get-ProjectAtlasCommand
+$installerProjectAtlasCommand = Get-ProjectAtlasShellCommand projectatlas
 $installerProjectAtlasPath = if ($installerProjectAtlasCommand) { $installerProjectAtlasCommand.Source } else { $null }
 $installerCommandMatchesRuntime = -not [string]::IsNullOrWhiteSpace($installerProjectAtlasPath) `
     -and (Get-NormalizedPathEntry $installerProjectAtlasPath) -eq $verifiedRuntimePath

@@ -1872,7 +1872,7 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "Confirm-ProjectAtlasBareCommandResolution",
         "Active process resolves bare projectatlas to verified runtime",
         "Restart Codex or the shell",
-        "$inheritedProjectAtlasCommand = Get-ProjectAtlasCommand",
+        "$inheritedProjectAtlasCommand = Get-ProjectAtlasShellCommand projectatlas",
         "$stableMirrorSynchronized = Sync-ProjectAtlasRuntimeToLocalAppData",
         "$inheritedSynchronizedMirrorReady = $stableMirrorReady",
         "$futureProcessPathReady = Set-ProjectAtlasPathPrecedence",
@@ -2418,7 +2418,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     fs::create_dir_all(&module)?;
     fs::write(
         module.join("AtlasDiscoveryProbe.psm1"),
-        "[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_MARKER, 'imported')\nfunction projectatlas {}\nExport-ModuleMember -Function projectatlas\n",
+        "[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_MARKER, 'imported')\nfunction projectatlas {}\nfunction codex {}\nfunction cargo {}\nExport-ModuleMember -Function projectatlas,codex,cargo\n",
     )?;
     let discovery_script = temp.path().join("command-discovery.ps1");
     fs::write(
@@ -2426,11 +2426,12 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         r#"
 $ErrorActionPreference = 'Stop'
 $source = [IO.File]::ReadAllText($env:PROJECTATLAS_DISCOVERY_INSTALLER)
-foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasCommand', 'Test-ProjectAtlasBareCommandResolutionOnPath')) {
+foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
     $definition = [regex]::Match($source, "(?ms)^function $name \{.*?^\}")
     if (-not $definition.Success) { throw "Missing command discovery owner: $name" }
     Invoke-Expression $definition.Value
 }
+[void](Resolve-Path $env:PROJECTATLAS_DISCOVERY_EMPTY)
 $env:PSModulePath = $env:PROJECTATLAS_DISCOVERY_MODULES
 $env:Path = $env:PROJECTATLAS_DISCOVERY_EMPTY
 if (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT) {
@@ -2442,8 +2443,17 @@ if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) {
 if ($null -ne $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')) {
     throw 'Command discovery did not restore absent preference'
 }
+$env:PROJECTATLAS_CODEX_COMMAND = $null
+if (Test-ProjectAtlasCodexCommandAvailable) { throw 'Module-only Codex command was classified as available' }
+if (Resolve-ProjectAtlasCodexCommand 'discovery fixture') { throw 'Module-only Codex command resolved' }
+$env:PROJECTATLAS_CODEX_COMMAND = 'codex'
+if (Test-ProjectAtlasCodexCommandAvailable) { throw 'Module-only Codex override was classified as available' }
+if (Resolve-ProjectAtlasCodexCommand 'discovery fixture') { throw 'Module-only Codex override resolved' }
+$env:USERPROFILE = $env:PROJECTATLAS_DISCOVERY_EMPTY
+if (Find-Cargo) { throw 'Module-only Cargo command resolved' }
+if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) { throw 'Host command discovery imported a module' }
 Set-Variable PSModuleAutoLoadingPreference -Scope Global -Value None -Option ReadOnly
-if (Get-ProjectAtlasCommand) { throw 'Read-only None preference admitted a module-only command' }
+if (Get-ProjectAtlasShellCommand projectatlas) { throw 'Read-only None preference admitted a module-only command' }
 $immutable = $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')
 if ($immutable.Value -ne 'None' -or $immutable.Options -ne [System.Management.Automation.ScopedItemOptions]::ReadOnly) {
     throw 'Command discovery mutated an immutable preference'
@@ -2455,17 +2465,30 @@ $env:Path = [IO.Path]::GetDirectoryName($env:PROJECTATLAS_DISCOVERY_SCRIPT)
 if (-not (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT)) {
     throw 'Command discovery lost PowerShell script compatibility'
 }
+$env:PROJECTATLAS_CODEX_COMMAND = $env:PROJECTATLAS_DISCOVERY_SCRIPT
+if (-not (Test-ProjectAtlasCodexCommandAvailable) -or (Resolve-ProjectAtlasCodexCommand 'discovery fixture') -ne $env:PROJECTATLAS_DISCOVERY_SCRIPT) {
+    throw 'Absolute Codex command override changed'
+}
+$env:PROJECTATLAS_CODEX_COMMAND = $null
+function git {}
+if ((Get-ProjectAtlasShellCommand git).CommandType -ne 'Function') { throw 'Git function precedence changed' }
+if (Get-ProjectAtlasShellCommand git -CommandType Application) { throw 'Git application lookup admitted a function' }
+$gitPath = [IO.Path]::Combine([IO.Path]::GetDirectoryName($env:PROJECTATLAS_DISCOVERY_SCRIPT), 'git.cmd')
+[IO.File]::WriteAllText($gitPath, '@exit /b 0')
+if ((Get-ProjectAtlasShellCommand git -CommandType Application).Source -ne $gitPath) {
+    throw 'Git application lookup lost its PATH command'
+}
 $global:PSModuleAutoLoadingPreference = 'All'
 function projectatlas { 'shadow' }
-if ((Get-ProjectAtlasCommand).CommandType -ne 'Function') { throw 'Function precedence changed' }
+if ((Get-ProjectAtlasShellCommand projectatlas).CommandType -ne 'Function') { throw 'Function precedence changed' }
 if ($global:PSModuleAutoLoadingPreference -ne 'All') { throw 'Existing preference was not restored' }
 Set-Alias projectatlas Get-Date
-if ((Get-ProjectAtlasCommand).CommandType -ne 'Alias') { throw 'Alias precedence changed' }
+if ((Get-ProjectAtlasShellCommand projectatlas).CommandType -ne 'Alias') { throw 'Alias precedence changed' }
 if ($global:PSModuleAutoLoadingPreference -ne 'All') { throw 'Alias lookup changed preference' }
 if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) { throw 'Discovery imported a module' }
 function Get-Command { throw 'command discovery failure' }
 $failed = $false
-try { Get-ProjectAtlasCommand } catch { $failed = $_.Exception.Message -eq 'command discovery failure' }
+try { Get-ProjectAtlasShellCommand projectatlas } catch { $failed = $_.Exception.Message -eq 'command discovery failure' }
 if (-not $failed -or $global:PSModuleAutoLoadingPreference -ne 'All') {
     throw 'Failed discovery did not preserve its error and restore preference'
 }
@@ -2617,7 +2640,7 @@ if ($errors.Count -ne 0) {
 $names = @(
     "Convert-ProjectAtlasVersionTag",
     "Get-NormalizedPathEntry",
-    "Get-ProjectAtlasCommand",
+    "Get-ProjectAtlasShellCommand",
     "Initialize-ProjectAtlasRuntimeProbe",
     "Invoke-ProjectAtlasBoundedJsonCommand",
     "Invoke-ProjectAtlasRuntimeInfo",
