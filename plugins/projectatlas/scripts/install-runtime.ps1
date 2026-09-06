@@ -2847,7 +2847,7 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
         }
         throw "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $candidate"
     }
-    $command = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+    $command = Get-ProjectAtlasShellCommand atlas | Select-Object -First 1
     if ($command) {
         $commandPath = if ($command.Path) { $command.Path } elseif ($command.Source) { $command.Source } else { $null }
         if ([string]::IsNullOrWhiteSpace($commandPath) -or (Get-NormalizedPathEntry $commandPath) -ine $forwarderNormalized) {
@@ -2865,7 +2865,7 @@ function Write-ProjectAtlasAtlasForwarder {
         [string]$VerifiedPath
     )
     $forwarder = Get-ProjectAtlasAtlasForwarderPath $VerifiedPath
-    $previousCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+    $previousCommand = Get-ProjectAtlasShellCommand atlas | Select-Object -First 1
     $previousCandidate = if ($previousCommand) {
         if ($previousCommand.Path) { $previousCommand.Path } else { $previousCommand.Source }
     }
@@ -2889,7 +2889,7 @@ function Write-ProjectAtlasAtlasForwarder {
     try {
         Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause
         $previousPath = $null
-        $currentCommand = Get-Command atlas -ErrorAction SilentlyContinue | Select-Object -First 1
+        $currentCommand = Get-ProjectAtlasShellCommand atlas | Select-Object -First 1
         $currentPath = if ($currentCommand) {
             if ($currentCommand.Path) { $currentCommand.Path } else { $currentCommand.Source }
         }

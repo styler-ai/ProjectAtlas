@@ -2438,7 +2438,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     fs::create_dir_all(&module)?;
     fs::write(
         module.join("AtlasDiscoveryProbe.psm1"),
-        "[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_MARKER, 'imported')\nfunction projectatlas {}\nfunction codex {}\nfunction cargo {}\nExport-ModuleMember -Function projectatlas,codex,cargo\n",
+        "[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_MARKER, 'imported')\nfunction projectatlas {}\nfunction atlas {}\nfunction codex {}\nfunction cargo {}\nExport-ModuleMember -Function projectatlas,atlas,codex,cargo\n",
     )?;
     let discovery_script = temp.path().join("command-discovery.ps1");
     fs::write(
@@ -2446,7 +2446,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         r#"
 $ErrorActionPreference = 'Stop'
 $source = [IO.File]::ReadAllText($env:PROJECTATLAS_DISCOVERY_INSTALLER)
-foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
+foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Get-ProjectAtlasAtlasForwarderPath', 'Assert-ProjectAtlasAtlasForwarderCollisionFree', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
     $definition = [regex]::Match($source, "(?ms)^function $name \{.*?^\}")
     if (-not $definition.Success) { throw "Missing command discovery owner: $name" }
     Invoke-Expression $definition.Value
@@ -2457,8 +2457,12 @@ $env:Path = $env:PROJECTATLAS_DISCOVERY_EMPTY
 if (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT) {
     throw 'Module-only command was classified as a PATH runtime'
 }
-if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) {
-    throw 'PATH discovery imported an unrelated module'
+try {
+    Assert-ProjectAtlasAtlasForwarderCollisionFree $env:PROJECTATLAS_DISCOVERY_SCRIPT | Out-Null
+} finally {
+    if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) {
+        throw 'PATH discovery imported an unrelated module'
+    }
 }
 if ($null -ne $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')) {
     throw 'Command discovery did not restore absent preference'
@@ -7149,7 +7153,7 @@ fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(
         .join(format!("isolated-{REAL_HOST_SPECIAL_PATH_COMPONENT}"));
     fs::create_dir_all(&host_root)?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let special_runtime = copy_runtime_into_special_path(&runtime, temp.path())?;
     let workspace_root = workspace_root()?;
     let fixtures = [
@@ -7996,8 +8000,19 @@ fn configure_real_host_environment(
     // config/data roots from the developer machine. Keep only the platform
     // process plumbing needed to launch an installed npm shim and an isolated
     // ProjectAtlas runtime.
+    // Keep the installer's filtered PATH when sanitizing its host environment.
+    let command_path = match command
+        .get_envs()
+        .find(|(key, _)| *key == OsStr::new("PATH"))
+    {
+        Some((_, value)) => value.map(OsStr::to_os_string),
+        None => std::env::var_os("PATH"),
+    };
     command.env_clear();
-    for key in ["PATH", "LANG", "LC_ALL", "TMPDIR", "TERM"] {
+    if let Some(path) = command_path {
+        command.env("PATH", path);
+    }
+    for key in ["LANG", "LC_ALL", "TMPDIR", "TERM"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
@@ -30785,7 +30800,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
 #[test]
 #[cfg(unix)]
 fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Box<dyn Error>> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -30805,7 +30820,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     fs::write(
         &runtime,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--signal-test\" ]; then\n  trap 'printf \"interrupted\\n\" >&2; exit 130' INT\n  while :; do sleep 1; done\nfi\nexec \"{real_runtime_quoted}\" \"$@\"\n"
+            "#!/bin/sh\nif [ \"$1\" = \"--signal-test\" ]; then\n  trap 'printf \"interrupted\\n\" >&2; exit 130' INT\n  : > \"$2\"\n  while :; do sleep 1; done\nfi\nexec \"{real_runtime_quoted}\" \"$@\"\n"
         ),
     )?;
     let mut permissions = fs::metadata(&runtime)?.permissions();
@@ -30814,6 +30829,11 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
 
     let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
+    let state_parent = temp.path().join("physical state parent");
+    fs::create_dir_all(&state_parent)?;
+    let state_alias = temp.path().join("state parent alias");
+    symlink(&state_parent, &state_alias)?;
+    let configured_state = state_alias.join("initially absent state");
     let workspace_root = workspace_root()?;
     let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &workspace_root,
@@ -30824,7 +30844,8 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     )?;
     install
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
-        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .env("XDG_STATE_HOME", &configured_state);
     let install_output = install.output()?;
     require(
         install_output.status.success(),
@@ -30834,6 +30855,38 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
             String::from_utf8_lossy(&install_output.stderr)
         ),
     )?;
+    let linked_state_base = temp.path().join("linked state base");
+    let unrelated_state = temp.path().join("unrelated state");
+    fs::create_dir_all(&linked_state_base)?;
+    fs::create_dir_all(&unrelated_state)?;
+    symlink(&unrelated_state, linked_state_base.join("projectatlas"))?;
+    let linked_root_output = install.env("XDG_STATE_HOME", &linked_state_base).output()?;
+    require(
+        !linked_root_output.status.success() && fs::read_dir(&unrelated_state)?.next().is_none(),
+        "POSIX atlas installer followed a linked product state root",
+    )?;
+    install.env("XDG_STATE_HOME", &configured_state);
+    let state_root = configured_state.join("projectatlas");
+    let lock_path = fs::read_dir(&state_root)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|entry| entry.path())
+        .find(|path| path.extension() == Some(OsStr::new("lock")))
+        .ok_or_else(|| io::Error::other("POSIX atlas lifecycle lock was not published"))?;
+    let retained_lock = temp.path().join("retained lifecycle lock");
+    fs::rename(&lock_path, &retained_lock)?;
+    let unrelated_lock = unrelated_state.join("unrelated lock");
+    fs::write(&unrelated_lock, "unrelated lock content")?;
+    symlink(&unrelated_lock, &lock_path)?;
+    let linked_lock_output = install.output()?;
+    require(
+        !linked_lock_output.status.success()
+            && fs::read_to_string(&unrelated_lock)? == "unrelated lock content",
+        "POSIX atlas installer accepted or changed a linked lifecycle lock",
+    )?;
+    fs::remove_file(&lock_path)?;
+    fs::rename(&retained_lock, &lock_path)?;
+
     let forwarder = runtime_dir.join(TEST_ATLAS_FORWARDER_FILE_NAME);
     let direct_info = StdCommand::new(&runtime)
         .args(["--format", "toon", "runtime-info"])
@@ -30848,11 +30901,29 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
         "POSIX atlas forwarder changed the runtime stream or argument contract",
     )?;
 
+    let signal_ready = temp.path().join("signal handler ready");
     let mut child = StdCommand::new(&forwarder)
         .arg("--signal-test")
+        .arg(&signal_ready)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
+    let readiness_deadline = Instant::now() + Duration::from_secs(5);
+    while !signal_ready.is_file() {
+        if child.try_wait()?.is_some() {
+            return Err(io::Error::other("POSIX signal fixture exited before readiness").into());
+        }
+        if Instant::now() >= readiness_deadline {
+            child.kill()?;
+            let _ = child.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "POSIX signal fixture did not install its handler",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
     let kill_status = StdCommand::new("kill")
         .args(["-INT", &child.id().to_string()])
         .status()?;

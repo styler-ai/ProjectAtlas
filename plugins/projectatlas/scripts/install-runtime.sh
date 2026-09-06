@@ -135,7 +135,11 @@ atlas_forwarder_provenance_path() {
 }
 
 atlas_forwarder_state_root() {
-  printf '%s/projectatlas\n' "${XDG_STATE_HOME:-$HOME/.local/state}"
+  forwarder_state_base=${XDG_STATE_HOME:-$HOME/.local/state}
+  if [ -d "$forwarder_state_base" ]; then
+    forwarder_state_base=$(CDPATH= cd -P -- "$forwarder_state_base" 2>/dev/null && pwd -P) || return 1
+  fi
+  printf '%s/projectatlas\n' "$forwarder_state_base"
 }
 
 atlas_forwarder_state_path() {
@@ -203,6 +207,15 @@ acquire_atlas_forwarder_lifecycle_lock_fd() {
     printf '%s\n' "ProjectAtlas could not create the atlas forwarder lifecycle lock root: $lock_root" >&2
     return 1
   }
+  # The configured base may have been created through a platform alias such
+  # as macOS /var. Canonicalize that base, but never follow the owned leaf.
+  state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
+  lock_root=$(dirname -- "$state_path")
+  lock_parent_resolved=$(CDPATH= cd -P -- "$lock_root" 2>/dev/null && pwd -P) || return 1
+  if [ "$lock_parent_resolved" != "$lock_root" ] || [ -L "$lock_root" ]; then
+    printf '%s\n' "ProjectAtlas atlas forwarder lifecycle lock root is not a trusted direct directory: $lock_root" >&2
+    return 1
+  fi
   lock_path=${state_path%.state}.lock
   if [ ! -e "$lock_path" ] && [ ! -L "$lock_path" ]; then
     (umask 077 && set -C && : > "$lock_path") 2>/dev/null || true
