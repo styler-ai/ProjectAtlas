@@ -897,7 +897,7 @@ fn extract_tree_sitter_graph<E>(
     } else {
         None
     };
-    visit_node(
+    let traversal = visit_node(
         root,
         content,
         &mut graph,
@@ -906,7 +906,9 @@ fn extract_tree_sitter_graph<E>(
         &mut incomplete,
     )?;
     check()?;
-    languages::augment_language_graph(&mut graph, content, check)?;
+    if traversal.is_continue() {
+        languages::augment_language_graph(&mut graph, content, check)?;
+    }
     check()?;
     Ok(Some(TreeSitterParse {
         graph,
@@ -1314,6 +1316,45 @@ fn contains_php_opening_tag(content: &str) -> bool {
         .is_some_and(|parsed| parsed.has_opening_tag)
 }
 
+/// Recognize the standalone outer-scope directive before visiting archive data.
+fn is_php_compiler_halt(node: Node<'_>, content: &str) -> bool {
+    if node.kind() != "expression_statement" || node.has_error() {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if parent.kind() != "program"
+        && !(parent.kind() == "compound_statement"
+            && parent
+                .parent()
+                .is_some_and(|owner| owner.kind() == "namespace_definition"))
+    {
+        return false;
+    }
+    let Some(call) = node.named_child(0) else {
+        return false;
+    };
+    if call.kind() != "function_call_expression" {
+        return false;
+    }
+    let Some(function) = call.child_by_field_name("function") else {
+        return false;
+    };
+    if function.kind() != "name"
+        || !content[function.byte_range()].eq_ignore_ascii_case("__halt_compiler")
+    {
+        return false;
+    }
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    arguments
+        .named_children(&mut cursor)
+        .all(|child| child.kind() == "comment")
+}
+
 /// Recursively inspect one tree-sitter node.
 fn visit_node<E>(
     node: Node<'_>,
@@ -1322,8 +1363,11 @@ fn visit_node<E>(
     check: &mut impl FnMut() -> Result<(), E>,
     mut php_namespace_context: Option<&mut PhpNamespaceContext>,
     incomplete: &mut bool,
-) -> Result<(), E> {
+) -> Result<ControlFlow<()>, E> {
     check()?;
+    if is_php_language(graph.language.as_deref()) && is_php_compiler_halt(node, content) {
+        return Ok(ControlFlow::Break(()));
+    }
     if is_php_language(graph.language.as_deref())
         && (matches!(node.kind(), "anonymous_function" | "arrow_function")
             || (node.kind() == "namespace_definition"
@@ -1336,7 +1380,7 @@ fn visit_node<E>(
             }))
     {
         *incomplete = true;
-        return Ok(());
+        return Ok(ControlFlow::Continue(()));
     }
     if is_php_language(graph.language.as_deref()) && php_node_is_incomplete(node, content) {
         *incomplete = true;
@@ -1367,7 +1411,7 @@ fn visit_node<E>(
             );
         if !admitted && is_php_language(graph.language.as_deref()) {
             *incomplete = true;
-            return Ok(());
+            return Ok(ControlFlow::Continue(()));
         }
     }
     if graph.relations.len() < MAX_RELATIONS_PER_FILE {
@@ -1381,16 +1425,20 @@ fn visit_node<E>(
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        visit_node(
+        if visit_node(
             child,
             content,
             graph,
             check,
             php_namespace_context.as_deref_mut(),
             incomplete,
-        )?;
+        )?
+        .is_break()
+        {
+            return Ok(ControlFlow::Break(()));
+        }
     }
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
 /// Refine a declaration kind using surrounding syntax context.
@@ -5277,6 +5325,49 @@ version = "0.60.0"
 
     #[test]
     fn extracts_php_symbols_relations_and_exact_selectors() {
+        for directive in [
+            "__halt_compiler();",
+            "__HALT_COMPILER /* comment */ ( /* comment */ );",
+        ] {
+            for (prefix, suffix) in [
+                ("", ""),
+                ("namespace N;", ""),
+                ("namespace N {", "}"),
+                ("namespace {", "}"),
+            ] {
+                let source = format!(
+                    "<?php {prefix} function real() {{}} {directive} function fake() {{ payload(); }} {suffix} function outside() {{}}"
+                );
+                let graph = extract_symbol_graph("src/archive.php", Some("php"), &source);
+                assert!(
+                    graph.symbols.iter().any(|symbol| symbol.name == "real")
+                        && graph
+                            .symbols
+                            .iter()
+                            .all(|symbol| !matches!(symbol.name.as_str(), "fake" | "outside"))
+                        && graph.relations.iter().all(|relation| !matches!(
+                            relation.target_name.as_str(),
+                            "payload" | "__halt_compiler" | "__HALT_COMPILER"
+                        )),
+                    "{source}: {graph:?}"
+                );
+            }
+        }
+        for lookalike in [
+            "// __halt_compiler();\n",
+            "$text = '__halt_compiler();';",
+            "$object->__halt_compiler();",
+            "Archive::__halt_compiler();",
+            "__halt_compiler(1);",
+            "function nested() { __halt_compiler(); }",
+        ] {
+            let source = format!("<?php {lookalike} function retained() {{}}");
+            let graph = extract_symbol_graph("src/not-archive.php", Some("php"), &source);
+            assert!(
+                graph.symbols.iter().any(|symbol| symbol.name == "retained"),
+                "{source}: {graph:?}"
+            );
+        }
         for (source, parent) in [
             (
                 "<?php namespace N; function outer() { function inner() {} class InnerType {} }",
