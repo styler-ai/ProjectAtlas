@@ -38,8 +38,8 @@ use projectatlas_core::health::{
 use projectatlas_core::language::{
     ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION, ContentClassification, ContentSelection,
     LANGUAGE_CAPABILITY_REGISTRY_VERSION, LanguageRegistryReport, SymbolParserOwner,
-    TreeSitterGrammar, accepted_language_capability_digest, content_classification,
-    language_capability, language_registry_digest, language_registry_report,
+    accepted_language_capability_digest, content_classification, language_capability,
+    language_registry_digest, language_registry_report,
 };
 #[cfg(all(test, feature = "optional-parser-supervisor"))]
 use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
@@ -92,7 +92,7 @@ use projectatlas_service::{
     validate_federated_root_count,
 };
 use projectatlas_symbols::{
-    MarkdownFacts, extract_markdown_facts_controlled, extract_symbol_graph_controlled,
+    MarkdownFacts, extract_markdown_facts_controlled, extract_symbol_graph_with_source_controlled,
     semantic_resolution_contract_digest,
 };
 use rayon::ThreadPoolBuilder;
@@ -6627,7 +6627,7 @@ fn parse_admitted_symbol_job(
             stage: IndexWorkStage::SymbolParsing,
         });
     }
-    let (graph, markdown_facts) = if job
+    let (observed_source_parser, graph, markdown_facts) = if job
         .language
         .as_deref()
         .and_then(language_capability)
@@ -6638,9 +6638,9 @@ fn parse_admitted_symbol_job(
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
         let graph = facts.symbol_graph(&job.path, job.language.as_deref());
-        (graph, Some(Box::new(facts)))
+        (graph.parser, graph, Some(Box::new(facts)))
     } else {
-        let graph = match extract_symbol_graph_controlled(
+        let (parser, graph) = match extract_symbol_graph_with_source_controlled(
             &job.path,
             job.language.as_deref(),
             content,
@@ -6649,20 +6649,9 @@ fn parse_admitted_symbol_job(
             Ok(graph) => graph,
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
-        (graph, None)
+        (parser, graph, None)
     };
-    let source_parser = source_parser.unwrap_or_else(|| {
-        job.language
-            .as_deref()
-            .and_then(language_capability)
-            .and_then(|capability| match capability.symbol_parser {
-                SymbolParserOwner::TreeSitter(TreeSitterGrammar::Php) => {
-                    Some(ParserKind::TreeSitter)
-                }
-                _ => None,
-            })
-            .unwrap_or(graph.parser)
-    });
+    let source_parser = source_parser.unwrap_or(observed_source_parser);
     let structural_summary = if let Some(facts) = &markdown_facts {
         markdown_summary_from_facts(
             facts,
@@ -10470,19 +10459,25 @@ mod tests {
     }
 
     #[test]
-    fn non_php_fallback_retains_actual_source_provenance() -> Result<(), Box<dyn Error>> {
-        let job = SymbolParseJob {
-            path: "src/recovered.rs".to_string(),
-            native_path: PathBuf::new(),
-            expected_content_hash: String::new(),
-            language: Some("rust".to_string()),
-            fallback_summary: None,
-            purpose_needs_suggestion: false,
-        };
-        for (content, parser) in [
-            ("fn recovered() {}", ParserKind::TreeSitter),
-            ("def recovered(): pass", ParserKind::Fallback),
+    fn fallback_retains_actual_source_provenance() -> Result<(), Box<dyn Error>> {
+        for (language, content, parser) in [
+            ("rust", "fn recovered() {}", ParserKind::TreeSitter),
+            ("rust", "def recovered(): pass", ParserKind::Fallback),
+            (
+                "php",
+                "<?php function recovered() {}",
+                ParserKind::TreeSitter,
+            ),
+            ("php", "<?php\ndef recovered(): pass", ParserKind::Fallback),
         ] {
+            let job = SymbolParseJob {
+                path: format!("src/recovered.{language}"),
+                native_path: PathBuf::new(),
+                expected_content_hash: String::new(),
+                language: Some(language.to_string()),
+                fallback_summary: None,
+                purpose_needs_suggestion: false,
+            };
             let SymbolParseOutcome::Parsed(parsed) = parse_admitted_symbol_job(
                 &job,
                 content,

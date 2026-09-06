@@ -85,13 +85,42 @@ pub fn extract_symbol_graph_controlled(
     })
 }
 
-/// Extract a symbol graph with one cooperative work checkpoint shared by every parser stage.
+/// Extract a graph and the parser that produced its retained source facts.
+///
+/// The first tuple item preserves source provenance independently of conservative
+/// fact confidence. Cancellation never returns a partial extraction result.
+///
+/// # Errors
+///
+/// Returns a typed cancellation or deadline failure.
+pub fn extract_symbol_graph_with_source_controlled(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    control: &IndexWorkControl,
+) -> Result<(ParserKind, SymbolGraph), IndexWorkFailure> {
+    extract_symbol_graph_with_source_checked(path, language, content, &mut || {
+        control.check(IndexWorkStage::SymbolParsing)
+    })
+}
+
+/// Preserve graph-only extraction for callers that do not consume source provenance.
 fn extract_symbol_graph_checked<E>(
     path: &str,
     language: Option<&str>,
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<SymbolGraph, E> {
+    extract_symbol_graph_with_source_checked(path, language, content, check).map(|(_, graph)| graph)
+}
+
+/// Extract a symbol graph with one cooperative work checkpoint shared by every parser stage.
+fn extract_symbol_graph_with_source_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(ParserKind, SymbolGraph), E> {
     check()?;
     let parse_content = content_without_leading_purpose_header(content);
     if let Some(capability) = semantic::embedded_source::host_capability(path, language) {
@@ -101,25 +130,33 @@ fn extract_symbol_graph_checked<E>(
             parse_content.as_ref(),
             capability,
             check,
-        );
+        )
+        .map(|graph| (graph.parser, graph));
     }
     match symbol_parser_owner(path, language) {
         SymbolParserOwner::CargoManifest => {
-            return extract_cargo_manifest_graph_checked(path, language, content, check);
+            return extract_cargo_manifest_graph_checked(path, language, content, check)
+                .map(|graph| (graph.parser, graph));
         }
         SymbolParserOwner::Vue => {
-            return extract_vue_sfc_graph_checked(path, language, parse_content.as_ref(), check);
+            return extract_vue_sfc_graph_checked(path, language, parse_content.as_ref(), check)
+                .map(|graph| (graph.parser, graph));
         }
         SymbolParserOwner::PowerShell => {
-            return extract_powershell_graph_checked(path, language, parse_content.as_ref(), check);
+            return extract_powershell_graph_checked(path, language, parse_content.as_ref(), check)
+                .map(|graph| (graph.parser, graph));
         }
         SymbolParserOwner::Markdown => {
             let facts = markdown::extract_markdown_facts_checked(parse_content.as_ref(), check)?;
-            return Ok(facts.symbol_graph(path, language));
+            let graph = facts.symbol_graph(path, language);
+            return Ok((graph.parser, graph));
         }
         SymbolParserOwner::Unavailable => {
             check()?;
-            return Ok(empty_graph(path, language, ParserKind::Structural));
+            return Ok((
+                ParserKind::Structural,
+                empty_graph(path, language, ParserKind::Structural),
+            ));
         }
         SymbolParserOwner::TreeSitter(_) | SymbolParserOwner::Fallback => {}
     }
@@ -130,22 +167,31 @@ fn extract_symbol_graph_checked<E>(
         if parsed.incomplete || parsed.graph.parser == ParserKind::Fallback {
             mark_graph_fallback(&mut parsed.graph);
         }
+        // PHP partial facts retain their grammar origin; a rescue below owns
+        // fallback provenance independently of the file's language capability.
+        let source_parser =
+            if language.and_then(tree_sitter_grammar) == Some(TreeSitterGrammar::Php) {
+                ParserKind::TreeSitter
+            } else {
+                parsed.graph.parser
+            };
         if !parsed.graph.symbols.is_empty() || !parsed.graph.relations.is_empty() {
             check()?;
-            return Ok(parsed.graph);
+            return Ok((source_parser, parsed.graph));
         }
         if parsed.had_errors {
             let fallback =
                 extract_fallback_graph_checked(path, language, parse_content.as_ref(), check)?;
             if !fallback.symbols.is_empty() || !fallback.relations.is_empty() {
                 check()?;
-                return Ok(fallback);
+                return Ok((fallback.parser, fallback));
             }
         }
         check()?;
-        return Ok(parsed.graph);
+        return Ok((source_parser, parsed.graph));
     }
     extract_fallback_graph_checked(path, language, parse_content.as_ref(), check)
+        .map(|graph| (graph.parser, graph))
 }
 
 /// Extract accepted inline script facts without changing their host-file positions.

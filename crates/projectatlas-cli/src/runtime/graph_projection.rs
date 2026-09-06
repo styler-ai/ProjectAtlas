@@ -5364,7 +5364,6 @@ fn unique_php_call_source(
     let mut callable = None;
     let mut callable_boundary = false;
     let mut module = None;
-    let mut module_ambiguous = false;
     for (candidate_index, &index) in symbol_index.get(source_name).iter().enumerate() {
         check_graph_work(control, candidate_index)?;
         let symbol = graph.symbols.get(index).ok_or_else(|| {
@@ -5380,7 +5379,8 @@ fn unique_php_call_source(
                 callable_boundary = line == symbol.line_start || line == symbol.line_end;
             }
             SymbolKind::Module => {
-                module_ambiguous |= module.replace(index).is_some();
+                // Reopened blocks share one line-independent namespace entity.
+                module = Some(index);
             }
             _ => {}
         }
@@ -5394,7 +5394,7 @@ fn unique_php_call_source(
             callable
         })
     } else {
-        Ok(if module_ambiguous { None } else { module })
+        Ok(module)
     }
 }
 
@@ -11854,6 +11854,25 @@ function helper() {}
                     &format!("PHP {caller} call must use only its namespace declaration block"),
                 )?;
             }
+        }
+
+        for source in [
+            "<?php namespace Foo { function helper() {} } namespace Foo { helper(); }",
+            "<?php\nnamespace Foo;\nfunction helper() {}\nnamespace Foo;\nhelper();",
+        ] {
+            let graph = extract_symbol_graph("src/reopened-top-level.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                        && staged.entities.iter().any(|entity| {
+                            entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol }
+                                    if symbol.name.as_str() == "Foo" && symbol.kind == SymbolKind::Module)
+                        })
+                }),
+                "Reopened PHP namespace must retain its top-level call source",
+            )?;
         }
 
         for (source, remove_namespaces) in [
