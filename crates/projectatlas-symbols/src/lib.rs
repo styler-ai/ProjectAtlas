@@ -126,7 +126,7 @@ fn extract_symbol_graph_checked<E>(
     if let Some(mut parsed) =
         extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
     {
-        restore_php_selector_columns(&mut parsed.graph, content);
+        normalize_source_selector_columns(&mut parsed.graph, content, check)?;
         if parsed.incomplete || parsed.graph.parser == ParserKind::Fallback {
             mark_graph_fallback(&mut parsed.graph);
         }
@@ -1750,7 +1750,7 @@ fn push_tree_symbol(
         && is_php_language(graph.language.as_deref())
         && let Some(symbol) = graph.symbols.last_mut()
     {
-        symbol.source_selector = Some(tree_source_selector(node, content));
+        symbol.source_selector = Some(tree_source_selector(node));
     }
     if admitted && let Some(parent_name) = parent {
         push_relation(
@@ -1765,43 +1765,65 @@ fn push_tree_symbol(
     admitted
 }
 
-/// Build the exact persisted selector represented by a Tree-sitter node.
-fn tree_source_selector(node: Node<'_>, content: &str) -> SymbolSourceSelector {
-    let start = node.start_position();
-    let end = node.end_position();
+/// Retain byte offsets and columns until normalization against the original source.
+fn tree_source_selector(node: Node<'_>) -> SymbolSourceSelector {
     SymbolSourceSelector {
         byte_start: node.start_byte(),
         byte_end: node.end_byte(),
-        column_start: tree_source_column(node.start_byte(), start.column, content),
-        column_end: tree_source_column(node.end_byte(), end.column, content),
+        column_start: node.start_position().column,
+        column_end: node.end_position().column,
     }
 }
 
-/// Recompute PHP selector columns against the unmasked source bytes.
-fn restore_php_selector_columns(graph: &mut SymbolGraph, source: &str) {
-    if !is_php_language(graph.language.as_deref()) {
-        return;
+/// Convert existing selectors to scalar columns in one bounded source traversal.
+fn normalize_source_selector_columns<E>(
+    graph: &mut SymbolGraph,
+    source: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let mut endpoints = Vec::new();
+    for (index, symbol) in graph.symbols.iter_mut().enumerate() {
+        check_parser_iteration(index, check)?;
+        if let Some(selector) = symbol.source_selector.as_mut() {
+            endpoints.push((selector.byte_start, &mut selector.column_start));
+            endpoints.push((selector.byte_end, &mut selector.column_end));
+        }
     }
-    for symbol in &mut graph.symbols {
-        let Some(selector) = symbol.source_selector.as_mut() else {
-            continue;
-        };
-        selector.column_start =
-            tree_source_column(selector.byte_start, selector.column_start, source);
-        selector.column_end = tree_source_column(selector.byte_end, selector.column_end, source);
+    if endpoints.is_empty() {
+        return Ok(());
     }
-}
-
-/// Convert Tree-sitter's byte column to the Unicode-scalar column persisted by the graph.
-fn tree_source_column(byte_offset: usize, byte_column: usize, content: &str) -> usize {
-    if content.is_ascii() {
-        return byte_column;
+    let mut ascii = true;
+    for (index, chunk) in source
+        .as_bytes()
+        .chunks(PARSER_CONTROL_CHECK_INTERVAL)
+        .enumerate()
+    {
+        check_parser_iteration(index, check)?;
+        if !chunk.is_ascii() {
+            ascii = false;
+            break;
+        }
     }
-    let byte_offset = byte_offset.min(content.len());
-    let line_start = content[..byte_offset]
-        .rfind('\n')
-        .map_or(0, |newline| newline + 1);
-    content[line_start..byte_offset].chars().count()
+    if ascii {
+        return Ok(());
+    }
+    endpoints.sort_unstable_by_key(|(offset, _)| *offset);
+    let mut characters = source.char_indices().peekable();
+    let mut column = 0;
+    let mut consumed = 0;
+    for (offset, target) in endpoints {
+        check()?;
+        while characters.peek().is_some_and(|(index, _)| *index < offset) {
+            check_parser_iteration(consumed, check)?;
+            let Some((_, character)) = characters.next() else {
+                break;
+            };
+            column = if character == '\n' { 0 } else { column + 1 };
+            consumed += 1;
+        }
+        *target = column;
+    }
+    Ok(())
 }
 
 /// Return whether a declaration is directly wrapped by a JavaScript-like export.
@@ -5701,6 +5723,116 @@ function helper(string $value): void {}
             selector.column_start,
             source[..function_start].chars().count(),
             "selector column must use Unicode scalars from the original source"
+        );
+    }
+
+    #[test]
+    fn php_selector_columns_stay_exact_at_file_and_symbol_limits() {
+        let mut source = String::from("<?php\n/*");
+        source.push_str(&"x".repeat(1_800_000));
+        source.push_str("*/\n");
+        for index in 0..3_999 {
+            assert!(writeln!(source, "function f{index}() {{}}").is_ok());
+        }
+        source.push_str("/* café */ function last() {}");
+        let graph = extract_symbol_graph("src/large.php", Some("php"), &source);
+        assert_eq!(graph.symbols.len(), 4_000);
+        let last = graph.symbols.iter().find(|symbol| symbol.name == "last");
+        assert!(
+            last.is_some(),
+            "last admitted declaration must remain exact"
+        );
+        let Some(last) = last else { return };
+        assert!(
+            last.source_selector.is_some(),
+            "last declaration selector is missing"
+        );
+        let Some(selector) = last.source_selector else {
+            return;
+        };
+        assert_eq!(selector.column_start, "/* café */ ".chars().count());
+        assert_eq!(
+            selector.column_end,
+            "/* café */ function last() {}".chars().count()
+        );
+        assert_eq!(
+            &source[selector.byte_start..selector.byte_end],
+            "function last() {}"
+        );
+    }
+
+    #[test]
+    fn selector_normalization_preserves_scalar_boundaries_and_cancellation() {
+        let mut graph = extract_symbol_graph("probe.php", Some("php"), "<?php function f() {}");
+        // Normalization changes existing selectors, not language support or selector admission.
+        graph.language = Some("rust".to_owned());
+        graph.symbols = vec![graph.symbols[0].clone(); 3];
+        let source = "α\r\nβγ";
+        for (symbol, (start, end)) in graph.symbols.iter_mut().zip([(4, 8), (0, 4), (6, 6)]) {
+            symbol.source_selector = Some(super::SymbolSourceSelector {
+                byte_start: start,
+                byte_end: end,
+                column_start: usize::MAX,
+                column_end: usize::MAX,
+            });
+        }
+        let result =
+            super::normalize_source_selector_columns(&mut graph, source, &mut || Ok::<_, ()>(()));
+        assert_eq!(result, Ok(()));
+        for (symbol, expected) in graph.symbols.iter().zip([(0, 2), (0, 0), (1, 1)]) {
+            assert_eq!(
+                symbol
+                    .source_selector
+                    .map(|span| (span.column_start, span.column_end)),
+                Some(expected)
+            );
+        }
+        for source in ["x".repeat(65_536), format!("{}é", "x".repeat(65_536))] {
+            for stop in [1, 2, 3, 5] {
+                let mut candidate = graph.clone();
+                candidate.symbols = vec![candidate.symbols[0].clone(); 129];
+                for symbol in &mut candidate.symbols {
+                    symbol.source_selector = Some(super::SymbolSourceSelector {
+                        byte_start: 0,
+                        byte_end: source.len(),
+                        column_start: 0,
+                        column_end: source.len(),
+                    });
+                }
+                let mut checks = 0;
+                let result =
+                    super::normalize_source_selector_columns(&mut candidate, &source, &mut || {
+                        checks += 1;
+                        if checks == stop {
+                            Err("cancelled")
+                        } else {
+                            Ok(())
+                        }
+                    });
+                assert_eq!(result, Err("cancelled"));
+                assert_eq!(checks, stop);
+            }
+        }
+        let source = format!("é{}", "x".repeat(65_536));
+        let mut checks = 0;
+        graph.symbols[0].source_selector = Some(super::SymbolSourceSelector {
+            byte_start: 0,
+            byte_end: source.len(),
+            column_start: 0,
+            column_end: source.len(),
+        });
+        let result = super::normalize_source_selector_columns(&mut graph, &source, &mut || {
+            checks += 1;
+            if checks == 20 {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(
+            checks, 20,
+            "the Unicode source walk must remain cancellable"
         );
     }
 
