@@ -20,7 +20,7 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::language::{SemanticProviderOwner, SymbolParserOwner, language_capability};
 use projectatlas_core::symbols::{
-    ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
 use projectatlas_db::{
     AtlasStore, IndexPublicationGuard, RepositoryAffectedSourceFootprint,
@@ -4378,7 +4378,7 @@ fn derived_parser_relation(relation: &SymbolRelation, target_name: String) -> Sy
 fn file_owned_relation(graph: &SymbolGraph, target_name: String) -> SymbolRelation {
     SymbolRelation {
         path: graph.path.clone(),
-        source_name: "<module>".to_string(),
+        source_name: MODULE_RELATION_SOURCE.to_string(),
         target_name,
         kind: RelationKind::Calls,
         line: 1,
@@ -4700,7 +4700,7 @@ fn relation_source<'a>(
     owners: &GraphOwners,
     entities: &'a BTreeMap<String, GraphEntity>,
     symbol_index: &GraphSymbolIndex<'_>,
-    relation: &projectatlas_core::symbols::SymbolRelation,
+    relation: &SymbolRelation,
 ) -> Result<&'a GraphEntity, CliError> {
     let file = entities.get(&owners.file_digest).ok_or_else(|| {
         CliError::InvalidInput("graph file owner entity was not staged".to_string())
@@ -4824,20 +4824,6 @@ fn local_relation_matches<'a>(
             .language
             .as_deref()
             .is_some_and(|language| language.eq_ignore_ascii_case("php"));
-    if is_php_call
-        && symbol_index.has_php_imports
-        && !target_name.starts_with('\\')
-        && !target_name
-            .split_once("::")
-            .is_some_and(|(scope, _)| scope.eq_ignore_ascii_case("self"))
-    {
-        // Import facts do not carry namespace-local alias bindings. Keep the
-        // call unresolved instead of assuming a same-file declaration wins.
-        return Ok(ResolutionMatches {
-            first: None,
-            count: 0,
-        });
-    }
     let source_parent = if relation.kind == RelationKind::Calls {
         unique_source_parent(
             graph,
@@ -4849,8 +4835,46 @@ fn local_relation_matches<'a>(
     } else {
         None
     };
+    let known_source_namespace = if is_php_call {
+        unique_php_source_namespace(graph, symbol_index, source_parent, relation, control)?
+    } else {
+        None
+    };
+    let namespace_relative_target = if is_php_call
+        && let Some((prefix, relative)) = target_name.split_once('\\')
+        && prefix.eq_ignore_ascii_case("namespace")
+    {
+        let Some(namespace) = known_source_namespace else {
+            return Ok(ResolutionMatches {
+                first: None,
+                count: 0,
+            });
+        };
+        Some(if namespace.is_empty() {
+            format!("\\{relative}")
+        } else {
+            format!("\\{namespace}\\{relative}")
+        })
+    } else {
+        None
+    };
+    let lookup_target = namespace_relative_target.as_deref().unwrap_or(target_name);
+    if is_php_call
+        && symbol_index.has_php_imports
+        && !lookup_target.starts_with('\\')
+        && !lookup_target
+            .split_once("::")
+            .is_some_and(|(scope, _)| scope.eq_ignore_ascii_case("self"))
+    {
+        // Import facts do not carry namespace-local alias bindings. Keep the
+        // call unresolved instead of assuming a same-file declaration wins.
+        return Ok(ResolutionMatches {
+            first: None,
+            count: 0,
+        });
+    }
     let (lookup_name, scoped_parent, mut scoped_namespace, target_namespace) = if is_php_call {
-        let Some(lookup) = php_call_lookup(target_name, source_parent) else {
+        let Some(lookup) = php_call_lookup(lookup_target, source_parent) else {
             return Ok(ResolutionMatches {
                 first: None,
                 count: 0,
@@ -4861,13 +4885,7 @@ fn local_relation_matches<'a>(
         (target_name, None, None, None)
     };
     if is_php_call && scoped_parent.is_some() && scoped_namespace.is_none() {
-        scoped_namespace = unique_php_source_namespace(
-            graph,
-            symbol_index,
-            source_parent,
-            relation.line,
-            control,
-        )?;
+        scoped_namespace = known_source_namespace;
         if scoped_namespace.is_none() {
             return Ok(ResolutionMatches {
                 first: None,
@@ -4879,7 +4897,7 @@ fn local_relation_matches<'a>(
         if target_namespace.is_some() {
             target_namespace
         } else {
-            unique_php_source_namespace(graph, symbol_index, source_parent, relation.line, control)?
+            known_source_namespace
         }
     } else {
         None
@@ -5055,16 +5073,42 @@ fn php_entity_matches_qualified_scope(
     )
 }
 
-/// Return the unique PHP namespace owned by a source method's containing type.
+/// Prove a PHP caller's namespace, including the empty global namespace.
 fn unique_php_source_namespace<'a>(
     graph: &'a SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
     source_parent: Option<&str>,
-    source_line: usize,
+    relation: &projectatlas_core::symbols::SymbolRelation,
     control: &IndexWorkControl,
 ) -> Result<Option<&'a str>, CliError> {
     let Some(source_parent) = source_parent else {
-        return Ok(None);
+        if relation.source_name == MODULE_RELATION_SOURCE
+            && relation.parser == ParserKind::TreeSitter
+        {
+            return Ok(Some(""));
+        }
+        let mut global_function = false;
+        let mut namespace = None;
+        for (candidate_index, &row_index) in
+            symbol_index.get(&relation.source_name).iter().enumerate()
+        {
+            check_graph_work(control, candidate_index)?;
+            let symbol = graph.symbols.get(row_index).ok_or_else(|| {
+                CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+            })?;
+            if matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
+                && symbol.line_start <= relation.line
+                && relation.line <= symbol.line_end
+            {
+                if symbol.kind != SymbolKind::Function || symbol.parent.is_some() {
+                    return Ok(None);
+                }
+                global_function = true;
+            } else if symbol.kind == SymbolKind::Module {
+                namespace = Some(symbol.name.as_str());
+            }
+        }
+        return Ok(if global_function { Some("") } else { namespace });
     };
     let mut namespace = None;
     let mut source_found = false;
@@ -5075,7 +5119,7 @@ fn unique_php_source_namespace<'a>(
         })?;
         let candidate = match symbol.kind {
             SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Enum => {
-                if source_line < symbol.line_start || source_line > symbol.line_end {
+                if relation.line < symbol.line_start || relation.line > symbol.line_end {
                     continue;
                 }
                 Some(symbol.parent.as_deref().unwrap_or(""))
@@ -10854,7 +10898,6 @@ class DuplicateB {
         for target in [
             "Atlas\\Domain\\QualifiedService::boot",
             "Alias\\QualifiedService::boot",
-            "namespace\\QualifiedService::boot",
         ] {
             require(
                 matches!(
@@ -10866,6 +10909,18 @@ class DuplicateB {
                 &format!("non-leading qualified PHP scope must remain unresolved: {target}"),
             )?;
         }
+        require(
+            matches!(
+                staged_call("namespace\\QualifiedService::boot", "relative_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                    == Some("Other\\Domain::QualifiedService")
+            ),
+            "explicit namespace-relative PHP static scope must resolve in its caller namespace",
+        )?;
         require(
             matches!(
                 staged_call("top_level_helper", "TopLevel")
@@ -11119,6 +11174,91 @@ function fallback_run(): void {
             }),
             "case-insensitive PHP duplicate declarations must remain ambiguous",
         )?;
+
+        let mut scope_failures = Vec::new();
+        for (source, target, expected_parent) in [
+            (
+                "<?php\nclass Service { public static function boot() {} }\nfunction run() { Service::boot(); }",
+                "Service::boot",
+                Some("Service"),
+            ),
+            (
+                "<?php\nclass Service { public static function boot() {} }\nService::boot();",
+                "Service::boot",
+                Some("Service"),
+            ),
+            (
+                "<?php\nfunction helper() {}\nfunction run() { namespace\\helper(); }",
+                "namespace\\helper",
+                None,
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction helper() {}\nfunction run() { namespace\\helper(); }",
+                "namespace\\helper",
+                Some("Foo"),
+            ),
+            (
+                "<?php\nnamespace Foo { use function Other\\helper; function run() { namespace\\helper(); } }\nnamespace Foo { function helper() {} }",
+                "namespace\\helper",
+                Some("Foo"),
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction helper() {}\nNaMeSpAcE\\helper();",
+                "NaMeSpAcE\\helper",
+                Some("Foo"),
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction run() { namespace\\Child\\helper(); }\nnamespace Foo\\Child;\nfunction helper() {}",
+                "namespace\\Child\\helper",
+                Some("Foo\\Child"),
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/explicit-scope.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            if !staged.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Resolved {
+                        selector: ReusableTargetSelector::Symbol { symbol },
+                        ..
+                    } if symbol.parent.as_ref().map(GraphIdentityText::as_str) == expected_parent
+                ) && relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+            }) {
+                scope_failures.push(target);
+            }
+        }
+        require(
+            scope_failures.is_empty(),
+            &format!("proven PHP call scopes did not resolve: {scope_failures:?}"),
+        )?;
+
+        let mut unknown_caller = extract_symbol_graph(
+            "src/unknown-scope.php",
+            Some("php"),
+            "<?php\nclass Service { public static function boot() {} }\nfunction run() { Service::boot(); }",
+        );
+        for relation in &mut unknown_caller.relations {
+            if relation.kind == RelationKind::Calls {
+                relation.source_name = "unknown_caller".to_string();
+            }
+        }
+        let ambiguous_caller = extract_symbol_graph(
+            "src/ambiguous-scope.php",
+            Some("php"),
+            "<?php namespace { class Service { public static function boot() {} } function run() { Service::boot(); } } namespace Foo { function run() {} }",
+        );
+        for graph in [&unknown_caller, &ambiguous_caller] {
+            let staged = finish_graph(graph)?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    matches!(
+                        relation.resolution(),
+                        RelationResolution::Unresolved { reference } if reference.as_str() == "Service::boot"
+                    )
+                }),
+                "unknown or ambiguous PHP callers must not be treated as proven global functions",
+            )?;
+        }
 
         let imported_graph = extract_symbol_graph(
             "src/imports.php",

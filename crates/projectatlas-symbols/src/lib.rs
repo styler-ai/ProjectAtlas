@@ -36,8 +36,8 @@ use projectatlas_core::language::{
     builtin_tree_sitter_language_ids, language_capability, tree_sitter_grammar,
 };
 use projectatlas_core::symbols::{
-    CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
-    SymbolSourceSelector,
+    CodeSymbol, MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind,
+    SymbolRelation, SymbolSourceSelector,
 };
 use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
 use regex::Regex;
@@ -267,7 +267,7 @@ fn extract_vue_sfc_graph_checked<E>(
         if is_fallback_import(trimmed) {
             push_relation(
                 &mut structural,
-                "<module>",
+                MODULE_RELATION_SOURCE,
                 trimmed,
                 RelationKind::Imports,
                 line_index + 1,
@@ -320,7 +320,7 @@ fn extract_powershell_graph_checked<E>(
         if is_fallback_import(trimmed) {
             push_relation(
                 &mut structural,
-                "<module>",
+                MODULE_RELATION_SOURCE,
                 trimmed,
                 RelationKind::Imports,
                 line_index + 1,
@@ -2295,7 +2295,7 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
             if !import_text.is_empty() && import_text.chars().count() <= MAX_SNIPPET_CHARS {
                 push_relation(
                     graph,
-                    "<module>",
+                    MODULE_RELATION_SOURCE,
                     &import_text,
                     RelationKind::Imports,
                     node.start_position().row + 1,
@@ -2321,7 +2321,7 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
     if is_php_include_node(node.kind()) {
         push_relation_preserving_target(
             graph,
-            "<module>",
+            MODULE_RELATION_SOURCE,
             &import_text,
             RelationKind::Imports,
             node.start_position().row + 1,
@@ -2330,7 +2330,7 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
     } else {
         push_relation(
             graph,
-            "<module>",
+            MODULE_RELATION_SOURCE,
             &import_text,
             RelationKind::Imports,
             node.start_position().row + 1,
@@ -2376,7 +2376,7 @@ fn push_call_relation(
                 .then(|| php_namespace_context.and_then(|context| context.parent_for(node)))
                 .flatten()
         })
-        .unwrap_or_else(|| "<module>".into());
+        .unwrap_or_else(|| MODULE_RELATION_SOURCE.into());
     let context = compact_text(node_text(node, content).as_deref().unwrap_or(""));
     push_relation(
         graph,
@@ -3092,7 +3092,7 @@ fn extract_fallback_graph_checked<E>(
         if is_fallback_import(trimmed) {
             push_relation(
                 &mut graph,
-                "<module>",
+                MODULE_RELATION_SOURCE,
                 trimmed,
                 RelationKind::Imports,
                 line_index + 1,
