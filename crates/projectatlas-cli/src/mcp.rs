@@ -11062,7 +11062,12 @@ mod tests {
         require(
             instances == 2 && events == 3,
             "MCP calls did not reuse one identity per server construction",
-        )
+        )?;
+        drop(connection);
+        drop(restarted);
+        drop(first);
+        fs::remove_dir_all(&repo)?;
+        require(!repo.exists(), "MCP teardown left its repository in use")
     }
 
     #[test]

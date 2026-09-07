@@ -266,6 +266,14 @@ impl Hash for SourceBinding {
 }
 
 impl SourceBinding {
+    /// Configuration directory observed separately when it lies outside the source root.
+    fn external_config_parent(&self) -> Option<&Path> {
+        self.config
+            .as_deref()
+            .filter(|config| !config.starts_with(&self.root))
+            .and_then(Path::parent)
+    }
+
     /// Resolve one root, database, and optional configuration into a stable binding.
     fn new(database: &Path, root: &Path, config: Option<&Path>) -> Result<Self, CliError> {
         let root = root.canonicalize().map_err(|source| CliError::Io {
@@ -309,7 +317,7 @@ struct SourceObservationEntry {
     /// Exact source, database, and configuration identity.
     binding: SourceBinding,
     /// Native watcher kept alive for the entry lifetime.
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
     /// Bounded receiver whose lock serializes callback publication with drain acknowledgment.
     receiver: Arc<Mutex<Receiver<Event>>>,
     /// Monotonic count of relevant events accepted by the callback.
@@ -329,6 +337,20 @@ struct SourceObservationEntry {
     #[cfg(test)]
     /// Continuity loss injected between the drain fast check and lock for owning race tests.
     drain_continuity_invalidations: AtomicU64,
+}
+
+#[cfg(windows)]
+impl Drop for SourceObservationEntry {
+    fn drop(&mut self) {
+        let _ = self.watcher.unwatch(&self.binding.root);
+        if let Some(parent) = self.binding.external_config_parent() {
+            let _ = self.watcher.unwatch(parent);
+        }
+        // notify's Windows Unwatch and Drop only enqueue actions. Configure waits
+        // for an acknowledgement after preceding cancellation/completion work,
+        // so directory cleanup cannot race an outstanding native notification.
+        let _ = self.watcher.configure(notify::Config::default());
+    }
 }
 
 impl fmt::Debug for SourceObservationEntry {
@@ -357,27 +379,16 @@ impl SourceObservationEntry {
         let test_sender = sender.clone();
         let ingress_sequence = Arc::new(AtomicU64::new(0));
         let continuity_lost = Arc::new(AtomicBool::new(false));
-        let mut watcher = notify::recommended_watcher(watcher_callback(
+        let watcher = notify::recommended_watcher(watcher_callback(
             sender,
             Arc::clone(&receiver),
             Arc::clone(&ingress_sequence),
             Arc::clone(&continuity_lost),
         ))
         .map_err(|source| observer_error(&binding.root, &source))?;
-        watcher
-            .watch(&binding.root, RecursiveMode::Recursive)
-            .map_err(|source| observer_error(&binding.root, &source))?;
-        if let Some(config) = binding.config.as_deref()
-            && !config.starts_with(&binding.root)
-            && let Some(parent) = config.parent()
-        {
-            watcher
-                .watch(parent, RecursiveMode::NonRecursive)
-                .map_err(|source| observer_error(&binding.root, &source))?;
-        }
-        Ok(Self {
+        let mut entry = Self {
             binding,
-            _watcher: watcher,
+            watcher,
             receiver,
             ingress_sequence,
             continuity_lost,
@@ -389,7 +400,18 @@ impl SourceObservationEntry {
             acceptance_event: Mutex::new(None),
             #[cfg(test)]
             drain_continuity_invalidations: AtomicU64::new(0),
-        })
+        };
+        entry
+            .watcher
+            .watch(&entry.binding.root, RecursiveMode::Recursive)
+            .map_err(|source| observer_error(&entry.binding.root, &source))?;
+        if let Some(parent) = entry.binding.external_config_parent() {
+            entry
+                .watcher
+                .watch(parent, RecursiveMode::NonRecursive)
+                .map_err(|source| observer_error(&entry.binding.root, &source))?;
+        }
+        Ok(entry)
     }
 
     /// Publish one deterministic test event through the production handshake.
@@ -1404,6 +1426,51 @@ mod tests {
         } else {
             Err(std::io::Error::other(message).into())
         }
+    }
+
+    #[test]
+    fn native_observer_teardown_releases_root_and_external_config() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let external = temp.path().join("settings");
+        fs::create_dir_all(&root)?;
+        fs::create_dir_all(&external)?;
+        let config = external.join("config.toml");
+        fs::write(&config, "")?;
+        let database = root.join("atlas.db");
+        let entry =
+            SourceObservationEntry::start(SourceBinding::new(&database, &root, Some(&config))?)?;
+        fs::write(root.join("source.rs"), "fn observed() {}")?;
+        drop(entry);
+        require(!database.exists(), "observer cleanup created an index")?;
+        fs::remove_dir_all(&root)?;
+        fs::remove_dir_all(&external)?;
+        require(
+            !root.exists() && !external.exists(),
+            "watch directories remain",
+        )
+    }
+
+    #[test]
+    fn native_observer_failed_registration_releases_admitted_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root)?;
+        let database = root.join("atlas.db");
+        let config = temp.path().join("missing-parent").join("config.toml");
+        let binding = SourceBinding::new(&database, &root, Some(&config))?;
+        let result = SourceObservationEntry::start(binding.clone());
+        require(result.is_err(), "missing configuration parent was accepted")?;
+        require(
+            !database.exists(),
+            "failed observer startup created an index",
+        )?;
+        fs::remove_dir_all(&root)?;
+        require(!root.exists(), "failed startup retained its root")?;
+        require(
+            SourceObservationEntry::start(binding).is_err(),
+            "missing root was accepted",
+        )
     }
 
     #[test]

@@ -13,7 +13,7 @@
         "390": { "blocked_by": [] },
         "456": { "blocked_by": [358, 465, 477, 484] },
         "464": { "blocked_by": [] },
-        "465": { "blocked_by": [476, 480, 488] },
+        "465": { "blocked_by": [476, 480, 488, 570] },
         "476": { "blocked_by": [481] },
         "477": { "blocked_by": [547] },
         "480": { "blocked_by": [482] },
@@ -28,7 +28,7 @@
         "489": { "blocked_by": [] },
         "490": { "blocked_by": [339, 342, 358, 384, 464, 465, 489] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 561, 564, 567, 568] },
+        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 561, 564, 567, 568, 570] },
         "495": { "blocked_by": [] },
         "517": { "blocked_by": [] },
         "518": { "blocked_by": [547] },
@@ -42,7 +42,8 @@
         "561": { "blocked_by": [] },
         "564": { "blocked_by": [] },
         "567": { "blocked_by": [] },
-        "568": { "blocked_by": [] }
+        "568": { "blocked_by": [] },
+        "570": { "blocked_by": [] }
       }
     },
     "v0.6.0-00": {
@@ -177,6 +178,7 @@
     "prefer-worktree-guidance-before-database-preflight": 412,
     "preserve-indexing-across-invalid-symbol-identities": 467,
     "enforce-release-asset-completion-deadline": 564,
+    "finish-native-source-observer-teardown": 570,
     "prove-completed-parent-pipe-cleanup": 561,
     "publish-rustdoc-readme-links": 300,
     "rationalize-agent-tool-surface": {
