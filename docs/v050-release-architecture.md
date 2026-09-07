@@ -223,7 +223,8 @@ The PDF guest is embedded build-owned code with a verified locked rebuild;
 callers cannot select modules. Its build resolves the locked dependency sources
 before mapping each Rust source directory to a canonical path, so embedded
 diagnostics do not depend on host separators or a warm Cargo cache. Native
-platform checks require the rebuilt guest to match the embedded bytes exactly. Each parse has 64 MiB linear memory, a 1 MiB
+platform checks require the rebuilt guest to match the embedded bytes exactly.
+Each parse has 64 MiB linear memory, a 1 MiB
 interpreter value stack, 256 call depth, 500 million total instruction fuel,
 and a ten-second ceiling that respects an earlier caller deadline. Fuel
 suspensions check cancellation; real allocation denial remains a typed limit.
@@ -236,7 +237,8 @@ PDF admission requires a `%PDF-` header and extracts only page text; DOCX
 admission requires a ZIP header, admits only stored or DEFLATE entries, rejects
 unsafe, duplicate, encrypted, or otherwise unsupported package input, and passes
 only `word/document.xml` to the parser. Each result carries a page/text-span or
-part/paragraph/run/text-span locator plus parser provenance and a complete
+part/paragraph/run/text-span locator plus its actual emitted-text line range
+for symbol slicing, parser provenance, and a complete
 coverage marker. The boundary caps input/compressed package bytes at 8 MiB,
 expanded package bytes at 32 MiB, the native source/parser staging envelope at 96 MiB,
 retained output at 4 MiB, and package entries and evidence facts at 256 and

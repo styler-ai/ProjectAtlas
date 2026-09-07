@@ -283,6 +283,14 @@ jobs:
         timeout-minutes: 10
         run: python3 packaging/pdf-parser/build.py --install-target --validate
 
+      - name: Retain mismatched PDF guest for comparison
+        if: failure() && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mismatched-pdf-guest-linux
+          path: .tmp/pdf-parser-build/wasm32-wasip1/release/projectatlas_pdf_parser.wasm
+          if-no-files-found: ignore
+
       - name: Selected Rust proof
         timeout-minutes: 15
         env:

@@ -152,6 +152,10 @@ pub struct DocumentFact {
     pub text: String,
     /// Exact parser-relative locator for the text.
     pub locator: DocumentLocator,
+    /// One-based first line in the emitted document text.
+    pub line_start: usize,
+    /// One-based last occupied line in the emitted document text.
+    pub line_end: usize,
 }
 
 /// Complete bounded text and provenance extracted from one document.
@@ -159,7 +163,7 @@ pub struct DocumentFact {
 pub struct DocumentFacts {
     /// Format admitted by magic and language/extension checks.
     pub format: DocumentFormat,
-    /// Newline-separated extracted text used by the existing text index.
+    /// Extracted text with preserved paragraph and run layout for the text index.
     pub text: String,
     /// Exact text facts used to build graph evidence.
     pub facts: Vec<DocumentFact>,
@@ -185,8 +189,8 @@ impl DocumentFacts {
                 signature: fact.locator.to_string(),
                 exported: false,
                 documentation: None,
-                line_start: index + 1,
-                line_end: index + 1,
+                line_start: fact.line_start,
+                line_end: fact.line_end,
                 source_selector: None,
                 parent: None,
                 parser: ParserKind::Structural,
@@ -445,6 +449,8 @@ fn extract_pdf(
             text.push_str(line);
             let end = text.len();
             facts.push(DocumentFact {
+                line_start: facts.len() + 1,
+                line_end: facts.len() + 1,
                 text: line.to_owned(),
                 locator: DocumentLocator::Pdf {
                     page: usize::try_from(*page_number).map_err(|_error| {
@@ -680,6 +686,7 @@ fn parse_docx(
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = true;
     let mut output = String::new();
+    let mut output_line = 1usize;
     let mut facts = Vec::new();
     let mut paragraph_open = false;
     let mut paragraph_number = 0usize;
@@ -748,6 +755,7 @@ fn parse_docx(
                         run_number = 0;
                         if !output.is_empty() {
                             push_output_byte(&mut output, b'\n')?;
+                            output_line += 1;
                         }
                     }
                     "r" if paragraph_open && run.is_none() => {
@@ -861,8 +869,14 @@ fn parse_docx(
                                     maximum: MAX_DOCUMENT_OUTPUT_BYTES,
                                 });
                             }
+                            let line_start = output_line;
+                            output_line += run.text.bytes().filter(|byte| *byte == b'\n').count();
+                            // A terminal newline does not create another occupied slice line.
+                            let line_end = output_line - usize::from(run.text.ends_with('\n'));
                             output.push_str(&run.text);
                             facts.push(DocumentFact {
+                                line_start,
+                                line_end,
                                 text: run.text,
                                 locator: DocumentLocator::Docx {
                                     part: DOCX_DOCUMENT_PART,

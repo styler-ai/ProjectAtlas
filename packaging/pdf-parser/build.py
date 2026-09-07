@@ -26,7 +26,7 @@ def main() -> None:
     metadata = json.loads(subprocess.run(
         ["cargo", f"+{channel}", "metadata", "--locked", "--format-version", "1",
          "--filter-platform", "wasm32-wasip1", "--manifest-path", str(guest / "Cargo.toml")],
-        cwd=root, check=True, capture_output=True, text=True, timeout=180,
+        cwd=root, check=True, capture_output=True, text=True, encoding="utf-8", timeout=180,
     ).stdout)
     selected = {node["id"] for node in metadata["resolve"]["nodes"]}
     remaps = {}

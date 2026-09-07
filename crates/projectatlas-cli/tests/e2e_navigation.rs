@@ -9622,7 +9622,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         docx.start_file("word/document.xml", FileOptions::default())?;
         write!(
             docx,
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p/><w:p><w:r><w:t>{text}</w:t></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/></w:r></w:p></w:body></w:document>"
         )?;
         docx.finish()?;
         Ok(())
@@ -9674,7 +9674,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             "docs/guide.docx",
             "DOCX evidence marker",
             "docx document",
-            "docx:part=word/document.xml;paragraph=1;run=1;text-span=0..20",
+            "docx:part=word/document.xml;paragraph=2;run=1;text-span=0..20",
         ),
     ];
     for (path, marker, description, locator) in cases {
@@ -9702,7 +9702,11 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         let summary = json_summary_command(&repo, &database, path)?;
         require_json_string(&summary, &["parser_kind"], "structural-symbol-graph")?;
         require_json_contains(&summary, &["content_summary"], description)?;
-        require_json_usize(&summary, &["symbol_count"], 1)?;
+        require_json_usize(
+            &summary,
+            &["symbol_count"],
+            if path.ends_with(".docx") { 3 } else { 1 },
+        )?;
         let symbols = run_mcp_contract_json(
             &executable,
             &repo,
@@ -9746,6 +9750,43 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         )?;
         require_json_usize(&relations, &["symbol_relations", "returned"], 0)?;
         require_json_usize(&relations, &["symbol_relations", "total", "value"], 0)?;
+    }
+
+    let slice_cases = [
+        ("docs/guide.pdf", "document-block-1", 1, 1, "Runtime PDF"),
+        (
+            "docs/guide.docx",
+            "document-block-2",
+            1,
+            1,
+            "DOCX evidence marker joined run",
+        ),
+        (
+            "docs/guide.docx",
+            "document-block-3",
+            3,
+            4,
+            "After empty\ncontinued",
+        ),
+    ];
+    for (path, symbol, start, end, content) in slice_cases {
+        let slice = run_mcp_contract_json(
+            &executable,
+            &repo,
+            &[
+                "--db".to_owned(),
+                database.display().to_string(),
+                "symbols".to_owned(),
+                "slice".to_owned(),
+                path.to_owned(),
+                symbol.to_owned(),
+                "--content-selection".to_owned(),
+                "documentation".to_owned(),
+            ],
+        )?;
+        require_json_usize(&slice, &["start_line"], start)?;
+        require_json_usize(&slice, &["end_line"], end)?;
+        require_json_string(&slice, &["content"], content)?;
     }
 
     Connection::open(&database)?.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
@@ -9852,6 +9893,16 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             )?)?;
             require_json_usize(&relations, &["symbol_relations", "returned"], 0)?;
             require_json_usize(&relations, &["symbol_relations", "total", "value"], 0)?;
+        }
+        for (path, symbol, start, end, content) in slice_cases {
+            let slice: Value = toon_format::decode_default(&session.call_tool(
+                "atlas_slice",
+                &json!({"project_path": repo.as_path(), "file": path, "symbol": symbol,
+                        "content_selection": "documentation"}),
+            )?)?;
+            require_json_usize(&slice, &["slice", "start_line"], start)?;
+            require_json_usize(&slice, &["slice", "end_line"], end)?;
+            require_json_string(&slice, &["slice", "content"], content)?;
         }
         Ok(())
     })();
