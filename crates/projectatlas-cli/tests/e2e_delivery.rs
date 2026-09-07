@@ -28824,10 +28824,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     let clear_retirement_quarantine = |directory: &Path| -> Result<(), Box<dyn Error>> {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".atlas-forwarder-retire.")
+            if [".atlas-forwarder-retire.", ".atlas-forwarder-retire-"]
+                .iter()
+                .any(|prefix| entry.file_name().to_string_lossy().starts_with(prefix))
             {
                 fs::remove_file(entry.path())?;
             }
@@ -29840,6 +29839,48 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         run_uninstall()?.status.success() && run_install()?.status.success(),
         "missing-forwarder uninstall was not idempotent or prevented reinstall",
     )?;
+
+    #[cfg(windows)]
+    for forwarder_present in [true, false] {
+        clear_retirement_quarantine(runtime_directory)?;
+        if !forwarder_present {
+            fs::remove_file(&forwarder)?;
+        }
+        let committed_cleanup = run_uninstall_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_QUARANTINE_CLEANUP_FAILURE",
+            Path::new("1"),
+        )?;
+        let cleanup_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&committed_cleanup.stdout),
+            String::from_utf8_lossy(&committed_cleanup.stderr)
+        );
+        let retained = fs::read_dir(runtime_directory)?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atlas-forwarder-retire-")
+            })
+            .collect::<Vec<_>>();
+        require(
+            committed_cleanup.status.success()
+                && cleanup_text.contains("retirement committed; quarantine cleanup remains")
+                && !forwarder.exists()
+                && !provenance.exists()
+                && !installer_state.exists()
+                && runtime.is_file()
+                && retained.len() == 1
+                && fs::read_to_string(retained[0].path())? == expected_provenance,
+            format!("committed retirement restored partial public state: {cleanup_text}"),
+        )?;
+        require(
+            run_uninstall()?.status.success() && run_install()?.status.success(),
+            "committed retirement cleanup residue prevented retry or reinstall",
+        )?;
+    }
 
     fs::create_dir_all(home.join(TEST_WINDOWS_APPDATA_DIR))?;
     fs::create_dir_all(home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))?;
@@ -30906,8 +30947,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         let remaining = rows[1][3].parse::<u64>()?;
         require(
             first_wait > 0
-                && first_wait < 250
-                && first_wait + remaining == 250
+                && remaining == 250_u64.saturating_sub(first_wait)
                 && rows[2][2].parse::<u64>()? == remaining,
             format!("contender reset the shared native lock-wait budget: {trace}"),
         )?;

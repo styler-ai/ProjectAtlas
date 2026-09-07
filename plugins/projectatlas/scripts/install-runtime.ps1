@@ -2664,6 +2664,7 @@ function Move-ProjectAtlasManagedAtlasForwarderLocked {
     $provenanceQuarantine = New-ProjectAtlasAtlasForwarderQuarantinePath $provenancePath
     $forwarderMoved = $false
     $provenanceMoved = $false
+    $retirementCommitted = $false
     try {
         if ($forwarderPresent) {
             Move-Item -LiteralPath $FilePath -Destination $forwarderQuarantine
@@ -2695,14 +2696,23 @@ function Move-ProjectAtlasManagedAtlasForwarderLocked {
             throw "ProjectAtlas atlas forwarder provenance was replaced during retirement: $provenancePath"
         }
         Remove-ProjectAtlasAtlasForwarderState $FilePath $target
+        # Once private state is retired, public artifacts must never be restored.
+        $retirementCommitted = $true
         if ($forwarderMoved) {
             Remove-Item -LiteralPath $forwarderQuarantine -Force
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_QUARANTINE_CLEANUP_FAILURE)) {
+            throw "ProjectAtlas atlas forwarder quarantine cleanup was intentionally failed for lifecycle proof."
         }
         Remove-Item -LiteralPath $provenanceQuarantine -Force
         Write-Output "Migrated ProjectAtlas atlas forwarder: $FilePath -> $(Get-ProjectAtlasAtlasForwarderPath $VerifiedPath)"
         return $true
     }
     catch {
+        if ($retirementCommitted) {
+            Write-Warning "ProjectAtlas atlas forwarder retirement committed; quarantine cleanup remains at '$forwarderQuarantine' or '$provenanceQuarantine': $($_.Exception.Message)"
+            return $true
+        }
         if ($provenanceMoved) {
             Restore-ProjectAtlasAtlasForwarderQuarantine $provenanceQuarantine $provenancePath | Out-Null
         }
