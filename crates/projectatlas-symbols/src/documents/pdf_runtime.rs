@@ -265,6 +265,7 @@ pub(super) fn extract_pages(
     })?;
     match Failure::try_from(status) {
         Ok(Failure::Encrypted) => return Err(DocumentExtractionError::EncryptedPdf),
+        Ok(Failure::Unsupported) => return Err(DocumentExtractionError::UnsupportedPdfInput),
         Ok(Failure::Pages) => return Err(limit(DocumentLimit::FactCount, MAX_DOCUMENT_FACTS)),
         Ok(Failure::Output) => {
             return Err(limit(DocumentLimit::OutputBytes, MAX_DOCUMENT_OUTPUT_BYTES));

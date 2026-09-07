@@ -23,6 +23,8 @@ pub enum Failure {
     Output = -4,
     /// Decoded streams exceed their expansion ceiling.
     Expanded = -5,
+    /// Text semantics require a feature outside the admitted parser subset.
+    Unsupported = -6,
 }
 
 impl TryFrom<i32> for Failure {
@@ -35,6 +37,7 @@ impl TryFrom<i32> for Failure {
             -3 => Ok(Self::Pages),
             -4 => Ok(Self::Output),
             -5 => Ok(Self::Expanded),
+            -6 => Ok(Self::Unsupported),
             other => Err(other),
         }
     }

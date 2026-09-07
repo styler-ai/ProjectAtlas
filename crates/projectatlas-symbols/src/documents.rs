@@ -282,6 +282,9 @@ pub enum DocumentExtractionError {
     /// An encrypted PDF was rejected because credentials are never accepted here.
     #[error("encrypted PDF documents are unsupported")]
     EncryptedPdf,
+    /// PDF text semantics require a feature outside the admitted parser subset.
+    #[error("unsupported PDF text semantics")]
+    UnsupportedPdfInput,
     /// A malformed or unreadable parser input was rejected.
     #[error("malformed {format} document: {message}")]
     Malformed {
@@ -927,6 +930,13 @@ fn parse_docx(
                     foreign_depth = Some(element_depth);
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
+                    "altChunk" if deleted_depth.is_none() => {
+                        return Err(DocumentExtractionError::UnsupportedDocxInput {
+                            message:
+                                "alternate-format DOCX chunks require unsupported part decoding"
+                                    .to_owned(),
+                        });
+                    }
                     "del" | "moveFrom" if deleted_depth.is_none() => {
                         deleted_depth = Some(element_depth);
                     }
@@ -2288,6 +2298,25 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 }),
             ));
         }
+    }
+
+    #[test]
+    fn docx_alternate_format_chunk_refuses_incomplete_publication() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Prefix</w:t></w:r></w:p><w:altChunk r:id="html"/></w:body></w:document>"#;
+        assert!(matches!(
+            parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+        ));
+        let deleted = xml.replace(
+            "<w:altChunk r:id=\"html\"/>",
+            "<w:del><w:altChunk r:id=\"html\"/></w:del>",
+        );
+        assert_eq!(
+            parse_docx(deleted.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("deleted content stays excluded")
+                .text,
+            "Prefix"
+        );
     }
 
     #[test]

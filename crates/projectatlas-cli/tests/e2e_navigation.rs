@@ -10020,6 +10020,10 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             std::iter::once(0xfeff).chain(r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>UTF16 text</w:t></w:r></w:p></w:body></w:document>"#.encode_utf16()).flat_map(u16::to_le_bytes).collect(),
             "DOCX XML encoding is not supported",
         ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r></w:p><w:altChunk r:id="html"/></w:body></w:document>"#.as_bytes().to_vec(),
+            "alternate-format DOCX chunks",
+        ),
     ] {
         {
             let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);

@@ -92,6 +92,11 @@ pub(crate) fn page(
     if text.exceeded {
         return Err(Failure::Output);
     }
-    result.map_err(|_| Failure::Malformed)?;
+    result.map_err(|error| match error {
+        OutputError::IoError(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            Failure::Unsupported
+        }
+        _ => Failure::Malformed,
+    })?;
     Ok(text.value)
 }

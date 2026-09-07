@@ -1846,7 +1846,26 @@ impl<'a> Processor<'a> {
                     dlog!("discard {:?}", path);
                     path.ops.clear();
                 }
-                "BMC" | "BDC" => {
+                "BDC" => {
+                    if operation.operands.len() != 2 {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid marked-content operands").into());
+                    }
+                    operation.operands[0].as_name()?;
+                    let property = match &operation.operands[1] {
+                        Object::Name(name) => {
+                            let (_, properties) = doc.dereference(resources.get(b"Properties")?)?;
+                            properties.as_dict()?.get(name)?
+                        }
+                        property => property,
+                    };
+                    let (_, property) = doc.dereference(property)?;
+                    if let Ok(actual_text) = property.as_dict()?.get(b"ActualText") {
+                        doc.dereference(actual_text)?.1.as_str()?;
+                        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ActualText replacement requires unsupported text decoding").into());
+                    }
+                    mc_stack.push(operation);
+                }
+                "BMC" => {
                     mc_stack.push(operation);
                 }
                 "EMC" => {

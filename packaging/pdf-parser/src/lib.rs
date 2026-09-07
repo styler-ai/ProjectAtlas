@@ -435,6 +435,94 @@ mod tests {
     }
 
     #[test]
+    fn actual_text_requires_supported_semantics_before_text_publication() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let replacement = document.add_object(dictionary! {
+            "ActualText" => lopdf::Object::string_literal("replacement")
+        });
+        let content = document.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), Vec::new()));
+        let form = document.add_object(lopdf::Stream::new(dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => font },
+                "Properties" => dictionary! { "Local" => replacement }
+            }
+        }, b"BT /F1 12 Tf /Span /Local BDC (glyph) Tj EMC ET".to_vec()));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => font },
+                "Properties" => dictionary! { "Replacement" => replacement, "Local" => dictionary! { "MCID" => 0 } },
+                "XObject" => dictionary! { "Form" => form }
+            }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        for stream in [
+            b"BT /F1 12 Tf /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET".as_slice(),
+            b"BT /F1 12 Tf /Artifact BMC /Span /Replacement BDC (glyph) Tj EMC EMC ET",
+            b"/Form Do",
+        ] {
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(stream.to_vec());
+            assert!(matches!(
+                text::page(&document, 1, 256),
+                Err(Failure::Unsupported)
+            ));
+        }
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        INPUT.with(|input| *input.borrow_mut() = bytes);
+        OUTPUT.with(|output| *output.borrow_mut() = b"previous text".to_vec());
+        assert_eq!(extract(), Failure::Unsupported as i32);
+        assert_eq!(output_len(), 0);
+        for (stream, valid) in [
+            (
+                b"BT /F1 12 Tf /Span << /MCID 0 >> BDC (Visible) Tj EMC ET".as_slice(),
+                true,
+            ),
+            (b"BT /F1 12 Tf /Span /Local BDC (Visible) Tj EMC ET", true),
+            (
+                b"BT /F1 12 Tf /Span << /ActualText 12 >> BDC (Visible) Tj EMC ET",
+                false,
+            ),
+            (
+                b"BT /F1 12 Tf /Span /Missing BDC (Visible) Tj EMC ET",
+                false,
+            ),
+        ] {
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(stream.to_vec());
+            let result = text::page(&document, 1, 256);
+            if valid {
+                assert!(result.unwrap().contains("Visible"));
+            } else {
+                assert!(matches!(result, Err(Failure::Malformed)));
+            }
+        }
+    }
+
+    #[test]
     fn quote_operators_match_explicit_text_state_operations() {
         let mut document = lopdf::Document::new();
         let pages = document.new_object_id();
