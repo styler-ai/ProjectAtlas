@@ -97,6 +97,7 @@ const TEST_WINDOWS_APPDATA_DIR: &str = "AppData/Roaming";
 const TEST_WINDOWS_LOCAL_APPDATA_DIR: &str = "AppData/Local";
 const TEST_WINDOWS_INSTALLER_STATE_DIR: &str = "AppData/Local/ProjectAtlas/state";
 const TEST_POSIX_INSTALLER_STATE_DIR: &str = ".local/state/projectatlas";
+const TEST_POSIX_USER_BIN_DIR: &str = ".local/bin";
 #[cfg(unix)]
 const TEST_ATLAS_FORWARDER_FILE_NAME: &str = "atlas";
 
@@ -30062,10 +30063,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     // A separate verified runtime can provide the native POSIX lock helper
     // after the forwarder's own target is gone; it owns no fixture forwarder.
     #[cfg(unix)]
-    let retirement_helper = home.join(".local/bin/projectatlas");
+    let retirement_helper = home.join(TEST_POSIX_USER_BIN_DIR).join("projectatlas");
     #[cfg(unix)]
     {
-        fs::create_dir_all(home.join(".local/bin"))?;
+        fs::create_dir_all(home.join(TEST_POSIX_USER_BIN_DIR))?;
         fs::copy(&runtime, &retirement_helper)?;
     }
     for (invalid_runtime_file, forwarder_present) in
@@ -30237,7 +30238,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         let runtime_dir = if cfg!(windows) {
             home.join(TEST_WINDOWS_APPDATA_DIR).join("npm")
         } else {
-            home.join(".local/bin")
+            home.join(TEST_POSIX_USER_BIN_DIR)
         };
         fs::create_dir_all(&runtime_dir)?;
         let alternate_runtime = runtime_dir.join(if cfg!(windows) {
