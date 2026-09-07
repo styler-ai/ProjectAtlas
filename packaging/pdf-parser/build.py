@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -21,13 +22,41 @@ def main() -> None:
     channel = preflight["read_declared_channel"](root / "rust-toolchain.toml")
     target = root / ".tmp" / "pdf-parser-build"
     env = os.environ.copy()
-    cargo_home = Path(env.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
-    remaps = [f"--remap-path-prefix={root}=/projectatlas"]
-    # Strip machine-specific registry roots from embedded parser diagnostics.
-    for registry in sorted((cargo_home / "registry" / "src").glob("*")):
-        if registry.is_dir():
-            remaps.append(f"--remap-path-prefix={registry}=/registry")
-    env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(remaps)
+    # Fetch the locked target tree before inspecting registry source paths.
+    metadata = json.loads(subprocess.run(
+        ["cargo", f"+{channel}", "metadata", "--locked", "--format-version", "1",
+         "--filter-platform", "wasm32-wasip1", "--manifest-path", str(guest / "Cargo.toml")],
+        cwd=root, check=True, capture_output=True, text=True, timeout=180,
+    ).stdout)
+    selected = {node["id"] for node in metadata["resolve"]["nodes"]}
+    remaps = {}
+    for package in metadata["packages"]:
+        if package["id"] not in selected:
+            continue
+        manifest = Path(package["manifest_path"])
+        if not manifest.is_file():
+            raise SystemExit(f"Resolved PDF guest dependency is not materialized: {manifest}")
+        package_root = manifest.parent
+        canonical = (Path("/registry") / f"{package['name']}-{package['version']}"
+                     if package["source"] else Path("/projectatlas") / package_root.relative_to(root))
+        for directory in {source.parent for source in package_root.rglob("*.rs")}:
+            destination = (canonical / directory.relative_to(package_root)).as_posix() + "/"
+            # A trailing separator leaves only the filename as the unmapped suffix.
+            # Mapping just a registry root retains Windows backslashes in diagnostics.
+            remaps[str(directory) + os.sep] = destination
+            if not package["source"]:
+                for base in (root, guest):
+                    remaps[str(directory.relative_to(base)) + os.sep] = destination
+    target.mkdir(parents=True, exist_ok=True)
+    flags = "".join(
+        f"--remap-path-prefix={source}={destination}\n"
+        for source, destination in sorted(remaps.items())
+    )
+    # Cargo fingerprints the response filename, not changes to its contents.
+    response = target / f"rustflags-{hashlib.sha256(flags.encode()).hexdigest()}.args"
+    response.write_text(flags, encoding="utf-8", newline="\n")
+    # Keep hundreds of source-directory mappings outside Windows' argv limit.
+    env["CARGO_ENCODED_RUSTFLAGS"] = "@" + str(response)
     env.pop("RUSTFLAGS", None)
     if args.install_target:
         subprocess.run(["rustup", "target", "add", "--toolchain", channel, "wasm32-wasip1"], check=True, timeout=180)
@@ -41,7 +70,7 @@ def main() -> None:
     if args.write:
         artifact.write_bytes(built)
     elif artifact.read_bytes() != built:
-        raise SystemExit("PDF parser artifact differs from its locked source; rebuild with --write")
+        raise SystemExit(f"PDF parser artifact differs from its locked source: built sha256={hashlib.sha256(built).hexdigest()}; rebuild with --write")
     if args.validate:
         manifest = str(guest / "Cargo.toml")
         for command in [

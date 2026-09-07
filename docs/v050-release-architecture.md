@@ -220,7 +220,10 @@ The document boundary pins a fixed `pdf-extract` `0.12.0+projectatlas` guest
 with `lopdf` `0.44.0`, the `wasmi`/`wasmi_core` `2.0.0` host, `quick-xml`
 `0.42.0`, and `zip` `0.6.6` (ZIP defaults disabled, only `deflate` enabled).
 The PDF guest is embedded build-owned code with a verified locked rebuild;
-callers cannot select modules. Each parse has 64 MiB linear memory, a 1 MiB
+callers cannot select modules. Its build resolves the locked dependency sources
+before mapping each Rust source directory to a canonical path, so embedded
+diagnostics do not depend on host separators or a warm Cargo cache. Native
+platform checks require the rebuilt guest to match the embedded bytes exactly. Each parse has 64 MiB linear memory, a 1 MiB
 interpreter value stack, 256 call depth, 500 million total instruction fuel,
 and a ten-second ceiling that respects an earlier caller deadline. Fuel
 suspensions check cancellation; real allocation denial remains a typed limit.
