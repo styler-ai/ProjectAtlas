@@ -1627,6 +1627,10 @@ mod tests {
         let mut form = lopdf::Dictionary::new();
         form.set("Type", "XObject");
         form.set("Subtype", "Form");
+        form.set(
+            "Matrix",
+            vec![1.into(), 0.into(), 0.into(), 1.into(), 0.into(), 600.into()],
+        );
         form.set("BBox", vec![0.into(), 0.into(), 612.into(), 792.into()]);
         let resources = document
             .get_dictionary((3, 0))
@@ -1637,7 +1641,7 @@ mod tests {
         form.set("Resources", resources);
         let form_id = document.add_object(lopdf::Stream::new(
             form,
-            b"BT /F1 12 Tf 72 700 Td (Form Text Marker) Tj ET".to_vec(),
+            b"BT /F1 12 Tf 72 0 Td (Form Text Marker) Tj ET".to_vec(),
         ));
         let mut xobjects = lopdf::Dictionary::new();
         xobjects.set("Fm1", form_id);
@@ -1657,14 +1661,25 @@ mod tests {
             .as_stream_mut()
             .expect("stream");
         let mut content = stream.content.clone();
-        content.extend_from_slice(b"\n/Fm1 Do\n");
+        content
+            .extend_from_slice(b"\nq 1 0 0 1 0 100 cm /Fm1 Do Q\nq 1 0 0 1 0 -100 cm /Fm1 Do Q\n");
         stream.set_content(content);
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).expect("fixture serialization");
         let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
             .expect("valid Form content");
         assert!(facts.text.contains("Hello PDF"));
-        assert!(facts.text.contains("Form Text Marker"), "{}", facts.text);
+        assert_eq!(facts.facts.len(), 3, "{}", facts.text);
+        assert_eq!(
+            facts
+                .facts
+                .iter()
+                .filter(|fact| fact.text == "Form Text Marker")
+                .count(),
+            2,
+            "{}",
+            facts.text
+        );
         assert!(
             facts
                 .facts

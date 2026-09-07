@@ -9592,8 +9592,8 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     let pdf_objects = [
         b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
         b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".as_slice(),
-        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".as_slice(),
-        b"4 0 obj\n<< /Length 42 >>\nstream\nBT /F1 12 Tf 72 720 Td (Runtime PDF) Tj ET\nendstream\nendobj\n".as_slice(),
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
+        b"4 0 obj\n<< /Length 100 >>\nstream\nBT /F1 12 Tf 72 720 Td (Runtime PDF) Tj ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q\nendstream\nendobj\n".as_slice(),
         b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
     ];
     let mut pdf = b"%PDF-1.4\n".to_vec();
@@ -9606,6 +9606,8 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     pdf.extend_from_slice(b"6 0 obj\n<< /Length 2000001 /Subtype /Image >>\nstream\n");
     pdf.extend(std::iter::repeat_n(b' ', 2_000_001));
     pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    offsets.push(pdf.len());
+    pdf.extend_from_slice(b"7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Matrix [1 0 0 1 0 600] /Length 42 >>\nstream\nBT /F1 12 Tf 72 0 Td (Runtime Form) Tj ET\nendstream\nendobj\n");
     let object_count = offsets.len() + 1;
     let xref = pdf.len();
     pdf.extend_from_slice(format!("xref\n0 {object_count}\n").as_bytes());
@@ -9726,7 +9728,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         require_json_usize(
             &summary,
             &["symbol_count"],
-            if path == "docs/guide.docx" { 5 } else { 1 },
+            if path == "docs/guide.docx" { 5 } else { 3 },
         )?;
         let symbols = run_mcp_contract_json(
             &executable,
@@ -9775,6 +9777,8 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
 
     let slice_cases = [
         ("docs/guide.pdf", "document-block-1", 1, 1, "Runtime PDF"),
+        ("docs/guide.pdf", "document-block-2", 2, 2, "Runtime Form"),
+        ("docs/guide.pdf", "document-block-3", 3, 3, "Runtime Form"),
         (
             "docs/guide.docx",
             "document-block-2",
