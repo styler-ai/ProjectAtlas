@@ -41,6 +41,10 @@ The installer SHALL verify Claude Code and OpenCode configuration through each a
 ### Requirement: One collision-safe atlas command exposes the complete CLI
 The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS to the same verified `projectatlas` runtime. It SHALL accept every present/future argument vector without per-subcommand executables and SHALL preserve `projectatlas` compatibility.
 
+#### Scenario: Runtime path cannot fit ownership records
+- **WHEN** a supplied POSIX runtime path or its canonical target contains a carriage return or newline, including a terminal newline
+- **THEN** the installer refuses it before forwarder, provenance, private-state, or generated host-configuration publication and preserves the supplied runtime and existing project state
+
 #### Scenario: Canonical command or nested command
 - **WHEN** a user invokes any supported command, global flag, nested command, or format through `atlas`
 - **THEN** stdout/stderr bytes, exit status, signals, JSON/TOON, help, errors, root isolation, and behavior match `projectatlas`
@@ -48,6 +52,38 @@ The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS t
 #### Scenario: Unmanaged collision
 - **WHEN** another executable already owns the intended `atlas` location or effective PATH
 - **THEN** installation reports the exact collision and does not shadow or overwrite it without explicit collision resolution
+
+#### Scenario: Provenance-bound ownership
+- **WHEN** a candidate forwarder has the public marker, exact generated body, and valid runtime target but its independent installer provenance or private random capability state is missing, mismatched, reparse-linked, or hard-linked
+- **THEN** installation and uninstall classify it as unmanaged and leave the forwarder, provenance, and unrelated state untouched
+
+#### Scenario: Malformed forwarder ownership artifacts
+- **WHEN** the forwarder, provenance, or private state has extra fields, an extra blank line, or otherwise differs from its complete installer-owned bytes
+- **THEN** install and uninstall both reject it without changing any artifact; active and quarantined ownership comparisons preserve every byte, and restoring the valid artifact restores the ordinary lifecycle
+
+#### Scenario: Staged no-clobber publication
+- **WHEN** an update stages a replacement, a foreign destination appears after the final collision check, or staging fails before publication
+- **THEN** publication never force-replaces the destination, and a prior owned forwarder plus provenance remains usable until a fully verified replacement is published; retirement quarantines and verifies each old artifact before deletion and preserves a concurrent foreign replacement
+
+#### Scenario: Concurrent migrations from isolated projects
+- **WHEN** installers for separate project roots migrate between the same two runtime directories in opposite directions
+- **THEN** their shared forwarder locks use one consistent order, both installations finish without deadlock, and each completed installation retains its own complete generated host configurations
+
+#### Scenario: Final runtime readiness fails
+- **WHEN** the destination runtime fails final verification after the complete forwarder pair is published
+- **THEN** installation reports failure and retains matching provenance and private state with the forwarder so repair and owned uninstall remain possible without an unmanaged orphan
+
+#### Scenario: Windows runtime path casing changes
+- **WHEN** the same Windows runtime identity is supplied with different path casing during update, repair, or uninstall
+- **THEN** the installer uses the authenticated record's original spelling for exact body, provenance, and state checks, preserving ownership without accepting malformed metadata
+
+#### Scenario: Owned POSIX forwarder loses execute permission
+- **WHEN** an authenticated POSIX forwarder has lost its execute bits
+- **THEN** repair restores executable permission while preserving its exact body, provenance, and private state; unauthenticated files remain untouched, and owned uninstall does not require the forwarder to execute
+
+#### Scenario: Literal percent sequences in Windows runtime paths
+- **WHEN** the verified Windows runtime path contains literal environment-variable syntax such as `%USERNAME%`
+- **THEN** install, forwarding, repair, update, and uninstall preserve the literal filesystem identity without expanding that syntax in generated ownership records or runtime targets
 
 ### Requirement: Health reporting and administration remain unambiguous
 `atlas health [report flags]` SHALL run the read-only health report, `atlas health resolve ...` SHALL retain the existing administrative route, and `health-check` SHALL remain a compatibility alias.
@@ -70,3 +106,14 @@ Install, update, repair, and uninstall SHALL manage the verified runtime, npm ca
 #### Scenario: Uninstall
 - **WHEN** ProjectAtlas is removed
 - **THEN** only proven-owned artifacts are removed and selected project databases/configuration plus unrelated host state remain according to the documented retention contract
+- **AND** forwarder uninstall does not require an existing project root or valid project state directory; missing, linked, and non-directory project state remains untouched
+- **AND** uninstall without an explicit runtime path derives each discovered forwarder's runtime from its validated ownership record rather than assuming a runtime filename
+
+#### Scenario: Missing forwarder with malformed retained provenance
+- **WHEN** a forwarder is absent but its valid private state and malformed provenance remain
+- **THEN** repair refuses before rotating private state, preserving the retained ownership bytes and leaving the forwarder absent
+
+#### Scenario: Forwarder target is unavailable
+- **WHEN** an authenticated forwarder target is missing or cannot execute
+- **THEN** retirement derives ownership from its exact generated body, provenance, and private capability state without requiring that target to run; malformed or incomplete ownership remains a refusal, and publication still requires a verified destination runtime
+- **AND** lifecycle locking remains mandatory; macOS uses another discoverable verified runtime for its native lock helper or refuses without changing owned artifacts and asks the user to restore a runtime before retrying

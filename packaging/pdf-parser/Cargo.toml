@@ -1,0 +1,22 @@
+[package]
+name = "projectatlas-pdf-parser"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+lopdf = { version = "=0.44.0", default-features = false }
+pdf-extract = { path = "vendor/pdf-extract", version = "=0.12.0" }
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+strip = true
+
+# Built separately for WASI and embedded in the native symbols crate.
+[workspace]
+exclude = ["vendor/pdf-extract"]

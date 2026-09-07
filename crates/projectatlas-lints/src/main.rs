@@ -216,7 +216,13 @@ const STRICT_STRING_RULES: &[StringLiteralRule] = &[
     StringLiteralRule {
         id: "e2e-fixture-path-inline-strings",
         description: "Repeated e2e fixture path segments must live in local constants instead of being repeated inline.",
-        paths: &["crates/projectatlas-cli/tests/e2e.rs"],
+        paths: &[
+            "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+            "crates/projectatlas-cli/tests/e2e_delivery.rs",
+            "crates/projectatlas-cli/tests/e2e_navigation.rs",
+            "crates/projectatlas-cli/tests/e2e_worktrees.rs",
+            "crates/projectatlas-cli/tests/e2e_maintenance.rs",
+        ],
         ban_unlisted: false,
         literals: E2E_FIXTURE_PATH_LITERALS,
         allowed_literals: &[],
@@ -227,7 +233,13 @@ const STRICT_STRING_RULES: &[StringLiteralRule] = &[
 const REPEATED_PATH_JOIN_RULES: &[PathJoinLiteralRule] = &[PathJoinLiteralRule {
     id: "repeated-path-join-inline-strings",
     description: "Repeated path join string literals must be centralized as constants or reviewed into the fixture allowlist.",
-    paths: &["crates/projectatlas-cli/tests/e2e.rs"],
+    paths: &[
+        "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+        "crates/projectatlas-cli/tests/e2e_delivery.rs",
+        "crates/projectatlas-cli/tests/e2e_navigation.rs",
+        "crates/projectatlas-cli/tests/e2e_worktrees.rs",
+        "crates/projectatlas-cli/tests/e2e_maintenance.rs",
+    ],
     allowed_repeated_literals: E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS,
 }];
 

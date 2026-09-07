@@ -4,7 +4,6 @@ use crate::check_parser_iteration;
 use projectatlas_core::symbols::{CodeSymbol, ParserKind, SymbolGraph, SymbolKind};
 use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
 use quick_xml::Reader;
-use quick_xml::escape::unescape;
 use quick_xml::events::{BytesRef, Event};
 use std::collections::HashSet;
 use std::fmt;
@@ -13,31 +12,39 @@ use std::path::Path;
 use thiserror::Error;
 use zip::{CompressionMethod, ZipArchive};
 
-/// The exact audited PDF parser version used by this boundary.
-pub const PDF_EXTRACT_VERSION: &str = "0.12.0";
+#[path = "../../../packaging/pdf-parser/limits.rs"]
+mod limits;
+mod pdf_runtime;
+
+/// The exact audited PDF object parser version used by this boundary.
+pub const LOPDF_VERSION: &str = "0.44.0";
+/// The upstream text parser version with the contained guest's documented patches.
+pub const PDF_EXTRACT_VERSION: &str = "0.12.0+projectatlas";
 /// The exact audited XML parser version used by the DOCX boundary.
 pub const QUICK_XML_VERSION: &str = "0.42.0";
 /// Maximum compressed bytes admitted to one document extraction.
-pub const MAX_DOCUMENT_COMPRESSED_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_DOCUMENT_COMPRESSED_BYTES: usize = limits::INPUT_LIMIT;
 /// Maximum expanded package bytes admitted to one document extraction.
-pub const MAX_DOCUMENT_EXPANDED_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_DOCUMENT_EXPANDED_BYTES: usize = limits::EXPANDED_LIMIT;
 /// Maximum extracted UTF-8 bytes retained from one document.
-pub const MAX_DOCUMENT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_DOCUMENT_OUTPUT_BYTES: usize = limits::OUTPUT_LIMIT;
 /// Maximum source, parser staging, and retained-output envelope for one extraction.
 pub const MAX_DOCUMENT_MEMORY_BYTES: usize = 96 * 1024 * 1024;
 /// Maximum ZIP entries inspected in one DOCX package.
 pub const MAX_DOCUMENT_ENTRIES: usize = 256;
-/// Maximum parser nesting supported by this boundary; embedded documents are rejected.
+/// Maximum document-container depth; embedded documents are rejected.
 pub const MAX_DOCUMENT_RECURSION_DEPTH: usize = 1;
+/// Maximum XML element nesting admitted within the document part.
+const MAX_DOCX_XML_DEPTH: usize = 64;
 /// Maximum evidence facts retained from one document.
-pub const MAX_DOCUMENT_FACTS: usize = 4_096;
+pub const MAX_DOCUMENT_FACTS: usize = limits::FACT_LIMIT;
 /// The only DOCX package part admitted to the parser.
 pub const DOCX_DOCUMENT_PART: &str = "word/document.xml";
 
 /// A repository document format supported by the bounded extraction boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DocumentFormat {
-    /// Portable Document Format, parsed by `pdf-extract`.
+    /// Portable Document Format, parsed by the fixed contained text extractor.
     Pdf,
     /// Office Open XML Word document, parsed by the direct `quick-xml` boundary.
     Docx,
@@ -122,7 +129,7 @@ impl fmt::Display for DocumentLocator {
 /// Parser provenance attached to every bounded document result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DocumentParserProvenance {
-    /// The pinned `pdf-extract` parser.
+    /// The pinned `pdf-extract` parser with documented guest-local patches.
     PdfExtract,
     /// The pinned direct `quick-xml` parser after strict package admission.
     QuickXml,
@@ -131,7 +138,7 @@ pub enum DocumentParserProvenance {
 impl fmt::Display for DocumentParserProvenance {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::PdfExtract => "pdf-extract-0.12.0",
+            Self::PdfExtract => "pdf-extract-0.12.0+projectatlas",
             Self::QuickXml => "quick-xml-0.42.0",
         })
     }
@@ -218,6 +225,10 @@ pub enum DocumentLimit {
     EntryCount,
     /// Number of retained evidence facts.
     FactCount,
+    /// Nested XML elements in a document part.
+    NestingDepth,
+    /// Interpreter work consumed by the contained PDF parser.
+    ExecutionFuel,
 }
 
 impl fmt::Display for DocumentLimit {
@@ -230,6 +241,8 @@ impl fmt::Display for DocumentLimit {
             Self::MemoryBytes => "memory_bytes",
             Self::EntryCount => "entry_count",
             Self::FactCount => "fact_count",
+            Self::NestingDepth => "nesting_depth",
+            Self::ExecutionFuel => "execution_fuel",
         })
     }
 }
@@ -395,53 +408,11 @@ fn extract_pdf(
             },
         });
     }
-    let document = pdf_extract::Document::load_mem(bytes).map_err(|error| {
-        DocumentExtractionError::Malformed {
-            format: DocumentFormat::Pdf,
-            message: error.to_string(),
-        }
-    })?;
-    if document.is_encrypted() {
-        return Err(DocumentExtractionError::EncryptedPdf);
-    }
-    let mut expanded_bytes = 0usize;
-    for (index, (_, page_id)) in document.get_pages().iter().enumerate() {
-        check_parser_iteration(index, &mut || control.check(stage))?;
-        let page_content = document.get_page_content(*page_id).map_err(|error| {
-            DocumentExtractionError::Malformed {
-                format: DocumentFormat::Pdf,
-                message: error.to_string(),
-            }
-        })?;
-        expanded_bytes = expanded_bytes.saturating_add(page_content.len());
-        if expanded_bytes > MAX_DOCUMENT_EXPANDED_BYTES {
-            return Err(DocumentExtractionError::ResourceLimit {
-                limit: DocumentLimit::ExpandedBytes,
-                observed: expanded_bytes,
-                maximum: MAX_DOCUMENT_EXPANDED_BYTES,
-            });
-        }
-    }
-    check_memory_budget(bytes.len().saturating_add(expanded_bytes))?;
-    let page_count = document.get_pages().len();
-    if page_count > MAX_DOCUMENT_FACTS {
-        return Err(DocumentExtractionError::ResourceLimit {
-            limit: DocumentLimit::FactCount,
-            observed: page_count,
-            maximum: MAX_DOCUMENT_FACTS,
-        });
-    }
-    control.check(stage)?;
-    let pages = pdf_extract::extract_text_from_mem_by_pages(bytes).map_err(|error| {
-        DocumentExtractionError::Malformed {
-            format: DocumentFormat::Pdf,
-            message: error.to_string(),
-        }
-    })?;
+    let pages = pdf_runtime::extract_pages(bytes, control, stage)?;
     let mut text = String::new();
     let mut facts = Vec::new();
-    for (page_index, page) in pages.iter().enumerate() {
-        check_parser_iteration(page_index, &mut || control.check(stage))?;
+    for (page_number, page) in &pages {
+        control.check(stage)?;
         let mut page_offset = 0usize;
         for line in page.split('\n') {
             let source_start = page_offset;
@@ -475,7 +446,12 @@ fn extract_pdf(
             facts.push(DocumentFact {
                 text: line.to_owned(),
                 locator: DocumentLocator::Pdf {
-                    page: page_index + 1,
+                    page: usize::try_from(*page_number).map_err(|_error| {
+                        DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Pdf,
+                            message: "PDF page number exceeds host range".to_owned(),
+                        }
+                    })?,
                     text_start: source_start,
                     text_end: source_start.saturating_add(line.len()),
                 },
@@ -644,23 +620,46 @@ fn extract_docx(
                 message: format!("required part {DOCX_DOCUMENT_PART} is missing"),
             }
         })?;
-        document_part.read_to_end(&mut xml).map_err(|error| {
-            DocumentExtractionError::InvalidDocxPackage {
-                message: error.to_string(),
+        let mut chunk = [0_u8; 8192];
+        loop {
+            control.check(stage)?;
+            let read = document_part.read(&mut chunk).map_err(|error| {
+                DocumentExtractionError::InvalidDocxPackage {
+                    message: error.to_string(),
+                }
+            })?;
+            if read == 0 {
+                break;
             }
-        })?;
+            let observed = xml.len().saturating_add(read);
+            if observed > MAX_DOCUMENT_EXPANDED_BYTES {
+                return Err(DocumentExtractionError::ResourceLimit {
+                    limit: DocumentLimit::ExpandedBytes,
+                    observed,
+                    maximum: MAX_DOCUMENT_EXPANDED_BYTES,
+                });
+            }
+            xml.extend_from_slice(&chunk[..read]);
+        }
     }
+    drop(archive);
+    drop(names);
     control.check(stage)?;
-    check_memory_budget(bytes.len().saturating_add(xml.len().saturating_mul(2)))?;
-    let paragraphs = parse_docx_paragraphs(&xml, control, stage)?;
-    facts_from_docx(&paragraphs, control, stage)
-}
-
-/// Raw paragraph retained by the no-trim XML evidence pass.
-#[derive(Default)]
-struct RawDocxParagraph {
-    /// Runs in source order.
-    runs: Vec<RawDocxRun>,
+    // Retain the XML allocation plus space for parser staging, geometric string
+    // growth in the current run/output/facts, and the bounded fact vector.
+    // Archive metadata has already been dropped before these allocations overlap.
+    check_memory_budget(
+        bytes
+            .len()
+            .saturating_add(xml.capacity().saturating_mul(2))
+            .saturating_add(MAX_DOCUMENT_OUTPUT_BYTES.saturating_mul(4))
+            .saturating_add(
+                MAX_DOCUMENT_FACTS
+                    .saturating_mul(std::mem::size_of::<DocumentFact>())
+                    .saturating_mul(2),
+            ),
+    )?;
+    parse_docx(&xml, control, stage)
 }
 
 /// Raw run text retained without XML parser whitespace trimming.
@@ -671,16 +670,19 @@ struct RawDocxRun {
 }
 
 /// Parse body paragraphs and table paragraphs from the admitted XML part.
-fn parse_docx_paragraphs(
+fn parse_docx(
     xml: &[u8],
     control: &IndexWorkControl,
     stage: IndexWorkStage,
-) -> Result<Vec<RawDocxParagraph>, DocumentExtractionError> {
+) -> Result<DocumentFacts, DocumentExtractionError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
-    let mut buffer = Vec::new();
-    let mut paragraphs = Vec::new();
-    let mut paragraph: Option<RawDocxParagraph> = None;
+    reader.config_mut().expand_empty_elements = true;
+    let mut output = String::new();
+    let mut facts = Vec::new();
+    let mut paragraph_open = false;
+    let mut paragraph_number = 0usize;
+    let mut run_number = 0usize;
     let mut run: Option<RawDocxRun> = None;
     let mut in_text = false;
     let mut element_depth = 0usize;
@@ -690,7 +692,7 @@ fn parse_docx_paragraphs(
     loop {
         check_parser_iteration(event_index, &mut || control.check(stage))?;
         event_index = event_index.saturating_add(1);
-        match reader.read_event_into(&mut buffer) {
+        match reader.read_event() {
             Ok(Event::Start(event)) => {
                 let name = event.name();
                 if element_depth == 0 {
@@ -703,31 +705,43 @@ fn parse_docx_paragraphs(
                     root_seen = true;
                 }
                 element_depth = element_depth.saturating_add(1);
-                match name.as_ref() {
-                    "w:p" => paragraph = Some(RawDocxParagraph::default()),
-                    "w:r" => run = Some(RawDocxRun::default()),
-                    "w:t" => in_text = true,
-                    _ => {}
+                if element_depth > MAX_DOCX_XML_DEPTH {
+                    return Err(DocumentExtractionError::ResourceLimit {
+                        limit: DocumentLimit::NestingDepth,
+                        observed: element_depth,
+                        maximum: MAX_DOCX_XML_DEPTH,
+                    });
                 }
-            }
-            Ok(Event::Empty(event)) => {
-                let name = event.name();
-                if element_depth == 0 {
-                    if root_seen || name.as_ref() != "w:document" {
+                match name.as_ref() {
+                    "w:p" if !paragraph_open => {
+                        paragraph_open = true;
+                        paragraph_number += 1;
+                        run_number = 0;
+                        if !output.is_empty() {
+                            push_output_byte(&mut output, b'\n')?;
+                        }
+                    }
+                    "w:r" if paragraph_open && run.is_none() => {
+                        run_number += 1;
+                        run = Some(RawDocxRun::default());
+                    }
+                    "w:t" if run.is_some() && !in_text => in_text = true,
+                    "w:tab" | "w:br" | "w:cr" => {
+                        if let Some(run) = run.as_mut() {
+                            append_docx_run_text(
+                                run,
+                                if name.as_ref() == "w:tab" { "\t" } else { "\n" },
+                                output.len(),
+                            )?;
+                        }
+                    }
+                    "w:p" | "w:r" | "w:t" => {
                         return Err(DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
-                            message: "DOCX XML must contain one w:document root".to_owned(),
+                            message: "DOCX paragraph, run, or text nesting is invalid".to_owned(),
                         });
                     }
-                    root_seen = true;
-                    root_closed = true;
-                }
-                if let Some(run) = run.as_mut() {
-                    match name.as_ref() {
-                        "w:tab" => append_docx_run_text(run, "\t")?,
-                        "w:br" | "w:cr" => append_docx_run_text(run, "\n")?,
-                        _ => {}
-                    }
+                    _ => {}
                 }
             }
             Ok(Event::Text(event)) => {
@@ -738,13 +752,7 @@ fn parse_docx_paragraphs(
                             message: "text appeared outside a run".to_owned(),
                         });
                     };
-                    let text = unescape(event.as_ref())
-                        .map_err(|error| DocumentExtractionError::Malformed {
-                            format: DocumentFormat::Docx,
-                            message: error.to_string(),
-                        })?
-                        .into_owned();
-                    append_docx_run_text(run, &text)?;
+                    append_docx_run_text(run, event.as_ref(), output.len())?;
                 } else if !event
                     .as_ref()
                     .chars()
@@ -769,7 +777,7 @@ fn parse_docx_paragraphs(
                         message: "CDATA appeared outside a run".to_owned(),
                     });
                 };
-                append_docx_run_text(run, event.as_ref())?;
+                append_docx_run_text(run, event.as_ref(), output.len())?;
             }
             Ok(Event::GeneralRef(reference)) => {
                 if !in_text {
@@ -785,7 +793,7 @@ fn parse_docx_paragraphs(
                     });
                 };
                 let text = decode_docx_reference(&reference)?;
-                append_docx_run_text(run, &text)?;
+                append_docx_run_text(run, &text, output.len())?;
             }
             Ok(Event::DocType(_)) => {
                 return Err(DocumentExtractionError::Malformed {
@@ -806,16 +814,38 @@ fn parse_docx_paragraphs(
                     "w:t" => in_text = false,
                     "w:r" => {
                         if let Some(run) = run.take()
-                            && let Some(paragraph) = paragraph.as_mut()
+                            && !run.text.is_empty()
                         {
-                            paragraph.runs.push(run);
+                            if facts.len() >= MAX_DOCUMENT_FACTS {
+                                return Err(DocumentExtractionError::ResourceLimit {
+                                    limit: DocumentLimit::FactCount,
+                                    observed: facts.len() + 1,
+                                    maximum: MAX_DOCUMENT_FACTS,
+                                });
+                            }
+                            let end = run.text.len();
+                            let required = output.len().saturating_add(end);
+                            if required > MAX_DOCUMENT_OUTPUT_BYTES {
+                                return Err(DocumentExtractionError::ResourceLimit {
+                                    limit: DocumentLimit::OutputBytes,
+                                    observed: required,
+                                    maximum: MAX_DOCUMENT_OUTPUT_BYTES,
+                                });
+                            }
+                            output.push_str(&run.text);
+                            facts.push(DocumentFact {
+                                text: run.text,
+                                locator: DocumentLocator::Docx {
+                                    part: DOCX_DOCUMENT_PART,
+                                    paragraph: paragraph_number,
+                                    run: run_number,
+                                    text_start: 0,
+                                    text_end: end,
+                                },
+                            });
                         }
                     }
-                    "w:p" => {
-                        if let Some(paragraph) = paragraph.take() {
-                            paragraphs.push(paragraph);
-                        }
-                    }
+                    "w:p" => paragraph_open = false,
                     _ => {}
                 }
                 element_depth -= 1;
@@ -832,12 +862,11 @@ fn parse_docx_paragraphs(
             }
             _ => {}
         }
-        buffer.clear();
     }
     if !root_seen
         || !root_closed
         || element_depth != 0
-        || paragraph.is_some()
+        || paragraph_open
         || run.is_some()
         || in_text
     {
@@ -846,12 +875,24 @@ fn parse_docx_paragraphs(
             message: "DOCX XML ended before all elements were closed".to_owned(),
         });
     }
-    Ok(paragraphs)
+    Ok(DocumentFacts {
+        format: DocumentFormat::Docx,
+        text: output,
+        facts,
+        completeness: DocumentCompleteness::Complete,
+        provenance: DocumentParserProvenance::QuickXml,
+    })
 }
 
 /// Append decoded XML text while bounding one retained run before publication.
-fn append_docx_run_text(run: &mut RawDocxRun, text: &str) -> Result<(), DocumentExtractionError> {
-    let required = run.text.len().saturating_add(text.len());
+fn append_docx_run_text(
+    run: &mut RawDocxRun,
+    text: &str,
+    published_bytes: usize,
+) -> Result<(), DocumentExtractionError> {
+    let required = published_bytes
+        .saturating_add(run.text.len())
+        .saturating_add(text.len());
     if required > MAX_DOCUMENT_OUTPUT_BYTES {
         return Err(DocumentExtractionError::ResourceLimit {
             limit: DocumentLimit::OutputBytes,
@@ -893,68 +934,6 @@ fn decode_docx_reference(reference: &BytesRef<'_>) -> Result<String, DocumentExt
             message: "DOCX XML contained an unsupported entity reference".to_owned(),
         }),
     }
-}
-
-/// Convert raw DOCX paragraphs to bounded text and exact part/run locators.
-fn facts_from_docx(
-    paragraphs: &[RawDocxParagraph],
-    control: &IndexWorkControl,
-    stage: IndexWorkStage,
-) -> Result<DocumentFacts, DocumentExtractionError> {
-    let mut text = String::new();
-    let mut facts = Vec::new();
-    let mut paragraph_number = 0usize;
-    let mut append_paragraph =
-        |paragraph: &RawDocxParagraph| -> Result<(), DocumentExtractionError> {
-            paragraph_number = paragraph_number.saturating_add(1);
-            if !text.is_empty() {
-                push_output_byte(&mut text, b'\n')?;
-            }
-            for (run_index, run) in paragraph.runs.iter().enumerate() {
-                if run.text.is_empty() {
-                    continue;
-                }
-                if facts.len() >= MAX_DOCUMENT_FACTS {
-                    return Err(DocumentExtractionError::ResourceLimit {
-                        limit: DocumentLimit::FactCount,
-                        observed: facts.len().saturating_add(1),
-                        maximum: MAX_DOCUMENT_FACTS,
-                    });
-                }
-                let end = run.text.len();
-                let required = text.len().saturating_add(end);
-                if required > MAX_DOCUMENT_OUTPUT_BYTES {
-                    return Err(DocumentExtractionError::ResourceLimit {
-                        limit: DocumentLimit::OutputBytes,
-                        observed: required,
-                        maximum: MAX_DOCUMENT_OUTPUT_BYTES,
-                    });
-                }
-                text.push_str(&run.text);
-                facts.push(DocumentFact {
-                    text: run.text.clone(),
-                    locator: DocumentLocator::Docx {
-                        part: DOCX_DOCUMENT_PART,
-                        paragraph: paragraph_number,
-                        run: run_index + 1,
-                        text_start: 0,
-                        text_end: end,
-                    },
-                });
-            }
-            Ok(())
-        };
-    for paragraph in paragraphs {
-        control.check(stage)?;
-        append_paragraph(paragraph)?;
-    }
-    Ok(DocumentFacts {
-        format: DocumentFormat::Docx,
-        text,
-        facts,
-        completeness: DocumentCompleteness::Complete,
-        provenance: DocumentParserProvenance::QuickXml,
-    })
 }
 
 #[cfg(test)]
@@ -1089,7 +1068,7 @@ mod tests {
         ));
     }
 
-    fn minimal_pdf() -> Vec<u8> {
+    pub(super) fn minimal_pdf() -> Vec<u8> {
         let objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".as_slice(),
@@ -1218,6 +1197,353 @@ mod tests {
                 text_end: 10
             }
         ));
+    }
+
+    #[test]
+    fn pdf_missing_or_unsupported_page_stream_is_not_silently_omitted() {
+        for missing in [true, false] {
+            let mut document = lopdf::Document::load_mem(&multi_page_pdf()).expect("fixture PDF");
+            if missing {
+                document.objects.remove(&(7, 0));
+            } else {
+                document
+                    .objects
+                    .get_mut(&(7, 0))
+                    .expect("second page stream")
+                    .as_stream_mut()
+                    .expect("stream object")
+                    .dict
+                    .set("Filter", "UnsupportedDecode");
+            }
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            assert!(
+                matches!(
+                    extract_document_text_controlled(&bytes, "guide.pdf", None, &control()),
+                    Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Pdf,
+                        ..
+                    })
+                ),
+                "missing={missing} must fail instead of publishing incomplete text"
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_missing_page_tree_child_never_publishes_a_complete_prefix() {
+        for declared_count in [1, 2] {
+            let mut document = lopdf::Document::load_mem(&multi_page_pdf()).expect("fixture PDF");
+            document.objects.remove(&(6, 0));
+            document
+                .get_object_mut((2, 0))
+                .expect("page tree")
+                .as_dict_mut()
+                .expect("page tree dictionary")
+                .set("Count", declared_count);
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+            assert!(
+                matches!(
+                    result,
+                    Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Pdf,
+                        ..
+                    })
+                ),
+                "declared_count={declared_count}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_form_content_keeps_text_and_page_evidence() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let mut form = lopdf::Dictionary::new();
+        form.set("Type", "XObject");
+        form.set("Subtype", "Form");
+        form.set("BBox", vec![0.into(), 0.into(), 612.into(), 792.into()]);
+        let resources = document
+            .get_dictionary((3, 0))
+            .expect("page")
+            .get(b"Resources")
+            .expect("resources")
+            .clone();
+        form.set("Resources", resources);
+        let form_id = document.add_object(lopdf::Stream::new(
+            form,
+            b"BT /F1 12 Tf 72 700 Td (Form Text Marker) Tj ET".to_vec(),
+        ));
+        let mut xobjects = lopdf::Dictionary::new();
+        xobjects.set("Fm1", form_id);
+        document
+            .get_object_mut((3, 0))
+            .expect("page")
+            .as_dict_mut()
+            .expect("page dictionary")
+            .get_mut(b"Resources")
+            .expect("resources")
+            .as_dict_mut()
+            .expect("resource dictionary")
+            .set("XObject", xobjects);
+        let stream = document
+            .get_object_mut((4, 0))
+            .expect("page stream")
+            .as_stream_mut()
+            .expect("stream");
+        let mut content = stream.content.clone();
+        content.extend_from_slice(b"\n/Fm1 Do\n");
+        stream.set_content(content);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+            .expect("valid Form content");
+        assert!(facts.text.contains("Hello PDF"));
+        assert!(facts.text.contains("Form Text Marker"), "{}", facts.text);
+        assert!(
+            facts
+                .facts
+                .iter()
+                .any(|fact| fact.text.contains("Form Text Marker")
+                    && matches!(fact.locator, DocumentLocator::Pdf { page: 1, .. }))
+        );
+    }
+
+    fn pdf_with_xobject(xobject: lopdf::Stream) -> Vec<u8> {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let object = document.add_object(xobject);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Object1", object);
+        document
+            .get_object_mut((3, 0))
+            .expect("page")
+            .as_dict_mut()
+            .expect("page dictionary")
+            .get_mut(b"Resources")
+            .expect("resources")
+            .as_dict_mut()
+            .expect("resource dictionary")
+            .set("XObject", resources);
+        let stream = document
+            .get_object_mut((4, 0))
+            .expect("page content")
+            .as_stream_mut()
+            .expect("content stream");
+        let mut content = stream.content.clone();
+        content.extend_from_slice(b"\n/Object1 Do\n");
+        stream.set_content(content);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        bytes
+    }
+
+    #[test]
+    fn recursive_pdf_form_stops_without_publishing_page_text() {
+        let mut form = lopdf::Dictionary::new();
+        form.set("Type", "XObject");
+        form.set("Subtype", "Form");
+        form.set("BBox", vec![0.into(), 0.into(), 612.into(), 792.into()]);
+        let bytes = pdf_with_xobject(lopdf::Stream::new(form, b"/Object1 Do".to_vec()));
+        let mut document = lopdf::Document::load_mem(&bytes).expect("fixture PDF");
+        let resources = document
+            .get_dictionary((3, 0))
+            .expect("page dictionary")
+            .get(b"Resources")
+            .expect("page resources")
+            .clone();
+        let id = resources
+            .as_dict()
+            .expect("resource dictionary")
+            .get(b"XObject")
+            .expect("XObject resources")
+            .as_dict()
+            .expect("XObject dictionary")
+            .get(b"Object1")
+            .expect("Form reference")
+            .as_reference()
+            .expect("indirect Form");
+        document
+            .get_object_mut(id)
+            .expect("Form object")
+            .as_stream_mut()
+            .expect("Form stream")
+            .dict
+            .set("Resources", resources);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+        assert!(
+            matches!(
+                result,
+                Err(DocumentExtractionError::ResourceLimit {
+                    limit: DocumentLimit::MemoryBytes | DocumentLimit::ExecutionFuel,
+                    ..
+                } | DocumentExtractionError::Work(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded { .. }
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn pdf_image_pixels_do_not_replace_or_invent_page_text() {
+        let mut image = lopdf::Dictionary::new();
+        image.set("Type", "XObject");
+        image.set("Subtype", "Image");
+        image.set("Width", 1);
+        image.set("Height", 1);
+        image.set("ColorSpace", "DeviceRGB");
+        image.set("BitsPerComponent", 8);
+        let bytes = pdf_with_xobject(lopdf::Stream::new(image, vec![255, 0, 0]));
+        let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+            .expect("text and image PDF");
+        assert_eq!(facts.text, "Hello PDF");
+    }
+
+    #[test]
+    fn pdf_form_font_names_do_not_reuse_page_font_encodings() {
+        let mut encoding = lopdf::Dictionary::new();
+        encoding.set("Type", "Encoding");
+        encoding.set("BaseEncoding", "WinAnsiEncoding");
+        encoding.set(
+            "Differences",
+            vec![65.into(), lopdf::Object::Name(b"Z".to_vec())],
+        );
+        let mut font = lopdf::Dictionary::new();
+        font.set("Type", "Font");
+        font.set("Subtype", "Type1");
+        font.set("BaseFont", "Helvetica");
+        font.set("Encoding", encoding);
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", font);
+        let mut resources = lopdf::Dictionary::new();
+        resources.set("Font", fonts);
+        let mut form = lopdf::Dictionary::new();
+        form.set("Type", "XObject");
+        form.set("Subtype", "Form");
+        form.set("BBox", vec![0.into(), 0.into(), 612.into(), 792.into()]);
+        form.set("Resources", resources);
+        let bytes = pdf_with_xobject(lopdf::Stream::new(
+            form,
+            b"BT /F1 12 Tf 72 700 Td (A) Tj ET".to_vec(),
+        ));
+        let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+            .expect("scoped Form font");
+        assert!(facts.text.contains("Hello PDF"));
+        assert!(facts.text.contains('Z'), "{}", facts.text);
+        assert!(!facts.text.contains('A'), "{}", facts.text);
+    }
+
+    #[test]
+    fn pdf_cid_text_requires_every_character_to_decode() {
+        for (codes, accepted) in [("0001", true), ("00010002", false), ("000100", false)] {
+            let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+            let cmap = document.add_object(lopdf::Stream::new(
+                lopdf::Dictionary::new(),
+                br"/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Fixture def /CMapType 2 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 beginbfchar <0001> <005A> endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end"
+                    .to_vec(),
+            ));
+            let mut system = lopdf::Dictionary::new();
+            system.set("Registry", lopdf::Object::string_literal("Adobe"));
+            system.set("Ordering", lopdf::Object::string_literal("Identity"));
+            system.set("Supplement", 0);
+            let mut descendant = lopdf::Dictionary::new();
+            descendant.set("Type", "Font");
+            descendant.set("Subtype", "CIDFontType2");
+            descendant.set("BaseFont", "Fixture");
+            descendant.set("CIDSystemInfo", system);
+            descendant.set("FontDescriptor", lopdf::Dictionary::new());
+            let descendant = document.add_object(descendant);
+            let mut font = lopdf::Dictionary::new();
+            font.set("Type", "Font");
+            font.set("Subtype", "Type0");
+            font.set("BaseFont", "Fixture");
+            font.set("Encoding", "Identity-H");
+            font.set(
+                "DescendantFonts",
+                vec![lopdf::Object::Reference(descendant)],
+            );
+            font.set("ToUnicode", cmap);
+            document.objects.insert((5, 0), font.into());
+            document
+                .get_object_mut((4, 0))
+                .expect("content")
+                .as_stream_mut()
+                .expect("stream")
+                .set_content(format!("BT /F1 12 Tf 72 720 Td <{codes}> Tj ET").into_bytes());
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+            if accepted {
+                assert_eq!(result.expect("mapped CID").text, "Z");
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Pdf,
+                            ..
+                        })
+                    ),
+                    "{codes}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pdf_late_malformed_page_never_publishes_a_complete_prefix() {
+        let mut document = lopdf::Document::load_mem(&multi_page_pdf()).expect("fixture PDF");
+        document.objects.insert(
+            (7, 0),
+            lopdf::Stream::new(lopdf::Dictionary::new(), b"BT (unterminated".to_vec()).into(),
+        );
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        assert!(matches!(
+            extract_document_text_controlled(&bytes, "guide.pdf", None, &control()),
+            Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Pdf,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn pdf_decompression_bomb_stops_at_the_first_host_resource_limit() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let mut stream = lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            vec![b' '; MAX_DOCUMENT_EXPANDED_BYTES + 1],
+        );
+        stream.compress().expect("fixture compression");
+        document.objects.insert((4, 0), stream.into());
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        assert!(bytes.len() < MAX_DOCUMENT_COMPRESSED_BYTES);
+        let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+        assert!(
+            matches!(
+                &result,
+                Err(DocumentExtractionError::ResourceLimit {
+                    limit: DocumentLimit::MemoryBytes
+                        | DocumentLimit::ExpandedBytes
+                        | DocumentLimit::ExecutionFuel,
+                    ..
+                } | DocumentExtractionError::Work(
+                    projectatlas_core::IndexWorkFailure::DeadlineExceeded { .. }
+                ))
+            ),
+            "actual refusal: {result:?}"
+        );
     }
 
     #[test]
@@ -1417,6 +1743,101 @@ mod tests {
                 observed,
                 maximum: MAX_DOCUMENT_EXPANDED_BYTES
             } if observed == MAX_DOCUMENT_EXPANDED_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn docx_actual_expansion_is_bounded_despite_forged_catalog_size() {
+        let mut bytes = docx_archive(
+            &vec![b'x'; MAX_DOCUMENT_EXPANDED_BYTES + 8192],
+            CompressionMethod::Deflated,
+        );
+        for index in 0..bytes.len().saturating_sub(4) {
+            let size_offset = match &bytes[index..index + 4] {
+                b"PK\x03\x04" => index + 22,
+                b"PK\x01\x02" => index + 24,
+                _ => continue,
+            };
+            bytes[size_offset..size_offset + 4].copy_from_slice(&1_u32.to_le_bytes());
+        }
+        let error = extract_document_text_controlled(&bytes, "guide.docx", None, &control())
+            .expect_err("actual decompression must be bounded independently of ZIP metadata");
+        assert!(matches!(
+            error,
+            DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::ExpandedBytes,
+                observed,
+                maximum: MAX_DOCUMENT_EXPANDED_BYTES,
+            } if observed > MAX_DOCUMENT_EXPANDED_BYTES
+        ));
+    }
+
+    #[test]
+    fn docx_empty_elements_preserve_paragraph_and_run_ordinals() {
+        let xml = b"<w:document><w:body><w:p/><w:p><w:r/><w:r><w:t>A</w:t><w:tab/><w:t/><w:t>B</w:t></w:r></w:p></w:body></w:document>";
+        let facts = parse_docx(xml, &control(), IndexWorkStage::SymbolParsing)
+            .expect("empty elements are valid document structure");
+        assert_eq!(facts.text, "A\tB");
+        assert_eq!(facts.facts.len(), 1);
+        assert!(matches!(
+            facts.facts[0].locator,
+            DocumentLocator::Docx {
+                paragraph: 2,
+                run: 2,
+                text_start: 0,
+                text_end: 3,
+                ..
+            }
+        ));
+        let expanded = String::from_utf8(xml.to_vec())
+            .expect("UTF-8 fixture")
+            .replace("<w:p/>", "<w:p></w:p>")
+            .replace("<w:r/>", "<w:r></w:r>")
+            .replace("<w:t/>", "<w:t></w:t>")
+            .replace("<w:tab/>", "<w:tab></w:tab>");
+        let expanded_facts = parse_docx(
+            expanded.as_bytes(),
+            &control(),
+            IndexWorkStage::SymbolParsing,
+        )
+        .expect("equivalent explicit empty elements");
+        assert_eq!(facts, expanded_facts);
+    }
+
+    #[test]
+    fn docx_xml_nesting_is_bounded() {
+        let xml = format!(
+            "<w:document>{}<w:body/>{}</w:document>",
+            "<w:container>".repeat(MAX_DOCX_XML_DEPTH),
+            "</w:container>".repeat(MAX_DOCX_XML_DEPTH),
+        );
+        let error = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::SymbolParsing)
+            .expect_err("XML nesting must be bounded");
+        assert!(matches!(
+            error,
+            DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::NestingDepth,
+                observed,
+                maximum: MAX_DOCX_XML_DEPTH,
+            } if observed == MAX_DOCX_XML_DEPTH + 1
+        ));
+    }
+
+    #[test]
+    fn docx_aggregate_output_is_bounded_before_reading_remaining_xml() {
+        let run = "x".repeat(MAX_DOCUMENT_OUTPUT_BYTES / 2 + 1);
+        let xml = format!(
+            "<w:document><w:body><w:p><w:r><w:t>{run}</w:t></w:r><w:r><w:t>{run}</w:t></w:r><malformed"
+        );
+        let error = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::SymbolParsing)
+            .expect_err("aggregate output must fail before the later malformed XML");
+        assert!(matches!(
+            error,
+            DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::OutputBytes,
+                observed,
+                maximum: MAX_DOCUMENT_OUTPUT_BYTES,
+            } if observed == MAX_DOCUMENT_OUTPUT_BYTES + 2
         ));
     }
 

@@ -90,6 +90,8 @@ pub enum IndexWorkResource {
     OutputBytes,
     /// Parallel workers used by one indexing operation.
     Workers,
+    /// Interpreter instructions admitted for one contained parser execution.
+    ParserFuel,
 }
 
 impl fmt::Display for IndexWorkResource {
@@ -105,6 +107,7 @@ impl fmt::Display for IndexWorkResource {
             Self::RelationRows => "relation_rows",
             Self::OutputBytes => "output_bytes",
             Self::Workers => "workers",
+            Self::ParserFuel => "parser_fuel",
         })
     }
 }

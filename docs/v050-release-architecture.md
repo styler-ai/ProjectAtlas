@@ -13,13 +13,25 @@ flowchart LR
     Acceptance --> Gates[Five ordered review gates]
     Sync --> Contract
     Gates --> Contract
-    PR[PR candidate branch] --> Owner[One open owner against live state]
+    PR[Hosted PR candidate] --> Owner[One open owner against live state]
     PR --> Base[Unrelated open slices against accepted PR base]
+    Push[Git pre-push ref-update records] --> MainTarget["Exactly one refs/heads/main target"]
+    Push --> CandidateTarget["Exactly one non-main refs/heads/* target"]
+    Push --> InvalidTarget["Zero or multiple records; deletions; malformed or unsupported targets"]
+    MainTarget --> Global[Global live-state validation]
+    CandidateTarget --> CandidateObject["Non-zero local OID equals validated HEAD"]
+    CandidateObject --> CandidateClean["No tracked, staged, or non-ignored untracked changes; no hidden flags; issue map, mapped tasks, and linked docs are regular candidate-tree files read from their blobs with replacement refs disabled"]
+    CandidateClean --> Candidate[Local candidate branch]
+    Candidate --> CandidateOwner["Each post-base subject has one same-owner (#NNN) reference"]
+    Candidate --> CandidateBase["Unrelated open slices against accepted origin/main base"]
     Owner --> Contract
     Base --> Contract
+    CandidateOwner --> Contract
+    CandidateBase --> Contract
     Closed[Already CLOSED mapped issue] --> Inert[Native closed state only; no body migration or validation]
     Reopened[Reopened mapped issue] --> Implementation
     Hidden[Hidden, duplicate, or legacy open fields] --> Reject[Fail closed]
+    InvalidTarget --> Reject
     Contract --> Ready[Truthful incremental or closure-ready state]
 ```
 
@@ -138,12 +150,24 @@ sequenceDiagram
   participant H as Real host CLI
   participant M as Generated ProjectAtlas MCP config
   participant R as Verified runtime
+  participant L as Isolated loopback model endpoint
   I->>C: write host-specific config and plugin/skill state
   H->>C: parse/list configuration through native reader
-  H->>M: consume generated MCP entry
-  H->>R: start exact installed runtime
-  R-->>H: initialize + tools/list + bounded tool call
-  H-->>I: isolated success or typed reader/startup failure
+  H->>M: consume generated MCP entry from native config
+  H->>R: launch generated runtime with exact root/database/config/version
+  R-->>H: initialize + tools/list
+  alt OpenCode native title preflight
+    H->>L: no-tools title request
+    L-->>H: bounded title response
+  end
+  H->>L: model request with ProjectAtlas tool schema
+  L-->>H: exactly one tool_use/tool_call
+  H->>R: invoke atlas_slice through the launched MCP session
+  R-->>H: source evidence for the isolated fixture
+  H->>L: matching tool_result with the source marker
+  L-->>H: final bounded marker and end_turn/[DONE]
+  H-->>I: host output plus causal isolated source evidence
+  Note over H,L: Synthetic key, localhost only, isolated roots, no ambient credentials
 ```
 
 ## Released-main database baseline decision
@@ -180,22 +204,38 @@ flowchart LR
     file[Repository file bytes] --> admit{PDF or DOCX magic and policy?}
     admit -->|no| unsupported[Typed unsupported coverage]
     admit -->|yes| limits[Compressed, expanded, time, memory, entry, recursion limits]
-    limits --> parser[Approved in-process Rust parser]
-    parser --> evidence[Text plus exact format locator and provenance]
+    limits --> format{Admitted format}
+    format -->|PDF| pdf[Fixed WASI guest in-process: memory and fuel ceilings]
+    format -->|DOCX| docx[Bounded ZIP read and streaming XML]
+    pdf --> evidence[Text plus exact format locator and provenance]
+    docx --> evidence
+    pdf -->|malformed, limited or canceled| bounded
+    docx -->|malformed, limited or canceled| bounded
     evidence --> publish[(Atomic indexed-text and graph publication)]
     publish --> navigate[Search, summary, graph, exact evidence]
     limits -->|exceeded or canceled| bounded[Typed bounded failure; no complete claim]
 ```
 
-The document boundary pins `pdf-extract` `0.12.0`, `quick-xml` `0.42.0`, and
-`zip` `0.6.6` with default features disabled and only `deflate` enabled.
+The document boundary pins a fixed `pdf-extract` `0.12.0+projectatlas` guest
+with `lopdf` `0.44.0`, the `wasmi`/`wasmi_core` `2.0.0` host, `quick-xml`
+`0.42.0`, and `zip` `0.6.6` (ZIP defaults disabled, only `deflate` enabled).
+The PDF guest is embedded build-owned code with a verified locked rebuild;
+callers cannot select modules. Each parse has 64 MiB linear memory, a 1 MiB
+interpreter value stack, 256 call depth, 500 million total instruction fuel,
+and a ten-second ceiling that respects an earlier caller deadline. Fuel
+suspensions check cancellation; real allocation denial remains a typed limit.
+The host supplies bounded entropy and an empty environment, with no filesystem,
+network, clock, or process capabilities. Page-tree validation and bounded
+stream decoding precede exact-page formatting, including Form text and scoped
+fonts. Image pixels remain opaque. Local dependency patches and retained
+attribution are documented in `packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md`.
 PDF admission requires a `%PDF-` header and extracts only page text; DOCX
 admission requires a ZIP header, admits only stored or DEFLATE entries, rejects
 unsafe, duplicate, encrypted, or otherwise unsupported package input, and passes
 only `word/document.xml` to the parser. Each result carries a page/text-span or
 part/paragraph/run/text-span locator plus parser provenance and a complete
 coverage marker. The boundary caps input/compressed package bytes at 8 MiB,
-expanded package bytes at 32 MiB, the source/parser staging envelope at 96 MiB,
+expanded package bytes at 32 MiB, the native source/parser staging envelope at 96 MiB,
 retained output at 4 MiB, and package entries and evidence facts at 256 and
 4,096 respectively; embedded-document recursion is limited to zero (the outer
 document depth is one). It never executes macros,
@@ -204,7 +244,18 @@ by the existing `file_texts` FTS projection and locator-bearing blocks by the
 existing graph publication transaction; no document-specific SQLite schema is
 needed. Any malformed, mismatched, encrypted, over-limit, canceled, or
 source-changed operation fails before publication, preserving the last complete
-generation.
+generation. The staging envelope excludes shared interpreter translation and allocator
+overhead; process RSS is measured separately in platform proof. `.github/scripts/measure-bounded-documents.py`
+scans three fresh isolated repositories, each with 64 sixteen-page PDFs and 64
+sixty-four-paragraph DOCX files, using the optimized native CLI. It checks the
+exact indexed file count and records CPU time, peak RSS, wall time, database and
+output bytes, and native I/O counters. Windows reports process read/write
+operations and transferred bytes; Linux/macOS report `wait4` filesystem block
+operations, without claiming byte-equivalence across platforms. CI retains each
+platform's report with the measured binary SHA-256. Per-run acceptance ceilings
+are 120 seconds wall time, 90 seconds CPU, 768 MiB peak RSS, 64 MiB database,
+1 MiB captured output, and two million native I/O operations. These are fixed-case
+regression ceilings; hostile per-document limits remain enforced by the parser.
 
 ## Invalid graph identity admission
 
@@ -233,14 +284,26 @@ rows and valid graph rows at the previous complete generation.
 
 ## Built-in PHP parser and graph publication
 
+PHP call matching uses case-insensitive names and proven namespace/type ownership, including known global callers and explicit `namespace\` references. Qualified names expand against the known caller namespace when namespace imports cannot alias them. A namespace-use symbol introduces alias uncertainty for an ordinary unrooted call when it occurs on an earlier line within the same named namespace declaration block, or no later in parser relation order on a same line whose import symbols and relations pair losslessly. A simple same-line import after the caller does not suppress that earlier call. Grouped or multi-clause same-line imports with unmatched symbol/relation counts remain conservative. An import in an earlier reopened block does not suppress a later block's proven local call. Tied line-only boundaries and omitted namespace declarations remain conservative. Include/require and type-owned trait-use facts do not introduce alias uncertainty, including when unrelated dynamic code makes coverage partial. Include relations retain bounded source syntax so the shared import kind cannot be mistaken for a namespace alias. Missing namespace-import symbols and unknown or legacy import contexts remain conservative. `self::`, fully qualified, and explicit namespace-relative calls retain their independent scope checks. Dynamic dispatch and unproven scopes remain unresolved. Namespace identities beyond the parser's identity bound, or malformed semicolon namespaces, omit dependent facts and report partial coverage instead of publishing global declarations. A declaration rejected by identity or symbol-count limits admits no descendant symbols or relations; admitted siblings remain available and coverage is partial.
+
+A proven outer-scope `__halt_compiler();` directive ends PHP traversal; the remaining bytes are embedded data and publish no declarations or calls.
+
+Anonymous function and arrow-function bodies have no supported stable owner, so their subtrees are omitted with partial coverage instead of attributing calls to an enclosing named function. Grouped imports bound the prefix and combined target before allocation; omitted targets mark coverage partial while admitted imports remain available. If no complete target fits, a bounded grammar-owned alias or terminal binding remains an Import symbol, preserving alias uncertainty without fabricating a target relation. Short-tag code whose first identifier starts with `xml` remains PHP; only the XML declaration prefix is excluded as a prolog.
+
+Call-source ownership and target scope share one lookup that prefers a unique line-containing PHP callable over unrelated same-name types or imports, then falls back to a namespace owner. Unknown or ambiguous callers retain file ownership, including namespace/callable collisions on a callable boundary line where line-only facts cannot prove the owner. Semicolon namespace declarations still own their later top-level calls. Reopened blocks with the same namespace name share one logical namespace owner for top-level calls. Trait-owned `self::` targets remain unresolved because the consuming class can override the trait member and trait composition is not modeled.
+
+Non-PHP source provenance records the parser that produced the graph, including fallback. PHP retains Tree-sitter source provenance when bounded or unsupported behavior makes its grammar-produced facts partial fallback evidence. If an erroneous PHP parse yields no facts and the generic extractor rescues declarations, both source and fact provenance record fallback.
+
+Scoped calls match methods and ordinary calls match functions; a namespace and class sharing a name cannot substitute one callable kind for the other. Named PHP function and type declarations belong to their active namespace even inside a function or method. Their declaration identity does not imply that conditional runtime execution has already made them available.
+
 ```mermaid
 flowchart LR
     php[.php bytes] --> registry[Language capability registry]
-    registry --> grammar[Pinned built-in tree-sitter-php]
+    registry --> grammar[Pinned built-in tree-sitter-php 0.24.2]
     grammar --> mapping[PHP node-to-symbol mapping]
-    mapping --> exact[Exact symbols, parents, spans, provenance]
-    mapping --> relations[Conservative namespace, import, include, call relations]
-    mapping --> dynamic[Typed partial coverage for dynamic constructs]
+    mapping --> exact[Admitted symbols, parents, spans, source/fact provenance]
+    mapping --> relations[Conservative relations from admitted declarations]
+    mapping --> dynamic[Typed partial coverage: dynamic or bounded facts]
     exact --> published_graph[(Existing graph publication)]
     relations --> published_graph
     dynamic --> published_graph
@@ -360,7 +423,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    support[Shared process, repo, JSON, platform, package support]
+    support[Shared test support owner: crates/projectatlas-cli/tests/support/mod.rs]
     lifecycle[Lifecycle and database contracts] --> support
     delivery[Installer and release contracts] --> support
     navigation[CLI, MCP, graph, document, language contracts] --> support
@@ -388,7 +451,16 @@ flowchart TB
     poll -->|published before same deadline| validate{Exact identity valid before same deadline?}
     validate -->|no| fail
     validate -->|yes| installer[Run existing installer handoff assertions]
-    installer --> cleanup[Owned parent and child cleanup]
+    installer --> cleanup[Attempt exact child stop]
+    fail --> cleanup
+    cleanup -->|stop helper stalls or fails| fallback[One bounded exact-identity cleanup fallback]
+    fallback -->|child stopped or already gone| reap[Kill and reap owned parent]
+    fallback -->|fallback stalls or fails| final[One bounded helper-free native exact-identity stop]
+    final -->|child stopped or already gone| reap
+    final -->|cleanup cannot prove ownership or stop child| reap
+    reap -->|all cleanup complete| done[Owned cleanup complete]
+    reap -->|any cleanup failure| diagnostic[Fail closed with cleanup diagnostic]
+    cleanup -->|child stopped| reap
 ```
 
 ## Production module ownership decision
@@ -444,18 +516,39 @@ flowchart LR
 
 ## atlas shim lifecycle and command compatibility
 
+Forwarder ownership comes from the exact generated body, provenance, and private capability state, so retirement remains possible when its target is missing or cannot execute. New publication verifies the destination runtime separately. Lifecycle locking is still mandatory: macOS can use another discoverable verified ProjectAtlas runtime as its native lock helper; if none is available, uninstall preserves the owned artifacts and asks the user to restore a runtime and retry.
+
+A failed final runtime check reports unsuccessful installation while retaining the complete authenticated forwarder pair for repair or uninstall. Windows compares runtime identity independently of letter case, then preserves the authenticated record's spelling for exact ownership-content checks.
+
 ```mermaid
 flowchart TB
-  installer[Installer] --> collision{Existing atlas command?}
+  installer[Installer] --> identity[Canonical verified runtime identity]
+  identity --> locks[Discover destination plus effective candidate; acquire at most two canonical locks ascending under one deadline; reclassify while held; release reverse]
+  locks --> collision{Existing atlas command?}
   collision -->|unmanaged| reject[Typed collision; no overwrite]
-  collision -->|managed| shim[Atomic managed shim install]
-  shim --> discover[PATH discovery]
-  discover --> aliases[atlas top-level command aliases]
-  aliases --> canonical[Canonical projectatlas command handlers]
+  collision -->|owned current| stage[Stage shim and provenance]
+  collision -->|owned prior target| stage
+  collision -->|absent| stage
+  stage --> state[Publish private capability state]
+  state --> provenance{Publish provenance no-clobber succeeds?}
+  provenance -->|no| state_cleanup[Quarantine and verify newly owned state]
+  state_cleanup -->|retired| reject_publication[Fail; preserve foreign provenance and unrelated bytes]
+  state_cleanup -->|retirement fails| retained[Retain exact state; report cleanup failure]
+  retained --> refuse[Later install refuses unretired orphan state]
+  refuse --> recover[Proven-owned retirement enables retry]
+  provenance -->|yes| forwarder{Publish shim no-clobber succeeds?}
+  forwarder -->|no| pair_cleanup[Retire only newly owned provenance and state]
+  pair_cleanup -->|retired| reject_publication
+  pair_cleanup -->|state retirement fails| retained
+  forwarder -->|yes| shim[Publish verified managed shim]
+  shim --> migrate[Quarantine and verify prior owned pair before identity-safe retirement]
+  migrate --> discover[PATH discovery; preserve concurrent foreign replacements]
+  discover --> aliases[Complete argv forwarded unchanged]
+  aliases --> canonical[Canonical handlers including health report]
   aliases --> resolve[atlas health resolve]
   aliases --> legacy[atlas health-check remains compatible]
   shim --> uninstall[Managed uninstall/repair]
-  uninstall --> clean[Remove only managed artifact]
+  uninstall --> clean[Remove only managed pair and private state]
 ```
 
 ## v0.5.0 candidate, readback, remediation, and stable promotion

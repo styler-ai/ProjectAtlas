@@ -332,13 +332,15 @@ function Invoke-Checked {
         [string[]]$Arguments,
 
         [Parameter(Mandatory = $true)]
-        [string]$Role
+        [string]$Role,
+
+        [switch]$ReturnReceipt
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $Executable
     $startInfo.UseShellExecute = $false
-    $captureDiagnostic = $Target -eq "x86_64-pc-windows-msvc"
+    $captureDiagnostic = $ReturnReceipt -or $Target -eq "x86_64-pc-windows-msvc"
     $startInfo.RedirectStandardOutput = $captureDiagnostic
     $startInfo.RedirectStandardError = $captureDiagnostic
     foreach ($argument in $Arguments) {
@@ -416,6 +418,14 @@ function Invoke-Checked {
         $commandExitCode = $process.ExitCode
     }
     catch {
+        if ($ReturnReceipt) {
+            return [pscustomobject]@{
+                role = $Role
+                exit_code = 1
+                stdout = ""
+                stderr = $_.Exception.Message
+            }
+        }
         try {
             Write-ConstructionStatus `
                 -Stage $script:constructionStage `
@@ -430,6 +440,15 @@ function Invoke-Checked {
     }
     finally {
         $process.Dispose()
+    }
+    if ($ReturnReceipt) {
+        $ascii = [System.Text.Encoding]::ASCII
+        return [pscustomobject]@{
+            role = $Role
+            exit_code = $commandExitCode
+            stdout = $ascii.GetString($stdoutTail, 0, $stdoutLength)
+            stderr = $ascii.GetString($stderrTail, 0, $stderrLength)
+        }
     }
     if ($commandExitCode -ne 0) {
         if ($captureDiagnostic) {
@@ -1194,21 +1213,49 @@ $artifactConstructions = for ($index = 0; $index -lt 2; $index += 1) {
 }
 $script:constructionStage = "parallel-artifact-construction"
 Write-ConstructionStatus -Stage $script:constructionStage -State "running"
-$artifactConstructions |
+$parallelCommand = ${function:Invoke-Checked}.ToString()
+$parallelTail = ${function:Add-BoundedDiagnosticTail}.ToString()
+$artifactOutcomes = @(
+    $artifactConstructions |
     ForEach-Object -Parallel {
-        $assembler = [string]$_.assembler
-        $assemblyArguments = [string[]]$_.assembly_arguments
-        & $assembler @assemblyArguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "artifact assembly $($_.index) failed with exit code $LASTEXITCODE."
+        $index = [string]$_.index
+        try {
+            Set-Item -Path Function:global:Add-BoundedDiagnosticTail -Value $using:parallelTail
+            Set-Item -Path Function:global:Invoke-Checked -Value $using:parallelCommand
+            $commandDiagnosticTailBytes = $using:commandDiagnosticTailBytes
+            $assembly = Invoke-Checked `
+                -Executable ([string]$_.assembler) `
+                -Arguments ([string[]]$_.assembly_arguments) `
+                -Role "artifact assembly $index" `
+                -ReturnReceipt
+            if ($assembly.exit_code -ne 0) {
+                return $assembly
+            }
+            Invoke-Checked `
+                -Executable ([string]$_.release_tool) `
+                -Arguments @("create", [string]$_.staged_directory, [string]$_.archive) `
+                -Role "deterministic archive creation $index" `
+                -ReturnReceipt
         }
-        $releaseTool = [string]$_.release_tool
-        & $releaseTool "create" ([string]$_.staged_directory) ([string]$_.archive)
-        if ($LASTEXITCODE -ne 0) {
-            throw "deterministic archive creation $($_.index) failed with exit code $LASTEXITCODE."
+        catch {
+            [pscustomobject]@{
+                role = "parallel artifact construction $index"
+                exit_code = 1
+                stdout = ""
+                stderr = $_.Exception.Message
+            }
         }
     } `
     -ThrottleLimit 2
+)
+$artifactFailure = $artifactOutcomes | Where-Object { $_.exit_code -ne 0 } | Select-Object -First 1
+if ($null -ne $artifactFailure) {
+    Write-BoundedConstructionDiagnostic `
+        -Role ([string]$artifactFailure.role) `
+        -StandardOutput ([string]$artifactFailure.stdout) `
+        -StandardError ([string]$artifactFailure.stderr)
+    throw "$($artifactFailure.role) failed with exit code $($artifactFailure.exit_code)."
+}
 
 $script:constructionStage = "deterministic-archive-comparison"
 Write-ConstructionStatus -Stage $script:constructionStage -State "running"

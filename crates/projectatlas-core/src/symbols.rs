@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Source label for a parser relation outside a named declaration or namespace.
+pub const MODULE_RELATION_SOURCE: &str = "<module>";
+
 /// Kind of symbol stored in the `ProjectAtlas` graph.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
