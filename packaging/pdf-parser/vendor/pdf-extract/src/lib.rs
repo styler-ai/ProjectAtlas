@@ -1669,13 +1669,23 @@ impl<'a> Processor<'a> {
                         _ => {}
                     }
                 }
-                "Tj" => {
-                    match operation.operands[0] {
-                        Object::String(ref s, _) => {
-                            show_text(&mut gs, s, &tlm, &flip_ctm, output)?;
-                        }
-                        _ => { panic!("unexpected Tj operand {:?}", operation) }
+                "Tj" | "'" | "\"" => {
+                    let quoted = operation.operator != "Tj";
+                    let spaced = operation.operator == "\"";
+                    if operation.operands.len() != if spaced { 3 } else { 1 } {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid text-showing operands").into());
                     }
+                    if spaced {
+                        gs.ts.word_spacing = as_num(&operation.operands[0]);
+                        gs.ts.character_spacing = as_num(&operation.operands[1]);
+                    }
+                    if quoted {
+                        tlm = tlm.pre_transform(&Transform2D::create_translation(0., -gs.ts.leading));
+                        gs.ts.tm = tlm;
+                        output.end_line()?;
+                    }
+                    let text = operation.operands[if spaced { 2 } else { 0 }].as_str()?;
+                    show_text(&mut gs, text, &tlm, &flip_ctm, output)?;
                 }
                 "Tc" => {
                     gs.ts.character_spacing = as_num(&operation.operands[0]);

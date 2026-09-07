@@ -38,12 +38,14 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **WHEN** PDF magic and all input/time/memory/output limits pass
 - **THEN** ProjectAtlas publishes bounded text with exact page and text-span locator, parser/version provenance, completeness, and coverage
 
+- **AND** quote text-showing operators preserve the corresponding line movement, spacing changes, and text emission
 - **AND** inherited page rotation uses validated integer quarter turns before text layout; malformed rotation fails before publication
 - **AND** Form XObjects inherit graphics state and compose their matrix with the caller transform, preserving positioned and nested text evidence; malformed matrices fail before publication
 
 #### Scenario: Valid DOCX
 - **WHEN** a ZIP container passes entry/path/compressed/expanded/recursion limits and contains admitted `word/document.xml` with Transitional or Strict WordprocessingML namespace identity, independent of its prefix
 - **THEN** ProjectAtlas publishes bounded text with exact part, paragraph, run, and text-span locator plus parser/version provenance
+- **AND** unsupported XML encodings, including UTF-16, return typed unsupported input without replacing the last complete publication
 - **AND** foreign-namespace character data requiring unsupported semantic decoding returns typed unsupported input, while recognized Word text boxes remain supported through drawing wrappers
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** explicit hyphens, tabs, and saved page breaks retain their text/separator characters and exact UTF-8 spans; font-coded symbols return typed unsupported input without replacing the last complete publication

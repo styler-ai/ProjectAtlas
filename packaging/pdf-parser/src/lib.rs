@@ -435,6 +435,56 @@ mod tests {
     }
 
     #[test]
+    fn quote_operators_match_explicit_text_state_operations() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let explicit = b"BT /F1 12 Tf 20 TL 72 700 Td (First) Tj T* (Second) Tj 3 Tw 2 Tc T* (Third word) Tj (tail) Tj ET";
+        let content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            explicit.to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let expected = text::page(&document, 1, 256).unwrap();
+        document.get_object_mut(content).unwrap().as_stream_mut().unwrap().set_content(
+            b"BT /F1 12 Tf 20 TL 72 700 Td (First) Tj (Second) ' 3 2 (Third word) \" (tail) Tj ET".to_vec()
+        );
+        assert_eq!(text::page(&document, 1, 256).unwrap(), expected);
+        for malformed in [
+            b"BT /F1 12 Tf 1 ' ET".as_slice(),
+            b"BT /F1 12 Tf (text) 1 ' ET",
+            b"BT /F1 12 Tf 3 (text) \" ET",
+            b"BT /F1 12 Tf 3 2 1 \" ET",
+        ] {
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(malformed.to_vec());
+            assert!(matches!(
+                text::page(&document, 1, 256),
+                Err(Failure::Malformed)
+            ));
+        }
+    }
+
+    #[test]
     fn inherited_page_rotation_preserves_displayed_text_lines() {
         let mut document = lopdf::Document::new();
         let pages = document.new_object_id();

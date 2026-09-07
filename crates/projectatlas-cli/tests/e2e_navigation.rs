@@ -10009,18 +10009,22 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     let before_failed_refresh = mcp_database_snapshot(&database)?;
     for (xml, message) in [
         (
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:body></w:document>"#,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
             "font-specific symbols",
         ),
         (
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p></w:body></w:document>"#,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p></w:body></w:document>"#.as_bytes().to_vec(),
             "foreign-namespace text",
+        ),
+        (
+            std::iter::once(0xfeff).chain(r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>UTF16 text</w:t></w:r></w:p></w:body></w:document>"#.encode_utf16()).flat_map(u16::to_le_bytes).collect(),
+            "DOCX XML encoding is not supported",
         ),
     ] {
         {
             let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);
             archive.start_file("word/document.xml", FileOptions::default())?;
-            archive.write_all(xml.as_bytes())?;
+            archive.write_all(&xml)?;
             archive.finish()?;
         }
         let unsupported_refresh = StdCommand::new(&executable)

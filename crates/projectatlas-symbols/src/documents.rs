@@ -736,6 +736,15 @@ fn parse_docx(
     control: &IndexWorkControl,
     stage: IndexWorkStage,
 ) -> Result<DocumentFacts, DocumentExtractionError> {
+    if xml.starts_with(&[0xff, 0xfe])
+        || xml.starts_with(&[0xfe, 0xff])
+        || xml.starts_with(&[0, b'<', 0, b'?'])
+        || xml.starts_with(&[b'<', 0, b'?', 0])
+    {
+        return Err(DocumentExtractionError::UnsupportedDocxInput {
+            message: "DOCX XML encoding is not supported; UTF-8 is required".to_owned(),
+        });
+    }
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = true;
@@ -1189,6 +1198,23 @@ fn parse_docx(
                 element_depth -= 1;
                 if element_depth == 0 {
                     root_closed = true;
+                }
+            }
+            Event::Decl(declaration) => {
+                if let Some(encoding) = declaration.encoding() {
+                    let encoding =
+                        encoding.map_err(|error| DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: error.to_string(),
+                        })?;
+                    if !encoding.eq_ignore_ascii_case("UTF-8")
+                        && !encoding.eq_ignore_ascii_case("US-ASCII")
+                    {
+                        return Err(DocumentExtractionError::UnsupportedDocxInput {
+                            message: "DOCX XML encoding is not supported; UTF-8 is required"
+                                .to_owned(),
+                        });
+                    }
                 }
             }
             Event::Eof => break,
@@ -2234,6 +2260,47 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                     ..
                 }),
             ));
+        }
+    }
+
+    #[test]
+    fn docx_unsupported_xml_encoding_is_not_malformed() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Text</w:t></w:r></w:p></w:body></w:document>"#;
+        for little_endian in [true, false] {
+            for bom in [true, false] {
+                let mut bytes = Vec::new();
+                for unit in bom.then_some(0xfeff).into_iter().chain(xml.encode_utf16()) {
+                    bytes.extend_from_slice(&if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    });
+                }
+                assert!(matches!(
+                    parse_docx(&bytes, &control(), IndexWorkStage::TextIndex),
+                    Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+                ));
+            }
+        }
+        for encoding in ["UTF-16", "ISO-8859-1"] {
+            assert!(matches!(
+                parse_docx(
+                    xml.replace("UTF-16", encoding).as_bytes(),
+                    &control(),
+                    IndexWorkStage::TextIndex
+                ),
+                Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+            ));
+        }
+        for encoding in ["UTF-8", "US-ASCII"] {
+            assert!(
+                parse_docx(
+                    xml.replace("UTF-16", encoding).as_bytes(),
+                    &control(),
+                    IndexWorkStage::TextIndex
+                )
+                .is_ok()
+            );
         }
     }
 
