@@ -3,8 +3,9 @@
 use crate::check_parser_iteration;
 use projectatlas_core::symbols::{CodeSymbol, ParserKind, SymbolGraph, SymbolKind};
 use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
-use quick_xml::Reader;
+use quick_xml::NsReader;
 use quick_xml::events::{BytesRef, Event};
+use quick_xml::name::ResolveResult;
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{Cursor, Read};
@@ -645,13 +646,13 @@ fn extract_docx(
     drop(archive);
     drop(names);
     control.check(stage)?;
-    // Retain the XML allocation plus space for parser staging, geometric string
+    // Retain XML, parser staging, and namespace resolver copies, plus geometric string
     // growth in the current run/output/facts, and the bounded fact vector.
     // Archive metadata has already been dropped before these allocations overlap.
     check_memory_budget(
         bytes
             .len()
-            .saturating_add(xml.capacity().saturating_mul(2))
+            .saturating_add(xml.capacity().saturating_mul(3))
             .saturating_add(MAX_DOCUMENT_OUTPUT_BYTES.saturating_mul(4))
             .saturating_add(
                 MAX_DOCUMENT_FACTS
@@ -675,7 +676,7 @@ fn parse_docx(
     control: &IndexWorkControl,
     stage: IndexWorkStage,
 ) -> Result<DocumentFacts, DocumentExtractionError> {
-    let mut reader = Reader::from_reader(xml);
+    let mut reader = NsReader::from_reader(xml);
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = true;
     let mut output = String::new();
@@ -692,14 +693,42 @@ fn parse_docx(
     loop {
         check_parser_iteration(event_index, &mut || control.check(stage))?;
         event_index = event_index.saturating_add(1);
-        match reader.read_event() {
-            Ok(Event::Start(event)) => {
-                let name = event.name();
+        let (namespace, event) =
+            reader
+                .read_resolved_event()
+                .map_err(|error| DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: error.to_string(),
+                })?;
+        let wordprocessing = match namespace {
+            ResolveResult::Bound(namespace) => matches!(
+                namespace.as_ref(),
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                    | "http://purl.oclc.org/ooxml/wordprocessingml/main"
+            ),
+            ResolveResult::Unbound => false,
+            ResolveResult::Unknown(prefix) => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: format!("DOCX XML contained an undeclared namespace prefix: {prefix}"),
+                });
+            }
+        };
+        match event {
+            Event::Start(event) => {
+                if in_text {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX text elements cannot contain nested markup".to_owned(),
+                    });
+                }
+                let name = event.local_name();
                 if element_depth == 0 {
-                    if root_seen || name.as_ref() != "w:document" {
+                    if root_seen || !wordprocessing || name.as_ref() != "document" {
                         return Err(DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
-                            message: "DOCX XML must contain one w:document root".to_owned(),
+                            message: "DOCX XML must contain one WordprocessingML document root"
+                                .to_owned(),
                         });
                     }
                     root_seen = true;
@@ -712,8 +741,8 @@ fn parse_docx(
                         maximum: MAX_DOCX_XML_DEPTH,
                     });
                 }
-                match name.as_ref() {
-                    "w:p" if !paragraph_open => {
+                match if wordprocessing { name.as_ref() } else { "" } {
+                    "p" if !paragraph_open => {
                         paragraph_open = true;
                         paragraph_number += 1;
                         run_number = 0;
@@ -721,21 +750,21 @@ fn parse_docx(
                             push_output_byte(&mut output, b'\n')?;
                         }
                     }
-                    "w:r" if paragraph_open && run.is_none() => {
+                    "r" if paragraph_open && run.is_none() => {
                         run_number += 1;
                         run = Some(RawDocxRun::default());
                     }
-                    "w:t" if run.is_some() && !in_text => in_text = true,
-                    "w:tab" | "w:br" | "w:cr" => {
+                    "t" if run.is_some() && !in_text => in_text = true,
+                    "tab" | "br" | "cr" => {
                         if let Some(run) = run.as_mut() {
                             append_docx_run_text(
                                 run,
-                                if name.as_ref() == "w:tab" { "\t" } else { "\n" },
+                                if name.as_ref() == "tab" { "\t" } else { "\n" },
                                 output.len(),
                             )?;
                         }
                     }
-                    "w:p" | "w:r" | "w:t" => {
+                    "p" | "r" | "t" => {
                         return Err(DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
                             message: "DOCX paragraph, run, or text nesting is invalid".to_owned(),
@@ -744,7 +773,7 @@ fn parse_docx(
                     _ => {}
                 }
             }
-            Ok(Event::Text(event)) => {
+            Event::Text(event) => {
                 if in_text {
                     let Some(run) = run.as_mut() else {
                         return Err(DocumentExtractionError::Malformed {
@@ -764,7 +793,7 @@ fn parse_docx(
                     });
                 }
             }
-            Ok(Event::CData(event)) => {
+            Event::CData(event) => {
                 if !in_text {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
@@ -779,7 +808,7 @@ fn parse_docx(
                 };
                 append_docx_run_text(run, event.as_ref(), output.len())?;
             }
-            Ok(Event::GeneralRef(reference)) => {
+            Event::GeneralRef(reference) => {
                 if !in_text {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
@@ -795,24 +824,24 @@ fn parse_docx(
                 let text = decode_docx_reference(&reference)?;
                 append_docx_run_text(run, &text, output.len())?;
             }
-            Ok(Event::DocType(_)) => {
+            Event::DocType(_) => {
                 return Err(DocumentExtractionError::Malformed {
                     format: DocumentFormat::Docx,
                     message: "DOCX XML DOCTYPE and external declarations are unsupported"
                         .to_owned(),
                 });
             }
-            Ok(Event::End(event)) => {
+            Event::End(event) => {
                 if element_depth == 0 {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "DOCX XML contained an unmatched closing element".to_owned(),
                     });
                 }
-                let name = event.name();
-                match name.as_ref() {
-                    "w:t" => in_text = false,
-                    "w:r" => {
+                let name = event.local_name();
+                match if wordprocessing { name.as_ref() } else { "" } {
+                    "t" => in_text = false,
+                    "r" => {
                         if let Some(run) = run.take()
                             && !run.text.is_empty()
                         {
@@ -845,7 +874,7 @@ fn parse_docx(
                             });
                         }
                     }
-                    "w:p" => paragraph_open = false,
+                    "p" => paragraph_open = false,
                     _ => {}
                 }
                 element_depth -= 1;
@@ -853,13 +882,7 @@ fn parse_docx(
                     root_closed = true;
                 }
             }
-            Ok(Event::Eof) => break,
-            Err(error) => {
-                return Err(DocumentExtractionError::Malformed {
-                    format: DocumentFormat::Docx,
-                    message: error.to_string(),
-                });
-            }
+            Event::Eof => break,
             _ => {}
         }
     }
@@ -1773,8 +1796,73 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_namespace_identity_is_independent_of_prefix() {
+        let canonical = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t></w:r></w:p></w:body></w:document>"#;
+        let expected = parse_docx(
+            canonical.as_bytes(),
+            &control(),
+            IndexWorkStage::SymbolParsing,
+        )
+        .expect("canonical WordprocessingML");
+        for xml in [
+            canonical.replace("w:", "x:").replace("xmlns:w", "xmlns:x"),
+            canonical.replace("w:", "").replace("xmlns:w", "xmlns"),
+            canonical.replace(
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "http://purl.oclc.org/ooxml/wordprocessingml/main",
+            ),
+        ] {
+            assert_eq!(
+                parse_docx(xml.as_bytes(), &control(), IndexWorkStage::SymbolParsing)
+                    .expect("equivalent namespace identity"),
+                expected,
+            );
+        }
+        for xml in [
+            canonical.replace(
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "urn:foreign",
+            ),
+            canonical.replace(
+                "<w:t>A</w:t>",
+                "<foreign:t xmlns:foreign=\"urn:foreign\">A</foreign:t>",
+            ),
+            canonical.replace(
+                "<w:t>A</w:t>",
+                "<w:t><foreign:t xmlns:foreign=\"urn:foreign\">A</foreign:t></w:t>",
+            ),
+            canonical.replace("<w:t>A</w:t>", "<unknown:t>A</unknown:t>"),
+            canonical.replace("</w:r></w:p>", "</w:p></w:r>"),
+        ] {
+            assert!(matches!(
+                parse_docx(xml.as_bytes(), &control(), IndexWorkStage::SymbolParsing),
+                Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    ..
+                }),
+            ));
+        }
+    }
+
+    #[test]
+    fn docx_namespace_storage_is_charged_before_parser_allocation() {
+        let xml = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:unused=\"{}\"><w:body/></w:document>",
+            "x".repeat(24 * 1024 * 1024),
+        );
+        let bytes = docx_archive(xml.as_bytes(), CompressionMethod::Deflated);
+        assert!(matches!(
+            extract_document_text_controlled(&bytes, "guide.docx", None, &control()),
+            Err(DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::MemoryBytes,
+                ..
+            }),
+        ));
+    }
+
+    #[test]
     fn docx_empty_elements_preserve_paragraph_and_run_ordinals() {
-        let xml = b"<w:document><w:body><w:p/><w:p><w:r/><w:r><w:t>A</w:t><w:tab/><w:t/><w:t>B</w:t></w:r></w:p></w:body></w:document>";
+        let xml = b"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p/><w:p><w:r/><w:r><w:t>A</w:t><w:tab/><w:t/><w:t>B</w:t></w:r></w:p></w:body></w:document>";
         let facts = parse_docx(xml, &control(), IndexWorkStage::SymbolParsing)
             .expect("empty elements are valid document structure");
         assert_eq!(facts.text, "A\tB");
@@ -1807,7 +1895,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     #[test]
     fn docx_xml_nesting_is_bounded() {
         let xml = format!(
-            "<w:document>{}<w:body/>{}</w:document>",
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">{}<w:body/>{}</w:document>",
             "<w:container>".repeat(MAX_DOCX_XML_DEPTH),
             "</w:container>".repeat(MAX_DOCX_XML_DEPTH),
         );
@@ -1827,7 +1915,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     fn docx_aggregate_output_is_bounded_before_reading_remaining_xml() {
         let run = "x".repeat(MAX_DOCUMENT_OUTPUT_BYTES / 2 + 1);
         let xml = format!(
-            "<w:document><w:body><w:p><w:r><w:t>{run}</w:t></w:r><w:r><w:t>{run}</w:t></w:r><malformed"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>{run}</w:t></w:r><w:r><w:t>{run}</w:t></w:r><malformed"
         );
         let error = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::SymbolParsing)
             .expect_err("aggregate output must fail before the later malformed XML");
@@ -1882,7 +1970,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 .start_file(DOCX_DOCUMENT_PART, FileOptions::default())
                 .expect("fixture entry");
             writer
-                .write_all(b"<w:document><w:body><w:p><w:r><w:t>truncated")
+                .write_all(b"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>truncated")
                 .expect("fixture XML");
             writer.finish().expect("fixture archive");
         }
