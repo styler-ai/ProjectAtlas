@@ -1744,6 +1744,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pdf_rotation_and_quote_operators_preserve_text_locators() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        for (rotation, content) in [
+            (0, b"BT /F1 12 Tf 20 TL 72 500 Td (First) Tj 108 0 Td (Second) Tj -108 -20 Td (Next) Tj ET".as_slice()),
+            (90, b"BT /F1 12 Tf 0 1 -1 0 112 72 Tm (First) Tj 0 1 -1 0 112 180 Tm (Second) Tj 0 1 -1 0 132 72 Tm (Next) Tj ET"),
+            (0, b"BT /F1 12 Tf 20 TL 72 500 Td (First) Tj 108 0 Td (Second) Tj -108 0 Td (Next) ' ET"),
+            (0, b"BT /F1 12 Tf 20 TL 72 500 Td (First) Tj 108 0 Td (Second) Tj -108 0 Td 0 0 (Next) \" ET"),
+        ] {
+            document.get_object_mut((2, 0)).expect("page tree").as_dict_mut()
+                .expect("page tree dictionary").set("Rotate", rotation);
+            document.get_object_mut((4, 0)).expect("page stream").as_stream_mut()
+                .expect("stream").set_content(content.to_vec());
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+                .expect("valid positioned text");
+            assert_eq!(facts.text, "First Second\nNext", "rotation={rotation}");
+            assert_eq!(facts.facts.len(), 2);
+            for (index, fact) in facts.facts.iter().enumerate() {
+                assert!(matches!(fact.locator, DocumentLocator::Pdf { page: 1, .. }));
+                assert_eq!(fact.line_start, index + 1);
+                assert_eq!(fact.line_end, index + 1);
+            }
+        }
+    }
+
     fn pdf_with_xobject(xobject: lopdf::Stream) -> Vec<u8> {
         let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
         let object = document.add_object(xobject);
