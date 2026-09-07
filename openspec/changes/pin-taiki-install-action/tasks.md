@@ -1,6 +1,6 @@
 ## 1. Immutable workflow pin
 
-- [ ] 1.1 Update the existing `taiki-e/install-action` uses in `.github/workflows/ci.yml` and `.github/workflows/release.yml` to the verified `v2.87.5` commit `5bf6ce016fd2e72eefc647cbca1e4213f65955b8`, preserve `cargo-deny@0.20.2` and all surrounding workflow behavior, and verify the exact two-use source diff plus the affected repository checks.
+- [x] 1.1 Update the existing `taiki-e/install-action` uses in `.github/workflows/ci.yml` and `.github/workflows/release.yml` to the verified `v2.87.5` commit `5bf6ce016fd2e72eefc647cbca1e4213f65955b8`, preserve `cargo-deny@0.20.2` and all surrounding workflow behavior, and verify the exact two-use source diff plus the affected repository checks.
 
 ## Verification
 
