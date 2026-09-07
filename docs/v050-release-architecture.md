@@ -248,7 +248,10 @@ in document order with their original decoded byte offsets. Complex-field code
 and deleted-text carriers are validated without execution or publication;
 cached field results and instruction-text leaves outside field-code regions
 remain literal document text. Field nesting has its own 64-level bound and is
-isolated across text-box contexts. Explicit language overrides take precedence
+isolated across text-box contexts. Markup Compatibility alternatives select only
+the first choice whose required namespaces are understood WordprocessingML, or
+the fallback. Unselected branches cannot alter text, locators, or field context;
+they retain XML depth, well-formedness, and declaration checks. Explicit language overrides take precedence
 over a PDF/DOCX extension. Each result carries a page/text-span or
 part/paragraph/run/text-span locator plus its actual emitted-text line range
 for symbol slicing, parser provenance, and a complete

@@ -44,6 +44,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** field instructions and deleted text are validated without execution or publication, while cached field results and instruction text outside field-code regions remain literal text
 - **AND** field nesting is bounded independently of XML depth and isolated within each text container
+- **AND** Markup Compatibility alternatives emit only the first choice requiring understood WordprocessingML namespaces, or its fallback; unselected branches cannot change extraction context or duplicate evidence
 
 #### Scenario: Explicit language overrides a document extension
 - **WHEN** an accepted language override selects another language for a `.pdf` or `.docx` path

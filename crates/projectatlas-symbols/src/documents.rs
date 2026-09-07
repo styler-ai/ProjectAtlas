@@ -5,7 +5,7 @@ use projectatlas_core::symbols::{CodeSymbol, ParserKind, SymbolGraph, SymbolKind
 use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
 use quick_xml::NsReader;
 use quick_xml::events::{BytesRef, Event};
-use quick_xml::name::ResolveResult;
+use quick_xml::name::{QName, ResolveResult};
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{Cursor, Read};
@@ -655,7 +655,8 @@ fn extract_docx(
             .saturating_add(MAX_DOCUMENT_OUTPUT_BYTES.saturating_mul(4))
             .saturating_add(MAX_DOCX_XML_DEPTH.saturating_mul(
                 std::mem::size_of::<(DocxTextContext, usize)>()
-                    + MAX_DOCX_XML_DEPTH * std::mem::size_of::<DocxFieldPhase>(),
+                    + MAX_DOCX_XML_DEPTH * std::mem::size_of::<DocxFieldPhase>()
+                    + std::mem::size_of::<DocxAlternative>(),
             ))
             .saturating_add(
                 MAX_DOCUMENT_FACTS
@@ -717,6 +718,18 @@ fn wordprocessing_namespace(namespace: &str) -> bool {
     )
 }
 
+/// Selection state for one bounded Markup Compatibility alternative.
+struct DocxAlternative {
+    /// XML depth of the enclosing `AlternateContent` element.
+    depth: usize,
+    /// Whether an earlier branch was selected.
+    selected: bool,
+    /// Whether the required first Choice has appeared.
+    choice_seen: bool,
+    /// Whether the final optional Fallback has appeared.
+    fallback_seen: bool,
+}
+
 /// Parse body paragraphs and table paragraphs from the admitted XML part.
 fn parse_docx(
     xml: &[u8],
@@ -733,6 +746,8 @@ fn parse_docx(
     let mut paragraph = DocxTextContext::default();
     let mut text_boxes = Vec::new();
     let mut text_carrier = None;
+    let mut alternatives: Vec<DocxAlternative> = Vec::new();
+    let mut skipped_branch_depth = None;
     let mut element_depth = 0usize;
     let mut root_seen = false;
     let mut root_closed = false;
@@ -747,6 +762,8 @@ fn parse_docx(
                     format: DocumentFormat::Docx,
                     message: error.to_string(),
                 })?;
+        let compatibility = matches!(&namespace, ResolveResult::Bound(namespace)
+            if namespace.as_ref() == "http://schemas.openxmlformats.org/markup-compatibility/2006");
         let wordprocessing = match namespace {
             ResolveResult::Bound(namespace) => wordprocessing_namespace(namespace.as_ref()),
             ResolveResult::Unbound => false,
@@ -783,6 +800,96 @@ fn parse_docx(
                         observed: element_depth,
                         maximum: MAX_DOCX_XML_DEPTH,
                     });
+                }
+                if skipped_branch_depth.is_some() {
+                    continue;
+                }
+                if compatibility && matches!(name.as_ref(), "Choice" | "Fallback") {
+                    let alternative = alternatives
+                        .last_mut()
+                        .filter(|alternative| {
+                            alternative.depth + 1 == element_depth && !alternative.fallback_seen
+                        })
+                        .ok_or_else(|| DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: "DOCX compatibility branch has invalid placement".to_owned(),
+                        })?;
+                    let supported = if name.as_ref() == "Choice" {
+                        alternative.choice_seen = true;
+                        let requires = event
+                            .try_get_attribute("Requires")
+                            .map_err(|error| DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: error.to_string(),
+                            })?
+                            .ok_or_else(|| DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX compatibility choice requires namespace prefixes"
+                                    .to_owned(),
+                            })?;
+                        let requires =
+                            quick_xml::escape::unescape(&requires.value).map_err(|error| {
+                                DocumentExtractionError::Malformed {
+                                    format: DocumentFormat::Docx,
+                                    message: error.to_string(),
+                                }
+                            })?;
+                        if requires.split_whitespace().next().is_none() {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX compatibility choice requires namespace prefixes"
+                                    .to_owned(),
+                            });
+                        }
+                        let mut supported = true;
+                        for (index, prefix) in requires.split_whitespace().enumerate() {
+                            check_parser_iteration(index, &mut || control.check(stage))?;
+                            let qualified = format!("{prefix}:choice");
+                            let (namespace, _) =
+                                reader.resolver().resolve_element(QName(&qualified));
+                            if !matches!(namespace, ResolveResult::Bound(namespace)
+                                if wordprocessing_namespace(namespace.as_ref()))
+                            {
+                                supported = false;
+                                break;
+                            }
+                        }
+                        supported
+                    } else {
+                        if !alternative.choice_seen {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX compatibility fallback requires a preceding choice"
+                                    .to_owned(),
+                            });
+                        }
+                        alternative.fallback_seen = true;
+                        true
+                    };
+                    if !alternative.selected && supported {
+                        alternative.selected = true;
+                    } else {
+                        skipped_branch_depth = Some(element_depth);
+                    }
+                    continue;
+                }
+                if alternatives
+                    .last()
+                    .is_some_and(|alternative| alternative.depth + 1 == element_depth)
+                {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX compatibility alternatives must contain choices and an optional fallback".to_owned(),
+                    });
+                }
+                if compatibility && name.as_ref() == "AlternateContent" {
+                    alternatives.push(DocxAlternative {
+                        depth: element_depth,
+                        selected: false,
+                        choice_seen: false,
+                        fallback_seen: false,
+                    });
+                    continue;
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
                     "txbxContent" => {
@@ -886,6 +993,9 @@ fn parse_docx(
                 }
             }
             Event::Text(event) => {
+                if skipped_branch_depth.is_some() {
+                    continue;
+                }
                 if text_carrier.is_some() {
                     let Some(run) = paragraph.run.as_mut() else {
                         return Err(DocumentExtractionError::Malformed {
@@ -908,6 +1018,9 @@ fn parse_docx(
                 }
             }
             Event::CData(event) => {
+                if skipped_branch_depth.is_some() {
+                    continue;
+                }
                 if text_carrier.is_none() {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
@@ -925,6 +1038,10 @@ fn parse_docx(
                 }
             }
             Event::GeneralRef(reference) => {
+                if skipped_branch_depth.is_some() {
+                    decode_docx_reference(&reference)?;
+                    continue;
+                }
                 if text_carrier.is_none() {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
@@ -955,6 +1072,25 @@ fn parse_docx(
                         format: DocumentFormat::Docx,
                         message: "DOCX XML contained an unmatched closing element".to_owned(),
                     });
+                }
+                if let Some(depth) = skipped_branch_depth {
+                    if element_depth == depth {
+                        skipped_branch_depth = None;
+                    }
+                    element_depth -= 1;
+                    continue;
+                }
+                if compatibility && event.local_name().as_ref() == "AlternateContent" {
+                    let alternative = alternatives.pop().filter(|alternative| {
+                        alternative.depth == element_depth && alternative.choice_seen
+                    });
+                    if alternative.is_none() {
+                        return Err(DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: "DOCX compatibility alternatives require at least one choice"
+                                .to_owned(),
+                        });
+                    }
                 }
                 let name = event.local_name();
                 match if wordprocessing { name.as_ref() } else { "" } {
@@ -1008,6 +1144,8 @@ fn parse_docx(
         || element_depth != 0
         || paragraph.open
         || !text_boxes.is_empty()
+        || !alternatives.is_empty()
+        || skipped_branch_depth.is_some()
         || paragraph.run.is_some()
         || text_carrier.is_some()
         || !paragraph.fields.is_empty()
@@ -2076,6 +2214,46 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn docx_compatibility_selects_one_understood_branch() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><w:body><mc:AlternateContent><mc:Choice Requires="future"><w:p><w:r><w:t>Unsupported</w:t></w:r></w:p></mc:Choice><mc:Choice Requires="w"><w:p><w:r><w:t>Chosen</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>Fallback</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent></w:body></w:document>"#;
+        let parsed = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+            .expect("one understood choice");
+        assert_eq!(parsed.text, "Chosen");
+        assert_eq!(parsed.facts.len(), 1);
+        let fallback = xml.replace("Requires=\"w\"", "Requires=\"future\"");
+        let parsed = parse_docx(fallback.as_bytes(), &control(), IndexWorkStage::TextIndex)
+            .expect("fallback when no choice is understood");
+        assert_eq!(parsed.text, "Fallback");
+        assert_eq!(parsed.facts.len(), 1);
+        let nested = xml.replace("<w:t>Chosen</w:t>", "<mc:AlternateContent><mc:Choice Requires=\"future\"><w:instrText>Discarded</w:instrText></mc:Choice><mc:Fallback><w:t>Nested</w:t></mc:Fallback></mc:AlternateContent>");
+        let parsed = parse_docx(nested.as_bytes(), &control(), IndexWorkStage::TextIndex)
+            .expect("nested alternatives preserve the containing run");
+        assert_eq!(parsed.text, "Nested");
+        for first in [
+            xml.replace("Requires=\"future\"", "Requires=\"w\""),
+            xml.replace(
+                "xmlns:future=\"urn:future\"",
+                "xmlns:future=\"http://purl.oclc.org/ooxml/wordprocessingml/main\"",
+            ),
+        ] {
+            let parsed = parse_docx(first.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("first understood branch and namespace aliases");
+            assert_eq!(parsed.text, "Unsupported");
+            assert_eq!(parsed.facts.len(), 1);
+        }
+        for invalid in [
+            xml.replace("Requires=\"future\"", "Requires=\"\""),
+            xml.replace("<mc:AlternateContent>", "<mc:AlternateContent><w:p/>"),
+            xml.replace("</mc:AlternateContent>", "<mc:Fallback/></mc:AlternateContent>"),
+            xml.replace("<mc:AlternateContent>", "<mc:AlternateContent><mc:Fallback/>"),
+            xml.replace("<mc:AlternateContent>", "<mc:AlternateContent><mc:Choice Requires=\"future\"><w:r><w:t>&unknown;</w:t></w:r></mc:Choice>"),
+        ] {
+            assert!(matches!(parse_docx(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { .. })));
+        }
     }
 
     #[test]

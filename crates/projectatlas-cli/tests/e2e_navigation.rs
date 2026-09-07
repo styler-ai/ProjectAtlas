@@ -9582,6 +9582,8 @@ fn require_json_contains_from_value(
 
 #[test]
 fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Error>> {
+    const PDF_FILE: &str = "guide.pdf";
+    const DOCX_FILE: &str = "guide.docx";
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("bounded-document-navigation");
     let docs = repo.join("docs");
@@ -9615,7 +9617,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         format!("trailer\n<< /Size {object_count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n")
             .as_bytes(),
     );
-    let pdf_path = docs.join("guide.pdf");
+    let pdf_path = docs.join(PDF_FILE);
     fs::write(&pdf_path, pdf)?;
 
     let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
@@ -9625,12 +9627,12 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         write!(docx, "<!--{}-->", " ".repeat(2_000_001))?;
         write!(
             docx,
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>{text}</w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><w:instrText>Inside box</w:instrText></w:r></w:p></w:txbxContent></w:drawing><w:t>After box</w:t></w:r></w:p></w:body></w:document>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\"><w:body><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>{text}</w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"future\"><w:t>Wrong alternative</w:t></mc:Choice><mc:Fallback><w:instrText>Inside box</w:instrText></mc:Fallback></mc:AlternateContent></w:r></w:p></w:txbxContent></w:drawing><w:t>After box</w:t></w:r></w:p></w:body></w:document>"
         )?;
         docx.finish()?;
         Ok(())
     };
-    let docx_path = docs.join("guide.docx");
+    let docx_path = docs.join(DOCX_FILE);
     write_docx(&docx_path, "DOCX evidence marker")?;
 
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
@@ -10083,11 +10085,8 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     }
     let override_repo = temp.path().join("document-language-overrides");
     fs::create_dir_all(&override_repo)?;
-    fs::write(
-        override_repo.join("guide.pdf"),
-        "pub fn overridden_pdf() {}\n",
-    )?;
-    fs::write(override_repo.join("guide.docx"), "# Overridden document\n")?;
+    fs::write(override_repo.join(PDF_FILE), "pub fn overridden_pdf() {}\n")?;
+    fs::write(override_repo.join(DOCX_FILE), "# Overridden document\n")?;
     fs::write(
         override_repo.join("projectatlas.toml"),
         "[project]\nroot = \".\"\n[scan.language_overrides]\n\".pdf\" = \"rust\"\n\".docx\" = \"markdown\"\n",
@@ -10095,8 +10094,8 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     let override_db = override_repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     run_scan(&override_repo, &override_db)?;
     for (path, name) in [
-        ("guide.pdf", "overridden_pdf"),
-        ("guide.docx", "Overridden document"),
+        (PDF_FILE, "overridden_pdf"),
+        (DOCX_FILE, "Overridden document"),
     ] {
         let symbols = run_mcp_contract_json(
             &executable,
