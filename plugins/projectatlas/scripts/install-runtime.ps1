@@ -2348,7 +2348,7 @@ function Read-ProjectAtlasAtlasForwarderState {
             '\A# ProjectAtlas atlas forwarder installer state v1\r\nforwarder: ([^\r\n]+)\r\nruntime: ([^\r\n]+)\r\ncapability: ([0-9a-f]{64})\r\n\z')
         if (-not $match.Success `
             -or $match.Groups[1].Value -ine $expectedForwarder `
-            -or $match.Groups[2].Value -ine $expectedRuntime) {
+            -or ($VerifiedPath -and $match.Groups[2].Value -ine $expectedRuntime)) {
             return $null
         }
         return [pscustomobject]@{
@@ -3154,12 +3154,6 @@ function Remove-ProjectAtlasAtlasForwarders {
             -and -not (Get-Item -Force -LiteralPath $statePath -ErrorAction SilentlyContinue)) {
             continue
         }
-        $verifiedPath = if ($RuntimePath) {
-            $RuntimePath
-        }
-        else {
-            $candidate -replace "\\atlas\.cmd$", "\\projectatlas.exe"
-        }
         $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLock $candidate
         try {
             $candidateItem = Get-Item -Force -LiteralPath $candidate -ErrorAction SilentlyContinue
@@ -3167,6 +3161,14 @@ function Remove-ProjectAtlasAtlasForwarders {
                 -and -not (Get-Item -Force -LiteralPath $provenancePath -ErrorAction SilentlyContinue) `
                 -and -not (Get-Item -Force -LiteralPath $statePath -ErrorAction SilentlyContinue)) {
                 continue
+            }
+            $verifiedPath = $RuntimePath
+            if (-not $RuntimePath) {
+                $state = Read-ProjectAtlasAtlasForwarderState $candidate $null
+                if (-not $state) {
+                    throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
+                }
+                $verifiedPath = $state.RuntimePath
             }
             if ($candidateItem -and -not (Test-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath)) {
                 throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"

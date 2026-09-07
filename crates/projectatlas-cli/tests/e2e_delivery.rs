@@ -30222,6 +30222,53 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             && !installer_state.exists(),
         "failed final readiness did not preserve exact ownership for repair and uninstall",
     )?;
+    #[cfg(windows)]
+    {
+        let runtime_dir = home.join(TEST_WINDOWS_APPDATA_DIR).join("npm");
+        fs::create_dir_all(&runtime_dir)?;
+        let alternate_runtime = runtime_dir.join("verified-custom-runtime.exe");
+        fs::hard_link(&runtime, &alternate_runtime)?;
+        let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &alternate_runtime,
+            None,
+            Some(&home),
+        )?;
+        install
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &run_path);
+        require(
+            install.output()?.status.success(),
+            "alternate runtime install failed",
+        )?;
+        let output = StdCommand::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&installer)
+            .arg("-Uninstall")
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
+            .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
+            .env("PATH", &run_path)
+            .output()?;
+        require(
+            output.status.success()
+                && !runtime_dir.join("atlas.cmd").exists()
+                && !runtime_dir.join(".atlas-forwarder.provenance").exists()
+                && fs::read_dir(&installer_state_dir)?
+                    .collect::<Result<Vec<_>, io::Error>>()?
+                    .iter()
+                    .all(|entry| entry.path().extension() != Some(OsStr::new("state")))
+                && alternate_runtime.is_file()
+                && runtime.is_file(),
+            format!(
+                "broad uninstall did not authenticate the recorded runtime: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+    }
     #[cfg(unix)]
     {
         let projects = fixture_root.join("uninstall projects");

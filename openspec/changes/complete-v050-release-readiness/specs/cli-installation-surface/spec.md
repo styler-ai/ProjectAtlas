@@ -107,6 +107,7 @@ Install, update, repair, and uninstall SHALL manage the verified runtime, npm ca
 - **WHEN** ProjectAtlas is removed
 - **THEN** only proven-owned artifacts are removed and selected project databases/configuration plus unrelated host state remain according to the documented retention contract
 - **AND** forwarder uninstall does not require an existing project root or valid project state directory; missing, linked, and non-directory project state remains untouched
+- **AND** uninstall without an explicit runtime path derives each discovered forwarder's runtime from its validated ownership record rather than assuming a runtime filename
 
 #### Scenario: Missing forwarder with malformed retained provenance
 - **WHEN** a forwarder is absent but its valid private state and malformed provenance remain
