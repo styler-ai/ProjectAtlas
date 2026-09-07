@@ -2345,7 +2345,7 @@ function Read-ProjectAtlasAtlasForwarderState {
         $expectedRuntime = Get-NormalizedPathEntry $VerifiedPath
         $match = [regex]::Match(
             $content,
-            '(?m)^# ProjectAtlas atlas forwarder installer state v1\r?\nforwarder: ([^\r\n]+)\r?\nruntime: ([^\r\n]+)\r?\ncapability: ([0-9a-f]{64})\r?\n$')
+            '\A# ProjectAtlas atlas forwarder installer state v1\r\nforwarder: ([^\r\n]+)\r\nruntime: ([^\r\n]+)\r\ncapability: ([0-9a-f]{64})\r\n\z')
         if (-not $match.Success `
             -or $match.Groups[1].Value -ine $expectedForwarder `
             -or $match.Groups[2].Value -ine $expectedRuntime) {

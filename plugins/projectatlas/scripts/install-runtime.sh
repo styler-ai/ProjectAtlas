@@ -477,19 +477,13 @@ atlas_forwarder_state_capability() {
   verified=$2
   state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
   is_direct_regular_file "$state_path" || return 1
-  expected_forwarder=$(canonical_file "$forwarder") || return 1
-  expected_verified=$(canonical_file "$verified") || return 1
-  state_forwarder=$(sed -n 's/^forwarder: //p' "$state_path" | head -n 1)
-  state_verified=$(sed -n 's/^runtime: //p' "$state_path" | head -n 1)
   capability=$(sed -n 's/^capability: //p' "$state_path" | head -n 1)
-  [ "$(sed -n '1p' "$state_path")" = '# ProjectAtlas atlas forwarder installer state v1' ] || return 1
-  [ "$state_forwarder" = "$expected_forwarder" ] || return 1
-  [ "$state_verified" = "$expected_verified" ] || return 1
   case "$capability" in
-    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]* ) ;;
-    *) return 1 ;;
+    *[!0-9a-fA-F]*|'') return 1 ;;
   esac
   [ "${#capability}" -eq 64 ] || return 1
+  atlas_forwarder_state_content "$forwarder" "$verified" "$capability" |
+    cmp -s - "$state_path" || return 1
   printf '%s\n' "$capability"
 }
 

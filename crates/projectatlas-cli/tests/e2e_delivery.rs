@@ -28947,6 +28947,21 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         ),
     )?;
     let installer_state = installer_states[0].path();
+    let valid_state = fs::read(&installer_state)?;
+    for suffix in [b"unexpected state field\n".as_slice(), b"\n".as_slice()] {
+        let mut malformed_state = valid_state.clone();
+        malformed_state.extend_from_slice(suffix);
+        fs::write(&installer_state, &malformed_state)?;
+        require(
+            !run_install()?.status.success()
+                && !run_uninstall()?.status.success()
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == malformed_state,
+            "malformed private state was accepted or changed by install/uninstall",
+        )?;
+        fs::write(&installer_state, &valid_state)?;
+    }
 
     #[cfg(unix)]
     {
