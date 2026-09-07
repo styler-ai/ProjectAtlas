@@ -219,12 +219,17 @@ flowchart LR
 The document boundary pins a fixed `pdf-extract` `0.12.0+projectatlas` guest
 with `lopdf` `0.44.0`, the `wasmi`/`wasmi_core` `2.0.0` host, `quick-xml`
 `0.42.0`, and `zip` `0.6.6` (ZIP defaults disabled, only `deflate` enabled).
-The PDF guest is embedded build-owned code with a verified locked rebuild;
-callers cannot select modules. Its release profile uses one code-generation
-unit to avoid parallel codegen partitioning in the fixed artifact. Its build resolves the locked dependency sources
-before mapping each Rust source directory to a canonical path, so embedded
-diagnostics do not depend on host separators or a warm Cargo cache. Native
-platform checks require the rebuilt guest to match the embedded bytes exactly.
+The PDF guest is embedded build-owned code; callers cannot select modules.
+Linux x86-64 with the repository-pinned Rust toolchain and locked WASI dependency
+tree is its canonical builder. `packaging/pdf-parser/build.py --install-target
+--validate` rebuilds and requires exact equality with the checked-in bytes in CI;
+`--write` is an explicit artifact update on that builder. Other hosts reject byte
+production and use `--validate --source-only` for guest format, Clippy, native
+tests, and locked dependency checks. All native platform jobs test the same
+embedded canonical guest through extraction, CLI/MCP navigation, and measurements.
+The build resolves dependency sources before canonical source-path remapping and
+uses one release code-generation unit. Cross-host compiler output equality is
+not an artifact claim.
 Each parse has 64 MiB linear memory, a 1 MiB
 interpreter value stack, 256 call depth, 500 million total instruction fuel,
 and a ten-second ceiling that respects an earlier caller deadline. Fuel
@@ -239,7 +244,12 @@ admission requires a ZIP header, admits only stored or DEFLATE entries, rejects
 unsafe, duplicate, encrypted, or otherwise unsupported package input, and passes
 only `word/document.xml` to the parser. Nested WordprocessingML text boxes retain
 and resume their outer paragraph/run context, emitting interrupted run fragments
-in document order with their original decoded byte offsets. Each result carries a page/text-span or
+in document order with their original decoded byte offsets. Complex-field code
+and deleted-text carriers are validated without execution or publication;
+cached field results and instruction-text leaves outside field-code regions
+remain literal document text. Field nesting has its own 64-level bound and is
+isolated across text-box contexts. Explicit language overrides take precedence
+over a PDF/DOCX extension. Each result carries a page/text-span or
 part/paragraph/run/text-span locator plus its actual emitted-text line range
 for symbol slicing, parser provenance, and a complete
 coverage marker. Normal text, symbol, and summary admission uses the document

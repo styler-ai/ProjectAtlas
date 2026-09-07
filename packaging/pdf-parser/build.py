@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Rebuild the fixed PDF guest and verify its checked-in bytes (or --write them)."""
+"""Verify the fixed PDF guest on its Linux x86-64 builder, or validate sources."""
 
 import argparse
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 import runpy
@@ -15,13 +16,22 @@ def main() -> None:
     parser.add_argument("--write", action="store_true", help="replace the embedded artifact")
     parser.add_argument("--install-target", action="store_true", help="install the pinned WASI target for CI")
     parser.add_argument("--validate", action="store_true", help="also run guest format, lint, tests, and dependency policy")
+    parser.add_argument("--source-only", action="store_true", help="validate source without canonical Linux x86-64 byte verification")
     args = parser.parse_args()
+    if args.source_only and (not args.validate or args.write or args.install_target):
+        parser.error("--source-only requires --validate and cannot write or install a WASI target")
+    if not args.source_only and (platform.system() != "Linux" or platform.machine() != "x86_64"):
+        parser.error("fixed PDF guest byte verification requires Linux x86-64; use --validate --source-only for native source checks")
     guest = Path(__file__).resolve().parent
     root = guest.parent.parent
     preflight = runpy.run_path(str(root / ".github/scripts/verify-rust-toolchain.py"))
     channel = preflight["read_declared_channel"](root / "rust-toolchain.toml")
     target = root / ".tmp" / "pdf-parser-build"
     env = os.environ.copy()
+    if args.source_only:
+        validate_sources(guest, root, channel, target, env)
+        print("PDF guest source validation passed; canonical byte verification belongs to Linux x86-64 CI")
+        return
     # Fetch the locked target tree before inspecting registry source paths.
     metadata = json.loads(subprocess.run(
         ["cargo", f"+{channel}", "metadata", "--locked", "--format-version", "1",
@@ -72,18 +82,23 @@ def main() -> None:
     elif artifact.read_bytes() != built:
         raise SystemExit(f"PDF parser artifact differs from its locked source: built sha256={hashlib.sha256(built).hexdigest()}; rebuild with --write")
     if args.validate:
-        manifest = str(guest / "Cargo.toml")
-        for command in [
-            ["cargo", f"+{channel}", "fmt", "--manifest-path", manifest, "--check"],
-            ["cargo", f"+{channel}", "clippy", "--locked", "--manifest-path", manifest, "--all-targets", "--target-dir", str(target), "--", "-D", "warnings"],
-            ["cargo", f"+{channel}", "test", "--locked", "--manifest-path", manifest, "--target-dir", str(target)],
-            # The shared policy includes native-only exceptions absent from this guest.
-            # Allow only those unused-policy diagnostics; actual dependency findings fail.
-            ["cargo", "deny", "--locked", "--manifest-path", manifest, "--config", str(root / "deny.toml"), "--target", "wasm32-wasip1", "check", "-D", "warnings",
-             "-A", "unmatched-skip", "-A", "unnecessary-skip", "-A", "license-exception-not-encountered", "-A", "license-not-encountered"],
-        ]:
-            subprocess.run(command, cwd=root, env=env, check=True, timeout=600)
+        validate_sources(guest, root, channel, target, env)
     print(f"PDF parser verified: {len(built)} bytes, sha256={hashlib.sha256(built).hexdigest()}")
+
+
+def validate_sources(guest: Path, root: Path, channel: str, target: Path, env: dict) -> None:
+    """Check the guest's native behavior and locked WASI dependency policy on any host."""
+    manifest = str(guest / "Cargo.toml")
+    for command in [
+        ["cargo", f"+{channel}", "fmt", "--manifest-path", manifest, "--check"],
+        ["cargo", f"+{channel}", "clippy", "--locked", "--manifest-path", manifest, "--all-targets", "--target-dir", str(target), "--", "-D", "warnings"],
+        ["cargo", f"+{channel}", "test", "--locked", "--manifest-path", manifest, "--target-dir", str(target)],
+        # The shared policy includes native-only exceptions absent from this guest.
+        # Allow only those unused-policy diagnostics; actual dependency findings fail.
+        ["cargo", "deny", "--locked", "--manifest-path", manifest, "--config", str(root / "deny.toml"), "--target", "wasm32-wasip1", "check", "-D", "warnings",
+         "-A", "unmatched-skip", "-A", "unnecessary-skip", "-A", "license-exception-not-encountered", "-A", "license-not-encountered"],
+    ]:
+        subprocess.run(command, cwd=root, env=env, check=True, timeout=600)
 
 
 if __name__ == "__main__":

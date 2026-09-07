@@ -9625,7 +9625,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         write!(docx, "<!--{}-->", " ".repeat(2_000_001))?;
         write!(
             docx,
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p/><w:p><w:r><w:t>{text}</w:t></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><w:t>Inside box</w:t></w:r></w:p></w:txbxContent></w:drawing><w:t>After box</w:t></w:r></w:p></w:body></w:document>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>{text}</w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><w:instrText>Inside box</w:instrText></w:r></w:p></w:txbxContent></w:drawing><w:t>After box</w:t></w:r></w:p></w:body></w:document>"
         )?;
         docx.finish()?;
         Ok(())
@@ -10080,6 +10080,56 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             "MCP repair/retry lost repaired document evidence: {repaired_mcp}"
         ))
         .into());
+    }
+    let override_repo = temp.path().join("document-language-overrides");
+    fs::create_dir_all(&override_repo)?;
+    fs::write(
+        override_repo.join("guide.pdf"),
+        "pub fn overridden_pdf() {}\n",
+    )?;
+    fs::write(override_repo.join("guide.docx"), "# Overridden document\n")?;
+    fs::write(
+        override_repo.join("projectatlas.toml"),
+        "[project]\nroot = \".\"\n[scan.language_overrides]\n\".pdf\" = \"rust\"\n\".docx\" = \"markdown\"\n",
+    )?;
+    let override_db = override_repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&override_repo, &override_db)?;
+    for (path, name) in [
+        ("guide.pdf", "overridden_pdf"),
+        ("guide.docx", "Overridden document"),
+    ] {
+        let symbols = run_mcp_contract_json(
+            &executable,
+            &override_repo,
+            &[
+                "--db".to_owned(),
+                override_db.display().to_string(),
+                "symbols".to_owned(),
+                "list".to_owned(),
+                "--file".to_owned(),
+                path.to_owned(),
+            ],
+        )?;
+        if !serde_json::to_string(&symbols)?.contains(name) {
+            return Err(
+                io::Error::other("explicit document language override lost its symbols").into(),
+            );
+        }
+        let mut session = McpContractSession::spawn(&executable, &override_repo, &override_db)?;
+        let result = session.call_tool(
+            "atlas_search",
+            &json!({
+                "project_path": override_repo.as_path(), "pattern": name, "file_pattern": path,
+            }),
+        );
+        let shutdown = session.shutdown();
+        let result = result?;
+        shutdown?;
+        if !result.contains(name) || !result.contains(path) {
+            return Err(
+                io::Error::other("explicit document language override lost indexed text").into(),
+            );
+        }
     }
     Ok(())
 }

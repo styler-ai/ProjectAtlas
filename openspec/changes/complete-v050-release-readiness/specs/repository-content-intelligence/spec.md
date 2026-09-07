@@ -29,6 +29,11 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 ### Requirement: v0.5 document extraction supports only PDF and DOCX
 #465 SHALL pin and audit the fixed `pdf-extract` 0.12.0+projectatlas guest with `lopdf` 0.44.0, the `wasmi`/`wasmi_core` 2.0.0 host, `quick-xml` 0.42.0, and `zip` 0.6.6 (ZIP default features disabled, only `deflate` enabled) plus their exact locked transitive trees. It SHALL admit only PDF content streams and stored or DEFLATE DOCX `word/document.xml`, reject encrypted or unsupported compression as typed unsupported input before text publication, and invoke no OCR, legacy DOC, spreadsheet/presentation formats, macros, scripts, remote references, arbitrary processes, or embedded recursive parsers.
 
+#### Scenario: Canonical guest source proof
+- **WHEN** CI verifies the fixed PDF guest on Linux x86-64 with the pinned Rust toolchain and locked sources
+- **THEN** the rebuilt WASI bytes must exactly match the checked-in guest
+- **AND** every supported native platform executes that same embedded guest through document, CLI/MCP, and resource proof; noncanonical hosts validate guest sources without claiming cross-host compiler-byte equality
+
 #### Scenario: Valid PDF
 - **WHEN** PDF magic and all input/time/memory/output limits pass
 - **THEN** ProjectAtlas publishes bounded text with exact page and text-span locator, parser/version provenance, completeness, and coverage
@@ -37,6 +42,12 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **WHEN** a ZIP container passes entry/path/compressed/expanded/recursion limits and contains admitted `word/document.xml` with Transitional or Strict WordprocessingML namespace identity, independent of its prefix
 - **THEN** ProjectAtlas publishes bounded text with exact part, paragraph, run, and text-span locator plus parser/version provenance
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
+- **AND** field instructions and deleted text are validated without execution or publication, while cached field results and instruction text outside field-code regions remain literal text
+- **AND** field nesting is bounded independently of XML depth and isolated within each text container
+
+#### Scenario: Explicit language overrides a document extension
+- **WHEN** an accepted language override selects another language for a `.pdf` or `.docx` path
+- **THEN** text and symbol navigation honor the selected language rather than invoking the document parser from its extension
 
 #### Scenario: Document input exceeds the ordinary source ceiling
 - **WHEN** a valid PDF or DOCX is larger than the ordinary source/text-index ceiling but within the declared document input and extraction bounds

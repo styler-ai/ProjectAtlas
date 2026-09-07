@@ -159,7 +159,12 @@ if has_repository_contract cargo-dependency; then
   cargo deny --locked --all-features check -D warnings
 fi
 case " $rust_packages " in
-  *" projectatlas-symbols "*) python3 packaging/pdf-parser/build.py --validate ;;
+  *" projectatlas-symbols "*)
+    case "$(uname -s):$(uname -m)" in
+      Linux:x86_64) python3 packaging/pdf-parser/build.py --validate ;;
+      *) python3 packaging/pdf-parser/build.py --validate --source-only ;;
+    esac
+    ;;
 esac
 
 set --

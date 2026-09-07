@@ -307,21 +307,14 @@ pub enum DocumentExtractionError {
     Work(#[from] IndexWorkFailure),
 }
 
-/// Identify a document format using the registry language first and extension second.
+/// Honor a supplied language; infer from the extension only when no language is supplied.
 #[must_use]
 pub fn document_format_for_path(path: &str, language: Option<&str>) -> Option<DocumentFormat> {
-    let language = language.unwrap_or_default().to_ascii_lowercase();
-    match language.as_str() {
+    let language = language.or_else(|| Path::new(path).extension()?.to_str())?;
+    match language.to_ascii_lowercase().as_str() {
         "pdf" => Some(DocumentFormat::Pdf),
         "docx" => Some(DocumentFormat::Docx),
-        _ => Path::new(path)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .and_then(|extension| match extension.to_ascii_lowercase().as_str() {
-                "pdf" => Some(DocumentFormat::Pdf),
-                "docx" => Some(DocumentFormat::Docx),
-                _ => None,
-            }),
+        _ => None,
     }
 }
 
@@ -660,9 +653,10 @@ fn extract_docx(
             .len()
             .saturating_add(xml.capacity().saturating_mul(3))
             .saturating_add(MAX_DOCUMENT_OUTPUT_BYTES.saturating_mul(4))
-            .saturating_add(
-                MAX_DOCX_XML_DEPTH.saturating_mul(std::mem::size_of::<(DocxParagraph, usize)>()),
-            )
+            .saturating_add(MAX_DOCX_XML_DEPTH.saturating_mul(
+                std::mem::size_of::<(DocxTextContext, usize)>()
+                    + MAX_DOCX_XML_DEPTH * std::mem::size_of::<DocxFieldPhase>(),
+            ))
             .saturating_add(
                 MAX_DOCUMENT_FACTS
                     .saturating_mul(std::mem::size_of::<DocumentFact>())
@@ -681,9 +675,9 @@ struct RawDocxRun {
     text_start: usize,
 }
 
-/// Paragraph and run ownership within one `WordprocessingML` text container.
+/// Paragraph, run, and field ownership within one `WordprocessingML` text container.
 #[derive(Default)]
-struct DocxParagraph {
+struct DocxTextContext {
     /// Document-order paragraph ordinal, including empty paragraphs.
     number: usize,
     /// Run ordinal within this paragraph, including empty runs.
@@ -692,6 +686,35 @@ struct DocxParagraph {
     open: bool,
     /// Unpublished fragment of the active run.
     run: Option<RawDocxRun>,
+    /// Nested complex-field phases in this text container.
+    fields: Vec<DocxFieldPhase>,
+}
+
+/// Whether a complex field is still in its instruction or cached-result region.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocxFieldPhase {
+    /// Field instructions are data and are never executed or rendered.
+    Instruction,
+    /// Existing cached result text may be retained.
+    Result,
+}
+
+/// The closed text leaves admitted from the Word document part.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocxTextCarrier {
+    /// Literal document text retained with a locator.
+    Rendered,
+    /// Field instructions and deleted text are validated without publication.
+    Ignored,
+}
+
+/// Recognize either supported Word namespace independently of its chosen prefix.
+fn wordprocessing_namespace(namespace: &str) -> bool {
+    matches!(
+        namespace,
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            | "http://purl.oclc.org/ooxml/wordprocessingml/main"
+    )
 }
 
 /// Parse body paragraphs and table paragraphs from the admitted XML part.
@@ -707,9 +730,9 @@ fn parse_docx(
     let mut output_line = 1usize;
     let mut facts = Vec::new();
     let mut paragraph_number = 0usize;
-    let mut paragraph = DocxParagraph::default();
+    let mut paragraph = DocxTextContext::default();
     let mut text_boxes = Vec::new();
-    let mut in_text = false;
+    let mut text_carrier = None;
     let mut element_depth = 0usize;
     let mut root_seen = false;
     let mut root_closed = false;
@@ -725,11 +748,7 @@ fn parse_docx(
                     message: error.to_string(),
                 })?;
         let wordprocessing = match namespace {
-            ResolveResult::Bound(namespace) => matches!(
-                namespace.as_ref(),
-                "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                    | "http://purl.oclc.org/ooxml/wordprocessingml/main"
-            ),
+            ResolveResult::Bound(namespace) => wordprocessing_namespace(namespace.as_ref()),
             ResolveResult::Unbound => false,
             ResolveResult::Unknown(prefix) => {
                 return Err(DocumentExtractionError::Malformed {
@@ -740,7 +759,7 @@ fn parse_docx(
         };
         match event {
             Event::Start(event) => {
-                if in_text {
+                if text_carrier.is_some() {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "DOCX text elements cannot contain nested markup".to_owned(),
@@ -793,7 +812,61 @@ fn parse_docx(
                         paragraph.run_number += 1;
                         paragraph.run = Some(RawDocxRun::default());
                     }
-                    "t" if paragraph.run.is_some() && !in_text => in_text = true,
+                    "t" | "instrText" | "delText" | "delInstrText" if paragraph.run.is_some() => {
+                        let ignored = matches!(name.as_ref(), "delText" | "delInstrText")
+                            || (name.as_ref() == "instrText"
+                                && paragraph.fields.contains(&DocxFieldPhase::Instruction));
+                        text_carrier = Some(if ignored {
+                            DocxTextCarrier::Ignored
+                        } else {
+                            DocxTextCarrier::Rendered
+                        });
+                    }
+                    "fldChar" if paragraph.run.is_some() => {
+                        let mut field_type = None;
+                        for attribute in event.attributes() {
+                            let attribute =
+                                attribute.map_err(|error| DocumentExtractionError::Malformed {
+                                    format: DocumentFormat::Docx,
+                                    message: error.to_string(),
+                                })?;
+                            let (namespace, local) =
+                                reader.resolver().resolve_attribute(attribute.key);
+                            if local.as_ref() == "fldCharType"
+                                && matches!(namespace, ResolveResult::Bound(namespace)
+                                    if wordprocessing_namespace(namespace.as_ref()))
+                            {
+                                field_type = Some(attribute.value.into_owned());
+                            }
+                        }
+                        match field_type.as_deref() {
+                            Some("begin") => {
+                                if paragraph.fields.len() >= MAX_DOCX_XML_DEPTH {
+                                    return Err(DocumentExtractionError::ResourceLimit {
+                                        limit: DocumentLimit::NestingDepth,
+                                        observed: paragraph.fields.len() + 1,
+                                        maximum: MAX_DOCX_XML_DEPTH,
+                                    });
+                                }
+                                paragraph.fields.push(DocxFieldPhase::Instruction);
+                            }
+                            Some("separate") if !paragraph.fields.is_empty() => {
+                                if let Some(phase) = paragraph.fields.last_mut() {
+                                    *phase = DocxFieldPhase::Result;
+                                }
+                            }
+                            Some("end") if !paragraph.fields.is_empty() => {
+                                paragraph.fields.pop();
+                            }
+                            _ => {
+                                return Err(DocumentExtractionError::Malformed {
+                                    format: DocumentFormat::Docx,
+                                    message: "DOCX field marker has invalid type or nesting"
+                                        .to_owned(),
+                                });
+                            }
+                        }
+                    }
                     "tab" | "br" | "cr" => {
                         if let Some(run) = paragraph.run.as_mut() {
                             append_docx_run_text(
@@ -803,7 +876,7 @@ fn parse_docx(
                             )?;
                         }
                     }
-                    "p" | "r" | "t" => {
+                    "p" | "r" | "t" | "instrText" | "delText" | "delInstrText" | "fldChar" => {
                         return Err(DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
                             message: "DOCX paragraph, run, or text nesting is invalid".to_owned(),
@@ -813,14 +886,16 @@ fn parse_docx(
                 }
             }
             Event::Text(event) => {
-                if in_text {
+                if text_carrier.is_some() {
                     let Some(run) = paragraph.run.as_mut() else {
                         return Err(DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
                             message: "text appeared outside a run".to_owned(),
                         });
                     };
-                    append_docx_run_text(run, event.as_ref(), output.len())?;
+                    if text_carrier == Some(DocxTextCarrier::Rendered) {
+                        append_docx_run_text(run, event.as_ref(), output.len())?;
+                    }
                 } else if !event
                     .as_ref()
                     .chars()
@@ -833,7 +908,7 @@ fn parse_docx(
                 }
             }
             Event::CData(event) => {
-                if !in_text {
+                if text_carrier.is_none() {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "CDATA appeared outside a run".to_owned(),
@@ -845,10 +920,12 @@ fn parse_docx(
                         message: "CDATA appeared outside a run".to_owned(),
                     });
                 };
-                append_docx_run_text(run, event.as_ref(), output.len())?;
+                if text_carrier == Some(DocxTextCarrier::Rendered) {
+                    append_docx_run_text(run, event.as_ref(), output.len())?;
+                }
             }
             Event::GeneralRef(reference) => {
-                if !in_text {
+                if text_carrier.is_none() {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "entity appeared outside a text run".to_owned(),
@@ -861,7 +938,9 @@ fn parse_docx(
                     });
                 };
                 let text = decode_docx_reference(&reference)?;
-                append_docx_run_text(run, &text, output.len())?;
+                if text_carrier == Some(DocxTextCarrier::Rendered) {
+                    append_docx_run_text(run, &text, output.len())?;
+                }
             }
             Event::DocType(_) => {
                 return Err(DocumentExtractionError::Malformed {
@@ -879,7 +958,7 @@ fn parse_docx(
                 }
                 let name = event.local_name();
                 match if wordprocessing { name.as_ref() } else { "" } {
-                    "t" => in_text = false,
+                    "t" | "instrText" | "delText" | "delInstrText" => text_carrier = None,
                     "r" => {
                         if let Some(mut run) = paragraph.run.take() {
                             publish_docx_run_fragment(
@@ -893,6 +972,13 @@ fn parse_docx(
                         }
                     }
                     "txbxContent" => {
+                        if !paragraph.fields.is_empty() {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX text box ended inside an incomplete field"
+                                    .to_owned(),
+                            });
+                        }
                         let Some((outer, previous_bytes)) = text_boxes.pop() else {
                             return Err(DocumentExtractionError::Malformed {
                                 format: DocumentFormat::Docx,
@@ -923,7 +1009,8 @@ fn parse_docx(
         || paragraph.open
         || !text_boxes.is_empty()
         || paragraph.run.is_some()
-        || in_text
+        || text_carrier.is_some()
+        || !paragraph.fields.is_empty()
     {
         return Err(DocumentExtractionError::Malformed {
             format: DocumentFormat::Docx,
@@ -1109,6 +1196,11 @@ mod tests {
             Some(DocumentFormat::Pdf)
         );
         assert_eq!(document_format_for_path("docs/guide.doc", None), None);
+        for language in ["text", "rust", "markdown", ""] {
+            for path in ["docs/guide.pdf", "docs/guide.docx"] {
+                assert_eq!(document_format_for_path(path, Some(language)), None);
+            }
+        }
     }
 
     #[test]
@@ -1924,6 +2016,66 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 }),
             ));
         }
+    }
+
+    #[test]
+    fn docx_field_carriers_retain_only_literal_and_cached_text() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE &amp; <![CDATA[ignored]]></w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:instrText> Literal</w:instrText></w:r><w:r><w:delInstrText>Deleted code</w:delInstrText><w:delText><![CDATA[Deleted text]]></w:delText></w:r></w:p></w:body></w:document>"#;
+        let parsed = extract_document_text_controlled(
+            &docx_archive(xml, CompressionMethod::Deflated),
+            "fields.docx",
+            None,
+            &control(),
+        )
+        .expect("field instructions and deleted carriers are valid bounded XML");
+        assert_eq!(parsed.text, "Page 7 Literal");
+        assert_eq!(parsed.completeness, DocumentCompleteness::Complete);
+        assert_eq!(parsed.facts.len(), 3);
+        for (fact, (run, text)) in
+            parsed
+                .facts
+                .iter()
+                .zip([(1, "Page "), (5, "7"), (7, " Literal")])
+        {
+            assert_eq!(fact.text, text);
+            assert_eq!(
+                fact.locator,
+                DocumentLocator::Docx {
+                    part: DOCX_DOCUMENT_PART,
+                    paragraph: 1,
+                    run,
+                    text_start: 0,
+                    text_end: text.len(),
+                }
+            );
+        }
+        let nested = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>OUTER</w:instrText><w:drawing><w:txbxContent><w:p><w:r><w:instrText>Box</w:instrText></w:r></w:p></w:txbxContent></w:drawing><w:fldChar w:fldCharType="begin"/><w:instrText>INNER</w:instrText><w:fldChar w:fldCharType="separate"/><w:instrText>Outer code remains ignored</w:instrText><w:fldChar w:fldCharType="end"/><w:fldChar w:fldCharType="separate"/><w:t>Result</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+        let nested = parse_docx(nested, &control(), IndexWorkStage::TextIndex)
+            .expect("nested fields and text boxes keep independent state");
+        assert_eq!(nested.text, "Box\nResult");
+        assert_eq!(nested.facts.len(), 2);
+        let text = std::str::from_utf8(xml).expect("UTF-8 fixture");
+        for invalid in [
+            text.replace("PAGE &amp; <![CDATA[ignored]]>", "<w:t>nested</w:t>"),
+            text.replace("PAGE &amp; <![CDATA[ignored]]>", "&unknown;"),
+            text.replace("<w:p>", "<w:p><w:instrText>outside run</w:instrText>"),
+        ] {
+            assert!(matches!(
+                parse_docx(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+        let deep = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r>{}</w:r></w:p></w:body></w:document>",
+            "<w:fldChar w:fldCharType=\"begin\"/>".repeat(MAX_DOCX_XML_DEPTH + 1),
+        );
+        assert!(matches!(
+            parse_docx(deep.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::NestingDepth,
+                ..
+            })
+        ));
     }
 
     #[test]
