@@ -28840,43 +28840,54 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     };
 
     #[cfg(unix)]
-    for (index, (directory_name, executable_name)) in [
-        ("runtime\nwith line break", "projectatlas"),
-        ("runtime\rwith line break", "projectatlas"),
-        ("runtime with terminal line break", "projectatlas\n"),
-    ]
-    .into_iter()
-    .enumerate()
     {
-        let invalid_directory = fixture_root.join(directory_name);
-        fs::create_dir_all(&invalid_directory)?;
-        let invalid_runtime = invalid_directory.join(executable_name);
-        fs::hard_link(&runtime, &invalid_runtime)?;
-        let runtime_alias = fixture_root.join(format!("runtime-alias-{index}"));
-        std::os::unix::fs::symlink(&invalid_runtime, &runtime_alias)?;
-        for supplied_runtime in [&invalid_runtime, &runtime_alias] {
-            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
-                &workspace_root,
-                &repo,
-                supplied_runtime,
-                None,
-                Some(&home),
-            )?;
-            command
-                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
-                .env("PROJECTATLAS_NO_TELEMETRY", "1")
-                .env("PATH", &run_path);
-            let before = repository_filesystem_snapshot(&fixture_root)?;
+        let mut commands = Vec::new();
+        for (index, (directory_name, executable_name)) in [
+            ("runtime\nwith line break", "projectatlas"),
+            ("runtime\rwith line break", "projectatlas"),
+            ("runtime with terminal line break", "projectatlas\n"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let invalid_directory = fixture_root.join(directory_name);
+            fs::create_dir_all(&invalid_directory)?;
+            let invalid_runtime = invalid_directory.join(executable_name);
+            fs::hard_link(&runtime, &invalid_runtime)?;
+            let runtime_alias = fixture_root.join(format!("runtime-alias-{index}"));
+            std::os::unix::fs::symlink(&invalid_runtime, &runtime_alias)?;
+            for supplied_runtime in [&invalid_runtime, &runtime_alias] {
+                let mut command =
+                    projectatlas_plugin_installer_command_with_optional_path_and_home(
+                        &workspace_root,
+                        &repo,
+                        supplied_runtime,
+                        None,
+                        Some(&home),
+                    )?;
+                command
+                    .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                    .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                    .env("PATH", &run_path);
+                commands.push(command);
+            }
+        }
+        // Hash the real runtime fixtures once per boundary, not once per rejected spelling.
+        let before = repository_filesystem_snapshot(&fixture_root)?;
+        for mut command in commands {
             let rejected = command.output()?;
             let diagnostic = String::from_utf8_lossy(&rejected.stderr);
             require(
                 !rejected.status.success()
                     && diagnostic.contains("runtime path contains a line break")
-                    && repository_filesystem_snapshot(&fixture_root)? == before
                     && !atlas_dir.join("projectatlas.db").exists(),
                 format!("line-breaking runtime path changed installer state: {diagnostic}"),
             )?;
         }
+        require(
+            repository_filesystem_snapshot(&fixture_root)? == before,
+            "line-breaking runtime path refusals changed installer state",
+        )?;
     }
 
     let forwarder = runtime
