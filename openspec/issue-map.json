@@ -28,7 +28,7 @@
         "489": { "blocked_by": [] },
         "490": { "blocked_by": [339, 342, 358, 384, 464, 465, 489] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 561, 564, 567] },
+        "492": { "blocked_by": [339, 342, 358, 372, 384, 388, 390, 456, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 561, 564, 567, 568] },
         "495": { "blocked_by": [] },
         "517": { "blocked_by": [] },
         "518": { "blocked_by": [547] },
@@ -41,7 +41,8 @@
         "555": { "blocked_by": [487] },
         "561": { "blocked_by": [] },
         "564": { "blocked_by": [] },
-        "567": { "blocked_by": [] }
+        "567": { "blocked_by": [] },
+        "568": { "blocked_by": [] }
       }
     },
     "v0.6.0-00": {
@@ -159,6 +160,7 @@
     "migrate-released-database-layouts": 379,
     "pin-sql-fixture-line-endings": 401,
     "pin-taiki-install-action": 567,
+    "update-mcp-parser-dependencies": 568,
     "pin-token-trend-palette-test-viewport": 495,
     "persist-agent-project-context": {
       "contract": "checklist-v1",
