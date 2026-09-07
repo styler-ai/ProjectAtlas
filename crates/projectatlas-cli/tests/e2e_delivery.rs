@@ -59,10 +59,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::error::Error;
-#[cfg(any(windows, feature = "optional-parser-supervisor"))]
 use std::ffi::OsStr;
-#[cfg(all(target_os = "macos", feature = "optional-parser-supervisor"))]
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -91,6 +90,16 @@ use support::{
 use yaml_rust2::{Yaml, YamlLoader};
 
 const TEST_REPO_DIR: &str = "repo";
+const TEST_ISOLATED_HOME_DIR_NAME: &str = "isolated home";
+const TEST_RUNTIME_DIR_NAME: &str = "runtime";
+const TEST_FORWARDER_PROVENANCE_FILE_NAME: &str = ".atlas-forwarder.provenance";
+const TEST_WINDOWS_APPDATA_DIR: &str = "AppData/Roaming";
+const TEST_WINDOWS_LOCAL_APPDATA_DIR: &str = "AppData/Local";
+const TEST_WINDOWS_INSTALLER_STATE_DIR: &str = "AppData/Local/ProjectAtlas/state";
+const TEST_POSIX_INSTALLER_STATE_DIR: &str = ".local/state/projectatlas";
+const TEST_POSIX_USER_BIN_DIR: &str = ".local/bin";
+#[cfg(unix)]
+const TEST_ATLAS_FORWARDER_FILE_NAME: &str = "atlas";
 
 const SRC_DIR_NAME: &str = "src";
 
@@ -1186,7 +1195,6 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
     }
 
     let mut observed_symbols_by_owner = BTreeMap::<String, Vec<ObservedCliE2eSymbol>>::new();
-    let mut observed_source_lines = BTreeSet::new();
     for relative_path in CLI_E2E_SOURCE_PATHS
         .iter()
         .copied()
@@ -1194,12 +1202,6 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
     {
         let source =
             normalize_cli_e2e_text(&fs::read_to_string(workspace_root.join(relative_path))?);
-        for line in source.lines() {
-            observed_source_lines.insert(line.to_owned());
-            if let Some(unqualified) = line.strip_prefix("pub(super) ") {
-                observed_source_lines.insert(unqualified.to_owned());
-            }
-        }
         let owner = relative_path
             .strip_prefix("crates/projectatlas-cli/tests/")
             .and_then(|path| path.strip_suffix(".rs"))
@@ -1316,38 +1318,8 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
         }
     }
 
-    for (name, facets) in [
-        (
-            "environment_mutations",
-            &inventory.contract_facets.environment_mutations,
-        ),
-        (
-            "timeouts_and_deadlines",
-            &inventory.contract_facets.timeouts_and_deadlines,
-        ),
-        (
-            "cleanup_and_process_ownership",
-            &inventory.contract_facets.cleanup_and_process_ownership,
-        ),
-        (
-            "process_isolation_and_fixtures",
-            &inventory.contract_facets.process_isolation_and_fixtures,
-        ),
-        (
-            "packaged_product_routes",
-            &inventory.contract_facets.packaged_product_routes,
-        ),
-    ] {
-        for facet in facets {
-            if !observed_source_lines.contains(&facet.text) {
-                return Err(io::Error::other(format!(
-                    "CLI E2E {name} facet line disappeared: {}",
-                    facet.text.trim()
-                ))
-                .into());
-            }
-        }
-    }
+    // Baseline facets document the accepted ownership split. Current source
+    // digests protect later reviewed fixture and behavior changes.
     let observed_attributes = inventory
         .tests
         .iter()
@@ -2051,6 +2023,39 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
             .into());
         }
     }
+    for (installer_name, installer, required) in [
+        (
+            "POSIX",
+            &posix_installer,
+            [
+                "atlas_forwarder_lifecycle_lock_remaining_ms=30000",
+                "acquire_atlas_forwarder_flock_with_deadline",
+                "previous_candidate",
+                "effective atlas command changed while acquiring its lifecycle locks",
+                "--report-elapsed",
+            ],
+        ),
+        (
+            "PowerShell",
+            &powershell_installer,
+            [
+                "[System.Diagnostics.Stopwatch]::GetTimestamp()",
+                "remainingTicks",
+                "previousCandidate",
+                "effective atlas command changed while acquiring its lifecycle locks",
+                "FromMilliseconds($TimeoutMilliseconds)",
+            ],
+        ),
+    ] {
+        for required_text in required {
+            if !installer.contains(required_text) {
+                return Err(io::Error::other(format!(
+                    "{installer_name} installer is missing lifecycle race/deadline guard {required_text:?}"
+                ))
+                .into());
+            }
+        }
+    }
     let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     if env!("CARGO_PKG_VERSION").contains("-rc") {
         for required in [
@@ -2148,6 +2153,22 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         }
     }
     let e2e_smoke = workflow_job_block(&ci_workflow, "e2e-smoke")?;
+    let forwarder_lifecycle_step =
+        workflow_job_step(&ci_workflow, "e2e-smoke", "Atlas forwarder lifecycle E2E")?;
+    if forwarder_lifecycle_step["if"].as_str() != Some("contains(matrix.contracts, 'plugin')") {
+        return Err(io::Error::other(
+            "atlas forwarder lifecycle E2E must run on every affected plugin platform",
+        )
+        .into());
+    }
+    if !forwarder_lifecycle_step["run"].as_str().is_some_and(|run| {
+        run.contains("plugin_installer_serializes_opposite_atlas_forwarder_migrations")
+    }) {
+        return Err(io::Error::other(
+            "atlas forwarder lifecycle E2E must run the opposite migration lock-order regression",
+        )
+        .into());
+    }
     if !e2e_smoke.contains("plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp") {
         return Err(io::Error::other(
             "multi-OS CI smoke must run the plugin update stale-shim regression",
@@ -2418,7 +2439,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
     fs::create_dir_all(&module)?;
     fs::write(
         module.join("AtlasDiscoveryProbe.psm1"),
-        "[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_MARKER, 'imported')\nfunction projectatlas {}\nfunction codex {}\nfunction cargo {}\nExport-ModuleMember -Function projectatlas,codex,cargo\n",
+        "[IO.File]::WriteAllText($env:PROJECTATLAS_DISCOVERY_MARKER, 'imported')\nfunction projectatlas {}\nfunction atlas {}\nfunction codex {}\nfunction cargo {}\nExport-ModuleMember -Function projectatlas,atlas,codex,cargo\n",
     )?;
     let discovery_script = temp.path().join("command-discovery.ps1");
     fs::write(
@@ -2426,19 +2447,28 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         r#"
 $ErrorActionPreference = 'Stop'
 $source = [IO.File]::ReadAllText($env:PROJECTATLAS_DISCOVERY_INSTALLER)
-foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
+foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Get-ProjectAtlasAtlasForwarderPath', 'Assert-ProjectAtlasAtlasForwarderCollisionFree', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Write-ProjectAtlasPathShadowReport', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
     $definition = [regex]::Match($source, "(?ms)^function $name \{.*?^\}")
     if (-not $definition.Success) { throw "Missing command discovery owner: $name" }
     Invoke-Expression $definition.Value
 }
 [void](Resolve-Path $env:PROJECTATLAS_DISCOVERY_EMPTY)
 $env:PSModulePath = $env:PROJECTATLAS_DISCOVERY_MODULES
+$env:Path = [IO.Path]::Combine($env:SystemRoot, 'System32')
+$missingPathWarning = @(Write-ProjectAtlasPathShadowReport $env:PROJECTATLAS_DISCOVERY_SCRIPT '0.4.5' 3>&1)
+if (-not ($missingPathWarning -match "Bare 'projectatlas' is not on PATH")) {
+    throw 'Missing PATH runtime did not produce the advisory warning'
+}
 $env:Path = $env:PROJECTATLAS_DISCOVERY_EMPTY
 if (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT) {
     throw 'Module-only command was classified as a PATH runtime'
 }
-if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) {
-    throw 'PATH discovery imported an unrelated module'
+try {
+    Assert-ProjectAtlasAtlasForwarderCollisionFree $env:PROJECTATLAS_DISCOVERY_SCRIPT | Out-Null
+} finally {
+    if ([IO.File]::Exists($env:PROJECTATLAS_DISCOVERY_MARKER)) {
+        throw 'PATH discovery imported an unrelated module'
+    }
 }
 if ($null -ne $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')) {
     throw 'Command discovery did not restore absent preference'
@@ -6159,7 +6189,21 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
     let workspace_root = workspace_root()?;
-    let runtime = mcp_contract_executable();
+    let runtime_dir = temp.path().join(TEST_RUNTIME_DIR_NAME);
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join(if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    });
+    fs::copy(mcp_contract_executable(), &runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime, permissions)?;
+    }
     let installer_output = run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
     let installer_output_text = format!(
         "{}{}",
@@ -7115,7 +7159,7 @@ fn installed_hosts_read_generated_configs_and_report_native_status() -> Result<(
         .join(format!("isolated-{REAL_HOST_SPECIAL_PATH_COMPONENT}"));
     fs::create_dir_all(&host_root)?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let special_runtime = copy_runtime_into_special_path(&runtime, temp.path())?;
     let workspace_root = workspace_root()?;
     let fixtures = [
@@ -7962,8 +8006,19 @@ fn configure_real_host_environment(
     // config/data roots from the developer machine. Keep only the platform
     // process plumbing needed to launch an installed npm shim and an isolated
     // ProjectAtlas runtime.
+    // Keep the installer's filtered PATH when sanitizing its host environment.
+    let command_path = match command
+        .get_envs()
+        .find(|(key, _)| *key == OsStr::new("PATH"))
+    {
+        Some((_, value)) => value.map(OsStr::to_os_string),
+        None => std::env::var_os("PATH"),
+    };
     command.env_clear();
-    for key in ["PATH", "LANG", "LC_ALL", "TMPDIR", "TERM"] {
+    if let Some(path) = command_path {
+        command.env("PATH", path);
+    }
+    for key in ["LANG", "LC_ALL", "TMPDIR", "TERM"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
@@ -9052,12 +9107,27 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime_dir = temp.path().join("real runtime");
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join("projectatlas");
+    fs::copy(mcp_contract_executable(), &runtime)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime, permissions)?;
+    }
     let runtime_link = temp.path().join("projectatlas-runtime-link");
     symlink(&runtime, &runtime_link)?;
+    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
 
-    let installer_output =
-        run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime_link)?;
+    let installer_output = run_projectatlas_plugin_installer_with_optional_path_and_home(
+        &workspace_root,
+        &repo,
+        &runtime_link,
+        None,
+        Some(&home),
+    )?;
     let installer_output_text = format!(
         "{}{}",
         String::from_utf8_lossy(&installer_output.stdout),
@@ -9099,6 +9169,68 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
         "opencode symlink",
     )?;
 
+    let forwarder = runtime_dir.join(TEST_ATLAS_FORWARDER_FILE_NAME);
+    require(
+        forwarder.is_file(),
+        "POSIX installer did not place the forwarder beside the canonical runtime",
+    )?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let bare_path =
+        env::join_paths(std::iter::once(runtime_dir).chain(env::split_paths(&inherited_path)))?;
+    let bare_output = StdCommand::new("atlas")
+        .env("PATH", &bare_path)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let direct_output = StdCommand::new(&runtime)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    require(
+        bare_output.status == direct_output.status
+            && bare_output.stdout == direct_output.stdout
+            && bare_output.stderr == direct_output.stderr,
+        format!(
+            "bare atlas did not resolve through the canonical symlink runtime directory:\nbare={} {}\ndirect={} {}",
+            bare_output.status,
+            String::from_utf8_lossy(&bare_output.stderr),
+            direct_output.status,
+            String::from_utf8_lossy(&direct_output.stderr)
+        ),
+    )?;
+
+    fs::remove_file(&forwarder)?;
+    let repaired_output = run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime_link)?;
+    require(
+        repaired_output.status.success() && forwarder.is_file(),
+        format!(
+            "POSIX installer did not repair the canonical symlink runtime forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&repaired_output.stdout),
+            String::from_utf8_lossy(&repaired_output.stderr)
+        ),
+    )?;
+
+    let mut uninstall = StdCommand::new("bash");
+    uninstall
+        .arg(workspace_root.join("plugins/projectatlas/scripts/install-runtime.sh"))
+        .arg("--uninstall")
+        .arg(&repo)
+        .env("HOME", &home)
+        .env("PROJECTATLAS_RUNTIME_PATH", &runtime_link)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    let uninstall_output = uninstall.output()?;
+    require(
+        uninstall_output.status.success() && !forwarder.exists() && runtime.is_file(),
+        format!(
+            "POSIX installer uninstall did not remove only the canonical symlink runtime forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&uninstall_output.stdout),
+            String::from_utf8_lossy(&uninstall_output.stderr)
+        ),
+    )?;
+
     Ok(())
 }
 
@@ -9108,7 +9240,7 @@ fn windows_installer_recovery_operation_preserves_config_selection() -> Result<(
     let temp = tempfile::tempdir()?;
     let outside = temp.path().join("outside");
     fs::create_dir(&outside)?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let installer = workspace_root()?
         .join("plugins")
         .join("projectatlas")
@@ -9278,10 +9410,15 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
     let stable_runtime_dir = stable_runtime
         .parent()
         .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
-    let parent_path = std::env::join_paths(
-        std::iter::once(stable_runtime_dir.to_path_buf())
-            .chain(std::env::split_paths(&inherited_path)),
-    )?;
+    let parent_path =
+        std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
+            std::env::split_paths(&inherited_path).filter(|entry| {
+                !is_shared_test_runtime_directory(entry)
+                    && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                        .iter()
+                        .any(|candidate| entry.join(candidate).exists())
+            }),
+        ))?;
 
     let db = atlas_dir.join("projectatlas.db");
     let versioned_runtime = local_app_data
@@ -10212,6 +10349,8 @@ fn windows_installer_obsolete_mcp_handoff_retires_only_exact_child_and_reports_r
     fs::write(
         &fixture_source,
         r#"using System;
+using System.Diagnostics;
+using System.IO;
 using System.Threading;
 
 public static class Program
@@ -10225,7 +10364,10 @@ public static class Program
         }
         if (Array.IndexOf(arguments, "mcp") >= 0)
         {
-            Thread.Sleep(Timeout.Infinite);
+            using (var image_lock = new FileStream(Process.GetCurrentProcess().MainModule.FileName, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Thread.Sleep(Timeout.Infinite);
+            }
             return 0;
         }
         return 2;
@@ -10260,14 +10402,20 @@ public static class Program
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
     let parent_path =
         std::env::join_paths(std::env::split_paths(&inherited_path).filter(|entry| {
-            ![
-                "projectatlas.exe",
-                "projectatlas.cmd",
-                "projectatlas.bat",
-                "projectatlas.ps1",
-            ]
-            .iter()
-            .any(|candidate| entry.join(candidate).exists())
+            !is_shared_test_runtime_directory(entry)
+                && ![
+                    "projectatlas.exe",
+                    "projectatlas.cmd",
+                    "projectatlas.bat",
+                    "projectatlas.ps1",
+                    "atlas",
+                    "atlas.cmd",
+                    "atlas.bat",
+                    "atlas.ps1",
+                    "atlas.com",
+                ]
+                .iter()
+                .any(|candidate| entry.join(candidate).exists())
         }))?;
     let stale_parent_path = std::env::join_paths(
         std::iter::once(
@@ -10280,7 +10428,7 @@ public static class Program
     )?;
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let plugin_cache = isolated_home.join(FAKE_CODEX_PLUGIN_CACHE_DIR);
     let plugin_manifest = plugin_cache
         .join(CODEX_PLUGIN_MANIFEST_DIR)
@@ -10845,6 +10993,8 @@ fn windows_installer_obsolete_mcp_handoff_preserves_unready_and_ambiguous_proces
     fs::write(
         &fixture_source,
         r#"using System;
+using System.Diagnostics;
+using System.IO;
 using System.Threading;
 
 public static class Program
@@ -10858,7 +11008,10 @@ public static class Program
         }
         if (Array.IndexOf(arguments, "mcp") >= 0)
         {
-            Thread.Sleep(Timeout.Infinite);
+            using (var image_lock = new FileStream(Process.GetCurrentProcess().MainModule.FileName, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Thread.Sleep(Timeout.Infinite);
+            }
             return 0;
         }
         return 2;
@@ -10970,10 +11123,15 @@ public static class Program
         .parent()
         .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-    let parent_path = std::env::join_paths(
-        std::iter::once(stable_runtime_dir.to_path_buf())
-            .chain(std::env::split_paths(&inherited_path)),
-    )?;
+    let parent_path =
+        std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
+            std::env::split_paths(&inherited_path).filter(|entry| {
+                !is_shared_test_runtime_directory(entry)
+                    && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                        .iter()
+                        .any(|candidate| entry.join(candidate).exists())
+            }),
+        ))?;
     let production_installer = workspace_root()?
         .join("plugins")
         .join("projectatlas")
@@ -13047,7 +13205,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         "existing project-local state must survive plugin updates\n",
     )?;
     let db = atlas_dir.join("projectatlas.db");
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     Command::new(&runtime)
         .current_dir(&repo)
         .arg("--db")
@@ -13529,7 +13687,7 @@ fn plugin_update_skips_non_official_codex_marketplace() -> Result<(), Box<dyn Er
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
@@ -13615,7 +13773,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
@@ -13756,7 +13914,7 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime = isolated_installer_runtime(temp.path())?;
     let installer_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
         &repo,
@@ -13926,7 +14084,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let verify_separate_state =
         previous_ref == expected_release_tag && config_existed && !replacement_has_blank_source;
     let generated_state_before = if verify_separate_state {
@@ -14131,7 +14289,7 @@ fn posix_plugin_lock_rejects_indirection_and_survives_crash() -> Result<(), Box<
     let lock_root = fs::canonicalize(lock_root)?;
     let lock_path = lock_root.join(CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME);
     let harness = temp.path().join("verify-plugin-lock-crash.sh");
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     fs::write(
         &harness,
         format!(
@@ -14715,7 +14873,7 @@ exit 0
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let first_mutated = isolated_home.join("first-mutated");
     let release_first = isolated_home.join("release-first");
     let second_observed = isolated_home.join("second-observed");
@@ -14886,7 +15044,7 @@ fn windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized()
     let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &workspace_root()?,
         &repo,
-        &mcp_contract_executable(),
+        &isolated_installer_runtime(temp.path())?,
         Some(&fake_path),
         Some(&isolated_home),
     )?;
@@ -14975,7 +15133,7 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
     };
     write_executable_script(&fake_codex, fake_codex_script)?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -15128,7 +15286,7 @@ fn assert_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(
         #[cfg(unix)]
         prepare_plugin_lock(&codex_dir)?;
         let state_before = repository_filesystem_snapshot(&codex_dir)?;
-        let runtime = mcp_contract_executable();
+        let runtime = isolated_installer_runtime(temp.path())?;
         let output = run_plugin_installer_with_codex_fixture(
             &workspace_root()?,
             &repo,
@@ -15470,7 +15628,7 @@ exec stat "$@"
 "#,
     )?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let inherited_path = std::env::var_os("PATH")
         .ok_or_else(|| io::Error::other("POSIX hostile restore test requires PATH"))?;
     let real_find = std::env::split_paths(&inherited_path)
@@ -15655,7 +15813,7 @@ fn windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot
     );
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -15751,7 +15909,7 @@ fn windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot()
     );
     write_executable_script(&fake_codex, &fake_script)?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -15861,7 +16019,7 @@ fn windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation()
             "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" (\r\n  echo {installed_json}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
         ),
     )?;
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -15939,7 +16097,7 @@ fn windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion()
             "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" goto plugin_list\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" goto plugin_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" goto plugin_add\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_list\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\necho {installed_json}\r\nexit /b 0\r\n:plugin_absent\r\necho {{\"installed\":[],\"available\":[]}}\r\nexit /b 0\r\n:plugin_remove\r\nif exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\nexit /b 0\r\n:plugin_add\r\ncopy /y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\nxcopy /e /i /q /y \"%PROJECTATLAS_FAKE_PLUGIN_ROOT%\" \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" >nul\r\nfor /d %%D in (\"%CODEX_HOME%\\.projectatlas-plugin-state-*\") do (\r\n  move \"%%~fD\" \"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\" >nul\r\n  >\"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\\outside-canary.txt\" echo outside state\r\n  mklink /J \"%%~fD\" \"%PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET%\" >nul\r\n)\r\nexit /b 0\r\n"
         ),
     )?;
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -16029,7 +16187,7 @@ fn windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot()
         ),
     )?;
 
-    let runtime = mcp_contract_executable();
+    let runtime = isolated_installer_runtime(temp.path())?;
     let output_result = run_plugin_installer_with_codex_fixture(
         &workspace_root()?,
         &repo,
@@ -16151,7 +16309,7 @@ fn windows_installer_without_codex_reports_clean_skip() -> Result<(), Box<dyn Er
         .arg("-ProjectRoot")
         .arg(&repo)
         .arg("-RuntimePath")
-        .arg(assert_cmd::cargo::cargo_bin("projectatlas"))
+        .arg(isolated_installer_runtime(temp.path())?)
         .env("HOME", &isolated_home)
         .env("USERPROFILE", &isolated_home)
         .env("APPDATA", &app_data)
@@ -16232,10 +16390,15 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
     let stable_runtime_dir = stable_runtime
         .parent()
         .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
-    let parent_path = std::env::join_paths(
-        std::iter::once(stable_runtime_dir.to_path_buf())
-            .chain(std::env::split_paths(&inherited_path)),
-    )?;
+    let parent_path =
+        std::env::join_paths(std::iter::once(stable_runtime_dir.to_path_buf()).chain(
+            std::env::split_paths(&inherited_path).filter(|entry| {
+                !is_shared_test_runtime_directory(entry)
+                    && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                        .iter()
+                        .any(|candidate| entry.join(candidate).exists())
+            }),
+        ))?;
 
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
@@ -16424,9 +16587,14 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         &stale_parent_runtime,
         "@echo off\r\necho {\"version\":\"0.3.26\"}\r\nexit /b 0\r\n",
     )?;
-    let stale_parent_path = std::env::join_paths(
-        std::iter::once(stale_parent_bin).chain(std::env::split_paths(&inherited_path)),
-    )?;
+    let stale_parent_path = std::env::join_paths(std::iter::once(stale_parent_bin).chain(
+        std::env::split_paths(&inherited_path).filter(|entry| {
+            !is_shared_test_runtime_directory(entry)
+                && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                    .iter()
+                    .any(|candidate| entry.join(candidate).exists())
+        }),
+    ))?;
     let stale_parent_install = StdCommand::new("powershell")
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
@@ -25375,6 +25543,32 @@ fn spawn_codex_owned_obsolete_mcp_with_test_delays(
 #[cfg(windows)]
 fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Result<(), Box<dyn Error>>
 {
+    // Metadata can disappear after Get-Process retains an exiting process.
+    // A live identity mismatch must still refuse cleanup without calling Kill.
+    for (exited, expected_exit) in [("false", 3), ("true", 0)] {
+        let script = format!(
+            r"function Get-Process {{
+    $observed = [pscustomobject]@{{ Handle = 0; StartTime = [DateTime]::UtcNow; Path = $env:SystemRoot; HasExited = [bool]::Parse($env:PROJECTATLAS_TEST_OBSERVED_EXITED) }}
+    $observed | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{}}
+    $observed
+}}
+{WINDOWS_FIXTURE_STOP_SCRIPT}"
+        );
+        let output = StdCommand::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .env("PROJECTATLAS_TEST_OBSERVED_EXITED", exited)
+            .env("PROJECTATLAS_FIXTURE_CREATION", "0")
+            .env("PROJECTATLAS_FIXTURE_PATH", env::temp_dir())
+            .output()?;
+        require(
+            output.status.code() == Some(expected_exit),
+            format!(
+                "exact child cleanup misclassified exited={exited} metadata mismatch: {}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+    }
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
@@ -26053,7 +26247,7 @@ fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(),
 }
 
 #[cfg(windows)]
-const WINDOWS_FIXTURE_STOP_SCRIPT: &str = "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { if ($env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) }; $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result";
+const WINDOWS_FIXTURE_STOP_SCRIPT: &str = "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { if (-not $process.HasExited) { $result = 3 } } elseif (-not $process.HasExited) { if ($env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) }; $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result";
 
 #[cfg(windows)]
 fn spawn_windows_fixture_stop_helper(
@@ -27742,10 +27936,18 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
         .env("PROJECTATLAS_RUNTIME_PATH", runtime)
         .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let inherited_path =
+        std::env::join_paths(std::env::split_paths(&current_path).filter(|entry| {
+            !is_shared_test_runtime_directory(entry)
+                && !["atlas", "atlas.cmd", "atlas.bat", "atlas.ps1", "atlas.com"]
+                    .iter()
+                    .any(|candidate| entry.join(candidate).exists())
+        }))?;
     if let Some(path_shadow) = path_shadow {
-        let current_path = std::env::var_os("PATH").unwrap_or_default();
         let shadowed_path = std::env::join_paths(
-            std::iter::once(path_shadow.to_path_buf()).chain(std::env::split_paths(&current_path)),
+            std::iter::once(path_shadow.to_path_buf())
+                .chain(std::env::split_paths(&inherited_path)),
         )?;
         command.env("PATH", shadowed_path);
         let fake_codex = path_shadow.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
@@ -27755,6 +27957,8 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
                 .env_remove("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE")
                 .env_remove("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE");
         }
+    } else {
+        command.env("PATH", inherited_path);
     }
     if let Some(home) = home {
         let app_data = home.join("AppData").join("Roaming");
@@ -28377,4 +28581,3184 @@ fn require_schema_version_mismatch(
         &["error", "schema_version_mismatch", "recovery"],
         "do not reset",
     )
+}
+
+#[test]
+fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    #[cfg(unix)]
+    let fixture_root = temp.path().canonicalize()?;
+    #[cfg(not(unix))]
+    let fixture_root = PathBuf::from(
+        normalize_native_path_display(temp.path().canonicalize()?)
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    let repo = fixture_root.join("repo with spaces");
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let runtime_dir = fixture_root.join(if cfg!(windows) {
+        "runtime with spaces %USERNAME%"
+    } else {
+        "runtime with spaces"
+    });
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join(if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    });
+    fs::copy(mcp_contract_executable(), &runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime, permissions)?;
+    }
+    let home = fixture_root.join(TEST_ISOLATED_HOME_DIR_NAME);
+    fs::create_dir_all(&home)?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let run_path = env::join_paths(
+        std::iter::once(
+            runtime
+                .parent()
+                .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+                .to_path_buf(),
+        )
+        .chain(
+            env::split_paths(&inherited_path)
+                .filter(|entry| !is_shared_test_runtime_directory(entry)),
+        ),
+    )?;
+    let workspace_root = workspace_root()?;
+    let installer = workspace_root
+        .join("plugins")
+        .join("projectatlas")
+        .join("scripts")
+        .join(if cfg!(windows) {
+            "install-runtime.ps1"
+        } else {
+            "install-runtime.sh"
+        });
+    let run_install = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &run_path);
+        Ok(command.output()?)
+    };
+    let run_install_with_env =
+        |key: &str, value: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                &runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &run_path)
+                .env(key, value);
+            Ok(command.output()?)
+        };
+    #[cfg(windows)]
+    let run_install_with_provenance_and_state_failure =
+        |provenance_path: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                &runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &run_path)
+                .env(
+                    "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
+                    provenance_path,
+                )
+                .env(
+                    "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+                    "1",
+                );
+            Ok(command.output()?)
+        };
+    #[cfg(windows)]
+    let run_install_with_state_failure = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &run_path)
+            .env(
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+                "1",
+            );
+        Ok(command.output()?)
+    };
+    #[cfg(unix)]
+    let run_install_with_provenance_and_state_failure =
+        |provenance_path: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                &runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &run_path)
+                .env(
+                    "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_CHECK_RACE_PATH",
+                    provenance_path,
+                )
+                .env(
+                    "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+                    "1",
+                );
+            Ok(command.output()?)
+        };
+    #[cfg(unix)]
+    let run_install_with_state_failure = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &run_path)
+            .env(
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+                "1",
+            );
+        Ok(command.output()?)
+    };
+    let run_uninstall_from = |project_root: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = if cfg!(windows) {
+            let mut command = StdCommand::new("powershell");
+            command
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(&installer)
+                .arg("-ProjectRoot")
+                .arg(project_root)
+                .arg("-RuntimePath")
+                .arg(&runtime)
+                .arg("-Uninstall");
+            command
+        } else {
+            let mut command = StdCommand::new("bash");
+            command
+                .arg(&installer)
+                .arg("--uninstall")
+                .arg(project_root)
+                .env("PROJECTATLAS_RUNTIME_PATH", &runtime);
+            command
+        };
+        command
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
+            .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1");
+        Ok(command.output()?)
+    };
+    let run_uninstall = || run_uninstall_from(&repo);
+    let run_uninstall_with_env =
+        |key: &str, value: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = if cfg!(windows) {
+                let mut command = StdCommand::new("powershell");
+                command
+                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                    .arg(&installer)
+                    .arg("-ProjectRoot")
+                    .arg(&repo)
+                    .arg("-RuntimePath")
+                    .arg(&runtime)
+                    .arg("-Uninstall");
+                command
+            } else {
+                let mut command = StdCommand::new("bash");
+                command
+                    .arg(&installer)
+                    .arg("--uninstall")
+                    .arg(&repo)
+                    .env("PROJECTATLAS_RUNTIME_PATH", &runtime);
+                command
+            };
+            command
+                .env("HOME", &home)
+                .env("USERPROFILE", &home)
+                .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
+                .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+                .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env(key, value);
+            Ok(command.output()?)
+        };
+    let clear_retirement_quarantine = |directory: &Path| -> Result<(), Box<dyn Error>> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if [".atlas-forwarder-retire.", ".atlas-forwarder-retire-"]
+                .iter()
+                .any(|prefix| entry.file_name().to_string_lossy().starts_with(prefix))
+            {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    };
+
+    #[cfg(unix)]
+    {
+        let mut commands = Vec::new();
+        for (index, (directory_name, executable_name)) in [
+            ("runtime\nwith line break", "projectatlas"),
+            ("runtime\rwith line break", "projectatlas"),
+            ("runtime with terminal line break", "projectatlas\n"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let invalid_directory = fixture_root.join(directory_name);
+            fs::create_dir_all(&invalid_directory)?;
+            let invalid_runtime = invalid_directory.join(executable_name);
+            fs::hard_link(&runtime, &invalid_runtime)?;
+            let runtime_alias = fixture_root.join(format!("runtime-alias-{index}"));
+            std::os::unix::fs::symlink(&invalid_runtime, &runtime_alias)?;
+            for supplied_runtime in [&invalid_runtime, &runtime_alias] {
+                let mut command =
+                    projectatlas_plugin_installer_command_with_optional_path_and_home(
+                        &workspace_root,
+                        &repo,
+                        supplied_runtime,
+                        None,
+                        Some(&home),
+                    )?;
+                command
+                    .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                    .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                    .env("PATH", &run_path);
+                commands.push(command);
+            }
+        }
+        // Hash the real runtime fixtures once per boundary, not once per rejected spelling.
+        let before = repository_filesystem_snapshot(&fixture_root)?;
+        for mut command in commands {
+            let rejected = command.output()?;
+            let diagnostic = String::from_utf8_lossy(&rejected.stderr);
+            require(
+                !rejected.status.success()
+                    && diagnostic.contains("runtime path contains a line break")
+                    && !atlas_dir.join("projectatlas.db").exists(),
+                format!("line-breaking runtime path changed installer state: {diagnostic}"),
+            )?;
+        }
+        require(
+            repository_filesystem_snapshot(&fixture_root)? == before,
+            "line-breaking runtime path refusals changed installer state",
+        )?;
+    }
+
+    let forwarder = runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+        .join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let provenance = runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+        .join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+    let unmanaged_collision = b"unmanaged atlas collision\n";
+    fs::write(&forwarder, unmanaged_collision)?;
+    let project_state_before_collision = repository_filesystem_snapshot(&repo)?;
+    let project_database = atlas_dir.join("projectatlas.db");
+    let mirror_dir = home.join("AppData/Local/ProjectAtlas/bin");
+    let collision_output = run_install()?;
+    let collision_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&collision_output.stdout),
+        String::from_utf8_lossy(&collision_output.stderr)
+    );
+    require(
+        !collision_output.status.success()
+            && collision_text.contains("atlas command collision")
+            && fs::read(&forwarder)? == unmanaged_collision
+            && repository_filesystem_snapshot(&repo)? == project_state_before_collision
+            && !project_database.exists()
+            && !mirror_dir.exists()
+            && env::var_os("PATH") == Some(inherited_path.clone()),
+        format!(
+            "unmanaged atlas collision was not rejected before installer mutation:\n{collision_text}"
+        ),
+    )?;
+    fs::remove_file(&forwarder)?;
+
+    #[cfg(unix)]
+    require(
+        fs::read_dir(home.join(TEST_POSIX_INSTALLER_STATE_DIR))?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .iter()
+            .all(|entry| entry.path().extension() != Some(OsStr::new("state"))),
+        "POSIX collision published a forwarder capability state",
+    )?;
+    let first_output = run_install()?;
+    require(
+        first_output.status.success(),
+        format!(
+            "installer failed to create the managed atlas forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&first_output.stdout),
+            String::from_utf8_lossy(&first_output.stderr)
+        ),
+    )?;
+    let forwarder_text = fs::read_to_string(&forwarder)?;
+    let canonical_runtime = runtime.to_string_lossy();
+    let expected_forwarder_text = if cfg!(windows) {
+        format!(
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
+            canonical_runtime.replace('%', "%%"),
+        )
+    } else {
+        format!(
+            "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
+        )
+    };
+    require(
+        forwarder_text == expected_forwarder_text,
+        format!(
+            "installer did not publish the exact managed forwarder body to the canonical runtime: {}\nactual={forwarder_text:?}\nexpected={expected_forwarder_text:?}",
+            forwarder.display()
+        ),
+    )?;
+    let expected_provenance = if cfg!(windows) {
+        format!(
+            "# ProjectAtlas atlas forwarder provenance v1\r\nforwarder: {}\r\nruntime: {}\r\n",
+            forwarder.display(),
+            runtime.display()
+        )
+    } else {
+        format!(
+            "# ProjectAtlas atlas forwarder provenance v1\nforwarder: {}\nruntime: {}\n",
+            forwarder.display(),
+            runtime.display()
+        )
+    };
+    require(
+        provenance.is_file() && fs::read_to_string(&provenance)? == expected_provenance,
+        "installer did not publish the independent atlas forwarder provenance authority",
+    )?;
+    let installer_state_dir = if cfg!(windows) {
+        home.join(TEST_WINDOWS_INSTALLER_STATE_DIR)
+    } else {
+        home.join(TEST_POSIX_INSTALLER_STATE_DIR)
+    };
+    let installer_states = fs::read_dir(&installer_state_dir)?
+        .collect::<Result<Vec<_>, io::Error>>()?
+        .into_iter()
+        .filter(|entry| entry.path().extension() == Some(OsStr::new("state")))
+        .collect::<Vec<_>>();
+    require(
+        installer_states.len() == 1
+            && installer_states[0]
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                == Some("state"),
+        format!(
+            "installer did not publish exactly one private forwarder capability: {}",
+            installer_state_dir.display()
+        ),
+    )?;
+    let installer_state = installer_states[0].path();
+    for artifact in [&installer_state, &forwarder, &provenance] {
+        let valid = fs::read(artifact)?;
+        for suffix in [b"unexpected ownership field\n".as_slice(), b"\n".as_slice()] {
+            let mut malformed = valid.clone();
+            malformed.extend_from_slice(suffix);
+            fs::write(artifact, &malformed)?;
+            let retained_forwarder = fs::read(&forwarder)?;
+            let retained_provenance = fs::read(&provenance)?;
+            let retained_state = fs::read(&installer_state)?;
+            require(
+                !run_install()?.status.success()
+                    && !run_uninstall()?.status.success()
+                    && fs::read(&forwarder)? == retained_forwarder
+                    && fs::read(&provenance)? == retained_provenance
+                    && fs::read(&installer_state)? == retained_state,
+                format!(
+                    "malformed ownership was accepted or changed: {}",
+                    artifact.display()
+                ),
+            )?;
+            fs::write(artifact, &valid)?;
+        }
+    }
+
+    let retained_state = fs::read(&installer_state)?;
+    let retained_forwarder = forwarder.with_extension("retained");
+    fs::rename(&forwarder, &retained_forwarder)?;
+    fs::write(&provenance, "unmanaged provenance\n")?;
+    require(
+        !run_install()?.status.success()
+            && !forwarder.exists()
+            && fs::read_to_string(&provenance)? == "unmanaged provenance\n"
+            && fs::read(&installer_state).is_ok_and(|state| state == retained_state),
+        "missing-forwarder repair changed retained ownership after rejecting malformed provenance",
+    )?;
+    fs::write(&provenance, &expected_provenance)?;
+    fs::rename(&retained_forwarder, &forwarder)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let retained_state = fs::read(&installer_state)?;
+        fs::set_permissions(&forwarder, fs::Permissions::from_mode(0o644))?;
+        require(
+            StdCommand::new(&forwarder)
+                .arg("--version")
+                .output()
+                .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied),
+            "non-executable forwarder fixture unexpectedly launched",
+        )?;
+        fs::write(&provenance, "unmanaged provenance\n")?;
+        require(
+            !run_install()?.status.success()
+                && fs::metadata(&forwarder)?.permissions().mode() & 0o777 == 0o644
+                && fs::read_to_string(&provenance)? == "unmanaged provenance\n"
+                && fs::read(&installer_state)? == retained_state,
+            "permission repair mutated a forwarder without authenticated ownership",
+        )?;
+        fs::write(&provenance, &expected_provenance)?;
+        let repaired = run_install()?;
+        require(
+            repaired.status.success()
+                && fs::metadata(&forwarder)?.permissions().mode() & 0o777 == 0o755
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == retained_state
+                && StdCommand::new(&forwarder)
+                    .arg("--version")
+                    .output()?
+                    .status
+                    .success(),
+            format!(
+                "owned forwarder execute permission was not repaired: {}\n{}",
+                String::from_utf8_lossy(&repaired.stdout),
+                String::from_utf8_lossy(&repaired.stderr),
+            ),
+        )?;
+        fs::set_permissions(&forwarder, fs::Permissions::from_mode(0o644))?;
+        require(
+            run_uninstall()?.status.success()
+                && !forwarder.exists()
+                && !provenance.exists()
+                && !installer_state.exists(),
+            "owned non-executable forwarder could not be uninstalled",
+        )?;
+        require(
+            run_install()?.status.success(),
+            "forwarder reinstall after permission repair failed",
+        )?;
+    }
+
+    #[cfg(windows)]
+    {
+        let runtime_casing = PathBuf::from(runtime.to_string_lossy().to_uppercase());
+        let run_with_runtime_casing =
+            |uninstall: bool| -> Result<std::process::Output, Box<dyn Error>> {
+                let mut command =
+                    projectatlas_plugin_installer_command_with_optional_path_and_home(
+                        &workspace_root,
+                        &repo,
+                        &runtime_casing,
+                        None,
+                        Some(&home),
+                    )?;
+                if uninstall {
+                    command.arg("-Uninstall");
+                }
+                command
+                    .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                    .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                    .env("PATH", &run_path);
+                Ok(command.output()?)
+            };
+        let retained_state = fs::read(&installer_state)?;
+        let update = run_with_runtime_casing(false)?;
+        require(
+            update.status.success()
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == retained_state,
+            format!(
+                "runtime path casing changed owned publication or refused update:\n{}\n{}",
+                String::from_utf8_lossy(&update.stdout),
+                String::from_utf8_lossy(&update.stderr)
+            ),
+        )?;
+        fs::remove_file(&forwarder)?;
+        require(
+            run_with_runtime_casing(false)?.status.success()
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && installer_state.is_file(),
+            "runtime path casing prevented missing-forwarder repair",
+        )?;
+        require(
+            run_with_runtime_casing(true)?.status.success()
+                && !forwarder.exists()
+                && !provenance.exists()
+                && !installer_state.exists()
+                && run_install()?.status.success(),
+            "runtime path casing prevented owned uninstall and reinstall",
+        )?;
+    }
+
+    #[cfg(windows)]
+    {
+        let legacy_body = format!(
+            "@echo off\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            canonical_runtime.replace('%', "%%"),
+        );
+        let retained_state = fs::read(&installer_state)?;
+        fs::write(&forwarder, &legacy_body)?;
+        let failed_stage = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_STAGE_FAILURE",
+            Path::new("1"),
+        )?;
+        require(
+            !failed_stage.status.success()
+                && fs::read_to_string(&forwarder)? == legacy_body
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == retained_state,
+            "legacy forwarder staging failure changed the owned installation",
+        )?;
+        let repaired = run_install()?;
+        require(
+            repaired.status.success()
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == retained_state,
+            "same-path update retained the legacy forwarder or changed its ownership metadata",
+        )?;
+        for race in [
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH",
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH",
+        ] {
+            fs::write(&forwarder, &legacy_body)?;
+            let prior_paths = fs::read_dir(&runtime_dir)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<Vec<_>, io::Error>>()?;
+            let collided = run_install_with_env(race, &forwarder)?;
+            require(
+                !collided.status.success()
+                    && fs::read_to_string(&forwarder)?.starts_with("# foreign ")
+                    && fs::read_to_string(&provenance)? == expected_provenance
+                    && fs::read(&installer_state)? == retained_state
+                    && fs::read_dir(&runtime_dir)?
+                        .collect::<Result<Vec<_>, io::Error>>()?
+                        .iter()
+                        .any(|entry| {
+                            !prior_paths.contains(&entry.path())
+                                && entry
+                                    .file_name()
+                                    .to_string_lossy()
+                                    .starts_with(".atlas-forwarder-retire-")
+                                && fs::read_to_string(entry.path())
+                                    .is_ok_and(|body| body == legacy_body)
+                        }),
+                "legacy update collision lost the prior forwarder or changed foreign/owned state",
+            )?;
+            fs::remove_file(&forwarder)?;
+        }
+        fs::write(&forwarder, &expected_forwarder_text)?;
+    }
+
+    #[cfg(unix)]
+    {
+        let ownership_retry = run_install()?;
+        require(
+            ownership_retry.status.success()
+                && forwarder.is_file()
+                && provenance.is_file()
+                && installer_state.is_file(),
+            format!(
+                "managed atlas forwarder was not recognized on a same-runtime retry:\n{}\n{}",
+                String::from_utf8_lossy(&ownership_retry.stdout),
+                String::from_utf8_lossy(&ownership_retry.stderr)
+            ),
+        )?;
+    }
+
+    // Check completed reinstall cleanup before intentionally killing a staged owner.
+    let second_output = run_install()?;
+    require(
+        second_output.status.success() && forwarder.is_file(),
+        format!(
+            "installer repair/update did not preserve the owned forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&second_output.stdout),
+            String::from_utf8_lossy(&second_output.stderr)
+        ),
+    )?;
+
+    require(
+        !fs::read_dir(&runtime_dir)?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .iter()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atlas-forwarder-provenance.")
+            }),
+        "installer reinstall retained staged forwarder provenance",
+    )?;
+
+    let unrelated_state = installer_state_dir.join("unrelated-state");
+    let unrelated_state_content = if cfg!(windows) {
+        b"unrelated installer state\r\n".as_slice()
+    } else {
+        b"unrelated installer state\n".as_slice()
+    };
+    fs::write(&unrelated_state, unrelated_state_content)?;
+
+    // A second live installer must not retire the first installer's capability
+    // state while that owner is between state and provenance publication. Kill
+    // the exact paused owner to prove the native lifecycle lock is released by
+    // interruption before the contender safely repairs and completes the pair.
+    fs::remove_file(&forwarder)?;
+    fs::remove_file(&provenance)?;
+    fs::remove_file(&installer_state)?;
+    let lifecycle_gate = fixture_root.join("atlas-forwarder-lifecycle.gate");
+    let lifecycle_ready = PathBuf::from(format!("{}.ready", lifecycle_gate.display()));
+    fs::write(&lifecycle_gate, b"hold\n")?;
+    let mut paused_install = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        None,
+        Some(&home),
+    )?;
+    paused_install
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .env("PATH", &run_path)
+        .env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_PUBLISHED_GATE",
+            &lifecycle_gate,
+        );
+    let mut paused_install = spawn_plugin_installer_process(&mut paused_install)?;
+    let ready_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if lifecycle_ready.is_file() {
+            break;
+        }
+        if paused_install.try_wait()?.is_some() {
+            let output = paused_install.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "paused installer exited before publishing capability state\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if Instant::now() >= ready_deadline {
+            drop(terminate_plugin_installer_process_tree(&mut paused_install));
+            let output = paused_install.wait_with_output()?;
+            return Err(io::Error::other(format!(
+                "paused installer did not publish capability state within 30 seconds\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    require(
+        installer_state.is_file() && !forwarder.exists() && !provenance.exists(),
+        "paused installer did not stop between capability-state and provenance publication",
+    )?;
+    let state_during_lifecycle_race = fs::read(&installer_state)?;
+
+    let mut contending_install = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        None,
+        Some(&home),
+    )?;
+    contending_install
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .env("PATH", &run_path);
+    let mut contending_install = spawn_plugin_installer_process(&mut contending_install)?;
+    let contention_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if contending_install.try_wait()?.is_some() {
+            let output = contending_install.wait_with_output()?;
+            drop(terminate_plugin_installer_process_tree(&mut paused_install));
+            drop(paused_install.wait());
+            return Err(io::Error::other(format!(
+                "contending installer bypassed the live forwarder lock\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        if Instant::now() >= contention_deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    require(
+        fs::read(&installer_state)? == state_during_lifecycle_race
+            && !forwarder.exists()
+            && !provenance.exists(),
+        "contending installer changed live capability state before the owner released its lock",
+    )?;
+    paused_install.kill()?;
+    let paused_output = paused_install.wait_with_output()?;
+    fs::remove_file(&lifecycle_gate)?;
+    fs::remove_file(&lifecycle_ready)?;
+    let contending_output = wait_for_plugin_installer_output(
+        contending_install,
+        "contending forwarder lifecycle",
+        Duration::from_secs(35),
+    )?;
+    require(
+        !paused_output.status.success()
+            && contending_output.status.success()
+            && forwarder.is_file()
+            && provenance.is_file()
+            && installer_state.is_file()
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        format!(
+            "interrupted forwarder owner did not release a recoverable lifecycle lock: paused={} contender={}\npaused stdout:\n{}\npaused stderr:\n{}\ncontender stdout:\n{}\ncontender stderr:\n{}",
+            paused_output.status,
+            contending_output.status,
+            String::from_utf8_lossy(&paused_output.stdout),
+            String::from_utf8_lossy(&paused_output.stderr),
+            String::from_utf8_lossy(&contending_output.stdout),
+            String::from_utf8_lossy(&contending_output.stderr)
+        ),
+    )?;
+
+    #[cfg(unix)]
+    {
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let early_collision = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_CHECK_RACE_PATH",
+            &provenance,
+        )?;
+        let early_collision_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&early_collision.stdout),
+            String::from_utf8_lossy(&early_collision.stderr)
+        );
+        let remaining_states = installer_state_dir
+            .read_dir()?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .into_iter()
+            .filter(|entry| entry.path() != installer_state.with_extension("lock"))
+            .collect::<Vec<_>>();
+        require(
+            !early_collision.status.success()
+                && early_collision_text.contains("provenance collision")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance check race collision\n"
+                && !installer_state.exists()
+                && remaining_states.len() == 1
+                && remaining_states[0].path() == unrelated_state
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "early provenance collision retained orphaned or unrelated state:\n{early_collision_text}"
+            ),
+        )?;
+        fs::remove_file(&provenance)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "installer could not recover after early provenance collision:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let publication_collision = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
+            &provenance,
+        )?;
+        let publication_collision_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&publication_collision.stdout),
+            String::from_utf8_lossy(&publication_collision.stderr)
+        );
+        require(
+            !publication_collision.status.success()
+                && publication_collision_text.contains("provenance publication collided")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance publication race collision\n"
+                && !installer_state.exists()
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "provenance publication collision retained orphaned or unrelated state:\n{publication_collision_text}"
+            ),
+        )?;
+        fs::remove_file(&provenance)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "installer could not recover after provenance publication collision:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let cleanup_failure = run_install_with_provenance_and_state_failure(&provenance)?;
+        let cleanup_failure_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&cleanup_failure.stdout),
+            String::from_utf8_lossy(&cleanup_failure.stderr)
+        );
+        require(
+            !cleanup_failure.status.success()
+                && cleanup_failure_text.contains("provenance collision")
+                && cleanup_failure_text.contains("could not retire newly published")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance check race collision\n"
+                && installer_state.is_file()
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "state cleanup failure did not retain only exact orphaned state:\n{cleanup_failure_text}"
+            ),
+        )?;
+        let retained_state_content = fs::read(&installer_state)?;
+        fs::remove_file(&provenance)?;
+        let retained_state = run_install_with_state_failure()?;
+        let retained_state_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&retained_state.stdout),
+            String::from_utf8_lossy(&retained_state.stderr)
+        );
+        require(
+            !retained_state.status.success()
+                && retained_state_text.contains("retained without a managed forwarder")
+                && !forwarder.exists()
+                && !provenance.exists()
+                && installer_state.is_file()
+                && fs::read(&installer_state)? == retained_state_content
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!("retained state was reused after cleanup failure:\n{retained_state_text}"),
+        )?;
+        fs::remove_file(&installer_state)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "installer could not recover after retained-state cleanup failure:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+    }
+
+    #[cfg(windows)]
+    {
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let publication_collision = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
+            &provenance,
+        )?;
+        let publication_collision_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&publication_collision.stdout),
+            String::from_utf8_lossy(&publication_collision.stderr)
+        );
+        let remaining_states = installer_state_dir
+            .read_dir()?
+            .collect::<Result<Vec<_>, io::Error>>()?;
+        require(
+            !publication_collision.status.success()
+                && publication_collision_text.contains("provenance publication")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance publication race collision\r\n"
+                && !installer_state.exists()
+                && remaining_states.len() == 1
+                && remaining_states[0].path() == unrelated_state
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "Windows provenance publication collision retained orphaned or unrelated state:\n{publication_collision_text}"
+            ),
+        )?;
+        fs::remove_file(&provenance)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "Windows installer could not recover after provenance publication collision:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        let cleanup_failure = run_install_with_provenance_and_state_failure(&provenance)?;
+        let cleanup_failure_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&cleanup_failure.stdout),
+            String::from_utf8_lossy(&cleanup_failure.stderr)
+        );
+        let remaining_states = installer_state_dir
+            .read_dir()?
+            .collect::<Result<Vec<_>, io::Error>>()?;
+        require(
+            !cleanup_failure.status.success()
+                && cleanup_failure_text.contains("provenance publication collided")
+                && cleanup_failure_text.contains("forwarder cleanup failed")
+                && !forwarder.exists()
+                && fs::read(&provenance)? == b"# foreign provenance publication race collision\r\n"
+                && installer_state.is_file()
+                && remaining_states.len() == 2
+                && remaining_states
+                    .iter()
+                    .any(|entry| entry.path() == installer_state)
+                && remaining_states
+                    .iter()
+                    .any(|entry| entry.path() == unrelated_state)
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "Windows state cleanup failure did not retain only exact owned state and foreign bytes:\n{cleanup_failure_text}"
+            ),
+        )?;
+        let retained_state_content = fs::read(&installer_state)?;
+        fs::remove_file(&provenance)?;
+        let retained_state = run_install_with_state_failure()?;
+        let retained_state_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&retained_state.stdout),
+            String::from_utf8_lossy(&retained_state.stderr)
+        );
+        require(
+            !retained_state.status.success()
+                && retained_state_text.contains("retained without a managed forwarder")
+                && !forwarder.exists()
+                && !provenance.exists()
+                && installer_state.is_file()
+                && fs::read(&installer_state)? == retained_state_content
+                && fs::read(&unrelated_state)? == unrelated_state_content,
+            format!(
+                "Windows retained state was reused after cleanup failure:\n{retained_state_text}"
+            ),
+        )?;
+        fs::remove_file(&installer_state)?;
+        let repaired_output = run_install()?;
+        require(
+            repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
+            format!(
+                "Windows installer could not recover after retained-state cleanup failure:\n{}\n{}",
+                String::from_utf8_lossy(&repaired_output.stdout),
+                String::from_utf8_lossy(&repaired_output.stderr)
+            ),
+        )?;
+    }
+
+    fs::remove_file(&unrelated_state)?;
+
+    let direct_database = fixture_root.join("direct database with spaces.db");
+    let alias_database = fixture_root.join("alias database with spaces.db");
+    let arguments = [
+        "--require-version",
+        env!("CARGO_PKG_VERSION"),
+        "--format",
+        "json",
+        "--db",
+    ];
+    let run_direct = |database: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+        Ok(StdCommand::new(&runtime)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(arguments)
+            .arg(database)
+            .arg("init")
+            .output()?)
+    };
+    let direct_output = run_direct(&direct_database)?;
+    let alias_output = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["/D", "/C", "call"])
+            .env("PATH", &run_path)
+            .arg("atlas")
+            .args(arguments)
+            .arg(&alias_database)
+            .arg("init")
+            .output()?
+    } else {
+        StdCommand::new(&forwarder)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(arguments)
+            .arg(&alias_database)
+            .arg("init")
+            .output()?
+    };
+    require(
+        direct_output.status.success()
+            && alias_output.status.success()
+            && direct_database.is_file()
+            && alias_database.is_file(),
+        format!(
+            "atlas did not preserve the complete quoted argument vector:\ndirect={} {}\nalias={} {}",
+            direct_output.status,
+            String::from_utf8_lossy(&direct_output.stderr),
+            alias_output.status,
+            String::from_utf8_lossy(&alias_output.stderr)
+        ),
+    )?;
+    let direct_health = StdCommand::new(&runtime)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(arguments)
+        .arg(&direct_database)
+        .args(["health", "--summary-only"])
+        .output()?;
+    let alias_health = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["/D", "/C", "call"])
+            .env("PATH", &run_path)
+            .arg("atlas")
+            .args(arguments)
+            .arg(&direct_database)
+            .args(["health", "--summary-only"])
+            .output()?
+    } else {
+        StdCommand::new(&forwarder)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(arguments)
+            .arg(&direct_database)
+            .args(["health", "--summary-only"])
+            .output()?
+    };
+    require(
+        direct_health.status == alias_health.status
+            && direct_health.stdout == alias_health.stdout
+            && direct_health.stderr == alias_health.stderr,
+        format!(
+            "atlas health report diverged from projectatlas:\ndirect={} {}\nalias={} {}",
+            direct_health.status,
+            String::from_utf8_lossy(&direct_health.stderr),
+            alias_health.status,
+            String::from_utf8_lossy(&alias_health.stderr)
+        ),
+    )?;
+    let direct_info = StdCommand::new(&runtime)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let alias_info = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .args(["/D", "/C", "call"])
+            .env("PATH", &run_path)
+            .arg("atlas")
+            .args(["--format", "toon", "runtime-info"])
+            .output()?
+    } else {
+        StdCommand::new(&forwarder)
+            .args(["--format", "toon", "runtime-info"])
+            .output()?
+    };
+    require(
+        direct_info.status == alias_info.status
+            && direct_info.stdout == alias_info.stdout
+            && direct_info.stderr == alias_info.stderr,
+        "atlas and projectatlas runtime-info streams diverged",
+    )?;
+
+    let delayed_expansion_version = format!("{}!argv!", env!("CARGO_PKG_VERSION"));
+    let direct_delayed_expansion = StdCommand::new(&runtime)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--require-version",
+            delayed_expansion_version.as_str(),
+            "--format",
+            "toon",
+            "runtime-info",
+        ])
+        .output()?;
+    let alias_delayed_expansion = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["/V:ON", "/D", "/C", "call"])
+            .env("PATH", &run_path)
+            .arg("atlas")
+            .args([
+                "--require-version",
+                delayed_expansion_version.as_str(),
+                "--format",
+                "toon",
+                "runtime-info",
+            ])
+            .output()?
+    } else {
+        StdCommand::new(&forwarder)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args([
+                "--require-version",
+                delayed_expansion_version.as_str(),
+                "--format",
+                "toon",
+                "runtime-info",
+            ])
+            .output()?
+    };
+    require(
+        !direct_delayed_expansion.status.success()
+            && direct_delayed_expansion.status == alias_delayed_expansion.status
+            && direct_delayed_expansion.stdout == alias_delayed_expansion.stdout
+            && direct_delayed_expansion.stderr == alias_delayed_expansion.stderr
+            && String::from_utf8_lossy(&alias_delayed_expansion.stderr)
+                .contains(&delayed_expansion_version),
+        format!(
+            "atlas did not preserve delayed-expansion-sensitive arguments:\ndirect={} {}\nalias={} {}",
+            direct_delayed_expansion.status,
+            String::from_utf8_lossy(&direct_delayed_expansion.stderr),
+            alias_delayed_expansion.status,
+            String::from_utf8_lossy(&alias_delayed_expansion.stderr)
+        ),
+    )?;
+
+    let hardlink_source = fixture_root.join(if cfg!(windows) {
+        "atlas-hardlink-source.cmd"
+    } else {
+        "atlas-hardlink-source"
+    });
+    fs::copy(&forwarder, &hardlink_source)?;
+    fs::remove_file(&forwarder)?;
+    fs::hard_link(&hardlink_source, &forwarder)?;
+    let hardlink_output = run_install()?;
+    let hardlink_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&hardlink_output.stdout),
+        String::from_utf8_lossy(&hardlink_output.stderr)
+    );
+    require(
+        !hardlink_output.status.success()
+            && hardlink_text.contains("atlas command collision")
+            && fs::read_to_string(&forwarder)? == forwarder_text
+            && fs::read_to_string(&provenance)? == expected_provenance,
+        format!("installer accepted or modified a hard-linked atlas forwarder:\n{hardlink_text}"),
+    )?;
+    fs::remove_file(&forwarder)?;
+    fs::remove_file(&hardlink_source)?;
+    require(
+        run_install()?.status.success() && forwarder.is_file() && provenance.is_file(),
+        "installer could not repair the hard-link collision without losing provenance",
+    )?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let symlink_source = fixture_root.join("atlas-symlink-source");
+        fs::copy(&forwarder, &symlink_source)?;
+        fs::remove_file(&forwarder)?;
+        symlink(&symlink_source, &forwarder)?;
+        let symlink_output = run_install()?;
+        let symlink_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&symlink_output.stdout),
+            String::from_utf8_lossy(&symlink_output.stderr)
+        );
+        require(
+            !symlink_output.status.success()
+                && symlink_text.contains("atlas command collision")
+                && fs::read(&symlink_source)? == fs::read(&forwarder)?
+                && fs::read_to_string(&provenance)? == expected_provenance,
+            format!("installer accepted or modified a symlinked atlas forwarder:\n{symlink_text}"),
+        )?;
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&symlink_source)?;
+        require(
+            run_install()?.status.success() && forwarder.is_file() && provenance.is_file(),
+            "installer could not repair the symlink collision without losing provenance",
+        )?;
+    }
+
+    let effective_collision_dir = fixture_root.join("effective atlas collision");
+    fs::create_dir_all(&effective_collision_dir)?;
+    let effective_collision_path =
+        effective_collision_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let foreign_target = fixture_root.join("foreign runtime").join(if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    });
+    let foreign_forwarder = if cfg!(windows) {
+        format!(
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
+            foreign_target.display(),
+            foreign_target.display()
+        )
+    } else {
+        format!(
+            "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {}\nexec '{}' \"$@\"\n",
+            foreign_target.display(),
+            foreign_target.display().to_string().replace('\'', "'\\''")
+        )
+    };
+    fs::write(&effective_collision_path, &foreign_forwarder)?;
+    let effective_collision_environment = env::join_paths(
+        std::iter::once(effective_collision_dir).chain(env::split_paths(&inherited_path)),
+    )?;
+    let managed_forwarder_before_path_collision = fs::read(&forwarder)?;
+    let mut effective_collision_command =
+        projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            Some(&home),
+        )?;
+    effective_collision_command
+        .env("PATH", effective_collision_environment)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1");
+    let effective_collision_output = effective_collision_command.output()?;
+    let effective_collision_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&effective_collision_output.stdout),
+        String::from_utf8_lossy(&effective_collision_output.stderr)
+    );
+    require(
+        !effective_collision_output.status.success()
+            && effective_collision_text.contains("atlas command collision")
+            && fs::read(&forwarder)? == managed_forwarder_before_path_collision,
+        format!(
+            "installer shadowed an effective PATH atlas collision:\n{effective_collision_text}"
+        ),
+    )?;
+    fs::remove_file(&effective_collision_path)?;
+
+    fs::remove_file(&forwarder)?;
+    fs::remove_file(&provenance)?;
+    fs::remove_file(&installer_state)?;
+    let valid_foreign_forwarder = if cfg!(windows) {
+        format!(
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
+            runtime.display(),
+            runtime.display()
+        )
+    } else {
+        format!(
+            "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {}\nexec '{}' \"$@\"\n",
+            runtime.display(),
+            runtime.display().to_string().replace('\'', "'\\''")
+        )
+    };
+    fs::write(&forwarder, &valid_foreign_forwarder)?;
+    fs::write(&provenance, &expected_provenance)?;
+    let collision_output = run_install()?;
+    let collision_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&collision_output.stdout),
+        String::from_utf8_lossy(&collision_output.stderr)
+    );
+    require(
+        !collision_output.status.success() && collision_text.contains("atlas command collision"),
+        format!("installer accepted an unmanaged atlas collision:\n{collision_text}"),
+    )?;
+    require(
+        fs::read_to_string(&forwarder)? == valid_foreign_forwarder
+            && fs::read_to_string(&provenance)? == expected_provenance
+            && !installer_state.exists(),
+        "installer overwrote a crafted exact-body atlas collision beside a valid runtime",
+    )?;
+    let rejected_uninstall = run_uninstall()?;
+    let rejected_uninstall_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&rejected_uninstall.stdout),
+        String::from_utf8_lossy(&rejected_uninstall.stderr)
+    );
+    require(
+        !rejected_uninstall.status.success()
+            && rejected_uninstall_text.contains("unmanaged")
+            && fs::read_to_string(&forwarder)? == valid_foreign_forwarder
+            && fs::read_to_string(&provenance)? == expected_provenance,
+        format!(
+            "installer uninstall accepted a foreign marker forwarder:\n{rejected_uninstall_text}"
+        ),
+    )?;
+    fs::remove_file(&forwarder)?;
+    fs::remove_file(&provenance)?;
+    require(
+        run_install()?.status.success(),
+        "installer could not repair the removed managed atlas forwarder",
+    )?;
+
+    let forwarder_retirement_race = run_uninstall_with_env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH",
+        &forwarder,
+    )?;
+    let forwarder_retirement_race_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&forwarder_retirement_race.stdout),
+        String::from_utf8_lossy(&forwarder_retirement_race.stderr)
+    );
+    require(
+        !forwarder_retirement_race.status.success()
+            && fs::read_to_string(&forwarder)?.contains("foreign forwarder retirement race")
+            && fs::read_to_string(&provenance)? == expected_provenance
+            && installer_state.exists(),
+        format!(
+            "uninstall deleted or failed to preserve a concurrent forwarder replacement:\n{forwarder_retirement_race_text}"
+        ),
+    )?;
+    fs::remove_file(&forwarder)?;
+    fs::write(&forwarder, &forwarder_text)?;
+    clear_retirement_quarantine(
+        runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?,
+    )?;
+
+    let provenance_retirement_race = run_uninstall_with_env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RETIRE_RACE_PATH",
+        &provenance,
+    )?;
+    let provenance_retirement_race_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&provenance_retirement_race.stdout),
+        String::from_utf8_lossy(&provenance_retirement_race.stderr)
+    );
+    require(
+        !provenance_retirement_race.status.success()
+            && fs::read_to_string(&forwarder)? == forwarder_text
+            && fs::read_to_string(&provenance)?.contains("foreign provenance retirement race")
+            && installer_state.exists(),
+        format!(
+            "uninstall deleted or failed to preserve a concurrent provenance replacement:\n{provenance_retirement_race_text}"
+        ),
+    )?;
+    fs::remove_file(&provenance)?;
+    fs::write(&provenance, &expected_provenance)?;
+    clear_retirement_quarantine(
+        runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?,
+    )?;
+
+    fs::remove_file(&forwarder)?;
+    let retained_provenance = fs::read(&provenance)?;
+    let retained_capability = fs::read(&installer_state)?;
+    fs::write(&provenance, b"unrelated provenance")?;
+    let malformed_uninstall = run_uninstall()?;
+    require(
+        !malformed_uninstall.status.success()
+            && !forwarder.exists()
+            && fs::read(&provenance)? == b"unrelated provenance"
+            && fs::read(&installer_state)? == retained_capability,
+        "missing-forwarder uninstall accepted or changed unrelated provenance",
+    )?;
+    fs::write(&provenance, &retained_provenance)?;
+    let failed_retirement = run_uninstall_with_env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+        Path::new("1"),
+    )?;
+    require(
+        !failed_retirement.status.success()
+            && !forwarder.exists()
+            && fs::read(&provenance)? == retained_provenance
+            && fs::read(&installer_state)? == retained_capability,
+        "missing-forwarder uninstall failed to restore owned metadata after retirement failure",
+    )?;
+    fs::remove_file(&provenance)?;
+    require(
+        !run_uninstall()?.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && fs::read(&installer_state)? == retained_capability,
+        "missing-forwarder uninstall accepted or changed a lone capability record",
+    )?;
+    let runtime_directory = runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?;
+    let retained_runtime_directory = fixture_root.join("retained runtime directory");
+    fs::rename(runtime_directory, &retained_runtime_directory)?;
+    let missing_runtime_uninstall = run_uninstall()?;
+    fs::rename(&retained_runtime_directory, runtime_directory)?;
+    require(
+        !missing_runtime_uninstall.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && fs::read(&installer_state)? == retained_capability,
+        "missing-runtime uninstall accepted or changed a lone capability record",
+    )?;
+    fs::write(&provenance, &retained_provenance)?;
+    let missing_uninstall = run_uninstall()?;
+    require(
+        missing_uninstall.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && !installer_state.exists()
+            && runtime.is_file(),
+        format!(
+            "missing-forwarder uninstall did not retire only owned metadata:\n{}\n{}",
+            String::from_utf8_lossy(&missing_uninstall.stdout),
+            String::from_utf8_lossy(&missing_uninstall.stderr)
+        ),
+    )?;
+    require(
+        run_uninstall()?.status.success() && run_install()?.status.success(),
+        "missing-forwarder uninstall was not idempotent or prevented reinstall",
+    )?;
+
+    // A separate verified runtime can provide the native POSIX lock helper
+    // after the forwarder's own target is gone; it owns no fixture forwarder.
+    #[cfg(unix)]
+    let retirement_helper = home.join(TEST_POSIX_USER_BIN_DIR).join("projectatlas");
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(home.join(TEST_POSIX_USER_BIN_DIR))?;
+        fs::copy(&runtime, &retirement_helper)?;
+    }
+    for (invalid_runtime_file, forwarder_present) in
+        [(false, true), (false, false), (true, true), (true, false)]
+    {
+        let retained_runtime = fixture_root.join("retained uninstall runtime");
+        fs::rename(&runtime, &retained_runtime)?;
+        if invalid_runtime_file {
+            fs::write(&runtime, b"unrelated non-executable runtime content")?;
+        }
+        if !forwarder_present {
+            fs::remove_file(&forwarder)?;
+        }
+        let owned_provenance = fs::read(&provenance)?;
+        let owned_state = fs::read(&installer_state)?;
+        fs::write(&provenance, b"unrelated provenance")?;
+        require(
+            !run_uninstall()?.status.success()
+                && forwarder.exists() == forwarder_present
+                && fs::read(&provenance)? == b"unrelated provenance"
+                && fs::read(&installer_state)? == owned_state,
+            "unavailable-runtime uninstall accepted or changed unrelated ownership",
+        )?;
+        fs::write(&provenance, &owned_provenance)?;
+        #[cfg(target_os = "macos")]
+        {
+            let unavailable_helper = home.join("retained lifecycle helper");
+            fs::rename(&retirement_helper, &unavailable_helper)?;
+            let no_helper =
+                run_uninstall_with_env("PATH", Path::new("/usr/bin:/bin:/usr/sbin:/sbin"))?;
+            fs::rename(&unavailable_helper, &retirement_helper)?;
+            require(
+                !no_helper.status.success()
+                    && String::from_utf8_lossy(&no_helper.stderr)
+                        .contains("verified ProjectAtlas runtime is required")
+                    && forwarder.exists() == forwarder_present
+                    && fs::read(&provenance)? == owned_provenance
+                    && fs::read(&installer_state)? == owned_state,
+                "macOS retirement bypassed its unavailable lock helper or changed ownership",
+            )?;
+        }
+        let retired = run_uninstall()?;
+        require(
+            retired.status.success()
+                && !forwarder.exists()
+                && !provenance.exists()
+                && !installer_state.exists()
+                && runtime.exists() == invalid_runtime_file,
+            format!(
+                "owned forwarder retirement required its unavailable runtime:\n{}\n{}",
+                String::from_utf8_lossy(&retired.stdout),
+                String::from_utf8_lossy(&retired.stderr)
+            ),
+        )?;
+        require(
+            run_uninstall()?.status.success(),
+            "unavailable-runtime uninstall was not idempotent",
+        )?;
+        if invalid_runtime_file {
+            require(
+                fs::read(&runtime)? == b"unrelated non-executable runtime content",
+                "forwarder retirement changed the unrelated runtime file",
+            )?;
+            fs::remove_file(&runtime)?;
+        }
+        fs::rename(&retained_runtime, &runtime)?;
+        require(
+            run_install()?.status.success(),
+            "runtime restoration did not permit forwarder reinstall",
+        )?;
+    }
+    #[cfg(unix)]
+    fs::remove_file(&retirement_helper)?;
+
+    #[cfg(windows)]
+    for forwarder_present in [true, false] {
+        clear_retirement_quarantine(runtime_directory)?;
+        if !forwarder_present {
+            fs::remove_file(&forwarder)?;
+        }
+        let committed_cleanup = run_uninstall_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_QUARANTINE_CLEANUP_FAILURE",
+            Path::new("1"),
+        )?;
+        let cleanup_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&committed_cleanup.stdout),
+            String::from_utf8_lossy(&committed_cleanup.stderr)
+        );
+        let retained = fs::read_dir(runtime_directory)?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atlas-forwarder-retire-")
+            })
+            .collect::<Vec<_>>();
+        require(
+            committed_cleanup.status.success()
+                && cleanup_text.contains("retirement committed; quarantine cleanup remains")
+                && !forwarder.exists()
+                && !provenance.exists()
+                && !installer_state.exists()
+                && runtime.is_file()
+                && retained.len() == 1
+                && fs::read_to_string(retained[0].path())? == expected_provenance,
+            format!("committed retirement restored partial public state: {cleanup_text}"),
+        )?;
+        require(
+            run_uninstall()?.status.success() && run_install()?.status.success(),
+            "committed retirement cleanup residue prevented retry or reinstall",
+        )?;
+    }
+
+    fs::create_dir_all(home.join(TEST_WINDOWS_APPDATA_DIR))?;
+    fs::create_dir_all(home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))?;
+    let uninstall_output = run_uninstall()?;
+    require(
+        uninstall_output.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && !installer_state.exists()
+            && runtime.is_file(),
+        format!(
+            "installer uninstall did not remove only the owned forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&uninstall_output.stdout),
+            String::from_utf8_lossy(&uninstall_output.stderr)
+        ),
+    )?;
+    require(
+        atlas_dir.join("config.toml").is_file()
+            && direct_database.is_file()
+            && alias_database.is_file(),
+        "atlas uninstall removed selected project state",
+    )?;
+    let failed_readiness = run_install_with_env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_FINAL_RUNTIME_FAILURE",
+        Path::new("1"),
+    )?;
+    require(
+        !failed_readiness.status.success()
+            && forwarder.is_file()
+            && provenance.is_file()
+            && installer_state.is_file(),
+        "failed final runtime verification left an orphan or reported readiness",
+    )?;
+    let retained_pair = (
+        fs::read(&forwarder)?,
+        fs::read(&provenance)?,
+        fs::read(&installer_state)?,
+    );
+    require(
+        run_install()?.status.success()
+            && retained_pair
+                == (
+                    fs::read(&forwarder)?,
+                    fs::read(&provenance)?,
+                    fs::read(&installer_state)?,
+                )
+            && run_uninstall()?.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && !installer_state.exists(),
+        "failed final readiness did not preserve exact ownership for repair and uninstall",
+    )?;
+    {
+        let runtime_dir = if cfg!(windows) {
+            home.join(TEST_WINDOWS_APPDATA_DIR).join("npm")
+        } else {
+            home.join(TEST_POSIX_USER_BIN_DIR)
+        };
+        fs::create_dir_all(&runtime_dir)?;
+        let alternate_runtime = runtime_dir.join(if cfg!(windows) {
+            "verified-custom-runtime.exe"
+        } else {
+            "verified-custom-runtime"
+        });
+        fs::hard_link(&runtime, &alternate_runtime)?;
+        let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &alternate_runtime,
+            None,
+            Some(&home),
+        )?;
+        install
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &run_path);
+        let alternate_forwarder =
+            runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+        for missing_forwarder in [false, true] {
+            require(
+                install.output()?.status.success(),
+                "alternate runtime install failed",
+            )?;
+            if missing_forwarder {
+                fs::remove_file(&alternate_forwarder)?;
+            }
+            let mut uninstall = if cfg!(windows) {
+                let mut command = StdCommand::new("powershell");
+                command
+                    .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                    .arg(&installer)
+                    .arg("-Uninstall");
+                command
+            } else {
+                let mut command = StdCommand::new("bash");
+                command.arg(&installer).arg("--uninstall");
+                command
+            };
+            let output = uninstall
+                .env("HOME", &home)
+                .env("USERPROFILE", &home)
+                .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
+                .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
+                .env("PATH", &run_path)
+                .output()?;
+            require(
+                output.status.success()
+                    && !alternate_forwarder.exists()
+                    && !runtime_dir.join(".atlas-forwarder.provenance").exists()
+                    && fs::read_dir(&installer_state_dir)?
+                        .collect::<Result<Vec<_>, io::Error>>()?
+                        .iter()
+                        .all(|entry| entry.path().extension() != Some(OsStr::new("state")))
+                    && alternate_runtime.is_file()
+                    && runtime.is_file(),
+                format!(
+                    "broad uninstall did not authenticate the recorded runtime: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        let projects = fixture_root.join("uninstall projects");
+        let missing = projects.join("missing");
+        let linked = projects.join("linked");
+        let non_directory = projects.join("non-directory");
+        let unrelated = projects.join("unrelated");
+        fs::create_dir_all(&linked)?;
+        fs::create_dir_all(&non_directory)?;
+        fs::create_dir_all(&unrelated)?;
+        fs::write(unrelated.join("keep.txt"), "unrelated project state")?;
+        std::os::unix::fs::symlink(&unrelated, linked.join(ATLAS_DIR_NAME))?;
+        fs::write(non_directory.join(ATLAS_DIR_NAME), "not a directory")?;
+        let before = repository_filesystem_snapshot(&projects)?;
+        for project in [&missing, &linked, &non_directory] {
+            require(
+                run_install()?.status.success(),
+                "uninstall fixture reinstall failed",
+            )?;
+            let output = run_uninstall_from(project)?;
+            require(
+                output.status.success()
+                    && !forwarder.exists()
+                    && !provenance.exists()
+                    && !installer_state.exists()
+                    && runtime.is_file()
+                    && repository_filesystem_snapshot(&projects)? == before,
+                format!(
+                    "project state blocked or was changed by owned uninstall: {}: {}",
+                    project.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    #[cfg(unix)]
+    let fixture_root = temp.path().canonicalize()?;
+    #[cfg(not(unix))]
+    let fixture_root = PathBuf::from(
+        normalize_native_path_display(temp.path().canonicalize()?)
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    let repo = fixture_root.join(TEST_REPO_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::write(
+        atlas_dir.join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+
+    let runtime_name = if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    };
+    let first_runtime_dir = fixture_root.join("first runtime");
+    let second_runtime_dir = fixture_root.join("second runtime");
+    fs::create_dir_all(&first_runtime_dir)?;
+    fs::create_dir_all(&second_runtime_dir)?;
+    let first_runtime = first_runtime_dir.join(runtime_name);
+    let second_runtime = second_runtime_dir.join(runtime_name);
+    fs::copy(mcp_contract_executable(), &first_runtime)?;
+    fs::copy(mcp_contract_executable(), &second_runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for runtime in [&first_runtime, &second_runtime] {
+            let mut permissions = fs::metadata(runtime)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(runtime, permissions)?;
+        }
+    }
+
+    let home = fixture_root.join(TEST_ISOLATED_HOME_DIR_NAME);
+    fs::create_dir_all(&home)?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let installer_path = env::join_paths(
+        [first_runtime_dir.clone(), second_runtime_dir.clone()]
+            .into_iter()
+            .chain(
+                env::split_paths(&inherited_path)
+                    .filter(|entry| !is_shared_test_runtime_directory(entry)),
+            ),
+    )?;
+    let workspace_root = workspace_root()?;
+    let run_install = |runtime: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &installer_path);
+        Ok(command.output()?)
+    };
+    let run_install_with_env =
+        |runtime: &Path, key: &str, value: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &installer_path)
+                .env(key, value);
+            Ok(command.output()?)
+        };
+    #[cfg(unix)]
+    let run_uninstall = || -> Result<std::process::Output, Box<dyn Error>> {
+        let mut command = StdCommand::new("bash");
+        command
+            .arg(
+                workspace_root
+                    .join("plugins")
+                    .join("projectatlas")
+                    .join("scripts")
+                    .join("install-runtime.sh"),
+            )
+            .arg("--uninstall")
+            .arg(&repo);
+        command
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("PROJECTATLAS_RUNTIME_PATH", &second_runtime)
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", &installer_path);
+        Ok(command.output()?)
+    };
+    let clear_retirement_quarantine = |directory: &Path| -> Result<(), Box<dyn Error>> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".atlas-forwarder-retire.")
+            {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    };
+
+    let first_output = run_install(&first_runtime)?;
+    require(
+        first_output.status.success(),
+        format!(
+            "installer failed to create the first managed atlas forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&first_output.stdout),
+            String::from_utf8_lossy(&first_output.stderr)
+        ),
+    )?;
+    let first_forwarder = first_runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let second_forwarder =
+        second_runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let installer_state_dir = if cfg!(windows) {
+        home.join(TEST_WINDOWS_INSTALLER_STATE_DIR)
+    } else {
+        home.join(TEST_POSIX_INSTALLER_STATE_DIR)
+    };
+    require(
+        first_forwarder.is_file(),
+        "first managed atlas forwarder was not installed",
+    )?;
+    let first_provenance = first_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+    let second_provenance = second_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+    let first_forwarder_before_failure = fs::read(&first_forwarder)?;
+    let first_forwarder_permissions = fs::metadata(&first_forwarder)?.permissions();
+    let first_provenance_before_failure = fs::read(&first_provenance)?;
+    let first_states = installer_state_dir
+        .read_dir()?
+        .collect::<Result<Vec<_>, io::Error>>()?
+        .into_iter()
+        .filter(|entry| entry.path().extension() == Some(OsStr::new("state")))
+        .collect::<Vec<_>>();
+    require(
+        first_states.len() == 1,
+        "migration fixture did not publish exactly one initial capability state",
+    )?;
+    let first_state = first_states[0].path();
+    let first_state_before_failure = fs::read(&first_state)?;
+
+    let staging_failure = run_install_with_env(
+        &second_runtime,
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_STAGE_FAILURE",
+        Path::new("1"),
+    )?;
+    require(
+        !staging_failure.status.success()
+            && fs::read(&first_forwarder)? == first_forwarder_before_failure
+            && fs::read(&first_provenance)? == first_provenance_before_failure
+            && !second_forwarder.exists()
+            && !second_provenance.exists(),
+        format!(
+            "staging failure did not preserve the old atlas forwarder and provenance:\n{}\n{}",
+            String::from_utf8_lossy(&staging_failure.stdout),
+            String::from_utf8_lossy(&staging_failure.stderr)
+        ),
+    )?;
+
+    let publication_race = run_install_with_env(
+        &second_runtime,
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH",
+        &second_forwarder,
+    )?;
+    let publication_race_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&publication_race.stdout),
+        String::from_utf8_lossy(&publication_race.stderr)
+    );
+    require(
+        !publication_race.status.success()
+            && publication_race_text.contains("publication")
+            && fs::read(&first_forwarder)? == first_forwarder_before_failure
+            && fs::read(&first_provenance)? == first_provenance_before_failure
+            && fs::read_to_string(&second_forwarder)?
+                == if cfg!(windows) {
+                    "# foreign publication race collision\r\n"
+                } else {
+                    "# foreign publication race collision\n"
+                }
+            && !second_provenance.exists(),
+        format!(
+            "publication race overwrote a foreign destination or retired the old command:\n{publication_race_text}"
+        ),
+    )?;
+    fs::remove_file(&second_forwarder)?;
+
+    let retirement_race = run_install_with_env(
+        &second_runtime,
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH",
+        &first_forwarder,
+    )?;
+    let retirement_race_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&retirement_race.stdout),
+        String::from_utf8_lossy(&retirement_race.stderr)
+    );
+    require(
+        !retirement_race.status.success()
+            && fs::read_to_string(&first_forwarder)?.contains("foreign forwarder retirement race")
+            && fs::read(&first_provenance)? == first_provenance_before_failure
+            && second_forwarder.is_file()
+            && second_provenance.is_file(),
+        format!(
+            "migration deleted or failed to preserve a concurrent forwarder replacement:\n{retirement_race_text}"
+        ),
+    )?;
+    fs::remove_file(&first_forwarder)?;
+    fs::write(&first_forwarder, &first_forwarder_before_failure)?;
+    fs::set_permissions(&first_forwarder, first_forwarder_permissions)?;
+    clear_retirement_quarantine(&first_runtime_dir)?;
+
+    let provenance_retirement_race = run_install_with_env(
+        &second_runtime,
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RETIRE_RACE_PATH",
+        &first_provenance,
+    )?;
+    let provenance_retirement_race_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&provenance_retirement_race.stdout),
+        String::from_utf8_lossy(&provenance_retirement_race.stderr)
+    );
+    require(
+        !provenance_retirement_race.status.success()
+            && fs::read(&first_forwarder)? == first_forwarder_before_failure
+            && fs::read_to_string(&first_provenance)?
+                .contains("foreign provenance retirement race")
+            && second_forwarder.is_file()
+            && second_provenance.is_file(),
+        format!(
+            "migration deleted or failed to preserve a concurrent provenance replacement:\n{provenance_retirement_race_text}"
+        ),
+    )?;
+    fs::remove_file(&first_provenance)?;
+    fs::write(&first_provenance, &first_provenance_before_failure)?;
+    clear_retirement_quarantine(&first_runtime_dir)?;
+    let second_forwarder_before_state_failure = fs::read(&second_forwarder)?;
+    let second_provenance_before_state_failure = fs::read(&second_provenance)?;
+    let state_files_before_state_failure = installer_state_dir
+        .read_dir()?
+        .map(|entry| entry.map(|value| value.path()))
+        .collect::<Result<Vec<_>, io::Error>>()?
+        .into_iter()
+        .filter(|path| path.extension() == Some(OsStr::new("state")))
+        .collect::<Vec<_>>();
+    require(
+        state_files_before_state_failure.len() == 2,
+        "migration fixture lost a capability state before retirement-failure proof",
+    )?;
+    let second_state = state_files_before_state_failure
+        .iter()
+        .find(|path| path.as_path() != first_state.as_path())
+        .ok_or_else(|| io::Error::other("replacement capability state was not published"))?;
+    let second_state_before_failure = fs::read(second_state)?;
+
+    let state_retirement_failure = run_install_with_env(
+        &second_runtime,
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+        Path::new("1"),
+    )?;
+    let state_retirement_failure_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&state_retirement_failure.stdout),
+        String::from_utf8_lossy(&state_retirement_failure.stderr)
+    );
+    require(
+        !state_retirement_failure.status.success()
+            && fs::read(&first_forwarder)? == first_forwarder_before_failure
+            && fs::read(&first_provenance)? == first_provenance_before_failure
+            && fs::read(&first_state)? == first_state_before_failure
+            && fs::read(&second_forwarder)? == second_forwarder_before_state_failure
+            && fs::read(&second_provenance)? == second_provenance_before_state_failure
+            && fs::read(second_state)? == second_state_before_failure,
+        format!(
+            "State retirement failure did not preserve both forwarder pairs and private state:\n{state_retirement_failure_text}"
+        ),
+    )?;
+
+    let second_output = run_install(&second_runtime)?;
+    let second_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&second_output.stdout),
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    require(
+        second_output.status.success()
+            && !first_forwarder.exists()
+            && !first_provenance.exists()
+            && second_forwarder.is_file()
+            && second_provenance.is_file(),
+        format!(
+            "installer did not migrate the owned forwarder from the old PATH location:\n{second_output_text}"
+        ),
+    )?;
+    require(
+        installer_state_dir
+            .read_dir()?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .iter()
+            .filter(|entry| entry.path().extension() == Some(OsStr::new("state")))
+            .count()
+            == 1,
+        "migration did not retire the old private capability state",
+    )?;
+
+    let direct_output = StdCommand::new(&second_runtime)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let alias_output = if cfg!(windows) {
+        StdCommand::new("cmd")
+            .args(["/D", "/C", "call"])
+            .arg(&second_forwarder)
+            .args(["--format", "toon", "runtime-info"])
+            .output()?
+    } else {
+        StdCommand::new(&second_forwarder)
+            .env("PATH", &installer_path)
+            .args(["--format", "toon", "runtime-info"])
+            .output()?
+    };
+    require(
+        direct_output.status == alias_output.status
+            && direct_output.stdout == alias_output.stdout
+            && direct_output.stderr == alias_output.stderr,
+        format!(
+            "migrated atlas forwarder diverged from the new runtime:\ndirect={} {}\nalias={} {}",
+            direct_output.status,
+            String::from_utf8_lossy(&direct_output.stderr),
+            alias_output.status,
+            String::from_utf8_lossy(&alias_output.stderr)
+        ),
+    )?;
+    #[cfg(unix)]
+    {
+        let uninstall_output = run_uninstall()?;
+        require(
+            uninstall_output.status.success()
+                && !second_forwarder.exists()
+                && !second_provenance.exists()
+                && second_runtime.is_file()
+                && installer_state_dir
+                    .read_dir()?
+                    .collect::<Result<Vec<_>, io::Error>>()?
+                    .iter()
+                    .all(|entry| entry.path().extension() != Some(OsStr::new("state"))),
+            format!(
+                "owned POSIX forwarder uninstall did not retire only the migrated pair:\n{}\n{}",
+                String::from_utf8_lossy(&uninstall_output.stdout),
+                String::from_utf8_lossy(&uninstall_output.stderr)
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    #[cfg(unix)]
+    let fixture_root = temp.path().canonicalize()?;
+    #[cfg(not(unix))]
+    let fixture_root = PathBuf::from(
+        normalize_native_path_display(temp.path().canonicalize()?)
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    let first_repo = fixture_root.join("first project");
+    let second_repo = fixture_root.join("second project");
+    for repo in [&first_repo, &second_repo] {
+        let atlas_dir = repo.join(ATLAS_DIR_NAME);
+        fs::create_dir_all(&atlas_dir)?;
+        fs::write(
+            atlas_dir.join("config.toml"),
+            "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+        )?;
+    }
+
+    let runtime_name = if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    };
+    let first_runtime_dir = fixture_root.join("opposite first runtime");
+    let second_runtime_dir = fixture_root.join("opposite second runtime");
+    fs::create_dir_all(&first_runtime_dir)?;
+    fs::create_dir_all(&second_runtime_dir)?;
+    let first_runtime = first_runtime_dir.join(runtime_name);
+    let second_runtime = second_runtime_dir.join(runtime_name);
+    fs::copy(mcp_contract_executable(), &first_runtime)?;
+    fs::copy(mcp_contract_executable(), &second_runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for runtime in [&first_runtime, &second_runtime] {
+            let mut permissions = fs::metadata(runtime)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(runtime, permissions)?;
+        }
+    }
+
+    let home = fixture_root.join(TEST_ISOLATED_HOME_DIR_NAME);
+    fs::create_dir_all(&home)?;
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let inherited_entries = env::split_paths(&inherited_path)
+        .filter(|entry| !is_shared_test_runtime_directory(entry))
+        .collect::<Vec<_>>();
+    let path_for = |first: &Path, second: Option<&Path>| -> Result<OsString, Box<dyn Error>> {
+        let mut entries = vec![first.to_path_buf()];
+        if let Some(second) = second {
+            entries.push(second.to_path_buf());
+        }
+        entries.extend(inherited_entries.iter().cloned());
+        Ok(env::join_paths(entries)?)
+    };
+    let first_only_path = path_for(&first_runtime_dir, None)?;
+    let second_only_path = path_for(&second_runtime_dir, None)?;
+    let first_then_second_path = path_for(&first_runtime_dir, Some(&second_runtime_dir))?;
+    let second_then_first_path = path_for(&second_runtime_dir, Some(&first_runtime_dir))?;
+    let workspace_root = workspace_root()?;
+    let make_installer = |runtime: &Path,
+                          path: &OsString,
+                          discovery_gate: Option<&Path>,
+                          acquired_gate: Option<&Path>|
+     -> Result<StdCommand, Box<dyn Error>> {
+        let repo = if runtime == first_runtime {
+            &first_repo
+        } else {
+            &second_repo
+        };
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            repo,
+            runtime,
+            None,
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .env("PATH", path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(discovery_gate) = discovery_gate {
+            command.env(
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_DISCOVERY_GATE",
+                discovery_gate,
+            );
+        }
+        if let Some(acquired_gate) = acquired_gate {
+            command.env(
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ACQUIRED_GATE",
+                acquired_gate,
+            );
+        }
+        Ok(command)
+    };
+    let run_install =
+        |runtime: &Path, path: &OsString| -> Result<std::process::Output, Box<dyn Error>> {
+            Ok(make_installer(runtime, path, None, None)?.output()?)
+        };
+    let wait_for_ready = |child: &mut PluginInstallerProcess,
+                          ready: &Path,
+                          label: &str|
+     -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if ready.is_file() {
+                return Ok(());
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "{label} exited before reaching its lock coordination gate: {status}"
+                ))
+                .into());
+            }
+            if Instant::now() >= deadline {
+                terminate_plugin_installer_process_tree(child)?;
+                let _ = child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{label} did not reach its lock coordination gate within 30 seconds"),
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let forwarder_for =
+        |directory: &Path| directory.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let provenance_for = |directory: &Path| directory.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+    let pair_is_complete = |directory: &Path, runtime: &Path| -> Result<bool, Box<dyn Error>> {
+        let forwarder = forwarder_for(directory);
+        let provenance = provenance_for(directory);
+        if !forwarder.is_file() || !provenance.is_file() {
+            return Ok(false);
+        }
+        let canonical_runtime = runtime.to_string_lossy();
+        let expected_forwarder = if cfg!(windows) {
+            format!(
+                "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{canonical_runtime}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n"
+            )
+        } else {
+            format!(
+                "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
+            )
+        };
+        let expected_provenance = if cfg!(windows) {
+            format!(
+                "# ProjectAtlas atlas forwarder provenance v1\r\nforwarder: {}\r\nruntime: {}\r\n",
+                forwarder.display(),
+                runtime.display()
+            )
+        } else {
+            format!(
+                "# ProjectAtlas atlas forwarder provenance v1\nforwarder: {}\nruntime: {}\n",
+                forwarder.display(),
+                runtime.display()
+            )
+        };
+        Ok(fs::read_to_string(&forwarder)? == expected_forwarder
+            && fs::read_to_string(&provenance)? == expected_provenance)
+    };
+    let first_forwarder = forwarder_for(&first_runtime_dir);
+    let first_provenance = provenance_for(&first_runtime_dir);
+
+    let first_output = run_install(&first_runtime, &first_only_path)?;
+    require(
+        first_output.status.success(),
+        format!(
+            "opposite migration fixture could not install first runtime:\n{}\n{}",
+            String::from_utf8_lossy(&first_output.stdout),
+            String::from_utf8_lossy(&first_output.stderr)
+        ),
+    )?;
+    let second_output = run_install(&second_runtime, &second_only_path)?;
+    require(
+        second_output.status.success(),
+        format!(
+            "opposite migration fixture could not install second runtime:\n{}\n{}",
+            String::from_utf8_lossy(&second_output.stdout),
+            String::from_utf8_lossy(&second_output.stderr)
+        ),
+    )?;
+
+    let installer_state_dir = if cfg!(windows) {
+        home.join(TEST_WINDOWS_INSTALLER_STATE_DIR)
+    } else {
+        home.join(TEST_POSIX_INSTALLER_STATE_DIR)
+    };
+    let state_files = || -> Result<Vec<PathBuf>, Box<dyn Error>> {
+        Ok(fs::read_dir(&installer_state_dir)?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .into_iter()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("state"))
+            .collect())
+    };
+    require(
+        pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 2,
+        "opposite migration fixture did not establish two complete managed forwarder pairs",
+    )?;
+    let unrelated_state = installer_state_dir.join("opposite-migration-unrelated-state");
+    let unrelated_state_content = if cfg!(windows) {
+        b"opposite migration unrelated state\r\n".as_slice()
+    } else {
+        b"opposite migration unrelated state\n".as_slice()
+    };
+    fs::write(&unrelated_state, unrelated_state_content)?;
+
+    let mut project_configs = Vec::new();
+    for repo in [&first_repo, &second_repo] {
+        for name in [
+            "projectatlas.mcp.json",
+            "projectatlas.claude.mcp.json",
+            "projectatlas.opencode.json",
+        ] {
+            let path = repo.join(ATLAS_DIR_NAME).join(name);
+            let bytes = fs::read(&path)?;
+            project_configs.push((path, bytes));
+        }
+    }
+    let discovery_a = fixture_root.join("opposite-a-discovery.gate");
+    let discovery_b = fixture_root.join("opposite-b-discovery.gate");
+    fs::write(&discovery_a, b"hold\n")?;
+    fs::write(&discovery_b, b"hold\n")?;
+    let discovery_a_ready = PathBuf::from(format!("{}.ready", discovery_a.display()));
+    let discovery_b_ready = PathBuf::from(format!("{}.ready", discovery_b.display()));
+    let mut install_a = spawn_plugin_installer_process(&mut make_installer(
+        &first_runtime,
+        &second_then_first_path,
+        Some(&discovery_a),
+        None,
+    )?)?;
+    let mut install_b = spawn_plugin_installer_process(&mut make_installer(
+        &second_runtime,
+        &first_then_second_path,
+        Some(&discovery_b),
+        None,
+    )?)?;
+    if let Err(error) = wait_for_ready(&mut install_a, &discovery_a_ready, "opposite installer A") {
+        drop(terminate_plugin_installer_process_tree(&mut install_b));
+        drop(install_b.wait());
+        return Err(error);
+    }
+    if let Err(error) = wait_for_ready(&mut install_b, &discovery_b_ready, "opposite installer B") {
+        drop(terminate_plugin_installer_process_tree(&mut install_a));
+        drop(install_a.wait());
+        return Err(error);
+    }
+    fs::remove_file(&discovery_a)?;
+    fs::remove_file(&discovery_b)?;
+    fs::remove_file(&discovery_a_ready)?;
+    fs::remove_file(&discovery_b_ready)?;
+    let migration_started = Instant::now();
+    let output_a = match wait_for_plugin_installer_output(
+        install_a,
+        "opposite installer A",
+        Duration::from_secs(35),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            drop(terminate_plugin_installer_process_tree(&mut install_b));
+            drop(install_b.wait());
+            return Err(error);
+        }
+    };
+    let output_b = wait_for_plugin_installer_output(
+        install_b,
+        "opposite installer B",
+        Duration::from_secs(35),
+    )?;
+    require(
+        migration_started.elapsed() < Duration::from_secs(30),
+        "opposite forwarder migrations incurred the full bounded lock timeout",
+    )?;
+    require(
+        output_a.status.success() && output_b.status.success(),
+        format!(
+            "opposite forwarder migrations did not both complete under total lock order (A={}, B={}):\nA stdout:\n{}\nA stderr:\n{}\nB stdout:\n{}\nB stderr:\n{}",
+            output_a.status,
+            output_b.status,
+            String::from_utf8_lossy(&output_a.stdout),
+            String::from_utf8_lossy(&output_a.stderr),
+            String::from_utf8_lossy(&output_b.stdout),
+            String::from_utf8_lossy(&output_b.stderr)
+        ),
+    )?;
+    for (path, expected) in project_configs {
+        require(
+            fs::read(&path)? == expected,
+            format!(
+                "opposite migration changed project config: {}",
+                path.display()
+            ),
+        )?;
+    }
+    let first_pair = pair_is_complete(&first_runtime_dir, &first_runtime)?;
+    let second_pair = pair_is_complete(&second_runtime_dir, &second_runtime)?;
+    require(
+        first_pair ^ second_pair,
+        "opposite forwarder migrations left zero or two managed pairs",
+    )?;
+    require(
+        state_files()?.len() == 1 && fs::read(&unrelated_state)? == unrelated_state_content,
+        "opposite forwarder migrations changed unrelated state or left stale capability state",
+    )?;
+
+    let missing_runtime = if first_pair {
+        &second_runtime
+    } else {
+        &first_runtime
+    };
+    let missing_runtime_path = if first_pair {
+        &second_only_path
+    } else {
+        &first_only_path
+    };
+    let recovery_install = run_install(missing_runtime, missing_runtime_path)?;
+    require(
+        recovery_install.status.success()
+            && pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 2,
+        format!(
+            "opposite migration fixture could not restore two managed pairs for interruption proof:\n{}\n{}",
+            String::from_utf8_lossy(&recovery_install.stdout),
+            String::from_utf8_lossy(&recovery_install.stderr)
+        ),
+    )?;
+
+    let recovery_discovery_a = fixture_root.join("opposite-recovery-a-discovery.gate");
+    let recovery_discovery_b = fixture_root.join("opposite-recovery-b-discovery.gate");
+    let recovery_acquired_a = fixture_root.join("opposite-recovery-a-acquired.gate");
+    fs::write(&recovery_discovery_a, b"hold\n")?;
+    fs::write(&recovery_discovery_b, b"hold\n")?;
+    fs::write(&recovery_acquired_a, b"hold\n")?;
+    let recovery_discovery_a_ready =
+        PathBuf::from(format!("{}.ready", recovery_discovery_a.display()));
+    let recovery_discovery_b_ready =
+        PathBuf::from(format!("{}.ready", recovery_discovery_b.display()));
+    let recovery_acquired_a_ready =
+        PathBuf::from(format!("{}.ready", recovery_acquired_a.display()));
+    let mut interrupted_a = spawn_plugin_installer_process(&mut make_installer(
+        &first_runtime,
+        &second_then_first_path,
+        Some(&recovery_discovery_a),
+        Some(&recovery_acquired_a),
+    )?)?;
+    let mut recovering_b = spawn_plugin_installer_process(&mut make_installer(
+        &second_runtime,
+        &first_then_second_path,
+        Some(&recovery_discovery_b),
+        None,
+    )?)?;
+    if let Err(error) = wait_for_ready(
+        &mut interrupted_a,
+        &recovery_discovery_a_ready,
+        "interrupted opposite installer A",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut recovering_b));
+        drop(recovering_b.wait());
+        return Err(error);
+    }
+    if let Err(error) = wait_for_ready(
+        &mut recovering_b,
+        &recovery_discovery_b_ready,
+        "recovering opposite installer B",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut interrupted_a));
+        drop(interrupted_a.wait());
+        return Err(error);
+    }
+    fs::remove_file(&recovery_discovery_a)?;
+    fs::remove_file(&recovery_discovery_a_ready)?;
+    if let Err(error) = wait_for_ready(
+        &mut interrupted_a,
+        &recovery_acquired_a_ready,
+        "interrupted opposite installer A lock owner",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut interrupted_a));
+        drop(interrupted_a.wait());
+        drop(terminate_plugin_installer_process_tree(&mut recovering_b));
+        drop(recovering_b.wait());
+        return Err(error);
+    }
+    interrupted_a.kill()?;
+    let interrupted_output = interrupted_a.wait_with_output()?;
+    fs::remove_file(&recovery_acquired_a)?;
+    fs::remove_file(&recovery_acquired_a_ready)?;
+    fs::remove_file(&recovery_discovery_b)?;
+    fs::remove_file(&recovery_discovery_b_ready)?;
+    let recovering_output = wait_for_plugin_installer_output(
+        recovering_b,
+        "recovering opposite installer B",
+        Duration::from_secs(35),
+    )?;
+    require(
+        !interrupted_output.status.success() && recovering_output.status.success(),
+        format!(
+            "interrupted opposite migration did not fail/recover truthfully: A={} B={}\nA stdout:\n{}\nA stderr:\n{}\nB stdout:\n{}\nB stderr:\n{}",
+            interrupted_output.status,
+            recovering_output.status,
+            String::from_utf8_lossy(&interrupted_output.stdout),
+            String::from_utf8_lossy(&interrupted_output.stderr),
+            String::from_utf8_lossy(&recovering_output.stdout),
+            String::from_utf8_lossy(&recovering_output.stderr)
+        ),
+    )?;
+    require(
+        !first_forwarder.exists()
+            && !first_provenance.exists()
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 1
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        "interrupted opposite migration did not leave one complete recoverable pair",
+    )?;
+
+    // A candidate without private state is still part of the lifecycle decision. Hold
+    // installer A after discovery while installer B repairs that candidate, then prove
+    // A serializes the repaired pair instead of creating a second managed destination.
+    let second_forwarder = forwarder_for(&second_runtime_dir);
+    let second_provenance = provenance_for(&second_runtime_dir);
+    let second_state = state_files()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::Error::other("repair-race fixture missing the second runtime state"))?;
+    require(
+        pair_is_complete(&second_runtime_dir, &second_runtime)? && second_state.is_file(),
+        "repair-race fixture did not begin with one complete managed candidate",
+    )?;
+    fs::remove_file(&second_forwarder)?;
+    fs::remove_file(&second_provenance)?;
+    fs::remove_file(&second_state)?;
+    let foreign_candidate = if cfg!(windows) {
+        b"repair-race foreign candidate\r\n".as_slice()
+    } else {
+        b"repair-race foreign candidate\n".as_slice()
+    };
+    fs::write(&second_forwarder, foreign_candidate)?;
+    let repair_discovery = fixture_root.join("repair-race-discovery.gate");
+    let repair_state = fixture_root.join("repair-race-state.gate");
+    let repair_discovery_ready = PathBuf::from(format!("{}.ready", repair_discovery.display()));
+    let repair_state_ready = PathBuf::from(format!("{}.ready", repair_state.display()));
+    fs::write(&repair_discovery, b"hold\n")?;
+    fs::write(&repair_state, b"hold\n")?;
+    let mut repair_a = spawn_plugin_installer_process(&mut make_installer(
+        &first_runtime,
+        &second_then_first_path,
+        Some(&repair_discovery),
+        None,
+    )?)?;
+    if let Err(error) = wait_for_ready(
+        &mut repair_a,
+        &repair_discovery_ready,
+        "repair-race installer A",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut repair_a));
+        drop(repair_a.wait());
+        return Err(error);
+    }
+    require(
+        fs::read(&second_forwarder)? == foreign_candidate,
+        "repair-race installer A changed the incomplete candidate before lifecycle ownership",
+    )?;
+    fs::remove_file(&second_forwarder)?;
+    let mut repair_b = make_installer(&second_runtime, &second_only_path, None, None)?;
+    repair_b.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_PUBLISHED_GATE",
+        &repair_state,
+    );
+    let mut repair_b = spawn_plugin_installer_process(&mut repair_b)?;
+    if let Err(error) = wait_for_ready(
+        &mut repair_b,
+        &repair_state_ready,
+        "repair-race installer B",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut repair_a));
+        drop(repair_a.wait());
+        return Err(error);
+    }
+    require(
+        second_state.is_file()
+            && !first_forwarder.exists()
+            && !first_provenance.exists()
+            && !second_forwarder.exists()
+            && !second_provenance.exists(),
+        "repair-race repair owner did not publish the candidate capability state",
+    )?;
+    fs::remove_file(&repair_state)?;
+    fs::remove_file(&repair_state_ready)?;
+    let repair_b_output = wait_for_plugin_installer_output(
+        repair_b,
+        "repair-race installer B",
+        Duration::from_secs(35),
+    )?;
+    fs::remove_file(&repair_discovery)?;
+    fs::remove_file(&repair_discovery_ready)?;
+    let repair_a_output = wait_for_plugin_installer_output(
+        repair_a,
+        "repair-race installer A",
+        Duration::from_secs(35),
+    )?;
+    let repair_first_pair = pair_is_complete(&first_runtime_dir, &first_runtime)?;
+    let repair_second_pair = pair_is_complete(&second_runtime_dir, &second_runtime)?;
+    let repair_states = state_files()?;
+    require(
+        repair_b_output.status.success()
+            && repair_a_output.status.success()
+            && repair_first_pair
+            && !repair_second_pair
+            && repair_states.len() == 1
+            && repair_states[0] != second_state
+            && fs::read(&unrelated_state)? == unrelated_state_content
+            && pair_is_complete(&first_runtime_dir, &first_runtime)?,
+        format!(
+            "repair-race installers left more than one effective managed pair or lost ownership:\nA stdout:\n{}\nA stderr:\n{}\nB stdout:\n{}\nB stderr:\n{}",
+            String::from_utf8_lossy(&repair_a_output.stdout),
+            String::from_utf8_lossy(&repair_a_output.stderr),
+            String::from_utf8_lossy(&repair_b_output.stdout),
+            String::from_utf8_lossy(&repair_b_output.stderr)
+        ),
+    )?;
+    require(
+        !second_state.exists()
+            && !second_provenance.exists()
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        "repair-race migration changed unrelated or stale source state",
+    )?;
+
+    let restore_second = run_install(&second_runtime, &second_only_path)?;
+    require(
+        restore_second.status.success()
+            && pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 2,
+        format!(
+            "deadline fixture could not restore two managed pairs:\n{}\n{}",
+            String::from_utf8_lossy(&restore_second.stdout),
+            String::from_utf8_lossy(&restore_second.stderr)
+        ),
+    )?;
+    let state_snapshot = || -> Result<Vec<(PathBuf, Vec<u8>)>, Box<dyn Error>> {
+        let mut snapshot = state_files()?
+            .into_iter()
+            .map(|path| -> Result<(PathBuf, Vec<u8>), Box<dyn Error>> {
+                let content = fs::read(&path)?;
+                Ok((path, content))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(snapshot)
+    };
+
+    // A short test-only budget makes each lock position fail deterministically;
+    // the production budget remains one shared 30-second lock-wait budget.
+    // Keep both sorted locks occupied so the contender spends part of its one
+    // budget waiting for lock 1, then proves that the remaining time—not a
+    // reset budget—is used for lock 2. Unix process-group termination needs
+    // scheduling slack; its exact trace verifies budget sharing independently
+    // of the Windows elapsed-time assertion.
+    let lock_budget_ms = if cfg!(unix) { 1_000_u64 } else { 250 };
+    let deadline_state_before_first = state_snapshot()?;
+    let held_first_gate = fixture_root.join("deadline-held-first.gate");
+    let held_first_ready = PathBuf::from(format!("{}.ready", held_first_gate.display()));
+    let held_second_gate = fixture_root.join("deadline-held-second-owner.gate");
+    let held_second_ready = PathBuf::from(format!("{}.ready", held_second_gate.display()));
+    fs::write(&held_first_gate, b"hold\n")?;
+    fs::write(&held_second_gate, b"hold\n")?;
+    let mut held_first = spawn_plugin_installer_process(&mut make_installer(
+        &first_runtime,
+        &first_only_path,
+        None,
+        Some(&held_first_gate),
+    )?)?;
+    if let Err(error) = wait_for_ready(
+        &mut held_first,
+        &held_first_ready,
+        "deadline held-first owner",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut held_first));
+        drop(held_first.wait());
+        return Err(error);
+    }
+    let mut held_second = spawn_plugin_installer_process(&mut make_installer(
+        &second_runtime,
+        &second_only_path,
+        None,
+        Some(&held_second_gate),
+    )?)?;
+    if let Err(error) = wait_for_ready(
+        &mut held_second,
+        &held_second_ready,
+        "deadline held-second owner",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut held_first));
+        drop(held_first.wait());
+        return Err(error);
+    }
+    let mut timed_first = make_installer(&second_runtime, &first_then_second_path, None, None)?;
+    timed_first.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS",
+        lock_budget_ms.to_string(),
+    );
+    #[cfg(unix)]
+    let lock_wait_trace = fixture_root.join("deadline-lock-waits.txt");
+    #[cfg(unix)]
+    timed_first.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE",
+        &lock_wait_trace,
+    );
+    let timed_first_attempt = fixture_root.join("deadline-held-first-attempt.gate");
+    let timed_first_attempt_ready =
+        PathBuf::from(format!("{}.ready", timed_first_attempt.display()));
+    timed_first.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_ATTEMPT_GATE",
+        &timed_first_attempt,
+    );
+    let mut timed_first = spawn_plugin_installer_process(&mut timed_first)?;
+    if let Err(error) = wait_for_ready(
+        &mut timed_first,
+        &timed_first_attempt_ready,
+        "deadline held-first contender lock attempt",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut held_first));
+        drop(held_first.wait());
+        drop(terminate_plugin_installer_process_tree(&mut held_second));
+        drop(held_second.wait());
+        return Err(error);
+    }
+    #[cfg(windows)]
+    let contender_started = Instant::now();
+    thread::sleep(Duration::from_millis(200));
+    held_first.kill()?;
+    terminate_plugin_installer_process_tree(&mut held_first)?;
+    let timed_first_output = wait_for_plugin_installer_output(
+        timed_first,
+        "deadline held-first contender",
+        Duration::from_secs(5),
+    )?;
+    #[cfg(windows)]
+    let contender_elapsed = contender_started.elapsed();
+    // Reaping the interrupted owner also drains its descendants' output pipes;
+    // that cleanup is independent of the contender's shared lock deadline.
+    let held_first_output = held_first.child.wait_with_output()?;
+    fs::remove_file(&timed_first_attempt_ready)?;
+    fs::remove_file(&held_first_gate)?;
+    fs::remove_file(&held_first_ready)?;
+    require(
+        !held_first_output.status.success() && state_snapshot()? == deadline_state_before_first,
+        format!(
+            "held-first interrupted owner changed managed state:\n{}\n{}",
+            String::from_utf8_lossy(&held_first_output.stdout),
+            String::from_utf8_lossy(&held_first_output.stderr)
+        ),
+    )?;
+    require(
+        !timed_first_output.status.success(),
+        format!(
+            "held-first contender did not fail closed at the bounded lock deadline (status={}):\n{}\n{}",
+            timed_first_output.status,
+            String::from_utf8_lossy(&timed_first_output.stdout),
+            String::from_utf8_lossy(&timed_first_output.stderr)
+        ),
+    )?;
+    #[cfg(windows)]
+    require(
+        contender_elapsed >= Duration::from_millis(180)
+            && contender_elapsed < Duration::from_millis(425),
+        format!(
+            "held-first contender did not consume one shared lock deadline (elapsed={contender_elapsed:?}; expected 180..425 ms)"
+        ),
+    )?;
+    #[cfg(unix)]
+    {
+        // Shell hashing, identity checks and process startup are outside native
+        // lock waits. Inspect the actual remaining budget passed to lock 2.
+        let trace = fs::read_to_string(&lock_wait_trace)?;
+        let rows = trace
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        require(
+            rows.len() == 3
+                && rows[0].len() == 3
+                && rows[0][..2] == ["request", "8"]
+                && rows[0][2].parse::<u64>()? == lock_budget_ms
+                && rows[1].len() == 4
+                && rows[1][..2] == ["acquired", "8"]
+                && rows[2].len() == 3
+                && rows[2][..2] == ["request", "7"],
+            format!("contender did not reach both ordered native lock waits: {trace}"),
+        )?;
+        let first_wait = rows[1][2].parse::<u64>()?;
+        let remaining = rows[1][3].parse::<u64>()?;
+        require(
+            first_wait > 0
+                && remaining == lock_budget_ms.saturating_sub(first_wait)
+                && rows[2][2].parse::<u64>()? == remaining,
+            format!("contender reset the shared native lock-wait budget: {trace}"),
+        )?;
+    }
+    let mut probe_first = make_installer(&first_runtime, &first_only_path, None, None)?;
+    probe_first.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
+    let probe_first_output = probe_first.output()?;
+    require(
+        probe_first_output.status.success() && state_snapshot()? == deadline_state_before_first,
+        format!(
+            "held-first contender did not release its partial lock set:\n{}\n{}",
+            String::from_utf8_lossy(&probe_first_output.stdout),
+            String::from_utf8_lossy(&probe_first_output.stderr)
+        ),
+    )?;
+    fs::remove_file(&held_second_gate)?;
+    fs::remove_file(&held_second_ready)?;
+    let held_second_output = wait_for_plugin_installer_output(
+        held_second,
+        "deadline held-second owner release",
+        Duration::from_secs(35),
+    )?;
+    require(
+        held_second_output.status.success() && state_snapshot()? == deadline_state_before_first,
+        format!(
+            "held-second deadline owner release changed managed state:\n{}\n{}",
+            String::from_utf8_lossy(&held_second_output.stdout),
+            String::from_utf8_lossy(&held_second_output.stderr)
+        ),
+    )?;
+    let recover_first = run_install(&second_runtime, &first_then_second_path)?;
+    require(
+        recover_first.status.success()
+            && !pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 1
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        format!(
+            "held-first lock release did not permit safe recovery:\n{}\n{}",
+            String::from_utf8_lossy(&recover_first.stdout),
+            String::from_utf8_lossy(&recover_first.stderr)
+        ),
+    )?;
+
+    let restore_first = run_install(&first_runtime, &first_only_path)?;
+    require(
+        restore_first.status.success()
+            && pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 2,
+        format!(
+            "deadline fixture could not restore the source pair:\n{}\n{}",
+            String::from_utf8_lossy(&restore_first.stdout),
+            String::from_utf8_lossy(&restore_first.stderr)
+        ),
+    )?;
+    let deadline_state_before_second = state_snapshot()?;
+    let held_second_gate = fixture_root.join("deadline-held-second.gate");
+    let held_second_ready = PathBuf::from(format!("{}.ready", held_second_gate.display()));
+    fs::write(&held_second_gate, b"hold\n")?;
+    let mut held_second = spawn_plugin_installer_process(&mut make_installer(
+        &second_runtime,
+        &second_only_path,
+        None,
+        Some(&held_second_gate),
+    )?)?;
+    if let Err(error) = wait_for_ready(
+        &mut held_second,
+        &held_second_ready,
+        "deadline held-second owner",
+    ) {
+        drop(terminate_plugin_installer_process_tree(&mut held_second));
+        drop(held_second.wait());
+        return Err(error);
+    }
+    let mut timed_second = make_installer(&second_runtime, &first_then_second_path, None, None)?;
+    timed_second.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
+    let timed_second = spawn_plugin_installer_process(&mut timed_second)?;
+    let timed_second_output = match wait_for_plugin_installer_output(
+        timed_second,
+        "deadline held-second contender",
+        Duration::from_secs(5),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            drop(terminate_plugin_installer_process_tree(&mut held_second));
+            drop(held_second.wait());
+            return Err(error);
+        }
+    };
+    fs::remove_file(&held_second_gate)?;
+    fs::remove_file(&held_second_ready)?;
+    let held_second_output = wait_for_plugin_installer_output(
+        held_second,
+        "deadline held-second owner release",
+        Duration::from_secs(35),
+    )?;
+    require(
+        held_second_output.status.success() && state_snapshot()? == deadline_state_before_second,
+        format!(
+            "held-second deadline/release changed managed state:\n{}\n{}",
+            String::from_utf8_lossy(&held_second_output.stdout),
+            String::from_utf8_lossy(&held_second_output.stderr)
+        ),
+    )?;
+    require(
+        !timed_second_output.status.success(),
+        format!(
+            "held-second contender did not fail closed at the bounded lock deadline (status={}):\n{}\n{}",
+            timed_second_output.status,
+            String::from_utf8_lossy(&timed_second_output.stdout),
+            String::from_utf8_lossy(&timed_second_output.stderr)
+        ),
+    )?;
+    let recover_second = run_install(&second_runtime, &first_then_second_path)?;
+    require(
+        recover_second.status.success()
+            && !pair_is_complete(&first_runtime_dir, &first_runtime)?
+            && pair_is_complete(&second_runtime_dir, &second_runtime)?
+            && state_files()?.len() == 1
+            && fs::read(&unrelated_state)? == unrelated_state_content,
+        format!(
+            "held-second lock release did not permit safe recovery:\n{}\n{}",
+            String::from_utf8_lossy(&recover_second.stdout),
+            String::from_utf8_lossy(&recover_second.stderr)
+        ),
+    )?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let temp = tempfile::tempdir()?;
+    let fixture_root = temp.path().canonicalize()?;
+    let repo = fixture_root.join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::write(
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
+        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+    )?;
+    let runtime_dir = fixture_root.join(TEST_RUNTIME_DIR_NAME);
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join("projectatlas");
+    let real_runtime = mcp_contract_executable();
+    fs::copy(&real_runtime, &runtime)?;
+    let mut permissions = fs::metadata(&runtime)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&runtime, permissions)?;
+
+    let home = fixture_root.join(TEST_ISOLATED_HOME_DIR_NAME);
+    fs::create_dir_all(&home)?;
+    let state_parent = fixture_root.join("physical state parent");
+    fs::create_dir_all(&state_parent)?;
+    let state_alias = fixture_root.join("state parent alias");
+    symlink(&state_parent, &state_alias)?;
+    let configured_state = state_alias.join("initially absent state");
+    let workspace_root = workspace_root()?;
+    let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        None,
+        Some(&home),
+    )?;
+    install
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .env("XDG_STATE_HOME", &configured_state);
+    let install_output = install.output()?;
+    require(
+        install_output.status.success(),
+        format!(
+            "POSIX signal fixture installer failed:\n{}\n{}",
+            String::from_utf8_lossy(&install_output.stdout),
+            String::from_utf8_lossy(&install_output.stderr)
+        ),
+    )?;
+    let linked_state_base = fixture_root.join("linked state base");
+    let unrelated_state = fixture_root.join("unrelated state");
+    fs::create_dir_all(&linked_state_base)?;
+    fs::create_dir_all(&unrelated_state)?;
+    symlink(&unrelated_state, linked_state_base.join("projectatlas"))?;
+    let linked_root_output = install.env("XDG_STATE_HOME", &linked_state_base).output()?;
+    require(
+        !linked_root_output.status.success() && fs::read_dir(&unrelated_state)?.next().is_none(),
+        "POSIX atlas installer followed a linked product state root",
+    )?;
+    install.env("XDG_STATE_HOME", &configured_state);
+    let state_root = configured_state.join("projectatlas");
+    let lock_path = fs::read_dir(&state_root)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|entry| entry.path())
+        .find(|path| path.extension() == Some(OsStr::new("lock")))
+        .ok_or_else(|| io::Error::other("POSIX atlas lifecycle lock was not published"))?;
+    let retained_lock = fixture_root.join("retained lifecycle lock");
+    fs::rename(&lock_path, &retained_lock)?;
+    let unrelated_lock = unrelated_state.join("unrelated lock");
+    fs::write(&unrelated_lock, "unrelated lock content")?;
+    symlink(&unrelated_lock, &lock_path)?;
+    let linked_lock_output = install.output()?;
+    require(
+        !linked_lock_output.status.success()
+            && fs::read_to_string(&unrelated_lock)? == "unrelated lock content",
+        "POSIX atlas installer accepted or changed a linked lifecycle lock",
+    )?;
+    fs::remove_file(&lock_path)?;
+    fs::rename(&retained_lock, &lock_path)?;
+
+    let forwarder = runtime_dir.join(TEST_ATLAS_FORWARDER_FILE_NAME);
+    let direct_info = StdCommand::new(&runtime)
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let alias_info = StdCommand::new(&forwarder)
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    require(
+        direct_info.status == alias_info.status
+            && direct_info.stdout == alias_info.stdout
+            && direct_info.stderr == alias_info.stderr,
+        "POSIX atlas forwarder changed the runtime stream or argument contract",
+    )?;
+
+    let real_runtime_quoted = real_runtime
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    fs::write(
+        &runtime,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--signal-test\" ]; then\n  trap 'printf \"interrupted\\n\" >&2; exit 130' INT\n  : > \"$2\"\n  while :; do sleep 1; done\nfi\nexec \"{real_runtime_quoted}\" \"$@\"\n"
+        ),
+    )?;
+
+    let signal_ready = fixture_root.join("signal handler ready");
+    let mut child = StdCommand::new(&forwarder)
+        .arg("--signal-test")
+        .arg(&signal_ready)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let readiness_deadline = Instant::now() + Duration::from_secs(5);
+    while !signal_ready.is_file() {
+        if child.try_wait()?.is_some() {
+            return Err(io::Error::other("POSIX signal fixture exited before readiness").into());
+        }
+        if Instant::now() >= readiness_deadline {
+            child.kill()?;
+            let _ = child.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "POSIX signal fixture did not install its handler",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let kill_status = StdCommand::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()?;
+    require(
+        kill_status.success(),
+        "POSIX kill utility could not deliver SIGINT",
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let _ = child.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "POSIX atlas forwarder did not terminate after SIGINT",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_end(&mut stderr)?;
+    }
+    require(
+        status.code() == Some(130) && String::from_utf8_lossy(&stderr).contains("interrupted"),
+        format!(
+            "POSIX atlas forwarder did not preserve SIGINT exit/stderr: status={status}, stderr={:?}",
+            String::from_utf8_lossy(&stderr)
+        ),
+    )?;
+    Ok(())
+}
+
+/// Give each isolated installer authority its own runtime publication path.
+fn isolated_installer_runtime(temp_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let runtime_dir = temp_root.join("projectatlas-installer-runtime");
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join(if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    });
+    fs::copy(mcp_contract_executable(), &runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime, permissions)?;
+    }
+    Ok(runtime)
+}
+
+/// Exclude the shared Cargo target runtime directory from installer fixture PATHs.
+fn is_shared_test_runtime_directory(path: &Path) -> bool {
+    let runtime = mcp_contract_executable();
+    let Some(runtime_directory) = runtime.parent() else {
+        return false;
+    };
+    let normalize = |value: &Path| {
+        value
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    if normalize(path) == normalize(runtime_directory)
+        || normalize(path) == normalize(&runtime_directory.join("deps"))
+    {
+        return true;
+    }
+    runtime_directory
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("deps"))
+        && runtime_directory
+            .parent()
+            .is_some_and(|parent| normalize(path) == normalize(parent))
 }

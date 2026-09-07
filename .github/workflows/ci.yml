@@ -649,6 +649,19 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e_delivery
 
+      - name: Atlas forwarder lifecycle E2E
+        if: contains(matrix.contracts, 'plugin')
+        timeout-minutes: 10
+        run: |
+          cargo test --locked -p projectatlas-cli plugin_installer_manages_atlas_forwarder_lifecycle_and_argv --test e2e_delivery -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations --test e2e_delivery -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli plugin_installer_serializes_opposite_atlas_forwarder_migrations --test e2e_delivery -- --exact --nocapture
+
+      - name: POSIX atlas forwarder process contract
+        if: runner.os != 'Windows' && contains(matrix.contracts, 'plugin')
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli posix_atlas_forwarder_preserves_streams_exit_and_interrupt --test e2e_delivery -- --exact --nocapture
+
       - name: Installer RC pin E2E
         if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5

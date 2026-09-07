@@ -1,12 +1,12 @@
 # CLI E2E ownership split move map
 
-This map freezes the complete pre-move contract before e2e.rs is deleted. The machine-readable source of truth is v050-cli-e2e-inventory.json.
+This map records the frozen pre-move contract for the accepted e2e.rs ownership split. The machine-readable source of truth is v050-cli-e2e-inventory.json. Historical facet digests preserve that baseline; current source digests and test, symbol, attribute, fixture, and workflow inventories protect subsequent reviewed changes without requiring superseded physical source lines to remain.
 
 - Baseline commit: b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb
 - Baseline e2e.rs SHA-256: e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c
 - Inventoried pre-deletion e2e.rs SHA-256: 942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757 (the only edits before deletion rewired contract assertions/selectors to their split owners)
 - Baseline symbols inventoried: 431 top-level items; baseline tests: 158
-- Accepted post-baseline tests: 23; current mapped tests: 181
+- Accepted post-baseline tests: 33; current mapped tests: 191
 - Post-move union proof compares the tests.name set in the JSON with the test names listed by all five e2e_* binaries.
 
 ## Durable binary ownership
@@ -14,7 +14,7 @@ This map freezes the complete pre-move contract before e2e.rs is deleted. The ma
 | Binary | Owns | Tests |
 | --- | --- | ---: |
 | e2e_lifecycle | lifecycle and database contracts | 37 |
-| e2e_delivery | installer, release, packaged, and plugin contracts | 76 |
+| e2e_delivery | installer, release, packaged, and plugin contracts | 86 |
 | e2e_navigation | CLI, MCP, graph, document, and language navigation contracts | 35 |
 | e2e_worktrees | worktree, watcher, freshness, and federation contracts | 17 |
 | e2e_maintenance | purpose, lint, telemetry, and TUI contracts | 16 |
@@ -23,9 +23,9 @@ Only concrete process, repository, JSON, platform, and packaged-contract support
 
 ## Enforced inventory contract
 
-The e2e_delivery integration binary loads docs/v050-cli-e2e-inventory.json on every normal test run. Schema 2 records the five split source-file SHA-256 digests after normalizing CRLF/CR to LF and excluding absolute paths and line metadata; these digests cover complete test bodies, assertions, and recorded contract facets. The multiply-owned process, repository, JSON, SQLite, and platform helpers have one private owner at `crates/projectatlas-cli/tests/support/mod.rs`; the executable checker freezes the complete normalized support module with its own fixed SHA-256 digest, so constants, type shapes, and helper bodies cannot drift or be concealed by updating a current binary digest. It also validates the frozen baseline and pre-deletion identities, complete baseline symbol and fixture names/owners/attributes, every recorded facet line, and the immutable pre-move selector inventory before rescanning all 181 current test names, duplicate/missing ownership, attributes/platform gates, and the accepted e2e_*.rs binary boundary (including rejection of legacy e2e.rs). It then compares every recorded CI/release selector by normalized relative workflow path and selector text, recognizing both Cargo `--test e2e_*` and `--test=e2e_*` forms. Its positive and tamper cases prove source assertion/facet, shared support (including the Git scrub-list), symbol, fixture, baseline, legacy-target, and spaced/equal-form legacy or unknown selector drift fails closed. The three checker tests are recorded outside the 181 mapped tests.
+The e2e_delivery integration binary loads docs/v050-cli-e2e-inventory.json on every normal test run. Schema 2 records the five split source-file SHA-256 digests after normalizing CRLF/CR to LF and excluding absolute paths and line metadata; these digests cover complete test bodies, assertions, and recorded contract facets. The multiply-owned process, repository, JSON, SQLite, and platform helpers have one private owner at `crates/projectatlas-cli/tests/support/mod.rs`; the executable checker freezes the complete normalized support module with its own fixed SHA-256 digest, so constants, type shapes, and helper bodies cannot drift or be concealed by updating a current binary digest. It also validates the frozen baseline and pre-deletion identities, complete baseline symbol and fixture names/owners/attributes, every recorded facet line, and the immutable pre-move selector inventory before rescanning all 191 current test names, duplicate/missing ownership, attributes/platform gates, and the accepted e2e_*.rs binary boundary (including rejection of legacy e2e.rs). It then compares every recorded CI/release selector by normalized relative workflow path and selector text, recognizing both Cargo `--test e2e_*` and `--test=e2e_*` forms. Its positive and tamper cases prove source assertion/facet, shared support (including the Git scrub-list), symbol, fixture, baseline, legacy-target, and spaced/equal-form legacy or unknown selector drift fails closed. The three checker tests are recorded outside the 191 mapped tests.
 
-The current inventory retains all 23 tests added after the original baseline: IssueOps candidate authority and dispatch coverage, process-observer and MCP shutdown coverage, the complete Windows Codex-owner readiness/native-cleanup matrix, typed graph-identity rejection and release-asset fixture lifecycle coverage, and Composer-shaped PHP CLI/MCP/incremental navigation. Their exact names, attributes, and delivery or navigation owner are recorded in the JSON inventory; the source and shared-support digests freeze their full helper, assertion, timeout, cleanup, and platform behavior.
+The current inventory retains all 33 tests added after the original baseline: IssueOps candidate authority and dispatch coverage, process-observer and MCP shutdown coverage, the complete Windows Codex-owner readiness/native-cleanup matrix, typed graph-identity rejection and release-asset fixture lifecycle coverage, Composer-shaped PHP CLI/MCP/incremental navigation, actual host readers, and atlas forwarder argument, process, collision, migration, and concurrency coverage. Their exact names, attributes, and delivery or navigation owner are recorded in the JSON inventory; the source and shared-support digests freeze their full helper, assertion, timeout, cleanup, and platform behavior.
 
 ## Test-to-domain move map
 

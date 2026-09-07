@@ -470,18 +470,39 @@ flowchart LR
 
 ## atlas shim lifecycle and command compatibility
 
+Forwarder ownership comes from the exact generated body, provenance, and private capability state, so retirement remains possible when its target is missing or cannot execute. New publication verifies the destination runtime separately. Lifecycle locking is still mandatory: macOS can use another discoverable verified ProjectAtlas runtime as its native lock helper; if none is available, uninstall preserves the owned artifacts and asks the user to restore a runtime and retry.
+
+A failed final runtime check reports unsuccessful installation while retaining the complete authenticated forwarder pair for repair or uninstall. Windows compares runtime identity independently of letter case, then preserves the authenticated record's spelling for exact ownership-content checks.
+
 ```mermaid
 flowchart TB
-  installer[Installer] --> collision{Existing atlas command?}
+  installer[Installer] --> identity[Canonical verified runtime identity]
+  identity --> locks[Discover destination plus effective candidate; acquire at most two canonical locks ascending under one deadline; reclassify while held; release reverse]
+  locks --> collision{Existing atlas command?}
   collision -->|unmanaged| reject[Typed collision; no overwrite]
-  collision -->|managed| shim[Atomic managed shim install]
-  shim --> discover[PATH discovery]
-  discover --> aliases[atlas top-level command aliases]
-  aliases --> canonical[Canonical projectatlas command handlers]
+  collision -->|owned current| stage[Stage shim and provenance]
+  collision -->|owned prior target| stage
+  collision -->|absent| stage
+  stage --> state[Publish private capability state]
+  state --> provenance{Publish provenance no-clobber succeeds?}
+  provenance -->|no| state_cleanup[Quarantine and verify newly owned state]
+  state_cleanup -->|retired| reject_publication[Fail; preserve foreign provenance and unrelated bytes]
+  state_cleanup -->|retirement fails| retained[Retain exact state; report cleanup failure]
+  retained --> refuse[Later install refuses unretired orphan state]
+  refuse --> recover[Proven-owned retirement enables retry]
+  provenance -->|yes| forwarder{Publish shim no-clobber succeeds?}
+  forwarder -->|no| pair_cleanup[Retire only newly owned provenance and state]
+  pair_cleanup -->|retired| reject_publication
+  pair_cleanup -->|state retirement fails| retained
+  forwarder -->|yes| shim[Publish verified managed shim]
+  shim --> migrate[Quarantine and verify prior owned pair before identity-safe retirement]
+  migrate --> discover[PATH discovery; preserve concurrent foreign replacements]
+  discover --> aliases[Complete argv forwarded unchanged]
+  aliases --> canonical[Canonical handlers including health report]
   aliases --> resolve[atlas health resolve]
   aliases --> legacy[atlas health-check remains compatible]
   shim --> uninstall[Managed uninstall/repair]
-  uninstall --> clean[Remove only managed artifact]
+  uninstall --> clean[Remove only managed pair and private state]
 ```
 
 ## v0.5.0 candidate, readback, remediation, and stable promotion

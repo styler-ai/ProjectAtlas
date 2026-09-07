@@ -549,6 +549,7 @@
       "files": ["--limit=10"],
       "folders": ["--limit=10"],
       "health-check": ["--start-index=0", "--limit=50"],
+      "health": ["--start-index=0", "--limit=50"],
       "lint": ["--purpose-level=low"],
       "mcp-config": ["--server-name=projectatlas", "--harness=mcp-json"],
       "next": ["--limit=3"],
