@@ -28557,7 +28557,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     #[cfg(unix)]
     let fixture_root = temp.path().canonicalize()?;
     #[cfg(not(unix))]
-    let fixture_root = temp.path().to_path_buf();
+    let fixture_root = PathBuf::from(
+        normalize_native_path_display(temp.path().canonicalize()?)
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
     let repo = fixture_root.join("repo with spaces");
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
@@ -29779,7 +29782,10 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     #[cfg(unix)]
     let fixture_root = temp.path().canonicalize()?;
     #[cfg(not(unix))]
-    let fixture_root = temp.path().to_path_buf();
+    let fixture_root = PathBuf::from(
+        normalize_native_path_display(temp.path().canonicalize()?)
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
     let repo = fixture_root.join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
@@ -30151,7 +30157,10 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     #[cfg(unix)]
     let fixture_root = temp.path().canonicalize()?;
     #[cfg(not(unix))]
-    let fixture_root = temp.path().to_path_buf();
+    let fixture_root = PathBuf::from(
+        normalize_native_path_display(temp.path().canonicalize()?)
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
     let repo = fixture_root.join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
