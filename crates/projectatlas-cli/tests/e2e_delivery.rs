@@ -29686,6 +29686,19 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         ),
     )?;
 
+    require(
+        !fs::read_dir(&runtime_dir)?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .iter()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atlas-forwarder-provenance.")
+            }),
+        "installer reinstall retained staged forwarder provenance",
+    )?;
+
     let hardlink_source = fixture_root.join(if cfg!(windows) {
         "atlas-hardlink-source.cmd"
     } else {

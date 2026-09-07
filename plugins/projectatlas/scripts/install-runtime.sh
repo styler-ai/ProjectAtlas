@@ -953,9 +953,9 @@ write_atlas_forwarder_locked() {
       printf '%s\n' "ProjectAtlas atlas forwarder provenance publication collided; refusing to overwrite: $provenance" >&2
       return 1
     fi
-    rm -f "$temporary_provenance"
     provenance_published=1
   fi
+  rm -f "$temporary_provenance"
   if ! ensure_atlas_forwarder_collision_free "$destination_forwarder" "$destination_runtime"; then
     if [ "$provenance_published" -eq 1 ]; then
       if ! remove_published_atlas_forwarder_provenance "$provenance" "$destination_forwarder" "$destination_runtime"; then
