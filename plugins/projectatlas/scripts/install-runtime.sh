@@ -1054,6 +1054,15 @@ remove_atlas_forwarder_locked() {
     [ ! -e "$state_path" ] && [ ! -L "$state_path" ]; then
     return 0
   fi
+  if [ -z "$verified" ]; then
+    if is_direct_regular_file "$state_path"; then
+      verified=$(sed -n 's/^runtime: //p' "$state_path" | head -n 1)
+    fi
+    if [ -z "$verified" ] || ! atlas_forwarder_state_capability "$forwarder" "$verified" >/dev/null; then
+      printf '%s\n' "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $forwarder" >&2
+      return 1
+    fi
+  fi
   if { [ -e "$forwarder" ] || [ -L "$forwarder" ]; } &&
     ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
     printf '%s\n' "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $forwarder" >&2
@@ -1082,11 +1091,11 @@ uninstall_atlas_forwarders() {
     "$HOME/.npm/bin/projectatlas" \
     "$HOME/.npm-global/bin/projectatlas" \
     "$HOME/.local/share/npm/bin/projectatlas"; do
-    remove_atlas_forwarder "$(dirname -- "$known_runtime")/atlas" "$known_runtime" || return 1
+    remove_atlas_forwarder "$(dirname -- "$known_runtime")/atlas" "" || return 1
   done
   projectatlas_command=$(command -v projectatlas 2>/dev/null || true)
   if [ -n "$projectatlas_command" ]; then
-    remove_atlas_forwarder "$(dirname -- "$projectatlas_command")/atlas" "$projectatlas_command" || return 1
+    remove_atlas_forwarder "$(dirname -- "$projectatlas_command")/atlas" "" || return 1
   fi
 }
 
