@@ -25546,12 +25546,12 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
     // A live identity mismatch must still refuse cleanup without calling Kill.
     for (exited, expected_exit) in [("false", 3), ("true", 0)] {
         let script = format!(
-            r#"function Get-Process {{
+            r"function Get-Process {{
     $observed = [pscustomobject]@{{ Handle = 0; StartTime = [DateTime]::UtcNow; Path = $env:SystemRoot; HasExited = [bool]::Parse($env:PROJECTATLAS_TEST_OBSERVED_EXITED) }}
     $observed | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{}}
     $observed
 }}
-{WINDOWS_FIXTURE_STOP_SCRIPT}"#
+{WINDOWS_FIXTURE_STOP_SCRIPT}"
         );
         let output = StdCommand::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
