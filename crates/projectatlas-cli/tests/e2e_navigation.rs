@@ -9627,7 +9627,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         write!(docx, "<!--{}-->", " ".repeat(2_000_001))?;
         write!(
             docx,
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\"><w:body><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>{text}</w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"future\"><w:t>Wrong alternative</w:t></mc:Choice><mc:Fallback><w:instrText>Inside box</w:instrText></mc:Fallback></mc:AlternateContent></w:r></w:p></w:txbxContent></w:drawing><w:t>After</w:t><w:noBreakHyphen/><w:t>box</w:t><w:softHyphen/><w:t>end</w:t></w:r></w:p></w:body></w:document>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\"><w:body><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>{text}</w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"future\"><w:t>Wrong alternative</w:t></mc:Choice><mc:Fallback><w:instrText>Inside box</w:instrText></mc:Fallback></mc:AlternateContent></w:r></w:p></w:txbxContent></w:drawing><w:t>After</w:t><w:noBreakHyphen/><w:t>box</w:t><w:softHyphen/><w:t>end</w:t><w:ptab w:alignment=\"left\" w:relativeTo=\"margin\" w:leader=\"none\"/><w:t>tabbed</w:t><w:lastRenderedPageBreak/><w:t>next page</w:t></w:r></w:p></w:body></w:document>"
         )?;
         docx.finish()?;
         Ok(())
@@ -9794,8 +9794,8 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             "docs/guide.docx",
             "document-block-5",
             7,
-            7,
-            "After\u{2011}box\u{00ad}end",
+            8,
+            "After\u{2011}box\u{00ad}end\ttabbed\nnext page",
         ),
     ];
     for (path, symbol, start, end, content) in slice_cases {
@@ -10003,6 +10003,35 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         };
 
     let before_failed_refresh = mcp_database_snapshot(&database)?;
+    {
+        let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);
+        archive.start_file("word/document.xml", FileOptions::default())?;
+        archive.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:body></w:document>"#)?;
+        archive.finish()?;
+    }
+    let unsupported_refresh = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .output()?;
+    if unsupported_refresh.status.success()
+        || !String::from_utf8_lossy(&unsupported_refresh.stderr).contains("font-specific symbols")
+        || before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative
+    {
+        return Err(
+            io::Error::other("unsupported DOCX glyph changed the complete publication").into(),
+        );
+    }
+    let unsupported: Value =
+        toon_format::decode_default(&mcp_docx_search("DOCX replacement marker")?)?;
+    require_json_contains(&unsupported, &["error", "message"], "font-specific symbols")?;
+    if before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative {
+        return Err(
+            io::Error::other("unsupported DOCX navigation changed authoritative state").into(),
+        );
+    }
+
     fs::write(
         &docx_path,
         vec![b' '; projectatlas_symbols::MAX_DOCUMENT_COMPRESSED_BYTES + 1],
