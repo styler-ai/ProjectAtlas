@@ -631,17 +631,17 @@ remove_atlas_forwarder_state() {
     rm -f -- "$quarantine"
     return 1
   fi
-  if ! inject_atlas_forwarder_state_retirement_failure; then
-    restore_atlas_forwarder_quarantine "$quarantine" "$state_path"
-    return 1
-  fi
   expected=$(atlas_forwarder_state_content "$forwarder" "$verified" "$capability") || return 1
   actual=$(cat "$quarantine" 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
     restore_atlas_forwarder_quarantine "$quarantine" "$state_path"
     return 1
   fi
-  rm -f -- "$quarantine"
+  if ! inject_atlas_forwarder_state_retirement_failure || ! rm -f -- "$quarantine"; then
+    restore_atlas_forwarder_quarantine "$quarantine" "$state_path"
+    return 1
+  fi
+  return 0
 }
 
 managed_atlas_forwarder_target() {
