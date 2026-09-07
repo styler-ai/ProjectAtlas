@@ -2640,12 +2640,20 @@ function Move-ProjectAtlasManagedAtlasForwarderLocked {
         [string]$VerifiedPath,
         [switch]$AllowSameTarget
     )
-    $target = Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath
+    $forwarderPresent = $null -ne (Get-Item -Force -LiteralPath $FilePath -ErrorAction SilentlyContinue)
+    $target = if ($forwarderPresent) { Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath } else { Get-NormalizedPathEntry $VerifiedPath }
+    if (-not $forwarderPresent) {
+        if (-not $AllowSameTarget -or -not (Test-ProjectAtlasRuntime $target $null) `
+            -or (Get-NormalizedPathEntry (Get-ProjectAtlasAtlasForwarderPath $target)) -ine (Get-NormalizedPathEntry $FilePath) `
+            -or -not (Test-ProjectAtlasAtlasForwarderProvenance (Get-ProjectAtlasAtlasForwarderProvenancePath $FilePath) $FilePath $target)) {
+            return $false
+        }
+    }
     if (-not $target -or ((-not $AllowSameTarget) -and (Get-NormalizedPathEntry $target) -ieq (Get-NormalizedPathEntry $VerifiedPath))) {
         return $false
     }
     $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $FilePath
-    if (-not (Test-ProjectAtlasAtlasForwarderPair $FilePath $provenancePath $target)) {
+    if ($forwarderPresent -and -not (Test-ProjectAtlasAtlasForwarderPair $FilePath $provenancePath $target)) {
         return $false
     }
     $forwarderQuarantine = New-ProjectAtlasAtlasForwarderQuarantinePath $FilePath
@@ -2653,8 +2661,10 @@ function Move-ProjectAtlasManagedAtlasForwarderLocked {
     $forwarderMoved = $false
     $provenanceMoved = $false
     try {
-        Move-Item -LiteralPath $FilePath -Destination $forwarderQuarantine
-        $forwarderMoved = $true
+        if ($forwarderPresent) {
+            Move-Item -LiteralPath $FilePath -Destination $forwarderQuarantine
+            $forwarderMoved = $true
+        }
         Invoke-ProjectAtlasAtlasForwarderRetirementRace `
             $FilePath `
             "PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH" `
@@ -2665,9 +2675,9 @@ function Move-ProjectAtlasManagedAtlasForwarderLocked {
             $provenancePath `
             "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RETIRE_RACE_PATH" `
             "# foreign provenance retirement race`r`n"
-        $forwarderContent = [System.IO.File]::ReadAllText($forwarderQuarantine)
+        $forwarderContent = if ($forwarderMoved) { [System.IO.File]::ReadAllText($forwarderQuarantine) } else { $null }
         $provenanceContent = [System.IO.File]::ReadAllText($provenanceQuarantine)
-        if ($forwarderContent -cne (Get-ProjectAtlasAtlasForwarderContent $target) `
+        if ($forwarderMoved -and $forwarderContent -cne (Get-ProjectAtlasAtlasForwarderContent $target) `
             -and $forwarderContent -cne (Get-ProjectAtlasLegacyAtlasForwarderContent $target)) {
             throw "ProjectAtlas atlas forwarder changed during retirement: $FilePath"
         }
@@ -2681,7 +2691,9 @@ function Move-ProjectAtlasManagedAtlasForwarderLocked {
             throw "ProjectAtlas atlas forwarder provenance was replaced during retirement: $provenancePath"
         }
         Remove-ProjectAtlasAtlasForwarderState $FilePath $target
-        Remove-Item -LiteralPath $forwarderQuarantine -Force
+        if ($forwarderMoved) {
+            Remove-Item -LiteralPath $forwarderQuarantine -Force
+        }
         Remove-Item -LiteralPath $provenanceQuarantine -Force
         Write-Output "Migrated ProjectAtlas atlas forwarder: $FilePath -> $(Get-ProjectAtlasAtlasForwarderPath $VerifiedPath)"
         return $true
@@ -3060,7 +3072,12 @@ function Remove-ProjectAtlasAtlasForwarders {
             continue
         }
         $seen[$normalized] = $true
-        if (-not (Test-Path -LiteralPath $candidate)) {
+        $candidateItem = Get-Item -Force -LiteralPath $candidate -ErrorAction SilentlyContinue
+        $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $candidate
+        $statePath = Get-ProjectAtlasAtlasForwarderStatePath $candidate
+        if (-not $candidateItem `
+            -and -not (Get-Item -Force -LiteralPath $provenancePath -ErrorAction SilentlyContinue) `
+            -and -not (Get-Item -Force -LiteralPath $statePath -ErrorAction SilentlyContinue)) {
             continue
         }
         $verifiedPath = if ($RuntimePath) {
@@ -3071,10 +3088,18 @@ function Remove-ProjectAtlasAtlasForwarders {
         }
         $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLock $candidate
         try {
-            if (-not (Test-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath)) {
+            $candidateItem = Get-Item -Force -LiteralPath $candidate -ErrorAction SilentlyContinue
+            if (-not $candidateItem `
+                -and -not (Get-Item -Force -LiteralPath $provenancePath -ErrorAction SilentlyContinue) `
+                -and -not (Get-Item -Force -LiteralPath $statePath -ErrorAction SilentlyContinue)) {
+                continue
+            }
+            if ($candidateItem -and -not (Test-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath)) {
                 throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
             }
-            Assert-ProjectAtlasDirectFilePath $candidate "ProjectAtlas atlas forwarder"
+            if ($candidateItem) {
+                Assert-ProjectAtlasDirectFilePath $candidate "ProjectAtlas atlas forwarder"
+            }
             if (-not (Move-ProjectAtlasManagedAtlasForwarderLocked $candidate $verifiedPath -AllowSameTarget)) {
                 throw "ProjectAtlas atlas uninstall could not retire the owned forwarder safely: $candidate"
             }

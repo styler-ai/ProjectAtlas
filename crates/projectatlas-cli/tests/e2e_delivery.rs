@@ -29679,6 +29679,71 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?,
     )?;
 
+    fs::remove_file(&forwarder)?;
+    let retained_provenance = fs::read(&provenance)?;
+    let retained_capability = fs::read(&installer_state)?;
+    fs::write(&provenance, b"unrelated provenance")?;
+    let malformed_uninstall = run_uninstall()?;
+    require(
+        !malformed_uninstall.status.success()
+            && !forwarder.exists()
+            && fs::read(&provenance)? == b"unrelated provenance"
+            && fs::read(&installer_state)? == retained_capability,
+        "missing-forwarder uninstall accepted or changed unrelated provenance",
+    )?;
+    fs::write(&provenance, &retained_provenance)?;
+    let failed_retirement = run_uninstall_with_env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_RETIRE_FAILURE",
+        Path::new("1"),
+    )?;
+    require(
+        !failed_retirement.status.success()
+            && !forwarder.exists()
+            && fs::read(&provenance)? == retained_provenance
+            && fs::read(&installer_state)? == retained_capability,
+        "missing-forwarder uninstall failed to restore owned metadata after retirement failure",
+    )?;
+    fs::remove_file(&provenance)?;
+    require(
+        !run_uninstall()?.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && fs::read(&installer_state)? == retained_capability,
+        "missing-forwarder uninstall accepted or changed a lone capability record",
+    )?;
+    let runtime_directory = runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?;
+    let retained_runtime_directory = temp.path().join("retained runtime directory");
+    fs::rename(runtime_directory, &retained_runtime_directory)?;
+    let missing_runtime_uninstall = run_uninstall()?;
+    fs::rename(&retained_runtime_directory, runtime_directory)?;
+    require(
+        !missing_runtime_uninstall.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && fs::read(&installer_state)? == retained_capability,
+        "missing-runtime uninstall accepted or changed a lone capability record",
+    )?;
+    fs::write(&provenance, &retained_provenance)?;
+    let missing_uninstall = run_uninstall()?;
+    require(
+        missing_uninstall.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && !installer_state.exists()
+            && runtime.is_file(),
+        format!(
+            "missing-forwarder uninstall did not retire only owned metadata:\n{}\n{}",
+            String::from_utf8_lossy(&missing_uninstall.stdout),
+            String::from_utf8_lossy(&missing_uninstall.stderr)
+        ),
+    )?;
+    require(
+        run_uninstall()?.status.success() && run_install()?.status.success(),
+        "missing-forwarder uninstall was not idempotent or prevented reinstall",
+    )?;
+
     fs::create_dir_all(home.join(TEST_WINDOWS_APPDATA_DIR))?;
     fs::create_dir_all(home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))?;
     let uninstall_output = run_uninstall()?;

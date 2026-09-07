@@ -665,9 +665,19 @@ migrate_managed_atlas_forwarder_locked() {
   migration_runtime=$2
   allow_same_target=${3:-0}
   [ -n "$migration_runtime" ] || return 1
-  managed_target=$(managed_atlas_forwarder_target "$candidate") || return 1
+  retiring_forwarder_present=0
+  if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+    retiring_forwarder_present=1
+    managed_target=$(managed_atlas_forwarder_target "$candidate") || return 1
+  else
+    [ "$allow_same_target" -eq 1 ] || return 1
+    managed_target=$(canonical_file "$migration_runtime") || return 1
+    is_projectatlas_runtime_contract "$managed_target" || return 1
+    [ "$(atlas_forwarder_path "$managed_target")" = "$(canonical_file "$candidate")" ] || return 1
+    is_atlas_forwarder_provenance "$(atlas_forwarder_provenance_path "$candidate")" "$candidate" "$managed_target" || return 1
+  fi
   [ "$managed_target" != "$(canonical_file "$migration_runtime")" ] || [ "$allow_same_target" -eq 1 ] || return 1
-  if ! is_managed_atlas_forwarder "$candidate" "$managed_target"; then
+  if [ "$retiring_forwarder_present" -eq 1 ] && ! is_managed_atlas_forwarder "$candidate" "$managed_target"; then
     return 1
   fi
   provenance=$(atlas_forwarder_provenance_path "$candidate") || return 1
@@ -676,13 +686,15 @@ migrate_managed_atlas_forwarder_locked() {
     rm -f -- "$forwarder_quarantine"
     return 1
   }
-  if ! mv -- "$candidate" "$forwarder_quarantine"; then
+  if [ "$retiring_forwarder_present" -eq 1 ] && ! mv -- "$candidate" "$forwarder_quarantine"; then
     rm -f -- "$forwarder_quarantine" "$provenance_quarantine"
     return 1
   fi
   retire_atlas_forwarder_race "$candidate" "${PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH:-}" "foreign forwarder retirement race"
   if ! mv -- "$provenance" "$provenance_quarantine"; then
-    restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    if [ "$retiring_forwarder_present" -eq 1 ]; then
+      restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    fi
     rm -f -- "$provenance_quarantine"
     return 1
   fi
@@ -691,15 +703,20 @@ migrate_managed_atlas_forwarder_locked() {
   actual_content=$(cat "$forwarder_quarantine" 2>/dev/null || true)
   expected_provenance=$(atlas_forwarder_provenance_content "$candidate" "$managed_target") || return 1
   actual_provenance=$(cat "$provenance_quarantine" 2>/dev/null || true)
-  if { [ "$actual_content" != "$expected_content" ] || [ "$actual_provenance" != "$expected_provenance" ]; } ||
+  if { [ "$retiring_forwarder_present" -eq 1 ] && [ "$actual_content" != "$expected_content" ]; } ||
+    [ "$actual_provenance" != "$expected_provenance" ] ||
     [ -e "$candidate" ] || [ -L "$candidate" ] || [ -e "$provenance" ] || [ -L "$provenance" ]; then
     restore_atlas_forwarder_quarantine "$provenance_quarantine" "$provenance"
-    restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    if [ "$retiring_forwarder_present" -eq 1 ]; then
+      restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    fi
     return 1
   fi
   if ! remove_atlas_forwarder_state "$candidate" "$managed_target"; then
     restore_atlas_forwarder_quarantine "$provenance_quarantine" "$provenance"
-    restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    if [ "$retiring_forwarder_present" -eq 1 ]; then
+      restore_atlas_forwarder_quarantine "$forwarder_quarantine" "$candidate"
+    fi
     return 1
   fi
   rm -f -- "$forwarder_quarantine" "$provenance_quarantine"
@@ -989,8 +1006,13 @@ write_atlas_forwarder_locked() {
 remove_atlas_forwarder() {
   forwarder=$1
   verified=$2
-  if [ ! -e "$forwarder" ] && [ ! -L "$forwarder" ]; then
-    return 0
+  provenance=$(atlas_forwarder_provenance_path "$forwarder")
+  if [ ! -e "$forwarder" ] && [ ! -L "$forwarder" ] &&
+    [ ! -e "$provenance" ] && [ ! -L "$provenance" ]; then
+    state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
+    if [ ! -e "$state_path" ] && [ ! -L "$state_path" ]; then
+      return 0
+    fi
   fi
   acquire_atlas_forwarder_lifecycle_lock "$forwarder" || return 1
   result=0
@@ -1006,10 +1028,15 @@ remove_atlas_forwarder() {
 remove_atlas_forwarder_locked() {
   forwarder=$1
   verified=$2
-  if [ ! -e "$forwarder" ] && [ ! -L "$forwarder" ]; then
+  provenance=$(atlas_forwarder_provenance_path "$forwarder")
+  state_path=$(atlas_forwarder_state_path "$forwarder") || return 1
+  if [ ! -e "$forwarder" ] && [ ! -L "$forwarder" ] &&
+    [ ! -e "$provenance" ] && [ ! -L "$provenance" ] &&
+    [ ! -e "$state_path" ] && [ ! -L "$state_path" ]; then
     return 0
   fi
-  if ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
+  if { [ -e "$forwarder" ] || [ -L "$forwarder" ]; } &&
+    ! is_managed_atlas_forwarder "$forwarder" "$verified"; then
     printf '%s\n' "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $forwarder" >&2
     return 1
   fi
