@@ -996,8 +996,12 @@ write_atlas_forwarder_locked() {
   else
     rm -f "$temporary"
   fi
-  if ! is_projectatlas_runtime_contract "$destination_runtime" ||
-    ! is_managed_atlas_forwarder "$destination_forwarder" "$destination_runtime"; then
+  if [ -n "${PROJECTATLAS_TEST_ATLAS_FORWARDER_FINAL_RUNTIME_FAILURE:-}" ] ||
+    ! is_projectatlas_runtime_contract "$destination_runtime"; then
+    printf '%s\n' "ProjectAtlas runtime failed final verification; retaining the owned forwarder pair for repair: $destination_forwarder" >&2
+    return 1
+  fi
+  if ! is_managed_atlas_forwarder "$destination_forwarder" "$destination_runtime"; then
     if [ "$provenance_published" -eq 1 ]; then
       if ! remove_published_atlas_forwarder_provenance "$provenance" "$destination_forwarder" "$destination_runtime"; then
         printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder provenance: $provenance" >&2

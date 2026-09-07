@@ -472,6 +472,8 @@ flowchart LR
 
 Forwarder ownership comes from the exact generated body, provenance, and private capability state, so retirement remains possible when its target is missing or cannot execute. New publication verifies the destination runtime separately. Lifecycle locking is still mandatory: macOS can use another discoverable verified ProjectAtlas runtime as its native lock helper; if none is available, uninstall preserves the owned artifacts and asks the user to restore a runtime and retry.
 
+A failed final runtime check reports unsuccessful installation while retaining the complete authenticated forwarder pair for repair or uninstall. Windows compares runtime identity independently of letter case, then preserves the authenticated record's spelling for exact ownership-content checks.
+
 ```mermaid
 flowchart TB
   installer[Installer] --> identity[Canonical verified runtime identity]

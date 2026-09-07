@@ -28945,6 +28945,59 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
     #[cfg(windows)]
     {
+        let runtime_casing = PathBuf::from(runtime.to_string_lossy().to_uppercase());
+        let run_with_runtime_casing =
+            |uninstall: bool| -> Result<std::process::Output, Box<dyn Error>> {
+                let mut command =
+                    projectatlas_plugin_installer_command_with_optional_path_and_home(
+                        &workspace_root,
+                        &repo,
+                        &runtime_casing,
+                        None,
+                        Some(&home),
+                    )?;
+                if uninstall {
+                    command.arg("-Uninstall");
+                }
+                command
+                    .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                    .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                    .env("PATH", &run_path);
+                Ok(command.output()?)
+            };
+        let retained_state = fs::read(&installer_state)?;
+        let update = run_with_runtime_casing(false)?;
+        require(
+            update.status.success()
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == retained_state,
+            format!(
+                "runtime path casing changed owned publication or refused update:\n{}\n{}",
+                String::from_utf8_lossy(&update.stdout),
+                String::from_utf8_lossy(&update.stderr)
+            ),
+        )?;
+        fs::remove_file(&forwarder)?;
+        require(
+            run_with_runtime_casing(false)?.status.success()
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && installer_state.is_file(),
+            "runtime path casing prevented missing-forwarder repair",
+        )?;
+        require(
+            run_with_runtime_casing(true)?.status.success()
+                && !forwarder.exists()
+                && !provenance.exists()
+                && !installer_state.exists()
+                && run_install()?.status.success(),
+            "runtime path casing prevented owned uninstall and reinstall",
+        )?;
+    }
+
+    #[cfg(windows)]
+    {
         let legacy_body = format!(
             "@echo off\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{canonical_runtime}\" %*\r\nexit /b %ERRORLEVEL%\r\n"
         );
@@ -29983,6 +30036,36 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             && direct_database.is_file()
             && alias_database.is_file(),
         "atlas uninstall removed selected project state",
+    )?;
+    let failed_readiness = run_install_with_env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_FINAL_RUNTIME_FAILURE",
+        Path::new("1"),
+    )?;
+    require(
+        !failed_readiness.status.success()
+            && forwarder.is_file()
+            && provenance.is_file()
+            && installer_state.is_file(),
+        "failed final runtime verification left an orphan or reported readiness",
+    )?;
+    let retained_pair = (
+        fs::read(&forwarder)?,
+        fs::read(&provenance)?,
+        fs::read(&installer_state)?,
+    );
+    require(
+        run_install()?.status.success()
+            && retained_pair
+                == (
+                    fs::read(&forwarder)?,
+                    fs::read(&provenance)?,
+                    fs::read(&installer_state)?,
+                )
+            && run_uninstall()?.status.success()
+            && !forwarder.exists()
+            && !provenance.exists()
+            && !installer_state.exists(),
+        "failed final readiness did not preserve exact ownership for repair and uninstall",
     )?;
     Ok(())
 }
