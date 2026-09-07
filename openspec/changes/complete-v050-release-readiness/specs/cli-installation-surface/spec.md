@@ -53,9 +53,9 @@ The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS t
 - **WHEN** a candidate forwarder has the public marker, exact generated body, and valid runtime target but its independent installer provenance or private random capability state is missing, mismatched, reparse-linked, or hard-linked
 - **THEN** installation and uninstall classify it as unmanaged and leave the forwarder, provenance, and unrelated state untouched
 
-#### Scenario: Malformed private forwarder state
-- **WHEN** private forwarder state has extra fields, an extra blank line, or otherwise differs from the complete installer-owned record format
-- **THEN** install and uninstall both reject it without changing the forwarder, provenance, or malformed state; restoring the valid record restores the ordinary lifecycle
+#### Scenario: Malformed forwarder ownership artifacts
+- **WHEN** the forwarder, provenance, or private state has extra fields, an extra blank line, or otherwise differs from its complete installer-owned bytes
+- **THEN** install and uninstall both reject it without changing any artifact; active and quarantined ownership comparisons preserve every byte, and restoring the valid artifact restores the ordinary lifecycle
 
 #### Scenario: Staged no-clobber publication
 - **WHEN** an update stages a replacement, a foreign destination appears after the final collision check, or staging fails before publication

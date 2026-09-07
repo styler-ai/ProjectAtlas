@@ -28947,20 +28947,28 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         ),
     )?;
     let installer_state = installer_states[0].path();
-    let valid_state = fs::read(&installer_state)?;
-    for suffix in [b"unexpected state field\n".as_slice(), b"\n".as_slice()] {
-        let mut malformed_state = valid_state.clone();
-        malformed_state.extend_from_slice(suffix);
-        fs::write(&installer_state, &malformed_state)?;
-        require(
-            !run_install()?.status.success()
-                && !run_uninstall()?.status.success()
-                && fs::read_to_string(&forwarder)? == expected_forwarder_text
-                && fs::read_to_string(&provenance)? == expected_provenance
-                && fs::read(&installer_state)? == malformed_state,
-            "malformed private state was accepted or changed by install/uninstall",
-        )?;
-        fs::write(&installer_state, &valid_state)?;
+    for artifact in [&installer_state, &forwarder, &provenance] {
+        let valid = fs::read(artifact)?;
+        for suffix in [b"unexpected ownership field\n".as_slice(), b"\n".as_slice()] {
+            let mut malformed = valid.clone();
+            malformed.extend_from_slice(suffix);
+            fs::write(artifact, &malformed)?;
+            let retained_forwarder = fs::read(&forwarder)?;
+            let retained_provenance = fs::read(&provenance)?;
+            let retained_state = fs::read(&installer_state)?;
+            require(
+                !run_install()?.status.success()
+                    && !run_uninstall()?.status.success()
+                    && fs::read(&forwarder)? == retained_forwarder
+                    && fs::read(&provenance)? == retained_provenance
+                    && fs::read(&installer_state)? == retained_state,
+                format!(
+                    "malformed ownership was accepted or changed: {}",
+                    artifact.display()
+                ),
+            )?;
+            fs::write(artifact, &valid)?;
+        }
     }
 
     #[cfg(unix)]

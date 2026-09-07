@@ -564,9 +564,7 @@ is_atlas_forwarder_provenance() (
   verified=$3
   atlas_forwarder_state_capability "$forwarder" "$verified" >/dev/null || return 1
   is_direct_regular_file "$provenance" || return 1
-  expected_content=$(atlas_forwarder_provenance_content "$forwarder" "$verified") || return 1
-  actual_content=$(cat "$provenance" 2>/dev/null || true)
-  [ "$actual_content" = "$expected_content" ]
+  atlas_forwarder_provenance_content "$forwarder" "$verified" | cmp -s - "$provenance"
 )
 
 remove_published_atlas_forwarder_provenance() {
@@ -579,9 +577,8 @@ remove_published_atlas_forwarder_provenance() {
       rm -f -- "$quarantine"
       return 1
     fi
-    expected=$(atlas_forwarder_provenance_content "$forwarder" "$verified") || return 1
-    actual=$(cat "$quarantine" 2>/dev/null || true)
-    if [ "$actual" != "$expected" ] || [ -e "$provenance" ] || [ -L "$provenance" ]; then
+    if ! atlas_forwarder_provenance_content "$forwarder" "$verified" | cmp -s - "$quarantine" ||
+      [ -e "$provenance" ] || [ -L "$provenance" ]; then
       restore_atlas_forwarder_quarantine "$quarantine" "$provenance"
       return 1
     fi
@@ -631,9 +628,7 @@ remove_atlas_forwarder_state() {
     rm -f -- "$quarantine"
     return 1
   fi
-  expected=$(atlas_forwarder_state_content "$forwarder" "$verified" "$capability") || return 1
-  actual=$(cat "$quarantine" 2>/dev/null || true)
-  if [ "$actual" != "$expected" ]; then
+  if ! atlas_forwarder_state_content "$forwarder" "$verified" "$capability" | cmp -s - "$quarantine"; then
     restore_atlas_forwarder_quarantine "$quarantine" "$state_path"
     return 1
   fi
@@ -656,9 +651,7 @@ managed_atlas_forwarder_target() {
   # Ownership survives target removal; publication verifies runtime health.
   provenance=$(atlas_forwarder_provenance_path "$forwarder_candidate") || return 1
   is_atlas_forwarder_provenance "$provenance" "$forwarder_candidate" "$canonical_target" || return 1
-  expected_content=$(atlas_forwarder_content "$canonical_target") || return 1
-  actual_content=$(cat "$forwarder_candidate" 2>/dev/null || true)
-  [ "$actual_content" = "$expected_content" ] || return 1
+  atlas_forwarder_content "$canonical_target" | cmp -s - "$forwarder_candidate" || return 1
   printf '%s\n' "$canonical_target"
 }
 
@@ -708,12 +701,9 @@ migrate_managed_atlas_forwarder_locked() {
     return 1
   fi
   retire_atlas_forwarder_race "$provenance" "${PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RETIRE_RACE_PATH:-}" "foreign provenance retirement race"
-  expected_content=$(atlas_forwarder_content "$managed_target") || return 1
-  actual_content=$(cat "$forwarder_quarantine" 2>/dev/null || true)
-  expected_provenance=$(atlas_forwarder_provenance_content "$candidate" "$managed_target") || return 1
-  actual_provenance=$(cat "$provenance_quarantine" 2>/dev/null || true)
-  if { [ "$retiring_forwarder_present" -eq 1 ] && [ "$actual_content" != "$expected_content" ]; } ||
-    [ "$actual_provenance" != "$expected_provenance" ] ||
+  if { [ "$retiring_forwarder_present" -eq 1 ] &&
+       ! atlas_forwarder_content "$managed_target" | cmp -s - "$forwarder_quarantine"; } ||
+    ! atlas_forwarder_provenance_content "$candidate" "$managed_target" | cmp -s - "$provenance_quarantine" ||
     [ -e "$candidate" ] || [ -L "$candidate" ] || [ -e "$provenance" ] || [ -L "$provenance" ]; then
     restore_atlas_forwarder_quarantine "$provenance_quarantine" "$provenance"
     if [ "$retiring_forwarder_present" -eq 1 ]; then
