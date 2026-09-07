@@ -12,6 +12,7 @@ PR #566 updates the libraries used by the existing MCP server and optional parse
 
 - Apply the existing manifest and lockfile update onto accepted main. Retain dependency features and unrelated package versions instead of running an unrestricted dependency update.
 - Keep optional parser artifacts and their manifests unchanged. A loader dependency update does not itself authorize replacing the accepted native grammar inventory.
+- Correct the stale accepted-capabilities checksum sidecar against the committed manifest bytes. The existing assembly integrity check remains mandatory; this repair changes no accepted capability or grammar artifact.
 - Reuse existing MCP stdio, parser-worker, and platform tests. Help output or successful compilation alone cannot prove transport or dynamic-loader compatibility.
 - Let the affected-proof planner and normal pre-push hook select mandatory checks. Inspect hosted selection for optional parser-pack consumers and execute existing supported proof routes where necessary; do not introduce another workflow.
 - Architecture diagrams are N/A because MCP, parser-worker, and artifact trust ownership remain unchanged.

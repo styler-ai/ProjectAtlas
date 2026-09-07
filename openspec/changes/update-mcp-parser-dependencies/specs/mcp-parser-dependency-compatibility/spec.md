@@ -31,6 +31,12 @@ The accepted candidate SHALL lock rmcp and rmcp-macros to 3.2.0, tree-sitter-lan
 
 The dependency update SHALL pass the existing required local, dependency-policy, and hosted platform checks that cover its consumers before closure.
 
+#### Scenario: Accepted construction inputs are verified
+
+- **WHEN** construction checks the accepted-capabilities manifest
+- **THEN** its checksum sidecar matches the committed manifest bytes
+- **AND** the existing integrity check remains enforced without changing accepted capabilities
+
 #### Scenario: A consumer proof route is skipped
 
 - **WHEN** a required MCP or optional parser compatibility boundary lacks executed proof in the selected checks

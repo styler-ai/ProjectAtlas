@@ -8,6 +8,7 @@ ProjectAtlas's MCP server and optional parser loader need the maintenance update
 - Preserve dependency features, MCP identity and stdio behavior, built-in parser precedence, and optional parser artifact trust and platform boundaries.
 - Verify existing consumers through their owning tests and required affected local and hosted checks.
 - Preserve bounded command diagnostics when parallel parser construction fails, so the required archive-backed compatibility proof can identify its failing command without weakening construction isolation.
+- Correct the stale accepted-capabilities checksum sidecar to match the unchanged committed manifest so construction can enforce its existing input integrity check.
 
 ## Capabilities
 
