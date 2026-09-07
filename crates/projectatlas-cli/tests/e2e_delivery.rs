@@ -30547,13 +30547,16 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         normalize_native_path_display(temp.path().canonicalize()?)
             .replace('/', std::path::MAIN_SEPARATOR_STR),
     );
-    let repo = fixture_root.join(TEST_REPO_DIR);
-    let atlas_dir = repo.join(ATLAS_DIR_NAME);
-    fs::create_dir_all(&atlas_dir)?;
-    fs::write(
-        atlas_dir.join("config.toml"),
-        "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
-    )?;
+    let first_repo = fixture_root.join("first project");
+    let second_repo = fixture_root.join("second project");
+    for repo in [&first_repo, &second_repo] {
+        let atlas_dir = repo.join(ATLAS_DIR_NAME);
+        fs::create_dir_all(&atlas_dir)?;
+        fs::write(
+            atlas_dir.join("config.toml"),
+            "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
+        )?;
+    }
 
     let runtime_name = if cfg!(windows) {
         "projectatlas.exe"
@@ -30602,9 +30605,14 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
                           discovery_gate: Option<&Path>,
                           acquired_gate: Option<&Path>|
      -> Result<StdCommand, Box<dyn Error>> {
+        let repo = if runtime == first_runtime {
+            &first_repo
+        } else {
+            &second_repo
+        };
         let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
             &workspace_root,
-            &repo,
+            repo,
             runtime,
             None,
             Some(&home),
@@ -30744,6 +30752,18 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     };
     fs::write(&unrelated_state, unrelated_state_content)?;
 
+    let mut project_configs = Vec::new();
+    for repo in [&first_repo, &second_repo] {
+        for name in [
+            "projectatlas.mcp.json",
+            "projectatlas.claude.mcp.json",
+            "projectatlas.opencode.json",
+        ] {
+            let path = repo.join(ATLAS_DIR_NAME).join(name);
+            let bytes = fs::read(&path)?;
+            project_configs.push((path, bytes));
+        }
+    }
     let discovery_a = fixture_root.join("opposite-a-discovery.gate");
     let discovery_b = fixture_root.join("opposite-b-discovery.gate");
     fs::write(&discovery_a, b"hold\n")?;
@@ -30810,6 +30830,15 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
             String::from_utf8_lossy(&output_b.stderr)
         ),
     )?;
+    for (path, expected) in project_configs {
+        require(
+            fs::read(&path)? == expected,
+            &format!(
+                "opposite migration changed project config: {}",
+                path.display()
+            ),
+        )?;
+    }
     let first_pair = pair_is_complete(&first_runtime_dir, &first_runtime)?;
     let second_pair = pair_is_complete(&second_runtime_dir, &second_runtime)?;
     require(

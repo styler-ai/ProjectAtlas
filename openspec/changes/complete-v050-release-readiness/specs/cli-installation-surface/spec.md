@@ -61,6 +61,10 @@ The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS t
 - **WHEN** an update stages a replacement, a foreign destination appears after the final collision check, or staging fails before publication
 - **THEN** publication never force-replaces the destination, and a prior owned forwarder plus provenance remains usable until a fully verified replacement is published; retirement quarantines and verifies each old artifact before deletion and preserves a concurrent foreign replacement
 
+#### Scenario: Concurrent migrations from isolated projects
+- **WHEN** installers for separate project roots migrate between the same two runtime directories in opposite directions
+- **THEN** their shared forwarder locks use one consistent order, both installations finish without deadlock, and each completed installation retains its own complete generated host configurations
+
 #### Scenario: Final runtime readiness fails
 - **WHEN** the destination runtime fails final verification after the complete forwarder pair is published
 - **THEN** installation reports failure and retains matching provenance and private state with the forwarder so repair and owned uninstall remain possible without an unmanaged orphan
