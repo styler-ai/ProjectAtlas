@@ -65,6 +65,10 @@ The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS t
 - **WHEN** the same Windows runtime identity is supplied with different path casing during update, repair, or uninstall
 - **THEN** the installer uses the authenticated record's original spelling for exact body, provenance, and state checks, preserving ownership without accepting malformed metadata
 
+#### Scenario: Owned POSIX forwarder loses execute permission
+- **WHEN** an authenticated POSIX forwarder has lost its execute bits
+- **THEN** repair restores executable permission while preserving its exact body, provenance, and private state; unauthenticated files remain untouched, and owned uninstall does not require the forwarder to execute
+
 #### Scenario: Literal percent sequences in Windows runtime paths
 - **WHEN** the verified Windows runtime path contains literal environment-variable syntax such as `%USERNAME%`
 - **THEN** install, forwarding, repair, update, and uninstall preserve the literal filesystem identity without expanding that syntax in generated ownership records or runtime targets

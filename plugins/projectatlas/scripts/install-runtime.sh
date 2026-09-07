@@ -1016,6 +1016,15 @@ write_atlas_forwarder_locked() {
     printf '%s\n' "ProjectAtlas atlas forwarder failed final ownership verification: $destination_forwarder" >&2
     return 1
   fi
+  # Ownership survives lost execute bits; only an authenticated file is repairable.
+  if [ ! -x "$destination_forwarder" ]; then
+    if ! chmod 755 "$destination_forwarder" ||
+      [ ! -x "$destination_forwarder" ] ||
+      ! is_managed_atlas_forwarder "$destination_forwarder" "$destination_runtime"; then
+      printf '%s\n' "ProjectAtlas could not restore executable permission on its owned atlas forwarder: $destination_forwarder" >&2
+      return 1
+    fi
+  fi
   if [ -n "$previous_atlas" ]; then
     migrate_managed_atlas_forwarder_locked "$previous_atlas" "$destination_runtime" || return 1
     hash -r 2>/dev/null || true

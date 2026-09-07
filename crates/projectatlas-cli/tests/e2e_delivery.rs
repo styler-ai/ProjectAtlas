@@ -28948,6 +28948,59 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     let installer_state = installer_states[0].path();
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let retained_state = fs::read(&installer_state)?;
+        fs::set_permissions(&forwarder, fs::Permissions::from_mode(0o644))?;
+        require(
+            StdCommand::new(&forwarder)
+                .arg("--version")
+                .output()
+                .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied),
+            "non-executable forwarder fixture unexpectedly launched",
+        )?;
+        fs::write(&provenance, "unmanaged provenance\n")?;
+        require(
+            !run_install()?.status.success()
+                && fs::metadata(&forwarder)?.permissions().mode() & 0o777 == 0o644
+                && fs::read_to_string(&provenance)? == "unmanaged provenance\n"
+                && fs::read(&installer_state)? == retained_state,
+            "permission repair mutated a forwarder without authenticated ownership",
+        )?;
+        fs::write(&provenance, &expected_provenance)?;
+        let repaired = run_install()?;
+        require(
+            repaired.status.success()
+                && fs::metadata(&forwarder)?.permissions().mode() & 0o777 == 0o755
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == retained_state
+                && StdCommand::new(&forwarder)
+                    .arg("--version")
+                    .output()?
+                    .status
+                    .success(),
+            format!(
+                "owned forwarder execute permission was not repaired: {}\n{}",
+                String::from_utf8_lossy(&repaired.stdout),
+                String::from_utf8_lossy(&repaired.stderr),
+            ),
+        )?;
+        fs::set_permissions(&forwarder, fs::Permissions::from_mode(0o644))?;
+        require(
+            run_uninstall()?.status.success()
+                && !forwarder.exists()
+                && !provenance.exists()
+                && !installer_state.exists(),
+            "owned non-executable forwarder could not be uninstalled",
+        )?;
+        require(
+            run_install()?.status.success(),
+            "forwarder reinstall after permission repair failed",
+        )?;
+    }
+
     #[cfg(windows)]
     {
         let runtime_casing = PathBuf::from(runtime.to_string_lossy().to_uppercase());
