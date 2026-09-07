@@ -2518,9 +2518,7 @@ function Get-ProjectAtlasManagedAtlasForwarderTarget {
             return $null
         }
         $target = Get-NormalizedPathEntry $targetMatch.Groups[1].Value
-        if (-not (Test-ProjectAtlasRuntime $target $null)) {
-            return $null
-        }
+        # Ownership survives target removal; publication verifies runtime health.
         $expectedForwarder = Get-ProjectAtlasAtlasForwarderPath $target
         if ((Get-NormalizedPathEntry $FilePath) -ine (Get-NormalizedPathEntry $expectedForwarder)) {
             return $null
@@ -2647,7 +2645,7 @@ function Move-ProjectAtlasManagedAtlasForwarderLocked {
     $forwarderPresent = $null -ne (Get-Item -Force -LiteralPath $FilePath -ErrorAction SilentlyContinue)
     $target = if ($forwarderPresent) { Get-ProjectAtlasManagedAtlasForwarderTarget $FilePath } else { Get-NormalizedPathEntry $VerifiedPath }
     if (-not $forwarderPresent) {
-        if (-not $AllowSameTarget -or -not (Test-ProjectAtlasRuntime $target $null) `
+        if (-not $AllowSameTarget `
             -or (Get-NormalizedPathEntry (Get-ProjectAtlasAtlasForwarderPath $target)) -ine (Get-NormalizedPathEntry $FilePath) `
             -or -not (Test-ProjectAtlasAtlasForwarderProvenance (Get-ProjectAtlasAtlasForwarderProvenancePath $FilePath) $FilePath $target)) {
             return $false
@@ -2955,6 +2953,9 @@ function Write-ProjectAtlasAtlasForwarderLocked {
         [string]$PreviousPath,
         [string]$PreviousIdentity
     )
+    if (-not (Test-ProjectAtlasRuntime $VerifiedPath $null)) {
+        throw "ProjectAtlas atlas forwarder requires a verified runtime: $VerifiedPath"
+    }
     if ($PreviousPath) {
         $currentPreviousIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $PreviousPath).SortKey
         if ($currentPreviousIdentity -cne $PreviousIdentity `
@@ -3027,7 +3028,8 @@ function Write-ProjectAtlasAtlasForwarderLocked {
             }
             $forwarderPublished = $true
         }
-        if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath) `
+        if (-not (Test-ProjectAtlasRuntime $VerifiedPath $null) `
+            -or -not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath) `
             -or [System.IO.File]::ReadAllText($forwarder) -cne $content) {
             throw "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder"
         }

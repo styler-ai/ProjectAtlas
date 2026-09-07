@@ -29840,6 +29840,87 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         "missing-forwarder uninstall was not idempotent or prevented reinstall",
     )?;
 
+    // A separate verified runtime can provide the native POSIX lock helper
+    // after the forwarder's own target is gone; it owns no fixture forwarder.
+    #[cfg(unix)]
+    let retirement_helper = home.join(".local/bin/projectatlas");
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(home.join(".local/bin"))?;
+        fs::copy(&runtime, &retirement_helper)?;
+    }
+    for (invalid_runtime_file, forwarder_present) in
+        [(false, true), (false, false), (true, true), (true, false)]
+    {
+        let retained_runtime = fixture_root.join("retained uninstall runtime");
+        fs::rename(&runtime, &retained_runtime)?;
+        if invalid_runtime_file {
+            fs::write(&runtime, b"unrelated non-executable runtime content")?;
+        }
+        if !forwarder_present {
+            fs::remove_file(&forwarder)?;
+        }
+        let owned_provenance = fs::read(&provenance)?;
+        let owned_state = fs::read(&installer_state)?;
+        fs::write(&provenance, b"unrelated provenance")?;
+        require(
+            !run_uninstall()?.status.success()
+                && forwarder.exists() == forwarder_present
+                && fs::read(&provenance)? == b"unrelated provenance"
+                && fs::read(&installer_state)? == owned_state,
+            "unavailable-runtime uninstall accepted or changed unrelated ownership",
+        )?;
+        fs::write(&provenance, &owned_provenance)?;
+        #[cfg(target_os = "macos")]
+        {
+            let unavailable_helper = home.join("retained lifecycle helper");
+            fs::rename(&retirement_helper, &unavailable_helper)?;
+            let no_helper =
+                run_uninstall_with_env("PATH", Path::new("/usr/bin:/bin:/usr/sbin:/sbin"))?;
+            fs::rename(&unavailable_helper, &retirement_helper)?;
+            require(
+                !no_helper.status.success()
+                    && String::from_utf8_lossy(&no_helper.stderr)
+                        .contains("verified ProjectAtlas runtime is required")
+                    && forwarder.exists() == forwarder_present
+                    && fs::read(&provenance)? == owned_provenance
+                    && fs::read(&installer_state)? == owned_state,
+                "macOS retirement bypassed its unavailable lock helper or changed ownership",
+            )?;
+        }
+        let retired = run_uninstall()?;
+        require(
+            retired.status.success()
+                && !forwarder.exists()
+                && !provenance.exists()
+                && !installer_state.exists()
+                && runtime.exists() == invalid_runtime_file,
+            format!(
+                "owned forwarder retirement required its unavailable runtime:\n{}\n{}",
+                String::from_utf8_lossy(&retired.stdout),
+                String::from_utf8_lossy(&retired.stderr)
+            ),
+        )?;
+        require(
+            run_uninstall()?.status.success(),
+            "unavailable-runtime uninstall was not idempotent",
+        )?;
+        if invalid_runtime_file {
+            require(
+                fs::read(&runtime)? == b"unrelated non-executable runtime content",
+                "forwarder retirement changed the unrelated runtime file",
+            )?;
+            fs::remove_file(&runtime)?;
+        }
+        fs::rename(&retained_runtime, &runtime)?;
+        require(
+            run_install()?.status.success(),
+            "runtime restoration did not permit forwarder reinstall",
+        )?;
+    }
+    #[cfg(unix)]
+    fs::remove_file(&retirement_helper)?;
+
     #[cfg(windows)]
     for forwarder_present in [true, false] {
         clear_retirement_quarantine(runtime_directory)?;

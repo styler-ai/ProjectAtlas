@@ -78,3 +78,8 @@ Install, update, repair, and uninstall SHALL manage the verified runtime, npm ca
 #### Scenario: Uninstall
 - **WHEN** ProjectAtlas is removed
 - **THEN** only proven-owned artifacts are removed and selected project databases/configuration plus unrelated host state remain according to the documented retention contract
+
+#### Scenario: Forwarder target is unavailable
+- **WHEN** an authenticated forwarder target is missing or cannot execute
+- **THEN** retirement derives ownership from its exact generated body, provenance, and private capability state without requiring that target to run; malformed or incomplete ownership remains a refusal, and publication still requires a verified destination runtime
+- **AND** lifecycle locking remains mandatory; macOS uses another discoverable verified runtime for its native lock helper or refuses without changing owned artifacts and asks the user to restore a runtime before retrying

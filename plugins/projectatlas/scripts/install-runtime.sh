@@ -241,8 +241,14 @@ acquire_atlas_forwarder_lifecycle_lock_fd() {
   lock_device=${lock_identity%%:*}
   lock_inode=${lock_identity#*:}
   lock_runtime=${projectatlas_bin:-${runtime_override:-}}
+  if [ "$uninstall" -eq 1 ] && ! is_projectatlas_runtime_contract "$lock_runtime"; then
+    lock_runtime=
+  fi
   if [ -z "$lock_runtime" ] && [ "$lock_platform" = Darwin ]; then
     lock_runtime=$(find_projectatlas || true)
+    if [ -z "$lock_runtime" ]; then
+      printf '%s\n' "A verified ProjectAtlas runtime is required for the macOS lifecycle lock; restore a runtime on PATH and retry uninstall: $forwarder" >&2
+    fi
   fi
   if [ -n "$lock_runtime" ]; then
     lock_elapsed_ms=
@@ -653,7 +659,7 @@ managed_atlas_forwarder_target() {
   [ "$marker_target" = "$canonical_target" ] || return 1
   expected_forwarder=$(atlas_forwarder_path "$canonical_target") || return 1
   [ "$(canonical_file "$forwarder_candidate")" = "$(canonical_file "$expected_forwarder")" ] || return 1
-  is_projectatlas_runtime_contract "$canonical_target" || return 1
+  # Ownership survives target removal; publication verifies runtime health.
   provenance=$(atlas_forwarder_provenance_path "$forwarder_candidate") || return 1
   is_atlas_forwarder_provenance "$provenance" "$forwarder_candidate" "$canonical_target" || return 1
   expected_content=$(atlas_forwarder_content "$canonical_target") || return 1
@@ -682,7 +688,6 @@ migrate_managed_atlas_forwarder_locked() {
   else
     [ "$allow_same_target" -eq 1 ] || return 1
     managed_target=$(canonical_file "$migration_runtime") || return 1
-    is_projectatlas_runtime_contract "$managed_target" || return 1
     [ "$(atlas_forwarder_path "$managed_target")" = "$(canonical_file "$candidate")" ] || return 1
     is_atlas_forwarder_provenance "$(atlas_forwarder_provenance_path "$candidate")" "$candidate" "$managed_target" || return 1
   fi
@@ -888,6 +893,7 @@ write_atlas_forwarder_locked() {
     printf '%s\n' "ProjectAtlas atlas forwarder migration source changed or is no longer managed: $previous_atlas" >&2
     return 1
   fi
+  is_projectatlas_runtime_contract "$destination_runtime" || return 1
   ensure_atlas_forwarder_collision_free "$destination_forwarder" "$destination_runtime" || return 1
   runtime_dir=$(dirname -- "$destination_runtime")
   temporary=$(mktemp "$runtime_dir/.atlas-forwarder.XXXXXX") || {
@@ -990,7 +996,8 @@ write_atlas_forwarder_locked() {
   else
     rm -f "$temporary"
   fi
-  if ! is_managed_atlas_forwarder "$destination_forwarder" "$destination_runtime"; then
+  if ! is_projectatlas_runtime_contract "$destination_runtime" ||
+    ! is_managed_atlas_forwarder "$destination_forwarder" "$destination_runtime"; then
     if [ "$provenance_published" -eq 1 ]; then
       if ! remove_published_atlas_forwarder_provenance "$provenance" "$destination_forwarder" "$destination_runtime"; then
         printf '%s\n' "ProjectAtlas could not retire newly published atlas forwarder provenance: $provenance" >&2
