@@ -6,7 +6,7 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
-import tomllib
+import runpy
 
 
 def main() -> None:
@@ -17,7 +17,8 @@ def main() -> None:
     args = parser.parse_args()
     guest = Path(__file__).resolve().parent
     root = guest.parent.parent
-    channel = tomllib.loads((root / "rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"]
+    preflight = runpy.run_path(str(root / ".github/scripts/verify-rust-toolchain.py"))
+    channel = preflight["read_declared_channel"](root / "rust-toolchain.toml")
     target = root / ".tmp" / "pdf-parser-build"
     env = os.environ.copy()
     cargo_home = Path(env.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()

@@ -176,8 +176,11 @@ def main():
         row = measure(binary, root)
         row["input_bytes"] = input_bytes
         runs.append(row)
+    digest = hashlib.sha256()
     with binary.open("rb") as stream:
-        binary_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(MIB), b""):
+            digest.update(chunk)
+    binary_sha256 = digest.hexdigest()
     report = {"platform": sys.platform, "binary_sha256": binary_sha256,
               "fixture": {"pdf_files": 64, "pages_per_pdf": 16, "docx_files": 64, "paragraphs_per_docx": 64},
               "limits": LIMITS, "runs": runs,
