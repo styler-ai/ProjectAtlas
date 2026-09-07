@@ -220,7 +220,8 @@ The document boundary pins a fixed `pdf-extract` `0.12.0+projectatlas` guest
 with `lopdf` `0.44.0`, the `wasmi`/`wasmi_core` `2.0.0` host, `quick-xml`
 `0.42.0`, and `zip` `0.6.6` (ZIP defaults disabled, only `deflate` enabled).
 The PDF guest is embedded build-owned code with a verified locked rebuild;
-callers cannot select modules. Its build resolves the locked dependency sources
+callers cannot select modules. Its release profile uses one code-generation
+unit to avoid parallel codegen partitioning in the fixed artifact. Its build resolves the locked dependency sources
 before mapping each Rust source directory to a canonical path, so embedded
 diagnostics do not depend on host separators or a warm Cargo cache. Native
 platform checks require the rebuilt guest to match the embedded bytes exactly.
@@ -236,10 +237,14 @@ attribution are documented in `packaging/pdf-parser/vendor/pdf-extract/PROJECTAT
 PDF admission requires a `%PDF-` header and extracts only page text; DOCX
 admission requires a ZIP header, admits only stored or DEFLATE entries, rejects
 unsafe, duplicate, encrypted, or otherwise unsupported package input, and passes
-only `word/document.xml` to the parser. Each result carries a page/text-span or
+only `word/document.xml` to the parser. Nested WordprocessingML text boxes retain
+and resume their outer paragraph/run context, emitting interrupted run fragments
+in document order with their original decoded byte offsets. Each result carries a page/text-span or
 part/paragraph/run/text-span locator plus its actual emitted-text line range
 for symbol slicing, parser provenance, and a complete
-coverage marker. The boundary caps input/compressed package bytes at 8 MiB,
+coverage marker. Normal text, symbol, and summary admission uses the document
+parser's 8 MiB raw-input ceiling; ordinary source retains its configured ceiling.
+The boundary caps input/compressed package bytes at 8 MiB,
 expanded package bytes at 32 MiB, the native source/parser staging envelope at 96 MiB,
 retained output at 4 MiB, and package entries and evidence facts at 256 and
 4,096 respectively; embedded-document recursion is limited to zero (the outer

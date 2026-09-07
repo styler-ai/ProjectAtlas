@@ -661,6 +661,9 @@ fn extract_docx(
             .saturating_add(xml.capacity().saturating_mul(3))
             .saturating_add(MAX_DOCUMENT_OUTPUT_BYTES.saturating_mul(4))
             .saturating_add(
+                MAX_DOCX_XML_DEPTH.saturating_mul(std::mem::size_of::<(DocxParagraph, usize)>()),
+            )
+            .saturating_add(
                 MAX_DOCUMENT_FACTS
                     .saturating_mul(std::mem::size_of::<DocumentFact>())
                     .saturating_mul(2),
@@ -674,6 +677,21 @@ fn extract_docx(
 struct RawDocxRun {
     /// Exact decoded run text.
     text: String,
+    /// Decoded run bytes already emitted before a nested text container.
+    text_start: usize,
+}
+
+/// Paragraph and run ownership within one `WordprocessingML` text container.
+#[derive(Default)]
+struct DocxParagraph {
+    /// Document-order paragraph ordinal, including empty paragraphs.
+    number: usize,
+    /// Run ordinal within this paragraph, including empty runs.
+    run_number: usize,
+    /// Whether the paragraph element is still open.
+    open: bool,
+    /// Unpublished fragment of the active run.
+    run: Option<RawDocxRun>,
 }
 
 /// Parse body paragraphs and table paragraphs from the admitted XML part.
@@ -688,10 +706,9 @@ fn parse_docx(
     let mut output = String::new();
     let mut output_line = 1usize;
     let mut facts = Vec::new();
-    let mut paragraph_open = false;
     let mut paragraph_number = 0usize;
-    let mut run_number = 0usize;
-    let mut run: Option<RawDocxRun> = None;
+    let mut paragraph = DocxParagraph::default();
+    let mut text_boxes = Vec::new();
     let mut in_text = false;
     let mut element_depth = 0usize;
     let mut root_seen = false;
@@ -749,22 +766,36 @@ fn parse_docx(
                     });
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
-                    "p" if !paragraph_open => {
-                        paragraph_open = true;
+                    "txbxContent" => {
+                        if let Some(run) = paragraph.run.as_mut() {
+                            publish_docx_run_fragment(
+                                run,
+                                paragraph.number,
+                                paragraph.run_number,
+                                &mut output,
+                                &mut output_line,
+                                &mut facts,
+                            )?;
+                        }
+                        text_boxes.push((std::mem::take(&mut paragraph), output.len()));
+                    }
+                    "p" if !paragraph.open => {
+                        paragraph.open = true;
                         paragraph_number += 1;
-                        run_number = 0;
+                        paragraph.number = paragraph_number;
+                        paragraph.run_number = 0;
                         if !output.is_empty() {
                             push_output_byte(&mut output, b'\n')?;
                             output_line += 1;
                         }
                     }
-                    "r" if paragraph_open && run.is_none() => {
-                        run_number += 1;
-                        run = Some(RawDocxRun::default());
+                    "r" if paragraph.open && paragraph.run.is_none() => {
+                        paragraph.run_number += 1;
+                        paragraph.run = Some(RawDocxRun::default());
                     }
-                    "t" if run.is_some() && !in_text => in_text = true,
+                    "t" if paragraph.run.is_some() && !in_text => in_text = true,
                     "tab" | "br" | "cr" => {
-                        if let Some(run) = run.as_mut() {
+                        if let Some(run) = paragraph.run.as_mut() {
                             append_docx_run_text(
                                 run,
                                 if name.as_ref() == "tab" { "\t" } else { "\n" },
@@ -783,7 +814,7 @@ fn parse_docx(
             }
             Event::Text(event) => {
                 if in_text {
-                    let Some(run) = run.as_mut() else {
+                    let Some(run) = paragraph.run.as_mut() else {
                         return Err(DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
                             message: "text appeared outside a run".to_owned(),
@@ -808,7 +839,7 @@ fn parse_docx(
                         message: "CDATA appeared outside a run".to_owned(),
                     });
                 }
-                let Some(run) = run.as_mut() else {
+                let Some(run) = paragraph.run.as_mut() else {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "CDATA appeared outside a run".to_owned(),
@@ -823,7 +854,7 @@ fn parse_docx(
                         message: "entity appeared outside a text run".to_owned(),
                     });
                 }
-                let Some(run) = run.as_mut() else {
+                let Some(run) = paragraph.run.as_mut() else {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "entity appeared outside a run".to_owned(),
@@ -850,45 +881,31 @@ fn parse_docx(
                 match if wordprocessing { name.as_ref() } else { "" } {
                     "t" => in_text = false,
                     "r" => {
-                        if let Some(run) = run.take()
-                            && !run.text.is_empty()
-                        {
-                            if facts.len() >= MAX_DOCUMENT_FACTS {
-                                return Err(DocumentExtractionError::ResourceLimit {
-                                    limit: DocumentLimit::FactCount,
-                                    observed: facts.len() + 1,
-                                    maximum: MAX_DOCUMENT_FACTS,
-                                });
-                            }
-                            let end = run.text.len();
-                            let required = output.len().saturating_add(end);
-                            if required > MAX_DOCUMENT_OUTPUT_BYTES {
-                                return Err(DocumentExtractionError::ResourceLimit {
-                                    limit: DocumentLimit::OutputBytes,
-                                    observed: required,
-                                    maximum: MAX_DOCUMENT_OUTPUT_BYTES,
-                                });
-                            }
-                            let line_start = output_line;
-                            output_line += run.text.bytes().filter(|byte| *byte == b'\n').count();
-                            // A terminal newline does not create another occupied slice line.
-                            let line_end = output_line - usize::from(run.text.ends_with('\n'));
-                            output.push_str(&run.text);
-                            facts.push(DocumentFact {
-                                line_start,
-                                line_end,
-                                text: run.text,
-                                locator: DocumentLocator::Docx {
-                                    part: DOCX_DOCUMENT_PART,
-                                    paragraph: paragraph_number,
-                                    run: run_number,
-                                    text_start: 0,
-                                    text_end: end,
-                                },
-                            });
+                        if let Some(mut run) = paragraph.run.take() {
+                            publish_docx_run_fragment(
+                                &mut run,
+                                paragraph.number,
+                                paragraph.run_number,
+                                &mut output,
+                                &mut output_line,
+                                &mut facts,
+                            )?;
                         }
                     }
-                    "p" => paragraph_open = false,
+                    "txbxContent" => {
+                        let Some((outer, previous_bytes)) = text_boxes.pop() else {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX text box had no matching container".to_owned(),
+                            });
+                        };
+                        paragraph = outer;
+                        if output.len() > previous_bytes && !output.ends_with('\n') {
+                            push_output_byte(&mut output, b'\n')?;
+                            output_line += 1;
+                        }
+                    }
+                    "p" => paragraph.open = false,
                     _ => {}
                 }
                 element_depth -= 1;
@@ -903,8 +920,9 @@ fn parse_docx(
     if !root_seen
         || !root_closed
         || element_depth != 0
-        || paragraph_open
-        || run.is_some()
+        || paragraph.open
+        || !text_boxes.is_empty()
+        || paragraph.run.is_some()
         || in_text
     {
         return Err(DocumentExtractionError::Malformed {
@@ -919,6 +937,56 @@ fn parse_docx(
         completeness: DocumentCompleteness::Complete,
         provenance: DocumentParserProvenance::QuickXml,
     })
+}
+
+/// Emit a run fragment before leaving its container, preserving its original byte locator.
+fn publish_docx_run_fragment(
+    run: &mut RawDocxRun,
+    paragraph: usize,
+    run_number: usize,
+    output: &mut String,
+    output_line: &mut usize,
+    facts: &mut Vec<DocumentFact>,
+) -> Result<(), DocumentExtractionError> {
+    if run.text.is_empty() {
+        return Ok(());
+    }
+    if facts.len() >= MAX_DOCUMENT_FACTS {
+        return Err(DocumentExtractionError::ResourceLimit {
+            limit: DocumentLimit::FactCount,
+            observed: facts.len() + 1,
+            maximum: MAX_DOCUMENT_FACTS,
+        });
+    }
+    let required = output.len().saturating_add(run.text.len());
+    if required > MAX_DOCUMENT_OUTPUT_BYTES {
+        return Err(DocumentExtractionError::ResourceLimit {
+            limit: DocumentLimit::OutputBytes,
+            observed: required,
+            maximum: MAX_DOCUMENT_OUTPUT_BYTES,
+        });
+    }
+    let text = std::mem::take(&mut run.text);
+    let line_start = *output_line;
+    *output_line += text.bytes().filter(|byte| *byte == b'\n').count();
+    // A terminal newline does not create another occupied slice line.
+    let line_end = *output_line - usize::from(text.ends_with('\n'));
+    output.push_str(&text);
+    let text_end = run.text_start + text.len();
+    facts.push(DocumentFact {
+        line_start,
+        line_end,
+        text,
+        locator: DocumentLocator::Docx {
+            part: DOCX_DOCUMENT_PART,
+            paragraph,
+            run: run_number,
+            text_start: run.text_start,
+            text_end,
+        },
+    });
+    run.text_start = text_end;
+    Ok(())
 }
 
 /// Append decoded XML text while bounding one retained run before publication.
@@ -1855,6 +1923,36 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                     ..
                 }),
             ));
+        }
+    }
+
+    #[test]
+    fn docx_nested_text_boxes_preserve_run_order_and_locators() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Before</w:t><w:drawing><w:txbxContent><w:p><w:r><w:t>Inside</w:t></w:r></w:p></w:txbxContent></w:drawing><w:t>After</w:t></w:r></w:p><w:p><w:r><w:t>Following</w:t></w:r></w:p></w:body></w:document>"#;
+        let bytes = docx_archive(xml, CompressionMethod::Stored);
+        let parsed = extract_document_text_controlled(&bytes, "text-box.docx", None, &control())
+            .expect("nested text container is valid WordprocessingML");
+        assert_eq!(parsed.text, "Before\nInside\nAfter\nFollowing");
+        assert_eq!(parsed.completeness, DocumentCompleteness::Complete);
+        assert_eq!(parsed.facts.len(), 4);
+        for (fact, (text, paragraph, start, end, line)) in parsed.facts.iter().zip([
+            ("Before", 1, 0, 6, 1),
+            ("Inside", 2, 0, 6, 2),
+            ("After", 1, 6, 11, 3),
+            ("Following", 3, 0, 9, 4),
+        ]) {
+            assert_eq!(fact.text, text);
+            assert_eq!((fact.line_start, fact.line_end), (line, line));
+            assert_eq!(
+                fact.locator,
+                DocumentLocator::Docx {
+                    part: DOCX_DOCUMENT_PART,
+                    paragraph,
+                    run: 1,
+                    text_start: start,
+                    text_end: end,
+                }
+            );
         }
     }
 

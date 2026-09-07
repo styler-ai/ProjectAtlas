@@ -13,6 +13,8 @@ lopdf = { version = "=0.44.0", default-features = false }
 pdf-extract = { path = "vendor/pdf-extract", version = "=0.12.0" }
 
 [profile.release]
+# Keep optimization and link input independent of parallel codegen partitioning.
+codegen-units = 1
 opt-level = "s"
 panic = "abort"
 strip = true

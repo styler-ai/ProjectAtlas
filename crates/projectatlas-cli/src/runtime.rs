@@ -92,8 +92,8 @@ use projectatlas_service::{
     validate_federated_root_count,
 };
 use projectatlas_symbols::{
-    DocumentExtractionError, DocumentLimit, MarkdownFacts, document_format_for_path,
-    extract_document_graph_controlled, extract_document_text_controlled,
+    DocumentExtractionError, DocumentLimit, MAX_DOCUMENT_COMPRESSED_BYTES, MarkdownFacts,
+    document_format_for_path, extract_document_graph_controlled, extract_document_text_controlled,
     extract_markdown_facts_controlled, extract_symbol_graph_with_source_controlled,
     semantic_resolution_contract_digest,
 };
@@ -6169,6 +6169,29 @@ fn build_symbols_for_paths_with_limits(
     Ok(staged.report)
 }
 
+/// Keep document admission at its parser-owned ceiling and ordinary source at caller policy.
+fn source_input_byte_limit(
+    path: &str,
+    language: Option<&str>,
+    observed: Option<u64>,
+    source_limit: u64,
+    stage: IndexWorkStage,
+) -> Result<u64, IndexWorkFailure> {
+    if document_format_for_path(path, language).is_none() {
+        return Ok(source_limit);
+    }
+    let maximum = MAX_DOCUMENT_COMPRESSED_BYTES as u64;
+    if let Some(observed) = observed.filter(|observed| *observed > maximum) {
+        return Err(IndexWorkFailure::resource_limit(
+            stage,
+            IndexWorkResource::SourceBytes,
+            maximum,
+            observed,
+        ));
+    }
+    Ok(maximum)
+}
+
 /// Build selected symbol mutations without acquiring the `SQLite` writer.
 #[allow(clippy::too_many_arguments)]
 fn stage_symbols_for_nodes_with_limits(
@@ -6274,7 +6297,14 @@ fn stage_symbols_for_nodes_with_limits(
     {
         control.check(IndexWorkStage::SymbolParsing)?;
         report.candidates += 1;
-        if node.size_bytes.is_some_and(|size| size > options.max_bytes) {
+        let max_bytes = source_input_byte_limit(
+            &node.path,
+            node.language.as_deref(),
+            node.size_bytes,
+            options.max_bytes,
+            IndexWorkStage::SymbolParsing,
+        )?;
+        if node.size_bytes.is_some_and(|size| size > max_bytes) {
             output_bytes = checked_symbol_publication_usage(
                 output_bytes,
                 node.path.len() as u64 + node.language.as_ref().map_or(0, String::len) as u64,
@@ -6593,9 +6623,17 @@ fn admit_symbol_job_bytes(
     options: &SymbolBuildOptions,
     control: &IndexWorkControl,
 ) -> Result<Vec<u8>, Box<SymbolParseOutcome>> {
+    let max_bytes = source_input_byte_limit(
+        &job.path,
+        job.language.as_deref(),
+        None,
+        options.max_bytes,
+        IndexWorkStage::SymbolParsing,
+    )
+    .map_err(|failure| Box::new(SymbolParseOutcome::IndexWork(failure)))?;
     let bytes = match read_source_bytes_controlled(
         &job.native_path,
-        options.max_bytes,
+        max_bytes,
         IndexWorkStage::SymbolParsing,
         control,
     ) {
@@ -6614,7 +6652,7 @@ fn admit_symbol_job_bytes(
                 IndexWorkFailure::resource_limit(
                     IndexWorkStage::SymbolParsing,
                     IndexWorkResource::SourceBytes,
-                    options.max_bytes,
+                    max_bytes,
                     observed,
                 ),
             )));
@@ -8407,10 +8445,17 @@ fn stage_structural_summaries_for_nodes_controlled(
             .map(|node| -> Result<StructuralSummaryDerivation, CliError> {
                 control.check(IndexWorkStage::TextIndex)?;
                 let existing = indexed_nodes.get(&node.path);
+                let max_bytes = source_input_byte_limit(
+                    &node.path,
+                    node.language.as_deref(),
+                    node.size_bytes,
+                    MAX_SYMBOL_FILE_BYTES,
+                    IndexWorkStage::TextIndex,
+                )?;
                 if reason_by_path.get(node.path.as_str()) == Some(&TextIndexSkipReason::TooLarge)
                     || node
                         .size_bytes
-                        .is_some_and(|size_bytes| size_bytes > MAX_SYMBOL_FILE_BYTES)
+                        .is_some_and(|size_bytes| size_bytes > max_bytes)
                 {
                     return Ok(StructuralSummaryDerivation {
                         change: Some(StructuralSummaryChange::Clear {
@@ -8719,9 +8764,16 @@ fn indexed_file_texts_for_nodes_with_limit(
     let mut staged_bytes = 0_u64;
     for node in nodes.iter().filter(|node| node.kind == NodeKind::File) {
         control.check(IndexWorkStage::TextIndex)?;
+        let max_bytes = source_input_byte_limit(
+            &node.path,
+            node.language.as_deref(),
+            node.size_bytes,
+            options.max_bytes,
+            IndexWorkStage::TextIndex,
+        )?;
         if node
             .size_bytes
-            .is_some_and(|size_bytes| size_bytes > options.max_bytes)
+            .is_some_and(|size_bytes| size_bytes > max_bytes)
         {
             rows.push(TextIndexRow {
                 path: node.path.clone(),
@@ -8744,8 +8796,8 @@ fn indexed_file_texts_for_nodes_with_limit(
             .into());
         }
         let native_path = root.join(repo_path_to_native(&node.path));
-        let read_limit = options.max_bytes.min(remaining_staged_bytes);
-        let aggregate_limit_is_narrower = remaining_staged_bytes <= options.max_bytes;
+        let read_limit = max_bytes.min(remaining_staged_bytes);
+        let aggregate_limit_is_narrower = remaining_staged_bytes <= max_bytes;
         let bytes = match read_source_bytes_controlled(
             &native_path,
             read_limit,
@@ -13432,7 +13484,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let result = indexed_file_texts_for_nodes(
             temp.path(),
             &[node],
-            TextIndexOptions::new((maximum * 2) as u64),
+            TextIndexOptions::new(MAX_SYMBOL_FILE_BYTES),
         );
         if matches!(
             result,

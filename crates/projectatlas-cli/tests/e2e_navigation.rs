@@ -9600,18 +9600,20 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         offsets.push(pdf.len());
         pdf.extend_from_slice(object);
     }
+    offsets.push(pdf.len());
+    pdf.extend_from_slice(b"6 0 obj\n<< /Length 2000001 /Subtype /Image >>\nstream\n");
+    pdf.extend(std::iter::repeat_n(b' ', 2_000_001));
+    pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    let object_count = offsets.len() + 1;
     let xref = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {}\n", pdf_objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(format!("xref\n0 {object_count}\n").as_bytes());
     pdf.extend_from_slice(b"0000000000 65535 f \n");
     for offset in offsets {
         pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
     }
     pdf.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            pdf_objects.len() + 1
-        )
-        .as_bytes(),
+        format!("trailer\n<< /Size {object_count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n")
+            .as_bytes(),
     );
     let pdf_path = docs.join("guide.pdf");
     fs::write(&pdf_path, pdf)?;
@@ -9620,9 +9622,10 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         let docx_file = fs::File::create(path)?;
         let mut docx = ZipWriter::new(docx_file);
         docx.start_file("word/document.xml", FileOptions::default())?;
+        write!(docx, "<!--{}-->", " ".repeat(2_000_001))?;
         write!(
             docx,
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p/><w:p><w:r><w:t>{text}</w:t></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/></w:r></w:p></w:body></w:document>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p/><w:p><w:r><w:t>{text}</w:t></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><w:t>Inside box</w:t></w:r></w:p></w:txbxContent></w:drawing><w:t>After box</w:t></w:r></w:p></w:body></w:document>"
         )?;
         docx.finish()?;
         Ok(())
@@ -9636,8 +9639,24 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         "// Runtime PDF and DOCX evidence marker are shared words, not links.\npub fn unrelated() {}\n",
     )?;
 
+    fs::write(
+        repo.join("src/oversized.rs"),
+        " ".repeat(2_000_001) + "pub fn oversized_source() {}",
+    )?;
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     run_scan(&repo, &database)?;
+    let persisted = Connection::open(&database)?;
+    let oversized_symbols: i64 = persisted.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE path = 'src/oversized.rs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if oversized_symbols != 0 {
+        return Err(
+            io::Error::other("document admission raised the ordinary source ceiling").into(),
+        );
+    }
+    drop(persisted);
     let executable = mcp_contract_executable();
 
     let files = run_mcp_contract_json(
@@ -9705,7 +9724,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         require_json_usize(
             &summary,
             &["symbol_count"],
-            if path == "docs/guide.docx" { 3 } else { 1 },
+            if path == "docs/guide.docx" { 5 } else { 1 },
         )?;
         let symbols = run_mcp_contract_json(
             &executable,
@@ -9768,6 +9787,8 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             4,
             "After empty\ncontinued",
         ),
+        ("docs/guide.docx", "document-block-4", 6, 6, "Inside box"),
+        ("docs/guide.docx", "document-block-5", 7, 7, "After box"),
     ];
     for (path, symbol, start, end, content) in slice_cases {
         let slice = run_mcp_contract_json(
@@ -9974,6 +9995,23 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         };
 
     let before_failed_refresh = mcp_database_snapshot(&database)?;
+    fs::write(
+        &docx_path,
+        vec![b' '; projectatlas_symbols::MAX_DOCUMENT_COMPRESSED_BYTES + 1],
+    )?;
+    let oversized_refresh = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .output()?;
+    if oversized_refresh.status.success()
+        || before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative
+    {
+        return Err(
+            io::Error::other("oversized DOCX replaced the last complete publication").into(),
+        );
+    }
     fs::write(&docx_path, b"PK\x03\x04truncated-document")?;
     let failed_refresh = StdCommand::new(&executable)
         .current_dir(&repo)
