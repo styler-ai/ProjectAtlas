@@ -28853,9 +28853,20 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         fs::hard_link(&runtime, &invalid_runtime)?;
         let runtime_alias = fixture_root.join(format!("runtime-alias-{index}"));
         std::os::unix::fs::symlink(&invalid_runtime, &runtime_alias)?;
-        let before = repository_filesystem_snapshot(&fixture_root)?;
         for supplied_runtime in [&invalid_runtime, &runtime_alias] {
-            let rejected = run_install_with_env("PROJECTATLAS_RUNTIME_PATH", supplied_runtime)?;
+            let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+                &workspace_root,
+                &repo,
+                supplied_runtime,
+                None,
+                Some(&home),
+            )?;
+            command
+                .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .env("PATH", &run_path);
+            let before = repository_filesystem_snapshot(&fixture_root)?;
+            let rejected = command.output()?;
             let diagnostic = String::from_utf8_lossy(&rejected.stderr);
             require(
                 !rejected.status.success()
