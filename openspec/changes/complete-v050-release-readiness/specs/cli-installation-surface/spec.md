@@ -41,6 +41,10 @@ The installer SHALL verify Claude Code and OpenCode configuration through each a
 ### Requirement: One collision-safe atlas command exposes the complete CLI
 The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS to the same verified `projectatlas` runtime. It SHALL accept every present/future argument vector without per-subcommand executables and SHALL preserve `projectatlas` compatibility.
 
+#### Scenario: Runtime path cannot fit ownership records
+- **WHEN** a supplied POSIX runtime path or its canonical target contains a carriage return or newline, including a terminal newline
+- **THEN** the installer refuses it before forwarder, provenance, private-state, or generated host-configuration publication and preserves the supplied runtime and existing project state
+
 #### Scenario: Canonical command or nested command
 - **WHEN** a user invokes any supported command, global flag, nested command, or format through `atlas`
 - **THEN** stdout/stderr bytes, exit status, signals, JSON/TOON, help, errors, root isolation, and behavior match `projectatlas`

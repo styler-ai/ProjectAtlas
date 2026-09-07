@@ -44,7 +44,18 @@ if [ -d "$atlas_dir" ]; then
     exit 1
   fi
 fi
+validate_atlas_runtime_record_path() {
+  case "$1" in
+    *'
+'*|*"$(printf '\r')"*)
+      printf '%s\n' 'ProjectAtlas atlas runtime path contains a line break; refusing ownership publication.' >&2
+      return 1
+      ;;
+  esac
+}
+
 if [ -n "$runtime_override" ]; then
+  validate_atlas_runtime_record_path "$runtime_override" || exit 1
   runtime_dir=$(CDPATH= cd -- "$(dirname -- "$runtime_override")" && pwd -P)
   runtime_override="$runtime_dir/$(basename -- "$runtime_override")"
 fi
@@ -809,8 +820,18 @@ pause_atlas_forwarder_after_lock_acquisition() {
   done
 }
 
+canonical_atlas_runtime_path() {
+  validate_atlas_runtime_record_path "$1" || return 1
+  # Preserve terminal newlines until the line-based ownership format validates them.
+  record_runtime=$(canonical_file "$1" && printf '.') || return 1
+  record_runtime=${record_runtime%.}
+  record_runtime=${record_runtime%?}
+  validate_atlas_runtime_record_path "$record_runtime" || return 1
+  printf '%s\n' "$record_runtime"
+}
+
 write_atlas_forwarder() {
-  destination_runtime=$(canonical_file "$1") || return 1
+  destination_runtime=$(canonical_atlas_runtime_path "$1") || return 1
   destination_forwarder=$(atlas_forwarder_path "$destination_runtime")
   previous_candidate=$(command -v atlas 2>/dev/null || true)
   previous_candidate_identity=
@@ -2416,7 +2437,7 @@ verify_release_checksum() {
 }
 
 if [ -n "$runtime_override" ]; then
-  runtime_override=$(canonical_file "$runtime_override") || {
+  runtime_override=$(canonical_atlas_runtime_path "$runtime_override") || {
     printf '%s\n' "ProjectAtlas runtime path could not be canonicalized: $runtime_override" >&2
     exit 1
   }
