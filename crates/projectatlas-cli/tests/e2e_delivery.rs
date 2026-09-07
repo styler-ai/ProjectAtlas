@@ -29011,6 +29011,20 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         }
     }
 
+    let retained_state = fs::read(&installer_state)?;
+    let retained_forwarder = forwarder.with_extension("retained");
+    fs::rename(&forwarder, &retained_forwarder)?;
+    fs::write(&provenance, "unmanaged provenance\n")?;
+    require(
+        !run_install()?.status.success()
+            && !forwarder.exists()
+            && fs::read_to_string(&provenance)? == "unmanaged provenance\n"
+            && fs::read(&installer_state).is_ok_and(|state| state == retained_state),
+        "missing-forwarder repair changed retained ownership after rejecting malformed provenance",
+    )?;
+    fs::write(&provenance, &expected_provenance)?;
+    fs::rename(&retained_forwarder, &forwarder)?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

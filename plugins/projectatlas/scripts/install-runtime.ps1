@@ -2389,6 +2389,11 @@ function Ensure-ProjectAtlasAtlasForwarderState {
         if (Test-ProjectAtlasManagedAtlasForwarder $ForwarderPath $VerifiedPath) {
             return $false
         }
+        $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $ForwarderPath
+        if ((Test-Path -LiteralPath $provenancePath) `
+            -and -not (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $ForwarderPath $VerifiedPath)) {
+            throw "ProjectAtlas atlas forwarder provenance collision; refusing to overwrite: $provenancePath"
+        }
         try {
             Remove-ProjectAtlasAtlasForwarderState $ForwarderPath $VerifiedPath
         }

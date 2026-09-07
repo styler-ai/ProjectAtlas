@@ -107,6 +107,10 @@ Install, update, repair, and uninstall SHALL manage the verified runtime, npm ca
 - **WHEN** ProjectAtlas is removed
 - **THEN** only proven-owned artifacts are removed and selected project databases/configuration plus unrelated host state remain according to the documented retention contract
 
+#### Scenario: Missing forwarder with malformed retained provenance
+- **WHEN** a forwarder is absent but its valid private state and malformed provenance remain
+- **THEN** repair refuses before rotating private state, preserving the retained ownership bytes and leaving the forwarder absent
+
 #### Scenario: Forwarder target is unavailable
 - **WHEN** an authenticated forwarder target is missing or cannot execute
 - **THEN** retirement derives ownership from its exact generated body, provenance, and private capability state without requiring that target to run; malformed or incomplete ownership remains a refusal, and publication still requires a verified destination runtime

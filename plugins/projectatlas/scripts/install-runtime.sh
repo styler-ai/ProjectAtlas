@@ -511,6 +511,12 @@ ensure_atlas_forwarder_state() {
     if is_managed_atlas_forwarder "$forwarder" "$verified"; then
       return 0
     fi
+    provenance=$(atlas_forwarder_provenance_path "$forwarder")
+    if { [ -e "$provenance" ] || [ -L "$provenance" ]; } &&
+      ! is_atlas_forwarder_provenance "$provenance" "$forwarder" "$verified"; then
+      printf '%s\n' "ProjectAtlas atlas forwarder provenance collision; refusing to overwrite: $provenance" >&2
+      return 1
+    fi
     if ! remove_atlas_forwarder_state "$forwarder" "$verified"; then
       printf '%s\n' "ProjectAtlas atlas forwarder installer state is retained without a managed forwarder; refusing to reuse: $state_path" >&2
       return 1
