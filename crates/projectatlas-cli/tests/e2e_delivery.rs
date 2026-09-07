@@ -29145,6 +29145,30 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         )?;
     }
 
+    // Check completed reinstall cleanup before intentionally killing a staged owner.
+    let second_output = run_install()?;
+    require(
+        second_output.status.success() && forwarder.is_file(),
+        format!(
+            "installer repair/update did not preserve the owned forwarder:\n{}\n{}",
+            String::from_utf8_lossy(&second_output.stdout),
+            String::from_utf8_lossy(&second_output.stderr)
+        ),
+    )?;
+
+    require(
+        !fs::read_dir(&runtime_dir)?
+            .collect::<Result<Vec<_>, io::Error>>()?
+            .iter()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atlas-forwarder-provenance.")
+            }),
+        "installer reinstall retained staged forwarder provenance",
+    )?;
+
     let unrelated_state = installer_state_dir.join("unrelated-state");
     let unrelated_state_content = if cfg!(windows) {
         b"unrelated installer state\r\n".as_slice()
@@ -29674,29 +29698,6 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             alias_delayed_expansion.status,
             String::from_utf8_lossy(&alias_delayed_expansion.stderr)
         ),
-    )?;
-
-    let second_output = run_install()?;
-    require(
-        second_output.status.success() && forwarder.is_file(),
-        format!(
-            "installer repair/update did not preserve the owned forwarder:\n{}\n{}",
-            String::from_utf8_lossy(&second_output.stdout),
-            String::from_utf8_lossy(&second_output.stderr)
-        ),
-    )?;
-
-    require(
-        !fs::read_dir(&runtime_dir)?
-            .collect::<Result<Vec<_>, io::Error>>()?
-            .iter()
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".atlas-forwarder-provenance.")
-            }),
-        "installer reinstall retained staged forwarder provenance",
     )?;
 
     let hardlink_source = fixture_root.join(if cfg!(windows) {
