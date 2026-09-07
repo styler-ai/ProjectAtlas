@@ -974,11 +974,16 @@ fn parse_docx(
                             }
                         }
                     }
-                    "tab" | "br" | "cr" => {
+                    "tab" | "br" | "cr" | "noBreakHyphen" | "softHyphen" => {
                         if let Some(run) = paragraph.run.as_mut() {
                             append_docx_run_text(
                                 run,
-                                if name.as_ref() == "tab" { "\t" } else { "\n" },
+                                match name.as_ref() {
+                                    "tab" => "\t",
+                                    "noBreakHyphen" => "\u{2011}",
+                                    "softHyphen" => "\u{00ad}",
+                                    _ => "\n",
+                                },
                                 output.len(),
                             )?;
                         }
@@ -2429,7 +2434,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn direct_xml_preserves_entities_tabs_and_breaks() {
-        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>A &amp; B</w:t><w:tab/><w:br/><w:t>C</w:t></w:r></w:p></w:body></w:document>"#;
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>A &amp; B</w:t><w:tab/><w:br/><w:t>C</w:t><w:noBreakHyphen/><w:t>D</w:t><w:softHyphen/><w:t>E</w:t></w:r></w:p></w:body></w:document>"#;
         let mut bytes = Vec::new();
         {
             let mut writer = ZipWriter::new(Cursor::new(&mut bytes));
@@ -2441,11 +2446,11 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         }
         let facts = extract_document_text_controlled(&bytes, "guide.docx", None, &control())
             .expect("valid DOCX");
-        assert_eq!(facts.text, "A & B\t\nC");
-        assert_eq!(facts.facts[0].text, "A & B\t\nC");
+        assert_eq!(facts.text, "A & B\t\nC\u{2011}D\u{00ad}E");
+        assert_eq!(facts.facts[0].text, "A & B\t\nC\u{2011}D\u{00ad}E");
         assert_eq!(
             facts.facts[0].locator.to_string(),
-            "docx:part=word/document.xml;paragraph=1;run=1;text-span=0..8"
+            "docx:part=word/document.xml;paragraph=1;run=1;text-span=0..15"
         );
     }
 

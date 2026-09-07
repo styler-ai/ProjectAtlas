@@ -9627,7 +9627,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         write!(docx, "<!--{}-->", " ".repeat(2_000_001))?;
         write!(
             docx,
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\"><w:body><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>{text}</w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"future\"><w:t>Wrong alternative</w:t></mc:Choice><mc:Fallback><w:instrText>Inside box</w:instrText></mc:Fallback></mc:AlternateContent></w:r></w:p></w:txbxContent></w:drawing><w:t>After box</w:t></w:r></w:p></w:body></w:document>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\"><w:body><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>{text}</w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:r><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"future\"><w:t>Wrong alternative</w:t></mc:Choice><mc:Fallback><w:instrText>Inside box</w:instrText></mc:Fallback></mc:AlternateContent></w:r></w:p></w:txbxContent></w:drawing><w:t>After</w:t><w:noBreakHyphen/><w:t>box</w:t><w:softHyphen/><w:t>end</w:t></w:r></w:p></w:body></w:document>"
         )?;
         docx.finish()?;
         Ok(())
@@ -9790,7 +9790,13 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             "After empty\ncontinued",
         ),
         ("docs/guide.docx", "document-block-4", 6, 6, "Inside box"),
-        ("docs/guide.docx", "document-block-5", 7, 7, "After box"),
+        (
+            "docs/guide.docx",
+            "document-block-5",
+            7,
+            7,
+            "After\u{2011}box\u{00ad}end",
+        ),
     ];
     for (path, symbol, start, end, content) in slice_cases {
         let slice = run_mcp_contract_json(

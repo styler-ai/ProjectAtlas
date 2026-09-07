@@ -252,7 +252,8 @@ isolated across text-box contexts. Markup Compatibility alternatives select only
 the first choice whose required namespaces are understood WordprocessingML, or
 the fallback. Unselected branches cannot alter text, locators, or field context;
 they retain XML depth, well-formedness, and declaration checks. Explicit language overrides take precedence
-over a PDF/DOCX extension. Each result carries a page/text-span or
+over a PDF/DOCX extension. Explicit nonbreaking and soft hyphens retain their
+Unicode characters and count toward decoded byte offsets. Each result carries a page/text-span or
 part/paragraph/run/text-span locator plus its actual emitted-text line range
 for symbol slicing, parser provenance, and a complete
 coverage marker. Normal text, symbol, and summary admission uses the document
