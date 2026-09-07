@@ -2446,13 +2446,18 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         r#"
 $ErrorActionPreference = 'Stop'
 $source = [IO.File]::ReadAllText($env:PROJECTATLAS_DISCOVERY_INSTALLER)
-foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Get-ProjectAtlasAtlasForwarderPath', 'Assert-ProjectAtlasAtlasForwarderCollisionFree', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
+foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Get-ProjectAtlasAtlasForwarderPath', 'Assert-ProjectAtlasAtlasForwarderCollisionFree', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Write-ProjectAtlasPathShadowReport', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
     $definition = [regex]::Match($source, "(?ms)^function $name \{.*?^\}")
     if (-not $definition.Success) { throw "Missing command discovery owner: $name" }
     Invoke-Expression $definition.Value
 }
 [void](Resolve-Path $env:PROJECTATLAS_DISCOVERY_EMPTY)
 $env:PSModulePath = $env:PROJECTATLAS_DISCOVERY_MODULES
+$env:Path = [IO.Path]::Combine($env:SystemRoot, 'System32')
+$missingPathWarning = @(Write-ProjectAtlasPathShadowReport $env:PROJECTATLAS_DISCOVERY_SCRIPT '0.4.5' 3>&1)
+if (-not ($missingPathWarning -match "Bare 'projectatlas' is not on PATH")) {
+    throw 'Missing PATH runtime did not produce the advisory warning'
+}
 $env:Path = $env:PROJECTATLAS_DISCOVERY_EMPTY
 if (Test-ProjectAtlasBareCommandResolutionOnPath $env:Path $env:PROJECTATLAS_DISCOVERY_SCRIPT) {
     throw 'Module-only command was classified as a PATH runtime'
@@ -28913,6 +28918,65 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     let installer_state = installer_states[0].path();
 
+    #[cfg(windows)]
+    {
+        let legacy_body = format!(
+            "@echo off\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{canonical_runtime}\" %*\r\nexit /b %ERRORLEVEL%\r\n"
+        );
+        let retained_state = fs::read(&installer_state)?;
+        fs::write(&forwarder, &legacy_body)?;
+        let failed_stage = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_STAGE_FAILURE",
+            Path::new("1"),
+        )?;
+        require(
+            !failed_stage.status.success()
+                && fs::read_to_string(&forwarder)? == legacy_body
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == retained_state,
+            "legacy forwarder staging failure changed the owned installation",
+        )?;
+        let repaired = run_install()?;
+        require(
+            repaired.status.success()
+                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == retained_state,
+            "same-path update retained the legacy forwarder or changed its ownership metadata",
+        )?;
+        for race in [
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH",
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH",
+        ] {
+            fs::write(&forwarder, &legacy_body)?;
+            let prior_paths = fs::read_dir(&runtime_dir)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<Vec<_>, io::Error>>()?;
+            let collided = run_install_with_env(race, &forwarder)?;
+            require(
+                !collided.status.success()
+                    && fs::read_to_string(&forwarder)?.starts_with("# foreign ")
+                    && fs::read_to_string(&provenance)? == expected_provenance
+                    && fs::read(&installer_state)? == retained_state
+                    && fs::read_dir(&runtime_dir)?
+                        .collect::<Result<Vec<_>, io::Error>>()?
+                        .iter()
+                        .any(|entry| {
+                            !prior_paths.contains(&entry.path())
+                                && entry
+                                    .file_name()
+                                    .to_string_lossy()
+                                    .starts_with(".atlas-forwarder-retire-")
+                                && fs::read_to_string(entry.path())
+                                    .is_ok_and(|body| body == legacy_body)
+                        }),
+                "legacy update collision lost the prior forwarder or changed foreign/owned state",
+            )?;
+            fs::remove_file(&forwarder)?;
+        }
+        fs::write(&forwarder, &expected_forwarder_text)?;
+    }
+
     #[cfg(unix)]
     {
         let ownership_retry = run_install()?;
@@ -30682,7 +30746,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     };
 
     // A short test-only budget makes each lock position fail deterministically;
-    // the production budget remains one monotonic 30-second lock-set deadline.
+    // the production budget remains one shared 30-second lock-wait budget.
     // Keep both sorted locks occupied so the contender spends most of its one
     // budget waiting for lock 1, then proves that the remaining time—not a
     // reset budget—is used for lock 2.
@@ -30725,6 +30789,13 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     }
     let mut timed_first = make_installer(&second_runtime, &first_then_second_path, None, None)?;
     timed_first.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
+    #[cfg(unix)]
+    let lock_wait_trace = fixture_root.join("deadline-lock-waits.txt");
+    #[cfg(unix)]
+    timed_first.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE",
+        &lock_wait_trace,
+    );
     let timed_first_attempt = fixture_root.join("deadline-held-first-attempt.gate");
     let timed_first_attempt_ready =
         PathBuf::from(format!("{}.ready", timed_first_attempt.display()));
@@ -30744,16 +30815,21 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         drop(held_second.wait());
         return Err(error);
     }
+    #[cfg(windows)]
     let contender_started = Instant::now();
     thread::sleep(Duration::from_millis(200));
     held_first.kill()?;
-    let held_first_output = held_first.wait_with_output()?;
+    terminate_plugin_installer_process_tree(&mut held_first)?;
     let timed_first_output = wait_for_plugin_installer_output(
         timed_first,
         "deadline held-first contender",
         Duration::from_secs(5),
     )?;
+    #[cfg(windows)]
     let contender_elapsed = contender_started.elapsed();
+    // Reaping the interrupted owner also drains its descendants' output pipes;
+    // that cleanup is independent of the contender's shared lock deadline.
+    let held_first_output = held_first.child.wait_with_output()?;
     fs::remove_file(&timed_first_attempt_ready)?;
     fs::remove_file(&held_first_gate)?;
     fs::remove_file(&held_first_ready)?;
@@ -30774,6 +30850,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
             String::from_utf8_lossy(&timed_first_output.stderr)
         ),
     )?;
+    #[cfg(windows)]
     require(
         contender_elapsed >= Duration::from_millis(180)
             && contender_elapsed < Duration::from_millis(425),
@@ -30781,6 +30858,34 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
             "held-first contender did not consume one shared lock deadline (elapsed={contender_elapsed:?}; expected 180..425 ms)"
         ),
     )?;
+    #[cfg(unix)]
+    {
+        // Shell hashing, identity checks and process startup are outside native
+        // lock waits. Inspect the actual remaining budget passed to lock 2.
+        let trace = fs::read_to_string(&lock_wait_trace)?;
+        let rows = trace
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        require(
+            rows.len() == 3
+                && rows[0] == ["request", "8", "250"]
+                && rows[1].len() == 4
+                && rows[1][..2] == ["acquired", "8"]
+                && rows[2].len() == 3
+                && rows[2][..2] == ["request", "7"],
+            format!("contender did not reach both ordered native lock waits: {trace}"),
+        )?;
+        let first_wait = rows[1][2].parse::<u64>()?;
+        let remaining = rows[1][3].parse::<u64>()?;
+        require(
+            first_wait > 0
+                && first_wait < 250
+                && first_wait + remaining == 250
+                && rows[2][2].parse::<u64>()? == remaining,
+            format!("contender reset the shared native lock-wait budget: {trace}"),
+        )?;
+    }
     let mut probe_first = make_installer(&first_runtime, &first_only_path, None, None)?;
     probe_first.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
     let probe_first_output = probe_first.output()?;

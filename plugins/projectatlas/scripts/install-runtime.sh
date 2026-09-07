@@ -247,6 +247,12 @@ acquire_atlas_forwarder_lifecycle_lock_fd() {
   if [ -n "$lock_runtime" ]; then
     lock_elapsed_ms=
     if [ "$lock_fd" = 8 ]; then
+      signal_atlas_forwarder_lock_attempt
+    fi
+    if [ -n "${PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE:-}" ]; then
+      printf 'request %s %s\n' "$lock_fd" "$atlas_forwarder_lifecycle_lock_remaining_ms" >>"$PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE"
+    fi
+    if [ "$lock_fd" = 8 ]; then
       lock_elapsed_ms=$("$lock_runtime" acquire-installer-lock "$lock_device" "$lock_inode" \
         "$atlas_forwarder_lifecycle_lock_remaining_ms" --report-elapsed <&8)
     else
@@ -262,6 +268,9 @@ acquire_atlas_forwarder_lifecycle_lock_fd() {
             atlas_forwarder_lifecycle_lock_remaining_ms=0
           else
             atlas_forwarder_lifecycle_lock_remaining_ms=$((atlas_forwarder_lifecycle_lock_remaining_ms - lock_elapsed_ms))
+          fi
+          if [ -n "${PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE:-}" ]; then
+            printf 'acquired %s %s %s\n' "$lock_fd" "$lock_elapsed_ms" "$atlas_forwarder_lifecycle_lock_remaining_ms" >>"$PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE"
           fi
           ;;
       esac
@@ -829,7 +838,6 @@ write_atlas_forwarder() {
     previous_candidate=
   fi
   pause_atlas_forwarder_after_lock_discovery
-  signal_atlas_forwarder_lock_attempt
   acquire_atlas_forwarder_lifecycle_lock_set "$destination_forwarder" "$previous_candidate" || return 1
   pause_atlas_forwarder_after_lock_acquisition
   result=0

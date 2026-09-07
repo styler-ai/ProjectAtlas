@@ -2000,12 +2000,16 @@ function Get-ProjectAtlasShellCommand {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name,
-        [System.Management.Automation.CommandTypes]$CommandType
+        [System.Management.Automation.CommandTypes]$CommandType,
+        [switch]$All
     )
     # Forward only requested filters; explicit All changes native command precedence.
     $lookup = @{ Name = $Name; ErrorAction = 'SilentlyContinue' }
     if ($PSBoundParameters.ContainsKey('CommandType')) {
         $lookup.CommandType = $CommandType
+    }
+    if ($All) {
+        $lookup.All = $true
     }
     $prior = $ExecutionContext.SessionState.PSVariable.Get('global:PSModuleAutoLoadingPreference')
     # An immutable caller preference remains authoritative.
@@ -2960,6 +2964,7 @@ function Write-ProjectAtlasAtlasForwarderLocked {
     $statePublished = $false
     $provenancePublished = $false
     $forwarderPublished = $false
+    $legacyQuarantine = $null
     try {
         [System.IO.File]::WriteAllText($temporary, $content, $utf8NoBom)
         [System.IO.File]::WriteAllText($temporaryProvenance, $provenanceContent, $utf8NoBom)
@@ -2988,6 +2993,20 @@ function Write-ProjectAtlasAtlasForwarderLocked {
             $provenancePublished = $true
         }
         Assert-ProjectAtlasAtlasForwarderCollisionFree $VerifiedPath | Out-Null
+        if ((Test-Path -LiteralPath $forwarder) `
+            -and [System.IO.File]::ReadAllText($forwarder) -cne $content) {
+            $legacyQuarantine = New-ProjectAtlasAtlasForwarderQuarantinePath $forwarder
+            [System.IO.File]::Move($forwarder, $legacyQuarantine)
+            Assert-ProjectAtlasDirectFilePath $legacyQuarantine "ProjectAtlas atlas forwarder update quarantine"
+            if ([System.IO.File]::ReadAllText($legacyQuarantine) -cne (Get-ProjectAtlasLegacyAtlasForwarderContent $VerifiedPath) `
+                -or -not (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath)) {
+                throw "ProjectAtlas atlas forwarder changed during same-path update: $forwarder"
+            }
+            Invoke-ProjectAtlasAtlasForwarderRetirementRace `
+                $forwarder `
+                "PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH" `
+                "# foreign forwarder retirement race`r`n"
+        }
         if (-not (Test-Path -LiteralPath $forwarder)) {
             Invoke-ProjectAtlasAtlasForwarderPublicationRace $forwarder
             try {
@@ -2998,8 +3017,13 @@ function Write-ProjectAtlasAtlasForwarderLocked {
             }
             $forwarderPublished = $true
         }
-        if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath)) {
+        if (-not (Test-ProjectAtlasManagedAtlasForwarder $forwarder $VerifiedPath) `
+            -or [System.IO.File]::ReadAllText($forwarder) -cne $content) {
             throw "ProjectAtlas atlas forwarder failed final ownership verification: $forwarder"
+        }
+        if ($legacyQuarantine) {
+            Remove-Item -LiteralPath $legacyQuarantine
+            $legacyQuarantine = $null
         }
         if ($PreviousPath) {
             if (-not (Move-ProjectAtlasManagedAtlasForwarderLocked $PreviousPath $VerifiedPath)) {
@@ -3010,6 +3034,11 @@ function Write-ProjectAtlasAtlasForwarderLocked {
     catch {
         $originalError = $_
         $cleanupErrors = @()
+        if ($legacyQuarantine -and (Test-Path -LiteralPath $legacyQuarantine)) {
+            if (-not (Restore-ProjectAtlasAtlasForwarderQuarantine $legacyQuarantine $forwarder)) {
+                $cleanupErrors += "ProjectAtlas preserved the prior atlas forwarder at $legacyQuarantine because its destination changed."
+            }
+        }
         if ($provenancePublished -and -not $forwarderPublished `
             -and (Test-ProjectAtlasAtlasForwarderProvenance $provenancePath $forwarder $VerifiedPath)) {
             try {
@@ -3172,7 +3201,7 @@ function Write-ProjectAtlasPathShadowReport {
         return
     }
     $verified = Get-NormalizedPathEntry $VerifiedPath
-    $candidates = @(where.exe projectatlas 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $candidates = @(Get-ProjectAtlasShellCommand projectatlas -CommandType Application -All | ForEach-Object { $_.Path })
     if ($candidates.Count -eq 0) {
         Write-Warning "Bare 'projectatlas' is not on PATH. Generated MCP configs use the verified absolute runtime: $VerifiedPath"
         return
