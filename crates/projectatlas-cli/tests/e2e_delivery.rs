@@ -25542,6 +25542,32 @@ fn spawn_codex_owned_obsolete_mcp_with_test_delays(
 #[cfg(windows)]
 fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Result<(), Box<dyn Error>>
 {
+    // Metadata can disappear after Get-Process retains an exiting process.
+    // A live identity mismatch must still refuse cleanup without calling Kill.
+    for (exited, expected_exit) in [("false", 3), ("true", 0)] {
+        let script = format!(
+            r#"function Get-Process {{
+    $observed = [pscustomobject]@{{ Handle = 0; StartTime = [DateTime]::UtcNow; Path = $env:SystemRoot; HasExited = [bool]::Parse($env:PROJECTATLAS_TEST_OBSERVED_EXITED) }}
+    $observed | Add-Member -MemberType ScriptMethod -Name Dispose -Value {{}}
+    $observed
+}}
+{WINDOWS_FIXTURE_STOP_SCRIPT}"#
+        );
+        let output = StdCommand::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .env("PROJECTATLAS_TEST_OBSERVED_EXITED", exited)
+            .env("PROJECTATLAS_FIXTURE_CREATION", "0")
+            .env("PROJECTATLAS_FIXTURE_PATH", env::temp_dir())
+            .output()?;
+        require(
+            output.status.code() == Some(expected_exit),
+            format!(
+                "exact child cleanup misclassified exited={exited} metadata mismatch: {}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+    }
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
@@ -26220,7 +26246,7 @@ fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(),
 }
 
 #[cfg(windows)]
-const WINDOWS_FIXTURE_STOP_SCRIPT: &str = "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { $result = 3 } elseif (-not $process.HasExited) { if ($env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) }; $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result";
+const WINDOWS_FIXTURE_STOP_SCRIPT: &str = "$process = Get-Process -Id $env:PROJECTATLAS_FIXTURE_PID -ErrorAction SilentlyContinue; if ($null -eq $process) { exit 0 }; $result = 0; try { $heldHandle = $process.Handle; $creation = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); $path = [System.IO.Path]::GetFullPath($process.Path); if ($creation -ne [long]$env:PROJECTATLAS_FIXTURE_CREATION -or -not [string]::Equals($path, [System.IO.Path]::GetFullPath($env:PROJECTATLAS_FIXTURE_PATH), [System.StringComparison]::OrdinalIgnoreCase)) { if (-not $process.HasExited) { $result = 3 } } elseif (-not $process.HasExited) { if ($env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:PROJECTATLAS_TEST_CODEX_OWNER_STOP_DELAY_MS) }; $process.Kill(); if (-not $process.WaitForExit(5000)) { $result = 5 } } } catch { if (-not $process.HasExited) { $result = 4 } } finally { $process.Dispose() }; exit $result";
 
 #[cfg(windows)]
 fn spawn_windows_fixture_stop_helper(
