@@ -3688,6 +3688,127 @@ exit 7
             $status.exit_code -eq 7 -and
             $script:constructionFailureExitCode -eq 7) `
         "Failure diagnostic changed the authoritative status record."
+
+    $parallelCommand = ${function:Invoke-Checked}.ToString()
+    $parallelTail = ${function:Add-BoundedDiagnosticTail}.ToString()
+    $parallelFailureCommand = @'
+[Console]::Out.Write("parallel-stdout-head" + ("o" * 30000) + "parallel-stdout-tail")
+[Console]::Error.Write("parallel-stderr-head" + ("e" * 30000) + "parallel-stderr-tail")
+exit 7
+'@
+    $parallelFailure = @(
+        [pscustomobject]@{ index = 0; command = $parallelFailureCommand } |
+            ForEach-Object -Parallel {
+                $index = [string]$_.index
+                try {
+                    Set-Item -Path Function:global:Add-BoundedDiagnosticTail -Value $using:parallelTail
+                    Set-Item -Path Function:global:Invoke-Checked -Value $using:parallelCommand
+                    $commandDiagnosticTailBytes = 24576
+                    Invoke-Checked `
+                        -Executable $using:pwsh `
+                        -Arguments @("-NoProfile", "-Command", [string]$_.command) `
+                        -Role "artifact assembly $index" `
+                        -ReturnReceipt
+                }
+                catch {
+                    [pscustomobject]@{
+                        role = "parallel artifact construction $index"
+                        exit_code = 1
+                        stdout = ""
+                        stderr = $_.Exception.Message
+                    }
+                }
+            } `
+            -ThrottleLimit 1
+    ) | Select-Object -First 1
+    Require `
+        ($parallelFailure.role -eq "artifact assembly 0" -and
+            $parallelFailure.exit_code -eq 7) `
+        "Parallel native failure lost its role or exit code."
+    Write-BoundedConstructionDiagnostic `
+        -Role ([string]$parallelFailure.role) `
+        -StandardOutput ([string]$parallelFailure.stdout) `
+        -StandardError ([string]$parallelFailure.stderr)
+    $parallelDiagnostic = Get-Item -LiteralPath $script:constructionDiagnosticPath -Force
+    $parallelDiagnosticText = [System.IO.File]::ReadAllText($parallelDiagnostic.FullName)
+    Require `
+        ($parallelDiagnostic.Length -le $constructionDiagnosticMaxBytes -and
+            $parallelDiagnosticText.Contains("artifact assembly 0") -and
+            $parallelDiagnosticText.Contains("parallel-stdout-tail") -and
+            $parallelDiagnosticText.Contains("parallel-stderr-tail") -and
+            -not $parallelDiagnosticText.Contains("parallel-stdout-head") -and
+            -not $parallelDiagnosticText.Contains("parallel-stderr-head")) `
+        "Parallel native failure did not retain bounded stream tails."
+
+    $parallelSuccess = @(
+        [pscustomobject]@{ index = 1 } |
+            ForEach-Object -Parallel {
+                $index = [string]$_.index
+                try {
+                    Set-Item -Path Function:global:Add-BoundedDiagnosticTail -Value $using:parallelTail
+                    Set-Item -Path Function:global:Invoke-Checked -Value $using:parallelCommand
+                    $commandDiagnosticTailBytes = 24576
+                    Invoke-Checked `
+                        -Executable $using:pwsh `
+                        -Arguments @(
+                            "-NoProfile",
+                            "-Command",
+                            '[Console]::Out.Write("parallel-success"); [Console]::Error.Write("parallel-success-error"); exit 0'
+                        ) `
+                        -Role "artifact assembly $index" `
+                        -ReturnReceipt
+                }
+                catch {
+                    [pscustomobject]@{
+                        role = "parallel artifact construction $index"
+                        exit_code = 1
+                        stdout = ""
+                        stderr = $_.Exception.Message
+                    }
+                }
+            } `
+            -ThrottleLimit 1
+    ) | Select-Object -First 1
+    Require `
+        ($parallelSuccess.role -eq "artifact assembly 1" -and
+            $parallelSuccess.exit_code -eq 0 -and
+            $parallelSuccess.stdout -eq "parallel-success" -and
+            $parallelSuccess.stderr -eq "parallel-success-error") `
+        "Parallel successful command did not preserve its stream receipt."
+
+    $parallelStartFailure = Invoke-Checked `
+        -Executable ([System.IO.Path]::Combine($testRoot, "missing-command.exe")) `
+        -Arguments @("--version") `
+        -Role "artifact assembly start" `
+        -ReturnReceipt
+    Require `
+        ($parallelStartFailure.exit_code -eq 1 -and
+            $parallelStartFailure.stderr.Length -gt 0) `
+        "Parallel command startup failure did not return one diagnostic receipt."
+
+    $parallelRunspaceFailure = @(
+        [pscustomobject]@{ index = 2 } |
+            ForEach-Object -Parallel {
+                $index = [string]$_.index
+                try {
+                    throw "parallel runspace failure self-test"
+                }
+                catch {
+                    [pscustomobject]@{
+                        role = "parallel artifact construction $index"
+                        exit_code = 1
+                        stdout = ""
+                        stderr = $_.Exception.Message
+                    }
+                }
+            } `
+            -ThrottleLimit 1
+    ) | Select-Object -First 1
+    Require `
+        ($parallelRunspaceFailure.role -eq "parallel artifact construction 2" -and
+            $parallelRunspaceFailure.exit_code -eq 1 -and
+            $parallelRunspaceFailure.stderr -eq "parallel runspace failure self-test") `
+        "Parallel runspace failure did not return one diagnostic receipt."
     if ($env:OS -eq "Windows_NT") {
         & (Join-Path $PSScriptRoot "test-parser-pack-runtime-containment-verifier.ps1")
     }

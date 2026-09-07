@@ -5,7 +5,7 @@
 ## 2. Dependency update
 
 - [x] 2.1 Refresh the locked rmcp and rmcp-macros resolution to 3.2.0 while retaining the existing manifest requirement and features; pin tree-sitter-language to 0.1.8 and tree-sitter-language-pack to 1.16.1 on accepted main, limiting manifest and lockfile changes to the intended update.
-- [ ] 2.2 Verify MCP identity and stdio behavior, built-in parser precedence, optional parser loading and typed refusal compatibility using the existing owning tests; complete the affected local, dependency-policy, and hosted platform checks and reconcile the specification with the delivered behavior.
+- [ ] 2.2 Preserve bounded diagnostics for failed parallel parser construction commands, verify MCP identity and stdio behavior, built-in parser precedence, optional parser loading and typed refusal compatibility using the existing owning tests, and complete the affected local, dependency-policy, and hosted platform checks while reconciling the specification with the delivered behavior.
 
 ## Verification
 

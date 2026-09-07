@@ -15,6 +15,7 @@ PR #566 updates the libraries used by the existing MCP server and optional parse
 - Reuse existing MCP stdio, parser-worker, and platform tests. Help output or successful compilation alone cannot prove transport or dynamic-loader compatibility.
 - Let the affected-proof planner and normal pre-push hook select mandatory checks. Inspect hosted selection for optional parser-pack consumers and execute existing supported proof routes where necessary; do not introduce another workflow.
 - Architecture diagrams are N/A because MCP, parser-worker, and artifact trust ownership remain unchanged.
+- Retain bounded per-command diagnostics from parallel construction through the existing diagnostic writer. Include the construction index, command role, native exit or launch failure, and bounded output tails. Keep the two assemblies independent and preserve the existing containment, failure, and publication rules.
 
 ## Risks / Trade-offs
 
@@ -22,6 +23,7 @@ PR #566 updates the libraries used by the existing MCP server and optional parse
 - MCP protocol or lifecycle regression: run existing identity, stdio, and failure-boundary tests with the new locked SDK.
 - Native loader or artifact compatibility regression: preserve built-in precedence and verify existing supported loading and unsupported/refusal behavior with the unchanged accepted artifact contract.
 - A skipped CI job can hide a proof gap: inspect the selected checks and actual completed platform results before acceptance.
+- Parallel command failures can lose their actual error at the outer trap: exercise native failure and launch-error diagnostics through the existing construction diagnostics test, including oversized output bounds. Successful compilation does not establish archive compatibility.
 
 ## Migration Plan
 

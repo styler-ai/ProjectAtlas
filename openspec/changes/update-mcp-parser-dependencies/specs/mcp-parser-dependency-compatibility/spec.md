@@ -36,3 +36,25 @@ The dependency update SHALL pass the existing required local, dependency-policy,
 - **WHEN** a required MCP or optional parser compatibility boundary lacks executed proof in the selected checks
 - **THEN** the update remains unaccepted until the existing owning proof route is executed successfully
 - **AND** compilation or help output alone does not substitute for runtime compatibility evidence
+
+### Requirement: Parallel construction failures retain bounded diagnostics
+
+The existing contained-construction runner SHALL identify failed parallel commands and retain their bounded output or launch error through its existing diagnostic mechanism. It MUST preserve construction isolation, independent assembly execution, nonzero failure, and refusal to publish incomplete artifacts.
+
+#### Scenario: A parallel native command fails
+
+- **WHEN** an assembler or archive command exits unsuccessfully
+- **THEN** the diagnostic identifies its construction index, command role, and exit code with bounded stdout and stderr tails
+- **AND** construction remains failed and incomplete artifacts are not published
+
+#### Scenario: A command cannot start
+
+- **WHEN** a parallel command fails before native execution
+- **THEN** a bounded diagnostic identifies the affected command and launch error
+- **AND** the outer failure handler does not discard that error
+
+#### Scenario: Output exceeds the diagnostic limit
+
+- **WHEN** a failed command produces oversized output
+- **THEN** reported output remains within the existing 24 KiB diagnostic tail bounds
+- **AND** the diagnostic retains the command identity and failure status
