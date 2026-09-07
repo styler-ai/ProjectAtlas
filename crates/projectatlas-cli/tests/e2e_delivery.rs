@@ -28554,14 +28554,18 @@ fn require_schema_version_mismatch(
 #[test]
 fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo with spaces");
+    #[cfg(unix)]
+    let fixture_root = temp.path().canonicalize()?;
+    #[cfg(not(unix))]
+    let fixture_root = temp.path().to_path_buf();
+    let repo = fixture_root.join("repo with spaces");
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
         atlas_dir.join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
-    let runtime_dir = temp.path().join("runtime with spaces");
+    let runtime_dir = fixture_root.join("runtime with spaces");
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join(if cfg!(windows) {
         "projectatlas.exe"
@@ -28576,7 +28580,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         permissions.set_mode(0o755);
         fs::set_permissions(&runtime, permissions)?;
     }
-    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
+    let home = fixture_root.join(TEST_ISOLATED_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
     let inherited_path = env::var_os("PATH").unwrap_or_default();
     let run_path = env::join_paths(
@@ -28855,7 +28859,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         )
     } else {
         format!(
-            "# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
+            "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
         )
     };
     require(
@@ -28937,7 +28941,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     fs::remove_file(&forwarder)?;
     fs::remove_file(&provenance)?;
     fs::remove_file(&installer_state)?;
-    let lifecycle_gate = temp.path().join("atlas-forwarder-lifecycle.gate");
+    let lifecycle_gate = fixture_root.join("atlas-forwarder-lifecycle.gate");
     let lifecycle_ready = PathBuf::from(format!("{}.ready", lifecycle_gate.display()));
     fs::write(&lifecycle_gate, b"hold\n")?;
     let mut paused_install = projectatlas_plugin_installer_command_with_optional_path_and_home(
@@ -29286,8 +29290,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
     fs::remove_file(&unrelated_state)?;
 
-    let direct_database = temp.path().join("direct database with spaces.db");
-    let alias_database = temp.path().join("alias database with spaces.db");
+    let direct_database = fixture_root.join("direct database with spaces.db");
+    let alias_database = fixture_root.join("alias database with spaces.db");
     let arguments = [
         "--require-version",
         env!("CARGO_PKG_VERSION"),
@@ -29459,7 +29463,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         ),
     )?;
 
-    let hardlink_source = temp.path().join(if cfg!(windows) {
+    let hardlink_source = fixture_root.join(if cfg!(windows) {
         "atlas-hardlink-source.cmd"
     } else {
         "atlas-hardlink-source"
@@ -29491,7 +29495,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     {
         use std::os::unix::fs::symlink;
 
-        let symlink_source = temp.path().join("atlas-symlink-source");
+        let symlink_source = fixture_root.join("atlas-symlink-source");
         fs::copy(&forwarder, &symlink_source)?;
         fs::remove_file(&forwarder)?;
         symlink(&symlink_source, &forwarder)?;
@@ -29516,11 +29520,11 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         )?;
     }
 
-    let effective_collision_dir = temp.path().join("effective atlas collision");
+    let effective_collision_dir = fixture_root.join("effective atlas collision");
     fs::create_dir_all(&effective_collision_dir)?;
     let effective_collision_path =
         effective_collision_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
-    let foreign_target = temp.path().join("foreign runtime").join(if cfg!(windows) {
+    let foreign_target = fixture_root.join("foreign runtime").join(if cfg!(windows) {
         "projectatlas.exe"
     } else {
         "projectatlas"
@@ -29533,7 +29537,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         )
     } else {
         format!(
-            "# ProjectAtlas managed atlas forwarder.\n# target: {}\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {}\nexec '{}' \"$@\"\n",
             foreign_target.display(),
             foreign_target.display().to_string().replace('\'', "'\\''")
         )
@@ -29582,7 +29586,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         )
     } else {
         format!(
-            "# ProjectAtlas managed atlas forwarder.\n# target: {}\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {}\nexec '{}' \"$@\"\n",
             runtime.display(),
             runtime.display().to_string().replace('\'', "'\\''")
         )
@@ -29714,7 +29718,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     let runtime_directory = runtime
         .parent()
         .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?;
-    let retained_runtime_directory = temp.path().join("retained runtime directory");
+    let retained_runtime_directory = fixture_root.join("retained runtime directory");
     fs::rename(runtime_directory, &retained_runtime_directory)?;
     let missing_runtime_uninstall = run_uninstall()?;
     fs::rename(&retained_runtime_directory, runtime_directory)?;
@@ -29772,7 +29776,11 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join(TEST_REPO_DIR);
+    #[cfg(unix)]
+    let fixture_root = temp.path().canonicalize()?;
+    #[cfg(not(unix))]
+    let fixture_root = temp.path().to_path_buf();
+    let repo = fixture_root.join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
@@ -29785,8 +29793,8 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     } else {
         "projectatlas"
     };
-    let first_runtime_dir = temp.path().join("first runtime");
-    let second_runtime_dir = temp.path().join("second runtime");
+    let first_runtime_dir = fixture_root.join("first runtime");
+    let second_runtime_dir = fixture_root.join("second runtime");
     fs::create_dir_all(&first_runtime_dir)?;
     fs::create_dir_all(&second_runtime_dir)?;
     let first_runtime = first_runtime_dir.join(runtime_name);
@@ -29803,7 +29811,7 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
         }
     }
 
-    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
+    let home = fixture_root.join(TEST_ISOLATED_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
     let inherited_path = env::var_os("PATH").unwrap_or_default();
     let installer_path = env::join_paths(
@@ -29907,6 +29915,7 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     let first_provenance = first_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
     let second_provenance = second_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
     let first_forwarder_before_failure = fs::read(&first_forwarder)?;
+    let first_forwarder_permissions = fs::metadata(&first_forwarder)?.permissions();
     let first_provenance_before_failure = fs::read(&first_provenance)?;
     let first_states = installer_state_dir
         .read_dir()?
@@ -29989,6 +29998,7 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     )?;
     fs::remove_file(&first_forwarder)?;
     fs::write(&first_forwarder, &first_forwarder_before_failure)?;
+    fs::set_permissions(&first_forwarder, first_forwarder_permissions)?;
     clear_retirement_quarantine(&first_runtime_dir)?;
 
     let provenance_retirement_race = run_install_with_env(
@@ -30138,7 +30148,11 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
 #[test]
 fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join(TEST_REPO_DIR);
+    #[cfg(unix)]
+    let fixture_root = temp.path().canonicalize()?;
+    #[cfg(not(unix))]
+    let fixture_root = temp.path().to_path_buf();
+    let repo = fixture_root.join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
@@ -30151,8 +30165,8 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     } else {
         "projectatlas"
     };
-    let first_runtime_dir = temp.path().join("opposite first runtime");
-    let second_runtime_dir = temp.path().join("opposite second runtime");
+    let first_runtime_dir = fixture_root.join("opposite first runtime");
+    let second_runtime_dir = fixture_root.join("opposite second runtime");
     fs::create_dir_all(&first_runtime_dir)?;
     fs::create_dir_all(&second_runtime_dir)?;
     let first_runtime = first_runtime_dir.join(runtime_name);
@@ -30169,7 +30183,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         }
     }
 
-    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
+    let home = fixture_root.join(TEST_ISOLATED_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
     let inherited_path = env::var_os("PATH").unwrap_or_default();
     let inherited_entries = env::split_paths(&inherited_path)
@@ -30267,7 +30281,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
             )
         } else {
             format!(
-                "# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
+                "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
             )
         };
         let expected_provenance = if cfg!(windows) {
@@ -30335,8 +30349,8 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     };
     fs::write(&unrelated_state, unrelated_state_content)?;
 
-    let discovery_a = temp.path().join("opposite-a-discovery.gate");
-    let discovery_b = temp.path().join("opposite-b-discovery.gate");
+    let discovery_a = fixture_root.join("opposite-a-discovery.gate");
+    let discovery_b = fixture_root.join("opposite-b-discovery.gate");
     fs::write(&discovery_a, b"hold\n")?;
     fs::write(&discovery_b, b"hold\n")?;
     let discovery_a_ready = PathBuf::from(format!("{}.ready", discovery_a.display()));
@@ -30435,9 +30449,9 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         ),
     )?;
 
-    let recovery_discovery_a = temp.path().join("opposite-recovery-a-discovery.gate");
-    let recovery_discovery_b = temp.path().join("opposite-recovery-b-discovery.gate");
-    let recovery_acquired_a = temp.path().join("opposite-recovery-a-acquired.gate");
+    let recovery_discovery_a = fixture_root.join("opposite-recovery-a-discovery.gate");
+    let recovery_discovery_b = fixture_root.join("opposite-recovery-b-discovery.gate");
+    let recovery_acquired_a = fixture_root.join("opposite-recovery-a-acquired.gate");
     fs::write(&recovery_discovery_a, b"hold\n")?;
     fs::write(&recovery_discovery_b, b"hold\n")?;
     fs::write(&recovery_acquired_a, b"hold\n")?;
@@ -30544,8 +30558,8 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         b"repair-race foreign candidate\n".as_slice()
     };
     fs::write(&second_forwarder, foreign_candidate)?;
-    let repair_discovery = temp.path().join("repair-race-discovery.gate");
-    let repair_state = temp.path().join("repair-race-state.gate");
+    let repair_discovery = fixture_root.join("repair-race-discovery.gate");
+    let repair_state = fixture_root.join("repair-race-state.gate");
     let repair_discovery_ready = PathBuf::from(format!("{}.ready", repair_discovery.display()));
     let repair_state_ready = PathBuf::from(format!("{}.ready", repair_state.display()));
     fs::write(&repair_discovery, b"hold\n")?;
@@ -30664,9 +30678,9 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     // budget waiting for lock 1, then proves that the remaining time—not a
     // reset budget—is used for lock 2.
     let deadline_state_before_first = state_snapshot()?;
-    let held_first_gate = temp.path().join("deadline-held-first.gate");
+    let held_first_gate = fixture_root.join("deadline-held-first.gate");
     let held_first_ready = PathBuf::from(format!("{}.ready", held_first_gate.display()));
-    let held_second_gate = temp.path().join("deadline-held-second-owner.gate");
+    let held_second_gate = fixture_root.join("deadline-held-second-owner.gate");
     let held_second_ready = PathBuf::from(format!("{}.ready", held_second_gate.display()));
     fs::write(&held_first_gate, b"hold\n")?;
     fs::write(&held_second_gate, b"hold\n")?;
@@ -30702,7 +30716,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     }
     let mut timed_first = make_installer(&second_runtime, &first_then_second_path, None, None)?;
     timed_first.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
-    let timed_first_attempt = temp.path().join("deadline-held-first-attempt.gate");
+    let timed_first_attempt = fixture_root.join("deadline-held-first-attempt.gate");
     let timed_first_attempt_ready =
         PathBuf::from(format!("{}.ready", timed_first_attempt.display()));
     timed_first.env(
@@ -30811,7 +30825,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         ),
     )?;
     let deadline_state_before_second = state_snapshot()?;
-    let held_second_gate = temp.path().join("deadline-held-second.gate");
+    let held_second_gate = fixture_root.join("deadline-held-second.gate");
     let held_second_ready = PathBuf::from(format!("{}.ready", held_second_gate.display()));
     fs::write(&held_second_gate, b"hold\n")?;
     let mut held_second = spawn_plugin_installer_process(&mut make_installer(

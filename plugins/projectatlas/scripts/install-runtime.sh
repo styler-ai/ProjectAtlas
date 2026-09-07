@@ -526,6 +526,7 @@ atlas_forwarder_content() {
   verified=$1
   canonical_verified=$(canonical_file "$verified") || return 1
   target_quoted=$(shell_quote "$canonical_verified") || return 1
+  printf '%s\n' '#!/bin/sh'
   printf '%s\n' '# ProjectAtlas managed atlas forwarder.'
   printf '%s\n' "# target: $canonical_verified"
   printf 'exec %s "$@"\n' "$target_quoted"
