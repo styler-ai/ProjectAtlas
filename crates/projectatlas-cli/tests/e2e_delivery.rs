@@ -30814,9 +30814,12 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
 
     // A short test-only budget makes each lock position fail deterministically;
     // the production budget remains one shared 30-second lock-wait budget.
-    // Keep both sorted locks occupied so the contender spends most of its one
+    // Keep both sorted locks occupied so the contender spends part of its one
     // budget waiting for lock 1, then proves that the remaining time—not a
-    // reset budget—is used for lock 2.
+    // reset budget—is used for lock 2. Unix process-group termination needs
+    // scheduling slack; its exact trace verifies budget sharing independently
+    // of the Windows elapsed-time assertion.
+    let lock_budget_ms = if cfg!(unix) { 1_000_u64 } else { 250 };
     let deadline_state_before_first = state_snapshot()?;
     let held_first_gate = fixture_root.join("deadline-held-first.gate");
     let held_first_ready = PathBuf::from(format!("{}.ready", held_first_gate.display()));
@@ -30855,7 +30858,10 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         return Err(error);
     }
     let mut timed_first = make_installer(&second_runtime, &first_then_second_path, None, None)?;
-    timed_first.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
+    timed_first.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS",
+        lock_budget_ms.to_string(),
+    );
     #[cfg(unix)]
     let lock_wait_trace = fixture_root.join("deadline-lock-waits.txt");
     #[cfg(unix)]
@@ -30936,7 +30942,9 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
             .collect::<Vec<_>>();
         require(
             rows.len() == 3
-                && rows[0] == ["request", "8", "250"]
+                && rows[0].len() == 3
+                && rows[0][..2] == ["request", "8"]
+                && rows[0][2].parse::<u64>()? == lock_budget_ms
                 && rows[1].len() == 4
                 && rows[1][..2] == ["acquired", "8"]
                 && rows[2].len() == 3
@@ -30947,7 +30955,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         let remaining = rows[1][3].parse::<u64>()?;
         require(
             first_wait > 0
-                && remaining == 250_u64.saturating_sub(first_wait)
+                && remaining == lock_budget_ms.saturating_sub(first_wait)
                 && rows[2][2].parse::<u64>()? == remaining,
             format!("contender reset the shared native lock-wait budget: {trace}"),
         )?;
@@ -31084,13 +31092,14 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join(TEST_REPO_DIR);
+    let fixture_root = temp.path().canonicalize()?;
+    let repo = fixture_root.join(TEST_REPO_DIR);
     fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
     fs::write(
         repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
-    let runtime_dir = temp.path().join(TEST_RUNTIME_DIR_NAME);
+    let runtime_dir = fixture_root.join(TEST_RUNTIME_DIR_NAME);
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join("projectatlas");
     let real_runtime = mcp_contract_executable();
@@ -31099,11 +31108,11 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     permissions.set_mode(0o755);
     fs::set_permissions(&runtime, permissions)?;
 
-    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
+    let home = fixture_root.join(TEST_ISOLATED_HOME_DIR_NAME);
     fs::create_dir_all(&home)?;
-    let state_parent = temp.path().join("physical state parent");
+    let state_parent = fixture_root.join("physical state parent");
     fs::create_dir_all(&state_parent)?;
-    let state_alias = temp.path().join("state parent alias");
+    let state_alias = fixture_root.join("state parent alias");
     symlink(&state_parent, &state_alias)?;
     let configured_state = state_alias.join("initially absent state");
     let workspace_root = workspace_root()?;
@@ -31127,8 +31136,8 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
             String::from_utf8_lossy(&install_output.stderr)
         ),
     )?;
-    let linked_state_base = temp.path().join("linked state base");
-    let unrelated_state = temp.path().join("unrelated state");
+    let linked_state_base = fixture_root.join("linked state base");
+    let unrelated_state = fixture_root.join("unrelated state");
     fs::create_dir_all(&linked_state_base)?;
     fs::create_dir_all(&unrelated_state)?;
     symlink(&unrelated_state, linked_state_base.join("projectatlas"))?;
@@ -31145,7 +31154,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
         .map(|entry| entry.path())
         .find(|path| path.extension() == Some(OsStr::new("lock")))
         .ok_or_else(|| io::Error::other("POSIX atlas lifecycle lock was not published"))?;
-    let retained_lock = temp.path().join("retained lifecycle lock");
+    let retained_lock = fixture_root.join("retained lifecycle lock");
     fs::rename(&lock_path, &retained_lock)?;
     let unrelated_lock = unrelated_state.join("unrelated lock");
     fs::write(&unrelated_lock, "unrelated lock content")?;
@@ -31184,7 +31193,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
         ),
     )?;
 
-    let signal_ready = temp.path().join("signal handler ready");
+    let signal_ready = fixture_root.join("signal handler ready");
     let mut child = StdCommand::new(&forwarder)
         .arg("--signal-test")
         .arg(&signal_ready)
