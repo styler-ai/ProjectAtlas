@@ -30833,7 +30833,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     for (path, expected) in project_configs {
         require(
             fs::read(&path)? == expected,
-            &format!(
+            format!(
                 "opposite migration changed project config: {}",
                 path.display()
             ),
