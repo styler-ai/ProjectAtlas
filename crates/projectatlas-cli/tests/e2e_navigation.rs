@@ -9705,7 +9705,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         require_json_usize(
             &summary,
             &["symbol_count"],
-            if path.ends_with(".docx") { 3 } else { 1 },
+            if path == "docs/guide.docx" { 3 } else { 1 },
         )?;
         let symbols = run_mcp_contract_json(
             &executable,
