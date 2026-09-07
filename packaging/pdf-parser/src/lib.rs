@@ -285,6 +285,156 @@ mod tests {
     }
 
     #[test]
+    fn nested_forms_preserve_graphics_state_and_composed_transforms() {
+        #[derive(Default)]
+        struct GlyphTransforms(Vec<[f64; 6]>);
+        impl pdf_extract::OutputDev for GlyphTransforms {
+            fn begin_page(
+                &mut self,
+                _: u32,
+                _: &pdf_extract::MediaBox,
+                _: Option<(f64, f64, f64, f64)>,
+            ) -> Result<(), pdf_extract::OutputError> {
+                Ok(())
+            }
+            fn end_page(&mut self) -> Result<(), pdf_extract::OutputError> {
+                Ok(())
+            }
+            fn begin_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+                Ok(())
+            }
+            fn end_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+                Ok(())
+            }
+            fn end_line(&mut self) -> Result<(), pdf_extract::OutputError> {
+                Ok(())
+            }
+            fn output_character(
+                &mut self,
+                transform: &pdf_extract::Transform,
+                _: f64,
+                _: f64,
+                _: f64,
+                _: &str,
+            ) -> Result<(), pdf_extract::OutputError> {
+                self.0.push([
+                    transform.m11,
+                    transform.m12,
+                    transform.m21,
+                    transform.m22,
+                    transform.m31,
+                    transform.m32,
+                ]);
+                Ok(())
+            }
+        }
+        let transforms = |document: &lopdf::Document| {
+            let mut output = GlyphTransforms::default();
+            pdf_extract::output_doc_page(document, &mut output, 1).unwrap();
+            output.0
+        };
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let inner = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 200.into(), 100.into()],
+                "Matrix" => vec![2.into(), 0.into(), 0.into(), 3.into(), 5.into(), 7.into()]
+            },
+            b"BT /F1 12 Tf (Form Marker) Tj ET".to_vec(),
+        ));
+        let outer = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 500.into(), 400.into()],
+                "Matrix" => vec![1.into(), 0.into(), 0.into(), 1.into(), 10.into(), 20.into()]
+            },
+            b"q /Inner Do Q".to_vec(),
+        ));
+        let direct = b"BT /F1 12 Tf 2 0 0 3 40 520 Tm (Form Marker) Tj 2 0 0 3 40 220 Tm (Form Marker) Tj ET";
+        let content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            direct.to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => font },
+                "XObject" => dictionary! { "Inner" => inner, "Outer" => outer }
+            }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let expected = text::page(&document, 1, 128).unwrap();
+        let expected_transforms = transforms(&document);
+        let assert_transforms = |document: &lopdf::Document| {
+            let actual = transforms(document);
+            assert_eq!(actual.len(), expected_transforms.len());
+            for (actual, expected) in actual
+                .iter()
+                .flatten()
+                .zip(expected_transforms.iter().flatten())
+            {
+                assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+            }
+        };
+        assert_eq!(expected.matches("Form Marker").count(), 2);
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(
+                b"BT /F1 12 Tf ET q 1 0 0 1 25 493 cm /Outer Do Q q 1 0 0 1 25 193 cm /Outer Do Q"
+                    .to_vec(),
+            );
+        assert_eq!(text::page(&document, 1, 128).unwrap(), expected);
+        assert_transforms(&document);
+        document
+            .get_object_mut(inner)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT (Form Marker) Tj ET".to_vec());
+        assert_eq!(text::page(&document, 1, 128).unwrap(), expected);
+        assert_transforms(&document);
+        for invalid in [
+            vec![1.into()],
+            vec![
+                1.into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                0.into(),
+                lopdf::Object::Null,
+            ],
+        ] {
+            document
+                .get_object_mut(inner)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("Matrix", invalid);
+            assert!(matches!(
+                text::page(&document, 1, 128),
+                Err(Failure::Malformed)
+            ));
+        }
+    }
+
+    #[test]
     fn declared_missing_stream_is_not_a_blank_page() {
         let mut document = lopdf::Document::new();
         let page = document.add_object(lopdf::dictionary! {

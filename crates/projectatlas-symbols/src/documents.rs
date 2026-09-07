@@ -748,6 +748,7 @@ fn parse_docx(
     let mut text_carrier = None;
     let mut alternatives: Vec<DocxAlternative> = Vec::new();
     let mut skipped_branch_depth = None;
+    let mut deleted_depth = None;
     let mut element_depth = 0usize;
     let mut root_seen = false;
     let mut root_closed = false;
@@ -892,6 +893,9 @@ fn parse_docx(
                     continue;
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
+                    "del" | "moveFrom" if deleted_depth.is_none() => {
+                        deleted_depth = Some(element_depth);
+                    }
                     "txbxContent" => {
                         if let Some(run) = paragraph.run.as_mut() {
                             publish_docx_run_fragment(
@@ -910,7 +914,7 @@ fn parse_docx(
                         paragraph_number += 1;
                         paragraph.number = paragraph_number;
                         paragraph.run_number = 0;
-                        if !output.is_empty() {
+                        if !output.is_empty() && deleted_depth.is_none() {
                             push_output_byte(&mut output, b'\n')?;
                             output_line += 1;
                         }
@@ -920,7 +924,8 @@ fn parse_docx(
                         paragraph.run = Some(RawDocxRun::default());
                     }
                     "t" | "instrText" | "delText" | "delInstrText" if paragraph.run.is_some() => {
-                        let ignored = matches!(name.as_ref(), "delText" | "delInstrText")
+                        let ignored = deleted_depth.is_some()
+                            || matches!(name.as_ref(), "delText" | "delInstrText")
                             || (name.as_ref() == "instrText"
                                 && paragraph.fields.contains(&DocxFieldPhase::Instruction));
                         text_carrier = Some(if ignored {
@@ -929,6 +934,7 @@ fn parse_docx(
                             DocxTextCarrier::Rendered
                         });
                     }
+                    "fldChar" if paragraph.run.is_some() && deleted_depth.is_some() => {}
                     "fldChar" if paragraph.run.is_some() => {
                         let mut field_type = None;
                         for attribute in event.attributes() {
@@ -980,7 +986,9 @@ fn parse_docx(
                     | "cr"
                     | "lastRenderedPageBreak"
                     | "noBreakHyphen"
-                    | "softHyphen" => {
+                    | "softHyphen"
+                        if deleted_depth.is_none() =>
+                    {
                         if let Some(run) = paragraph.run.as_mut() {
                             append_docx_run_text(
                                 run,
@@ -994,7 +1002,7 @@ fn parse_docx(
                             )?;
                         }
                     }
-                    "sym" if paragraph.run.is_some() => {
+                    "sym" if paragraph.run.is_some() && deleted_depth.is_none() => {
                         return Err(DocumentExtractionError::UnsupportedDocxInput {
                             message: "font-specific symbols require unsupported font decoding"
                                 .to_owned(),
@@ -1110,6 +1118,9 @@ fn parse_docx(
                     }
                 }
                 let name = event.local_name();
+                if deleted_depth == Some(element_depth) {
+                    deleted_depth = None;
+                }
                 match if wordprocessing { name.as_ref() } else { "" } {
                     "t" | "instrText" | "delText" | "delInstrText" => text_carrier = None,
                     "r" => {
@@ -1163,6 +1174,7 @@ fn parse_docx(
         || !text_boxes.is_empty()
         || !alternatives.is_empty()
         || skipped_branch_depth.is_some()
+        || deleted_depth.is_some()
         || paragraph.run.is_some()
         || text_carrier.is_some()
         || !paragraph.fields.is_empty()
@@ -2170,6 +2182,39 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                     ..
                 }),
             ));
+        }
+    }
+
+    #[test]
+    fn docx_deleted_revisions_do_not_publish_run_content() {
+        for revision in ["del", "moveFrom"] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:{revision}><w:r><w:delText>Removed</w:delText><w:fldChar w:fldCharType=\"begin\"/><w:sym w:font=\"Wingdings\" w:char=\"F020\"/><w:noBreakHyphen/><w:softHyphen/><w:tab/><w:ptab/><w:br/><w:cr/><w:lastRenderedPageBreak/></w:r><w:del><w:r><w:t>Nested</w:t></w:r></w:del></w:{revision}><w:r><w:t>After</w:t></w:r></w:p></w:body></w:document>"
+            );
+            let parsed = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("tracked revision content is valid XML");
+            assert!(matches!(
+                parse_docx(
+                    xml.replace("Removed", "&unknown;").as_bytes(),
+                    &control(),
+                    IndexWorkStage::TextIndex
+                ),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+            assert_eq!(parsed.text, "BeforeAfter", "{revision}");
+            assert_eq!(parsed.facts.len(), 2);
+            assert_eq!(parsed.facts[1].line_start, 1);
+            assert_eq!(parsed.facts[1].line_end, 1);
+            assert_eq!(
+                parsed.facts[1].locator,
+                DocumentLocator::Docx {
+                    part: DOCX_DOCUMENT_PART,
+                    paragraph: 1,
+                    run: 4,
+                    text_start: 0,
+                    text_end: 5,
+                }
+            );
         }
     }
 

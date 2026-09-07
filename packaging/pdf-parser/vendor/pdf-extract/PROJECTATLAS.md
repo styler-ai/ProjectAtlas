@@ -16,8 +16,9 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Key cached fonts by the resolved dictionary's identity within the immutable
   document, preserving independent page and Form resource scopes.
 - Refuse incomplete or unmapped character codes instead of silently ending text.
-- Interpret Form XObjects, skip Image pixels without OCR, and refuse unknown
-  XObject subtypes.
+- Interpret Form XObjects with inherited graphics state and composed caller/Form
+  transforms, skip Image pixels without OCR, and refuse unknown XObject subtypes
+  or malformed Form matrices.
 
 The guest uses exact-page execution and bounded output collection. It does not
 use the upstream convenience function that stops after the first page error.

@@ -236,8 +236,8 @@ and a ten-second ceiling that respects an earlier caller deadline. Fuel
 suspensions check cancellation; real allocation denial remains a typed limit.
 The host supplies bounded entropy and an empty environment, with no filesystem,
 network, clock, or process capabilities. Page-tree validation and bounded
-stream decoding precede exact-page formatting, including Form text and scoped
-fonts. Image pixels remain opaque. Local dependency patches and retained
+stream decoding precede exact-page formatting, including Form text with inherited graphics state, composed caller/Form
+matrices, and scoped fonts. Image pixels remain opaque. Local dependency patches and retained
 attribution are documented in `packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md`.
 PDF admission requires a `%PDF-` header and extracts only page text; DOCX
 admission requires a ZIP header, admits only stored or DEFLATE entries, rejects
@@ -246,6 +246,8 @@ only `word/document.xml` to the parser. Nested WordprocessingML text boxes retai
 and resume their outer paragraph/run context, emitting interrupted run fragments
 in document order with their original decoded byte offsets. Complex-field code
 and deleted-text carriers are validated without execution or publication;
+enclosing deleted/moved-from revisions also suppress every text leaf, separator,
+and field-state mutation while retaining source paragraph/run numbering;
 cached field results and instruction-text leaves outside field-code regions
 remain literal document text. Field nesting has its own 64-level bound and is
 isolated across text-box contexts. Markup Compatibility alternatives select only

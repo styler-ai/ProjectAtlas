@@ -1580,9 +1580,9 @@ impl<'a> Processor<'a> {
         Processor { font_table: HashMap::new(), _none: PhantomData }
     }
 
-    fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32) -> Result<(), OutputError> {
+    fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32, inherited: Option<GraphicsState<'a>>) -> Result<(), OutputError> {
         let content = Content::decode_strict(&content)?;
-        let mut gs: GraphicsState = GraphicsState {
+        let mut gs: GraphicsState = inherited.unwrap_or_else(|| GraphicsState {
             ts: TextState {
                 font: None,
                 font_size: std::f64::NAN,
@@ -1600,7 +1600,7 @@ impl<'a> Processor<'a> {
             line_width: 1.,
             ctm: Transform2D::identity(),
             smask: None
-        };
+        });
         //let mut ts = &mut gs.ts;
         let mut gs_stack = Vec::new();
         let mut mc_stack = Vec::new();
@@ -1874,7 +1874,18 @@ impl<'a> Processor<'a> {
                     }
                     let resources = maybe_get_obj(&doc, &xf.dict, b"Resources").and_then(|n| n.as_dict().ok()).unwrap_or(resources);
                     let contents = get_contents(xf);
-                    self.process_stream(&doc, contents, resources, &media_box, output, page_num)?;
+                    let mut nested = gs.clone();
+                    if let Some(matrix) = maybe_get_obj(doc, &xf.dict, b"Matrix") {
+                        let matrix = matrix.as_array()?;
+                        if matrix.len() != 6 || matrix.iter().any(|value|
+                            !matches!(value, Object::Integer(_) | Object::Real(_)) || !as_num(value).is_finite()) {
+                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Form matrix").into());
+                        }
+                        nested.ctm = nested.ctm.pre_transform(&Transform2D::row_major(
+                            as_num(&matrix[0]), as_num(&matrix[1]), as_num(&matrix[2]),
+                            as_num(&matrix[3]), as_num(&matrix[4]), as_num(&matrix[5])));
+                    }
+                    self.process_stream(&doc, contents, resources, &media_box, output, page_num, Some(nested))?;
                 }
                 _ => { dlog!("unknown operation {:?}", operation); }
 
@@ -2419,7 +2430,7 @@ fn output_doc_inner<'a>(page_num: u32, object_id: ObjectId, doc: &'a Document, p
     let art_box = get::<Option<Vec<f64>>>(&doc, page_dict, b"ArtBox")
         .map(|x| (x[0], x[1], x[2], x[3]));
     output.begin_page(page_num, &media_box, art_box)?;
-    p.process_stream(&doc, doc.get_page_content(object_id), resources, &media_box, output, page_num)?;
+    p.process_stream(&doc, doc.get_page_content(object_id), resources, &media_box, output, page_num, None)?;
     output.end_page()?;
     Ok(())
 }

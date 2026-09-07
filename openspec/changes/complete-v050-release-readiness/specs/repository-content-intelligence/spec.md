@@ -38,12 +38,15 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **WHEN** PDF magic and all input/time/memory/output limits pass
 - **THEN** ProjectAtlas publishes bounded text with exact page and text-span locator, parser/version provenance, completeness, and coverage
 
+- **AND** Form XObjects inherit graphics state and compose their matrix with the caller transform, preserving positioned and nested text evidence; malformed matrices fail before publication
+
 #### Scenario: Valid DOCX
 - **WHEN** a ZIP container passes entry/path/compressed/expanded/recursion limits and contains admitted `word/document.xml` with Transitional or Strict WordprocessingML namespace identity, independent of its prefix
 - **THEN** ProjectAtlas publishes bounded text with exact part, paragraph, run, and text-span locator plus parser/version provenance
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** explicit hyphens, tabs, and saved page breaks retain their text/separator characters and exact UTF-8 spans; font-coded symbols return typed unsupported input without replacing the last complete publication
 - **AND** field instructions and deleted text are validated without execution or publication, while cached field results and instruction text outside field-code regions remain literal text
+- **AND** deleted and moved-from revision containers suppress all text leaves, separators, and field-state changes while preserving source paragraph/run numbering
 - **AND** field nesting is bounded independently of XML depth and isolated within each text container
 - **AND** Markup Compatibility alternatives emit only the first choice requiring understood WordprocessingML namespaces, or its fallback; unselected branches cannot change extraction context or duplicate evidence
 
