@@ -10007,33 +10007,47 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         };
 
     let before_failed_refresh = mcp_database_snapshot(&database)?;
-    {
-        let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);
-        archive.start_file("word/document.xml", FileOptions::default())?;
-        archive.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:body></w:document>"#)?;
-        archive.finish()?;
-    }
-    let unsupported_refresh = StdCommand::new(&executable)
-        .current_dir(&repo)
-        .arg("--db")
-        .arg(&database)
-        .args(["scan", "."])
-        .output()?;
-    if unsupported_refresh.status.success()
-        || !String::from_utf8_lossy(&unsupported_refresh.stderr).contains("font-specific symbols")
-        || before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative
-    {
-        return Err(
-            io::Error::other("unsupported DOCX glyph changed the complete publication").into(),
-        );
-    }
-    let unsupported: Value =
-        toon_format::decode_default(&mcp_docx_search("DOCX replacement marker")?)?;
-    require_json_contains(&unsupported, &["error", "message"], "font-specific symbols")?;
-    if before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative {
-        return Err(
-            io::Error::other("unsupported DOCX navigation changed authoritative state").into(),
-        );
+    for (xml, message) in [
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:body></w:document>"#,
+            "font-specific symbols",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p></w:body></w:document>"#,
+            "foreign-namespace text",
+        ),
+    ] {
+        {
+            let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);
+            archive.start_file("word/document.xml", FileOptions::default())?;
+            archive.write_all(xml.as_bytes())?;
+            archive.finish()?;
+        }
+        let unsupported_refresh = StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .args(["scan", "."])
+            .output()?;
+        if unsupported_refresh.status.success()
+            || !String::from_utf8_lossy(&unsupported_refresh.stderr).contains(message)
+            || before_failed_refresh.authoritative
+                != mcp_database_snapshot(&database)?.authoritative
+        {
+            return Err(io::Error::other(
+                "unsupported DOCX content changed the complete publication",
+            )
+            .into());
+        }
+        let unsupported: Value =
+            toon_format::decode_default(&mcp_docx_search("DOCX replacement marker")?)?;
+        require_json_contains(&unsupported, &["error", "message"], message)?;
+        if before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative {
+            return Err(io::Error::other(
+                "unsupported DOCX navigation changed authoritative state",
+            )
+            .into());
+        }
     }
 
     fs::write(

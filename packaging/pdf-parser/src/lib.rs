@@ -435,6 +435,103 @@ mod tests {
     }
 
     #[test]
+    fn inherited_page_rotation_preserves_displayed_text_lines() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let direct = b"BT /F1 12 Tf 1 0 0 1 72 500 Tm (First) Tj 1 0 0 1 180 500 Tm (Second) Tj 1 0 0 1 72 400 Tm (Next) Tj ET";
+        let content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            direct.to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let expected = text::page(&document, 1, 128).unwrap();
+        assert!(expected.contains("First Second"));
+        for (rotation, matrix, positions) in [
+            (0, [1, 0, 0, 1], [[72, 500], [180, 500], [72, 400]]),
+            (90, [0, 1, -1, 0], [[112, 72], [112, 180], [212, 72]]),
+            (180, [-1, 0, 0, -1], [[540, 292], [432, 292], [540, 392]]),
+            (270, [0, -1, 1, 0], [[500, 720], [500, 612], [400, 720]]),
+            (450, [0, 1, -1, 0], [[112, 72], [112, 180], [212, 72]]),
+            (-90, [0, -1, 1, 0], [[500, 720], [500, 612], [400, 720]]),
+        ] {
+            document
+                .get_object_mut(pages)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Rotate", rotation);
+            let mut stream = String::from("BT /F1 12 Tf ");
+            for ([x, y], word) in positions.into_iter().zip(["First", "Second", "Next"]) {
+                stream.push_str(&format!(
+                    "{} {} {} {} {x} {y} Tm ({word}) Tj ",
+                    matrix[0], matrix[1], matrix[2], matrix[3]
+                ));
+            }
+            stream.push_str("ET");
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(stream.into_bytes());
+            assert_eq!(
+                text::page(&document, 1, 128).unwrap(),
+                expected,
+                "rotation={rotation}"
+            );
+        }
+        document
+            .get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 0);
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(direct.to_vec());
+        assert_eq!(
+            text::page(&document, 1, 128).unwrap(),
+            expected,
+            "leaf overrides inherited rotation"
+        );
+        for invalid in [
+            lopdf::Object::Integer(45),
+            lopdf::Object::Real(90.0),
+            lopdf::Object::Name(b"90".to_vec()),
+        ] {
+            document
+                .get_object_mut(page)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Rotate", invalid);
+            assert!(matches!(
+                text::page(&document, 1, 128),
+                Err(Failure::Malformed)
+            ));
+        }
+    }
+
+    #[test]
     fn declared_missing_stream_is_not_a_blank_page() {
         let mut document = lopdf::Document::new();
         let page = document.add_object(lopdf::dictionary! {

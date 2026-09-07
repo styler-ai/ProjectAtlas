@@ -8783,9 +8783,11 @@ fn indexed_file_texts_for_nodes_with_limit(
             continue;
         }
         let remaining_staged_bytes = max_staged_bytes.saturating_sub(staged_bytes);
-        if node
-            .size_bytes
-            .is_some_and(|size_bytes| size_bytes > remaining_staged_bytes)
+        let is_document = document_format_for_path(&node.path, node.language.as_deref()).is_some();
+        if !is_document
+            && node
+                .size_bytes
+                .is_some_and(|size_bytes| size_bytes > remaining_staged_bytes)
         {
             return Err(IndexWorkFailure::resource_limit(
                 IndexWorkStage::TextIndex,
@@ -8796,8 +8798,12 @@ fn indexed_file_texts_for_nodes_with_limit(
             .into());
         }
         let native_path = root.join(repo_path_to_native(&node.path));
-        let read_limit = max_bytes.min(remaining_staged_bytes);
-        let aggregate_limit_is_narrower = remaining_staged_bytes <= max_bytes;
+        let read_limit = if is_document {
+            max_bytes
+        } else {
+            max_bytes.min(remaining_staged_bytes)
+        };
+        let aggregate_limit_is_narrower = !is_document && remaining_staged_bytes <= max_bytes;
         let bytes = match read_source_bytes_controlled(
             &native_path,
             read_limit,
@@ -8830,7 +8836,7 @@ fn indexed_file_texts_for_nodes_with_limit(
         if node.content_hash.as_deref() != Some(current_hash.as_str()) {
             return Err(source_changed_during_derivation(root, &node.path));
         }
-        let content = if document_format_for_path(&node.path, node.language.as_deref()).is_some() {
+        let content = if is_document {
             extract_document_text_controlled(&bytes, &node.path, node.language.as_deref(), control)
                 .map_err(|error| document_navigation_error(&node.path, error))?
                 .text
@@ -13462,6 +13468,69 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             .as_bytes(),
         );
         pdf
+    }
+
+    #[test]
+    fn document_input_does_not_consume_retained_text_capacity() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let pdf = runtime_pdf_fixture();
+        let mut nodes = Vec::new();
+        for (path, language, bytes) in [
+            ("seed.txt", "text", b"seed".as_slice()),
+            ("guide.pdf", "pdf", pdf.as_slice()),
+        ] {
+            fs::write(temp.path().join(path), bytes)?;
+            nodes.push(Node {
+                path: path.to_owned(),
+                kind: NodeKind::File,
+                parent_path: None,
+                extension: None,
+                language: Some(language.to_owned()),
+                size_bytes: Some(bytes.len() as u64),
+                mtime_ns: Some(1),
+                content_hash: Some(blake3::hash(bytes).to_hex().to_string()),
+            });
+        }
+        let control = standalone_index_work_control();
+        for known_size in [true, false] {
+            nodes[1].size_bytes = known_size.then_some(pdf.len() as u64);
+            let rows = indexed_file_texts_for_nodes_with_limit(
+                temp.path(),
+                &nodes,
+                TextIndexOptions::new(64),
+                15,
+                &control,
+            )?;
+            if rows.len() != 2
+                || rows[1].text.as_ref().map(|text| text.content.as_str()) != Some("Runtime PDF")
+            {
+                return Err(
+                    io::Error::other("document input consumed retained-text capacity").into(),
+                );
+            }
+            if !matches!(
+                indexed_file_texts_for_nodes_with_limit(
+                    temp.path(),
+                    &nodes,
+                    TextIndexOptions::new(64),
+                    14,
+                    &control,
+                ),
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        stage: IndexWorkStage::TextIndex,
+                        resource: IndexWorkResource::TextBytes,
+                        ..
+                    }
+                ))
+            ) {
+                return Err(io::Error::other(
+                    "extracted document text exceeded retained-text capacity",
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     #[test]

@@ -749,6 +749,7 @@ fn parse_docx(
     let mut alternatives: Vec<DocxAlternative> = Vec::new();
     let mut skipped_branch_depth = None;
     let mut deleted_depth = None;
+    let mut foreign_depth = None;
     let mut element_depth = 0usize;
     let mut root_seen = false;
     let mut root_closed = false;
@@ -775,6 +776,27 @@ fn parse_docx(
                 });
             }
         };
+        if foreign_depth.is_some() && text_carrier.is_none() {
+            let has_text = match &event {
+                Event::Text(text) => Some(text.as_ref().chars().any(|c| !c.is_ascii_whitespace())),
+                Event::CData(text) => Some(text.as_ref().chars().any(|c| !c.is_ascii_whitespace())),
+                Event::GeneralRef(reference) => Some(
+                    decode_docx_reference(reference)?
+                        .chars()
+                        .any(|c| !c.is_ascii_whitespace()),
+                ),
+                _ => None,
+            };
+            if let Some(has_text) = has_text {
+                if has_text && deleted_depth.is_none() && skipped_branch_depth.is_none() {
+                    return Err(DocumentExtractionError::UnsupportedDocxInput {
+                        message: "foreign-namespace text requires unsupported semantic decoding"
+                            .to_owned(),
+                    });
+                }
+                continue;
+            }
+        }
         match event {
             Event::Start(event) => {
                 if text_carrier.is_some() {
@@ -891,6 +913,9 @@ fn parse_docx(
                         fallback_seen: false,
                     });
                     continue;
+                }
+                if !wordprocessing && !compatibility && foreign_depth.is_none() {
+                    foreign_depth = Some(element_depth);
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
                     "del" | "moveFrom" if deleted_depth.is_none() => {
@@ -1098,6 +1123,9 @@ fn parse_docx(
                         message: "DOCX XML contained an unmatched closing element".to_owned(),
                     });
                 }
+                if foreign_depth == Some(element_depth) {
+                    foreign_depth = None;
+                }
                 if let Some(depth) = skipped_branch_depth {
                     if element_depth == depth {
                         skipped_branch_depth = None;
@@ -1175,6 +1203,7 @@ fn parse_docx(
         || !alternatives.is_empty()
         || skipped_branch_depth.is_some()
         || deleted_depth.is_some()
+        || foreign_depth.is_some()
         || paragraph.run.is_some()
         || text_carrier.is_some()
         || !paragraph.fields.is_empty()
@@ -2174,14 +2203,22 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 expected,
             );
         }
+        let foreign_text = canonical.replace(
+            "<w:t>A</w:t>",
+            "<foreign:t xmlns:foreign=\"urn:foreign\">A</foreign:t>",
+        );
+        assert!(matches!(
+            parse_docx(
+                foreign_text.as_bytes(),
+                &control(),
+                IndexWorkStage::SymbolParsing
+            ),
+            Err(DocumentExtractionError::UnsupportedDocxInput { .. }),
+        ));
         for xml in [
             canonical.replace(
                 "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
                 "urn:foreign",
-            ),
-            canonical.replace(
-                "<w:t>A</w:t>",
-                "<foreign:t xmlns:foreign=\"urn:foreign\">A</foreign:t>",
             ),
             canonical.replace(
                 "<w:t>A</w:t>",
@@ -2198,6 +2235,44 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 }),
             ));
         }
+    }
+
+    #[test]
+    fn docx_foreign_text_is_unsupported_without_hiding_word_text_boxes() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body><w:p><m:oMath><m:r><m:t>CONTENT</m:t></m:r></m:oMath></w:p></w:body></w:document>"#;
+        for content in ["x", "<![CDATA[x]]>", "&#120;"] {
+            assert!(matches!(
+                parse_docx(
+                    xml.replace("CONTENT", content).as_bytes(),
+                    &control(),
+                    IndexWorkStage::TextIndex
+                ),
+                Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+            ));
+        }
+        assert!(matches!(
+            parse_docx(
+                xml.replace("CONTENT", "&unknown;").as_bytes(),
+                &control(),
+                IndexWorkStage::TextIndex
+            ),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        assert!(
+            parse_docx(
+                xml.replace("CONTENT", " ").as_bytes(),
+                &control(),
+                IndexWorkStage::TextIndex
+            )
+            .is_ok()
+        );
+        let drawing = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:graphic><a:graphicData><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></a:graphicData></a:graphic></w:drawing></w:r></w:p></w:body></w:document>"#;
+        assert_eq!(
+            parse_docx(drawing, &control(), IndexWorkStage::TextIndex)
+                .expect("Word text inside opaque drawing wrappers")
+                .text,
+            "Box\n"
+        );
     }
 
     #[test]

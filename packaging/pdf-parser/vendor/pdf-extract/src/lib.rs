@@ -1580,27 +1580,8 @@ impl<'a> Processor<'a> {
         Processor { font_table: HashMap::new(), _none: PhantomData }
     }
 
-    fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32, inherited: Option<GraphicsState<'a>>) -> Result<(), OutputError> {
+    fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32, mut gs: GraphicsState<'a>) -> Result<(), OutputError> {
         let content = Content::decode_strict(&content)?;
-        let mut gs: GraphicsState = inherited.unwrap_or_else(|| GraphicsState {
-            ts: TextState {
-                font: None,
-                font_size: std::f64::NAN,
-                character_spacing: 0.,
-                word_spacing: 0.,
-                horizontal_scaling: 100. / 100.,
-                leading: 0.,
-                rise: 0.,
-                tm: Transform2D::identity(),
-            },
-            fill_color: Vec::new(),
-            fill_colorspace: ColorSpace::DeviceGray,
-            stroke_color: Vec::new(),
-            stroke_colorspace: ColorSpace::DeviceGray,
-            line_width: 1.,
-            ctm: Transform2D::identity(),
-            smask: None
-        });
         //let mut ts = &mut gs.ts;
         let mut gs_stack = Vec::new();
         let mut mc_stack = Vec::new();
@@ -1885,7 +1866,7 @@ impl<'a> Processor<'a> {
                             as_num(&matrix[0]), as_num(&matrix[1]), as_num(&matrix[2]),
                             as_num(&matrix[3]), as_num(&matrix[4]), as_num(&matrix[5])));
                     }
-                    self.process_stream(&doc, contents, resources, &media_box, output, page_num, Some(nested))?;
+                    self.process_stream(&doc, contents, resources, &media_box, output, page_num, nested)?;
                 }
                 _ => { dlog!("unknown operation {:?}", operation); }
 
@@ -2429,8 +2410,36 @@ fn output_doc_inner<'a>(page_num: u32, object_id: ObjectId, doc: &'a Document, p
     let media_box = MediaBox { llx: media_box[0], lly: media_box[1], urx: media_box[2], ury: media_box[3] };
     let art_box = get::<Option<Vec<f64>>>(&doc, page_dict, b"ArtBox")
         .map(|x| (x[0], x[1], x[2], x[3]));
+    let rotation = get_inherited::<&Object>(doc, page_dict, b"Rotate")
+        .map(Object::as_i64).transpose()?.unwrap_or(0).rem_euclid(360);
+    let ctm = match rotation {
+        0 => Transform2D::identity(),
+        90 => Transform2D::row_major(0., -1., 1., 0., -media_box.lly, media_box.urx),
+        180 => Transform2D::row_major(-1., 0., 0., -1., media_box.urx, media_box.ury),
+        270 => Transform2D::row_major(0., 1., -1., 0., media_box.ury, -media_box.llx),
+        _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "page rotation must be a multiple of 90 degrees").into()),
+    };
+    let gs = GraphicsState {
+        ts: TextState {
+            font: None,
+            font_size: std::f64::NAN,
+            character_spacing: 0.,
+            word_spacing: 0.,
+            horizontal_scaling: 100. / 100.,
+            leading: 0.,
+            rise: 0.,
+            tm: Transform2D::identity(),
+        },
+        fill_color: Vec::new(),
+        fill_colorspace: ColorSpace::DeviceGray,
+        stroke_color: Vec::new(),
+        stroke_colorspace: ColorSpace::DeviceGray,
+        line_width: 1.,
+        ctm,
+        smask: None
+    };
     output.begin_page(page_num, &media_box, art_box)?;
-    p.process_stream(&doc, doc.get_page_content(object_id), resources, &media_box, output, page_num, None)?;
+    p.process_stream(&doc, doc.get_page_content(object_id), resources, &media_box, output, page_num, gs)?;
     output.end_page()?;
     Ok(())
 }
