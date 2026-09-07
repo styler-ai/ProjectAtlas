@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "5cd41b2108b09570e96f786d243836d071c61132effdbc59926fdcfabb4cf36f",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "a5168da9ff76b87126de774c913fc94b0e4f841b247f4bf1653768681df0c89a",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "0fca4b81eccb59fcb208b5c8a409cbf120ffc40f0f0b4d01dda5c582274ea0ec",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "910c770ebf1bc427dd08dfee19fcd22b817bdd85f9d08cd36682fbffee127efb",

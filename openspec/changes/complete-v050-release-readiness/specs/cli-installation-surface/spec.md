@@ -65,6 +65,10 @@ The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS t
 - **WHEN** the same Windows runtime identity is supplied with different path casing during update, repair, or uninstall
 - **THEN** the installer uses the authenticated record's original spelling for exact body, provenance, and state checks, preserving ownership without accepting malformed metadata
 
+#### Scenario: Literal percent sequences in Windows runtime paths
+- **WHEN** the verified Windows runtime path contains literal environment-variable syntax such as `%USERNAME%`
+- **THEN** install, forwarding, repair, update, and uninstall preserve the literal filesystem identity without expanding that syntax in generated ownership records or runtime targets
+
 ### Requirement: Health reporting and administration remain unambiguous
 `atlas health [report flags]` SHALL run the read-only health report, `atlas health resolve ...` SHALL retain the existing administrative route, and `health-check` SHALL remain a compatibility alias.
 

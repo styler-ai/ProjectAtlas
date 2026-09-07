@@ -1971,7 +1971,7 @@ function Get-NormalizedPathEntry {
         [string]$Value
     )
     try {
-        return ([System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Value))).TrimEnd("\")
+        return ([System.IO.Path]::GetFullPath($Value)).TrimEnd("\")
     }
     catch {
         return $Value.TrimEnd("\")
@@ -2078,7 +2078,7 @@ function Set-ProjectAtlasPathPrecedence {
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $userEntries = Split-PathList $userPath
-    $userEntries = @($userEntries | Where-Object { (Get-NormalizedPathEntry $_) -ne $normalizedRuntimeDir })
+    $userEntries = @($userEntries | Where-Object { (Get-NormalizedPathEntry ([Environment]::ExpandEnvironmentVariables($_))) -ne $normalizedRuntimeDir })
     $futureUserPath = (@($runtimeDir) + $userEntries) -join ";"
     [Environment]::SetEnvironmentVariable("Path", $futureUserPath, "User")
     return (Test-ProjectAtlasPersistedBareCommandResolution $FilePath)

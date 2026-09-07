@@ -28599,7 +28599,11 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         atlas_dir.join("config.toml"),
         "[project]\nroot = \".\"\n\n[scan]\nexclude_dir_names = [\".git\", \".projectatlas\", \"target\"]\n",
     )?;
-    let runtime_dir = fixture_root.join("runtime with spaces");
+    let runtime_dir = fixture_root.join(if cfg!(windows) {
+        "runtime with spaces %USERNAME%"
+    } else {
+        "runtime with spaces"
+    });
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join(if cfg!(windows) {
         "projectatlas.exe"
@@ -28888,7 +28892,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     let canonical_runtime = runtime.to_string_lossy();
     let expected_forwarder_text = if cfg!(windows) {
         format!(
-            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{canonical_runtime}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n"
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
+            canonical_runtime.replace('%', "%%"),
         )
     } else {
         format!(
@@ -28999,7 +29004,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     #[cfg(windows)]
     {
         let legacy_body = format!(
-            "@echo off\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{canonical_runtime}\" %*\r\nexit /b %ERRORLEVEL%\r\n"
+            "@echo off\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            canonical_runtime.replace('%', "%%"),
         );
         let retained_state = fs::read(&installer_state)?;
         fs::write(&forwarder, &legacy_body)?;
@@ -29459,7 +29465,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .current_dir(&repo)
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .args(["/D", "/C", "call"])
-            .arg(&forwarder)
+            .env("PATH", &run_path)
+            .arg("atlas")
             .args(arguments)
             .arg(&alias_database)
             .arg("init")
@@ -29498,7 +29505,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .current_dir(&repo)
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .args(["/D", "/C", "call"])
-            .arg(&forwarder)
+            .env("PATH", &run_path)
+            .arg("atlas")
             .args(arguments)
             .arg(&direct_database)
             .args(["health", "--summary-only"])
@@ -29531,7 +29539,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     let alias_info = if cfg!(windows) {
         StdCommand::new("cmd")
             .args(["/D", "/C", "call"])
-            .arg(&forwarder)
+            .env("PATH", &run_path)
+            .arg("atlas")
             .args(["--format", "toon", "runtime-info"])
             .output()?
     } else {
@@ -29561,7 +29570,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         StdCommand::new("cmd")
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .args(["/V:ON", "/D", "/C", "call"])
-            .arg(&forwarder)
+            .env("PATH", &run_path)
+            .arg("atlas")
             .args([
                 "--require-version",
                 delayed_expansion_version.as_str(),
