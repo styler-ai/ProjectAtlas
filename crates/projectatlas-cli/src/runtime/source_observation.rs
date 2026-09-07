@@ -342,14 +342,14 @@ struct SourceObservationEntry {
 #[cfg(windows)]
 impl Drop for SourceObservationEntry {
     fn drop(&mut self) {
-        let _ = self.watcher.unwatch(&self.binding.root);
+        drop(self.watcher.unwatch(&self.binding.root));
         if let Some(parent) = self.binding.external_config_parent() {
-            let _ = self.watcher.unwatch(parent);
+            drop(self.watcher.unwatch(parent));
         }
         // notify's Windows Unwatch and Drop only enqueue actions. Configure waits
         // for an acknowledgement after preceding cancellation/completion work,
         // so directory cleanup cannot race an outstanding native notification.
-        let _ = self.watcher.configure(notify::Config::default());
+        drop(self.watcher.configure(notify::Config::default()));
     }
 }
 
