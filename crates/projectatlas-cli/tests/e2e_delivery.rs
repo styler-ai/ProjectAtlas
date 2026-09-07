@@ -28759,14 +28759,14 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             );
         Ok(command.output()?)
     };
-    let run_uninstall = || -> Result<std::process::Output, Box<dyn Error>> {
+    let run_uninstall_from = |project_root: &Path| -> Result<std::process::Output, Box<dyn Error>> {
         let mut command = if cfg!(windows) {
             let mut command = StdCommand::new("powershell");
             command
                 .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
                 .arg(&installer)
                 .arg("-ProjectRoot")
-                .arg(&repo)
+                .arg(project_root)
                 .arg("-RuntimePath")
                 .arg(&runtime)
                 .arg("-Uninstall");
@@ -28776,7 +28776,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             command
                 .arg(&installer)
                 .arg("--uninstall")
-                .arg(&repo)
+                .arg(project_root)
                 .env("PROJECTATLAS_RUNTIME_PATH", &runtime);
             command
         };
@@ -28791,6 +28791,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .env("PROJECTATLAS_NO_TELEMETRY", "1");
         Ok(command.output()?)
     };
+    let run_uninstall = || run_uninstall_from(&repo);
     let run_uninstall_with_env =
         |key: &str, value: &Path| -> Result<std::process::Output, Box<dyn Error>> {
             let mut command = if cfg!(windows) {
@@ -30221,6 +30222,41 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             && !installer_state.exists(),
         "failed final readiness did not preserve exact ownership for repair and uninstall",
     )?;
+    #[cfg(unix)]
+    {
+        let projects = fixture_root.join("uninstall projects");
+        let missing = projects.join("missing");
+        let linked = projects.join("linked");
+        let non_directory = projects.join("non-directory");
+        let unrelated = projects.join("unrelated");
+        fs::create_dir_all(&linked)?;
+        fs::create_dir_all(&non_directory)?;
+        fs::create_dir_all(&unrelated)?;
+        fs::write(unrelated.join("keep.txt"), "unrelated project state")?;
+        std::os::unix::fs::symlink(&unrelated, linked.join(ATLAS_DIR_NAME))?;
+        fs::write(non_directory.join(ATLAS_DIR_NAME), "not a directory")?;
+        let before = repository_filesystem_snapshot(&projects)?;
+        for project in [&missing, &linked, &non_directory] {
+            require(
+                run_install()?.status.success(),
+                "uninstall fixture reinstall failed",
+            )?;
+            let output = run_uninstall_from(project)?;
+            require(
+                output.status.success()
+                    && !forwarder.exists()
+                    && !provenance.exists()
+                    && !installer_state.exists()
+                    && runtime.is_file()
+                    && repository_filesystem_snapshot(&projects)? == before,
+                format!(
+                    "project state blocked or was changed by owned uninstall: {}: {}",
+                    project.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )?;
+        }
+    }
     Ok(())
 }
 

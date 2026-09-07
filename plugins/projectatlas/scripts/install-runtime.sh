@@ -23,27 +23,6 @@ if [ -z "$projectatlas_version" ] && [ -f "$plugin_manifest" ]; then
   fi
 fi
 
-if [ "${1:-}" ]; then
-  project_root=$(cd "$1" && pwd -P)
-else
-  project_root=$(pwd -P)
-fi
-atlas_dir="$project_root/.projectatlas"
-if [ -L "$atlas_dir" ] || [ -h "$atlas_dir" ]; then
-  printf '%s\n' "ProjectAtlas project state directory must not be a symlink: $atlas_dir" >&2
-  exit 1
-fi
-if [ -e "$atlas_dir" ] && [ ! -d "$atlas_dir" ]; then
-  printf '%s\n' "ProjectAtlas project state path must be a directory: $atlas_dir" >&2
-  exit 1
-fi
-if [ -d "$atlas_dir" ]; then
-  atlas_dir_canonical=$(CDPATH= cd -- "$atlas_dir" && pwd -P)
-  if [ "$atlas_dir_canonical" != "$atlas_dir" ]; then
-    printf '%s\n' "ProjectAtlas project state directory escaped the canonical project root: $atlas_dir" >&2
-    exit 1
-  fi
-fi
 validate_atlas_runtime_record_path() {
   case "$1" in
     *'
@@ -2454,6 +2433,27 @@ if [ "$uninstall" -eq 1 ]; then
   exit 0
 fi
 
+if [ "${1:-}" ]; then
+  project_root=$(cd "$1" && pwd -P)
+else
+  project_root=$(pwd -P)
+fi
+atlas_dir="$project_root/.projectatlas"
+if [ -L "$atlas_dir" ] || [ -h "$atlas_dir" ]; then
+  printf '%s\n' "ProjectAtlas project state directory must not be a symlink: $atlas_dir" >&2
+  exit 1
+fi
+if [ -e "$atlas_dir" ] && [ ! -d "$atlas_dir" ]; then
+  printf '%s\n' "ProjectAtlas project state path must be a directory: $atlas_dir" >&2
+  exit 1
+fi
+if [ -d "$atlas_dir" ]; then
+  atlas_dir_canonical=$(CDPATH= cd -- "$atlas_dir" && pwd -P)
+  if [ "$atlas_dir_canonical" != "$atlas_dir" ]; then
+    printf '%s\n' "ProjectAtlas project state directory escaped the canonical project root: $atlas_dir" >&2
+    exit 1
+  fi
+fi
 install_release_binary() {
   if [ -z "$projectatlas_version" ]; then
     return 1
