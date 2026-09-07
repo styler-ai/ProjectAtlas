@@ -9630,9 +9630,9 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     let docx_path = docs.join("guide.docx");
     write_docx(&docx_path, "DOCX evidence marker")?;
 
-    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::write(
-        repo.join("src/lib.rs"),
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "// Runtime PDF and DOCX evidence marker are shared words, not links.\npub fn unrelated() {}\n",
     )?;
 
