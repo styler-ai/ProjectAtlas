@@ -2228,6 +2228,46 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn pdf_closed_paths_preserve_text_and_missing_current_points_refuse() {
+        for (path, valid) in [
+            ("10 20 m 30 40 l h 50 60 70 80 v S", true),
+            ("10 20 30 40 re 50 60 70 80 v S", true),
+            ("50 60 70 80 v", false),
+        ] {
+            let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+            let stream = document
+                .get_object_mut((4, 0))
+                .expect("page content")
+                .as_stream_mut()
+                .expect("content stream");
+            let mut content = format!("{path}\n").into_bytes();
+            content.extend_from_slice(&stream.content);
+            stream.set_content(content);
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+            if valid {
+                let facts = result.expect("closed path and displayed PDF text");
+                assert_eq!(facts.text, "Hello PDF");
+                assert_eq!(facts.facts.len(), 1);
+                assert!(matches!(
+                    facts.facts[0].locator,
+                    DocumentLocator::Pdf {
+                        page: 1,
+                        text_start: 0,
+                        text_end: 9
+                    }
+                ));
+            } else {
+                assert!(
+                    matches!(result, Err(DocumentExtractionError::Malformed { .. })),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pdf_postscript_xobjects_preserve_displayed_text_and_exact_locator() {
         for subtype in ["PS", "Form", "Unknown"] {
             let mut object = lopdf::Dictionary::new();

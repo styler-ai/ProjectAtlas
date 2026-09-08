@@ -9590,7 +9590,9 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     fs::create_dir_all(&docs)?;
 
     let make_pdf = |page_content: &str| {
-        let page_content = format!("/Ps Do /LegacyPs Do\n{page_content}");
+        let page_content = format!(
+            "10 20 m 30 40 l h 50 60 70 80 v S 10 20 30 40 re 50 60 70 80 v S /Ps Do /LegacyPs Do\n{page_content}"
+        );
         let page_object = format!(
             "4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n",
             page_content.len()
