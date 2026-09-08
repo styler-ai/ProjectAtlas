@@ -4,8 +4,8 @@
 
 ## 2. Implementation and proof
 
-- [ ] 2.1 Complete Windows source-observer unwatch operations before releasing the owning entry, including partial registration failure.
-- [ ] 2.2 Prove native directory cleanup after MCP server teardown and partial watcher startup, preserve observation behavior on supported platforms, and pass required local and hosted gates.
+- [x] 2.1 Complete Windows source-observer unwatch operations before releasing the owning entry, including partial registration failure.
+- [x] 2.2 Prove native directory cleanup after MCP server teardown and partial watcher startup, preserve observation behavior on supported platforms, and pass required local and hosted gates.
 
 ## Verification
 
