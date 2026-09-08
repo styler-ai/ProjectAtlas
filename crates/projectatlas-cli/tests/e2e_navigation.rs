@@ -10210,8 +10210,11 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         let summary = json_summary_command(&repo, &database, path)?;
         require_json_usize(&summary, &["symbol_count"], 0)?;
         let current_summary = json_at(&summary, &["content_summary"])?;
-        if current_summary.to_string().contains("document-block-") {
-            return Err(io::Error::other("empty document kept its old summary").into());
+        if current_summary
+            .as_str()
+            .is_none_or(|summary| summary.trim().is_empty() || summary.contains("document-block-"))
+        {
+            return Err(io::Error::other("empty document summary was not regenerated").into());
         }
         let persisted = Connection::open(&database)?;
         let text: String = persisted.query_row(
@@ -10250,10 +10253,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         shutdown?;
         require_json_usize(&payload, &["file_summary", "symbol_count"], 0)?;
         if json_at(&payload, &["file_summary", "content_summary"])?
-            .to_string()
-            .contains("document-block-")
+            .as_str()
+            .is_none_or(|summary| summary.trim().is_empty() || summary.contains("document-block-"))
         {
-            return Err(io::Error::other("MCP empty summary retained old document blocks").into());
+            return Err(io::Error::other("MCP empty document summary was not regenerated").into());
         }
     }
     let before_bad_count = mcp_database_snapshot(&database)?;
