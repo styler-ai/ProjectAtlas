@@ -2190,9 +2190,8 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
     }
     fn output_character(&mut self, trm: &Transform, width: f64, _spacing: f64, font_size: f64, char: &str) -> Result<(), OutputError> {
         let position = trm.post_transform(&self.flip_ctm);
-        let transformed_font_size_vec = trm.transform_vector(vec2(font_size, font_size));
-        // get the length of one sized of the square with the same area with a rectangle of size (x, y)
-        let transformed_font_size = (transformed_font_size_vec.x*transformed_font_size_vec.y).sqrt();
+        // The absolute determinant preserves glyph-cell area across rotation and reflection.
+        let transformed_font_size = font_size.abs() * trm.determinant().abs().sqrt();
         let (x, y) = (position.m31, position.m32);
         use std::fmt::Write;
         //dlog!("last_end: {} x: {}, width: {}", self.last_end, x, width);

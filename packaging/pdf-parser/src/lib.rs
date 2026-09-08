@@ -634,6 +634,26 @@ mod tests {
                 "rotation={rotation}"
             );
         }
+        for rotation in [90, 270] {
+            document
+                .get_object_mut(pages)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Rotate", rotation);
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(direct.to_vec());
+            let text = text::page(&document, 1, 128).unwrap();
+            assert_eq!(
+                text.split_whitespace().collect::<Vec<_>>(),
+                ["First", "Second", "Next"],
+                "ordinary rotated text: rotation={rotation}, text={text:?}"
+            );
+        }
         document
             .get_object_mut(page)
             .unwrap()
