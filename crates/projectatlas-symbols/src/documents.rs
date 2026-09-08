@@ -2221,6 +2221,41 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn pdf_postscript_xobjects_preserve_displayed_text_and_exact_locator() {
+        for subtype in ["PS", "Form", "Unknown"] {
+            let mut object = lopdf::Dictionary::new();
+            object.set("Type", "XObject");
+            object.set("Subtype", subtype);
+            if subtype != "PS" {
+                object.set("Subtype2", "PS");
+            }
+            let bytes = pdf_with_xobject(lopdf::Stream::new(
+                object,
+                b"/Helvetica findfont 12 scalefont setfont (Print only) show".to_vec(),
+            ));
+            let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+            if subtype == "Unknown" {
+                assert!(
+                    matches!(result, Err(DocumentExtractionError::Malformed { .. })),
+                    "{result:?}"
+                );
+            } else {
+                let facts = result.expect("displayed PDF text");
+                assert_eq!(facts.text, "Hello PDF");
+                assert_eq!(facts.facts.len(), 1);
+                assert!(matches!(
+                    facts.facts[0].locator,
+                    DocumentLocator::Pdf {
+                        page: 1,
+                        text_start: 0,
+                        text_end: 9
+                    }
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn pdf_image_pixels_do_not_replace_or_invent_page_text() {
         let mut image = lopdf::Dictionary::new();
         image.set("Type", "XObject");

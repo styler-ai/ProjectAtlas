@@ -9590,6 +9590,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     fs::create_dir_all(&docs)?;
 
     let make_pdf = |page_content: &str| {
+        let page_content = format!("/Ps Do /LegacyPs Do\n{page_content}");
         let page_object = format!(
             "4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n",
             page_content.len()
@@ -9597,7 +9598,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         let pdf_objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>\nendobj\n".as_slice(),
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice(),
             page_object.as_bytes(),
             b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
         ];
@@ -9659,6 +9660,8 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "20 0 obj\n<< /Length 8 >>\nstream\n600 0 d0\nendstream\nendobj\n",
             "21 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 600] /FontMatrix [.002] /CharProcs << /A 20 0 R /B 20 0 R >> /Encoding << /Differences [65 /A /B] >> /FirstChar 65 /LastChar 66 /Widths [600 600] >>\nendobj\n",
             "22 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << >> >>\nendobj\n",
+            "23 0 obj\n<< /Type /XObject /Subtype /PS /Length 58 >>\nstream\n/Helvetica findfont 12 scalefont setfont (Print only) show\nendstream\nendobj\n",
+            "24 0 obj\n<< /Type /XObject /Subtype /Form /Subtype2 /PS /Length 58 >>\nstream\n/Helvetica findfont 12 scalefont setfont (Print only) show\nendstream\nendobj\n",
         ] {
             offsets.push(pdf.len());
             pdf.extend_from_slice(object.as_bytes());
