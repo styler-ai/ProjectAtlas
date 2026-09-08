@@ -1863,6 +1863,12 @@ fn extract_purpose_header_with_reader<E, F>(
 where
     F: FnMut(&Path) -> Result<String, E>,
 {
+    if DOCUMENT_SOURCE_EXTENSIONS.contains(&normalized_extension(rel_path).as_str()) {
+        return Ok((
+            None,
+            vec!["missing database purpose for document".to_owned()],
+        ));
+    }
     let content = read_text(path)?;
     let lines = content.lines().map(ToString::to_string).collect::<Vec<_>>();
     let style = resolve_purpose_style(rel_path, config);
@@ -3056,6 +3062,40 @@ mod tests {
             purpose_default_style: "line-comment".to_string(),
             line_comment_prefixes: vec!["//".to_string()],
         }
+    }
+
+    #[test]
+    fn document_map_records_preserve_purposes_without_reading_binary_headers()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let config = test_config(temp.path().join("projectatlas.toon"));
+        for path in ["guide.pdf", "guide.DOCX", "approved.docx"] {
+            fs::write(temp.path().join(path), b"\xff\xfe binary document")?;
+        }
+        fs::write(
+            temp.path().join("lib.rs"),
+            "// Purpose: Explain source ownership.\n",
+        )?;
+        let files = ["guide.pdf", "guide.DOCX", "approved.docx", "lib.rs"].map(str::to_owned);
+        let purposes = BTreeMap::from([(
+            "approved.docx".to_owned(),
+            "Explain document ownership.".to_owned(),
+        )]);
+        let (records, missing, invalid) = super::build_file_records(&files, &config, &purposes)?;
+        assert_eq!(missing, ["guide.pdf", "guide.DOCX"]);
+        assert!(invalid.is_empty());
+        assert_eq!(records.len(), 4);
+        for record in &records[..2] {
+            assert_eq!(record.summary, "MISSING");
+            assert_eq!(record.source, "missing");
+        }
+        assert_eq!(records[2].summary, "Explain document ownership.");
+        assert_eq!(records[2].source, "database");
+        assert_eq!(records[3].summary, "Explain source ownership.");
+        assert_eq!(records[3].source, "header");
+        fs::write(temp.path().join("invalid.rs"), b"\xff")?;
+        assert!(super::build_file_records(&["invalid.rs".to_owned()], &config, &purposes).is_err());
+        Ok(())
     }
 
     #[test]

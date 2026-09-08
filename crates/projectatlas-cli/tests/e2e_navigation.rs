@@ -9591,7 +9591,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
 
     let make_pdf = |page_content: &str| {
         let page_content = format!(
-            "10 20 m 30 40 l h 50 60 70 80 v S 10 20 30 40 re 50 60 70 80 v S /Ps Do /LegacyPs Do\n{page_content}"
+            "10 20 30 40 re s 10 20 30 40 re f* 10 20 30 40 re B 10 20 30 40 re B* 10 20 30 40 re b 10 20 30 40 re b* 10 20 m 30 40 l h 50 60 70 80 v S 10 20 30 40 re 50 60 70 80 v S /Ps Do /LegacyPs Do\n{page_content}"
         );
         let page_object = format!(
             "4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n",
@@ -9720,6 +9720,17 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     fs::write(&config_path, &legacy_config)?;
     let database = atlas.join("projectatlas.db");
     run_scan(&repo, &database)?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["map", "--force"])
+        .assert()
+        .success();
+    let map = fs::read_to_string(atlas.join("projectatlas.toon"))?;
+    for document in ["docs/guide.pdf", "docs/guide.docx"] {
+        if !map.contains(document) {
+            return Err(io::Error::other(format!("map omitted document {document}")).into());
+        }
+    }
     if fs::read_to_string(&config_path)? != legacy_config {
         return Err(io::Error::other("document upgrade rewrote the existing configuration").into());
     }

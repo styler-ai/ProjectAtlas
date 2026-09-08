@@ -317,10 +317,9 @@ jobs:
               *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
             esac
           done
-          filtered_custom_harness=false
           for target in "${targets[@]}"; do
             case "$target" in
-              parser_supervisor_adversarial) filtered_custom_harness=true ;;
+              parser_supervisor_adversarial) ;;
               e2e_delivery|e2e_lifecycle|e2e_maintenance|e2e_navigation|e2e_worktrees|installer_trust_boundaries|language_runtime_compatibility|lint_diagnostics|optional_parser_worker_failure|optional_parser_worker_platform|parser_launch_authority) ;;
               *) echo "planner emitted unknown Rust test target: $target" >&2; exit 1 ;;
             esac
@@ -369,9 +368,11 @@ jobs:
               fi
             fi
           fi
-          if [[ "$filtered_custom_harness" == "true" ]]; then
-            cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
-          fi
+
+      - name: Filtered parser supervisor proof
+        if: contains(fromJSON(needs.plan.outputs.plan).test_targets, 'parser_supervisor_adversarial')
+        timeout-minutes: 2
+        run: cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
 
       - name: Dependency policy
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency')

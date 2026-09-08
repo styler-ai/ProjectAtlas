@@ -2325,6 +2325,20 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             ("10 20 m 30 40 l h 50 60 70 80 v S", true),
             ("10 20 30 40 re 50 60 70 80 v S", true),
             ("50 60 70 80 v", false),
+            ("10 20 m s 50 60 70 80 v", false),
+            ("10 20 m f* 50 60 70 80 v", false),
+            ("10 20 m B 50 60 70 80 v", false),
+            ("10 20 m B* 50 60 70 80 v", false),
+            ("10 20 m b 50 60 70 80 v", false),
+            ("10 20 m b* 50 60 70 80 v", false),
+            ("10 20 m S 50 60 70 80 v", false),
+            ("10 20 m f 50 60 70 80 v", false),
+            ("10 20 m F 50 60 70 80 v", false),
+            ("10 20 m n 50 60 70 80 v", false),
+            (
+                "10 20 30 40 re s 10 20 30 40 re f* 10 20 30 40 re B 10 20 30 40 re B* 10 20 30 40 re b 10 20 30 40 re b*",
+                true,
+            ),
         ] {
             let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
             let stream = document
