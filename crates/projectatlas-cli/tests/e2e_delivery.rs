@@ -18597,11 +18597,15 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         let reported_db = payload[scope]["db"]["path"]
             .as_str()
             .ok_or_else(|| io::Error::other(format!("MCP {scope} omitted its database path")))?;
-        assert_eq!(
-            fs::canonicalize(reported_db)?,
-            expected_db,
-            "MCP {scope} selected a different database from the fixture"
-        );
+        let reported_db = fs::canonicalize(reported_db)?;
+        if reported_db != expected_db {
+            return Err(io::Error::other(format!(
+                "MCP {scope} selected {} instead of fixture database {}",
+                reported_db.display(),
+                expected_db.display()
+            ))
+            .into());
+        }
     }
     assert_frozen_mcp_surfaces_compatible(&stdout)?;
     let session_brief_text = mcp_tool_text(&stdout, 19)?;
