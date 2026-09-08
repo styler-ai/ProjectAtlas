@@ -257,7 +257,10 @@ and deleted-text carriers are validated without execution or publication;
 enclosing deleted/moved-from revisions also suppress every text leaf, separator,
 and field-state mutation while retaining source paragraph/run numbering;
 cached field results and instruction-text leaves outside field-code regions
-remain literal document text. Live page-number and date blocks return typed
+remain literal document text. Each complete decoded text leaf honors inherited
+`xml:space`, trimming only XML edge whitespace in default mode and retaining it
+in preserve mode before logical run offsets are published; invalid modes fail
+as malformed input. Live page-number and date blocks return typed
 unsupported input because their text requires field evaluation. Field nesting has its own 64-level bound and is
 isolated across text-box contexts. Markup Compatibility alternatives select only
 the first choice whose required namespaces are understood WordprocessingML, or

@@ -715,10 +715,10 @@ fn extract_docx(
     parse_docx(&xml, control, stage)
 }
 
-/// Raw run text retained without XML parser whitespace trimming.
+/// Decoded run text with Word text-leaf whitespace policy applied before publication.
 #[derive(Default)]
 struct RawDocxRun {
-    /// Exact decoded run text.
+    /// Decoded logical run text.
     text: String,
     /// Decoded run bytes already emitted before a nested text container.
     text_start: usize,
@@ -803,6 +803,8 @@ fn parse_docx(
     let mut paragraph = DocxTextContext::default();
     let mut text_boxes = Vec::new();
     let mut text_carrier = None;
+    let mut text_start = 0;
+    let mut preserve_space = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut alternatives: Vec<DocxAlternative> = Vec::new();
     let mut ignorable_namespaces: Vec<String> = Vec::new();
     let mut skipped_branch_depth = None;
@@ -882,6 +884,7 @@ fn parse_docx(
                         maximum: MAX_DOCX_XML_DEPTH,
                     });
                 }
+                preserve_space[element_depth] = preserve_space[element_depth - 1];
                 if skipped_branch_depth.is_some() {
                     continue;
                 }
@@ -977,6 +980,29 @@ fn parse_docx(
                                     "DOCX XML attribute has an undeclared namespace prefix: {prefix}"
                                 ),
                             });
+                        }
+                        if attribute_name.as_ref() == "space"
+                            && matches!(&attribute_namespace, ResolveResult::Bound(namespace)
+                                if namespace.as_ref() == "http://www.w3.org/XML/1998/namespace")
+                        {
+                            let value =
+                                quick_xml::escape::unescape(&attribute.value).map_err(|error| {
+                                    DocumentExtractionError::Malformed {
+                                        format: DocumentFormat::Docx,
+                                        message: error.to_string(),
+                                    }
+                                })?;
+                            preserve_space[element_depth] = match value.as_ref() {
+                                "default" => false,
+                                "preserve" => true,
+                                _ => {
+                                    return Err(DocumentExtractionError::Malformed {
+                                        format: DocumentFormat::Docx,
+                                        message: "DOCX xml:space must be default or preserve"
+                                            .to_owned(),
+                                    });
+                                }
+                            };
                         }
                         if !matches!(attribute_namespace, ResolveResult::Bound(namespace)
                             if namespace.as_ref() == "http://schemas.openxmlformats.org/markup-compatibility/2006")
@@ -1119,6 +1145,7 @@ fn parse_docx(
                         paragraph.run = Some(RawDocxRun::default());
                     }
                     "t" | "instrText" | "delText" | "delInstrText" if paragraph.run.is_some() => {
+                        text_start = paragraph.run.as_ref().map_or(0, |run| run.text.len());
                         let ignored = deleted_depth.is_some()
                             || matches!(name.as_ref(), "delText" | "delInstrText")
                             || (name.as_ref() == "instrText"
@@ -1330,7 +1357,22 @@ fn parse_docx(
                     deleted_depth = None;
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
-                    "t" | "instrText" | "delText" | "delInstrText" => text_carrier = None,
+                    "t" | "instrText" | "delText" | "delInstrText" => {
+                        if text_carrier == Some(DocxTextCarrier::Rendered)
+                            && !preserve_space[element_depth]
+                            && let Some(run) = paragraph.run.as_mut()
+                        {
+                            // Trim the complete leaf, not individual XML text/entity/CDATA events.
+                            let text = &run.text[text_start..];
+                            let trimmed = text.trim_matches([' ', '\t', '\r', '\n']);
+                            let leading =
+                                text.len() - text.trim_start_matches([' ', '\t', '\r', '\n']).len();
+                            let end = text_start + leading + trimmed.len();
+                            run.text.truncate(end);
+                            run.text.drain(text_start..text_start + leading);
+                        }
+                        text_carrier = None;
+                    }
                     "r" => {
                         if let Some(mut run) = paragraph.run.take() {
                             publish_docx_run_fragment(
@@ -3374,7 +3416,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn docx_field_carriers_retain_only_literal_and_cached_text() {
-        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE &amp; <![CDATA[ignored]]></w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:instrText> Literal</w:instrText></w:r><w:r><w:delInstrText>Deleted code</w:delInstrText><w:delText><![CDATA[Deleted text]]></w:delText></w:r></w:p></w:body></w:document>"#;
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE &amp; <![CDATA[ignored]]></w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:instrText xml:space="preserve"> Literal</w:instrText></w:r><w:r><w:delInstrText>Deleted code</w:delInstrText><w:delText><![CDATA[Deleted text]]></w:delText></w:r></w:p></w:body></w:document>"#;
         let parsed = extract_document_text_controlled(
             &docx_archive(xml, CompressionMethod::Deflated),
             "fields.docx",
@@ -3726,7 +3768,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     fn direct_xml_extracts_body_and_table_locators() {
         let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
             <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-              <w:body><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t> world</w:t></w:r></w:p>
+              <w:body><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> world</w:t></w:r></w:p>
               <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body>
             </w:document>"#;
         let mut bytes = Vec::new();
@@ -3775,6 +3817,62 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 format: DocumentFormat::Docx,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn docx_text_whitespace_follows_inherited_xml_space() {
+        for (attributes, leaves, expected) in [
+            ("", "<w:t> A </w:t><w:t> B </w:t>", "AB"),
+            (
+                "",
+                "<w:t xml:space=\"preserve\"> A </w:t><w:t> B </w:t>",
+                " A B",
+            ),
+            (
+                "xml:space=\"preserve\"",
+                "<w:t> A </w:t><w:t xml:space=\"default\"> B </w:t><w:t> C </w:t>",
+                " A B C ",
+            ),
+            (
+                "",
+                "<w:t> \tA&#x20;<![CDATA[ B ]]>&amp; C&#x20;</w:t>",
+                "A  B & C",
+            ),
+            (
+                "",
+                "<w:t> &#xA0;A&#xA0; </w:t><w:t> \t </w:t>",
+                "\u{a0}A\u{a0}",
+            ),
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" {attributes}><w:body><w:p><w:r>{leaves}</w:r></w:p></w:body></w:document>"
+            );
+            let facts = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("Word text whitespace");
+            assert_eq!(facts.text, expected);
+            assert_eq!(facts.facts.len(), 1);
+            assert_eq!(facts.facts[0].text, expected);
+            assert!(
+                matches!(facts.facts[0].locator, DocumentLocator::Docx { paragraph: 1, run: 1, text_start: 0, text_end, .. } if text_end == expected.len())
+            );
+        }
+    }
+
+    #[test]
+    fn docx_invalid_whitespace_mode_refuses_publication() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Prefix</w:t><w:t xml:space="invalid">suffix</w:t></w:r></w:p></w:body></w:document>"#;
+        assert!(matches!(
+            extract_document_text_controlled(
+                &docx_archive(xml, CompressionMethod::Deflated),
+                "guide.docx",
+                None,
+                &control()
+            ),
+            Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                ..
+            })
         ));
     }
 

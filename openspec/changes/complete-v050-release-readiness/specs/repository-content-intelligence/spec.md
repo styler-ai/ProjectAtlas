@@ -71,6 +71,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 #### Scenario: Valid DOCX
 - **WHEN** a ZIP container passes entry/path/compressed/expanded/recursion limits and contains admitted `word/document.xml` with Transitional or Strict WordprocessingML namespace identity, independent of its prefix
 - **THEN** ProjectAtlas publishes bounded text with exact part, paragraph, run, and text-span locator plus parser/version provenance
+- **AND** admitted text leaves honor inherited `xml:space`: default mode removes only leading and trailing XML whitespace after complete entity/CDATA decoding, preserve mode retains it, and invalid modes fail as malformed input; interior whitespace, nonbreaking spaces, and exact logical run spans remain intact
 - **AND** live ruby annotations return typed unsupported input rather than a malformed-input error; deleted ruby content remains excluded
 - **AND** alternate-format chunks return typed unsupported input rather than omitting referenced content
 - **AND** unsupported XML encodings, including UTF-16, return typed unsupported input without replacing the last complete publication
