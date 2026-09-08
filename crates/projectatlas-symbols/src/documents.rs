@@ -955,6 +955,13 @@ fn parse_docx(
                     foreign_depth = Some(element_depth);
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
+                    "subDoc" if deleted_depth.is_none() => {
+                        return Err(DocumentExtractionError::UnsupportedDocxInput {
+                            message:
+                                "referenced DOCX subdocuments require unsupported external content"
+                                    .to_owned(),
+                        });
+                    }
                     "altChunk" if deleted_depth.is_none() => {
                         return Err(DocumentExtractionError::UnsupportedDocxInput {
                             message:
@@ -2764,6 +2771,33 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 .text,
             "Prefix"
         );
+    }
+
+    #[test]
+    fn docx_subdocuments_refuse_incomplete_text() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Prefix</w:t></w:r><w:subDoc r:id="child"/></w:p></w:body></w:document>"#;
+        for reference in [
+            r#"<w:subDoc r:id="child"/>"#,
+            r#"<w:subDoc r:id="child"></w:subDoc>"#,
+        ] {
+            let xml = xml.replace(r#"<w:subDoc r:id="child"/>"#, reference);
+            let bytes = docx_archive(xml.as_bytes(), CompressionMethod::Deflated);
+            let result = extract_document_text_controlled(&bytes, "guide.docx", None, &control());
+            assert!(
+                matches!(
+                    result,
+                    Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+                ),
+                "{result:?}"
+            );
+            let deleted = xml.replace(reference, &format!("<w:del>{reference}</w:del>"));
+            assert_eq!(
+                parse_docx(deleted.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                    .expect("deleted subdocument remains excluded")
+                    .text,
+                "Prefix"
+            );
+        }
     }
 
     #[test]

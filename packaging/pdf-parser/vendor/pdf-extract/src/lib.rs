@@ -1420,12 +1420,16 @@ impl Path {
     fn new() -> Path {
         Path { ops: Vec::new() }
     }
-    fn current_point(&self) -> (f64, f64) {
-        match self.ops.last().unwrap() {
-            &PathOp::MoveTo(x, y) => { (x, y) }
-            &PathOp::LineTo(x, y) => { (x, y) }
-            &PathOp::CurveTo(_, _, _, _, x, y) => { (x, y) }
-            _ => { panic!() }
+    fn current_point(&self) -> Option<(f64, f64)> {
+        match *self.ops.last()? {
+            PathOp::MoveTo(x, y) | PathOp::LineTo(x, y) | PathOp::Rect(x, y, _, _) => Some((x, y)),
+            PathOp::CurveTo(_, _, _, _, x, y) => Some((x, y)),
+            // ponytail: closing paths scan back to their origin under the guest fuel limit;
+            // cache that origin if path-heavy documents exhaust the budget.
+            PathOp::Close => self.ops.iter().rev().find_map(|operation| match *operation {
+                PathOp::MoveTo(x, y) | PathOp::Rect(x, y, _, _) => Some((x, y)),
+                _ => None,
+            }),
         }
     }
 }
@@ -1846,7 +1850,8 @@ impl<'a> Processor<'a> {
                         as_num(&operation.operands[5])))
                 }
                 "v" => {
-                    let (x, y) = path.current_point();
+                    let (x, y) = path.current_point().ok_or_else(||
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "path curve requires a current point"))?;
                     path.ops.push(PathOp::CurveTo(
                         x,
                         y,

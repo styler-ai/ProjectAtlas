@@ -10318,6 +10318,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "alternate-format DOCX chunks",
         ),
         (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r><w:subDoc r:id="child"/></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "referenced DOCX subdocuments",
+        ),
+        (
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:ruby><w:rt><w:r><w:t>Reading</w:t></w:r></w:rt><w:rubyBase><w:r><w:t>Base</w:t></w:r></w:rubyBase></w:ruby></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
             "ruby annotations",
         ),

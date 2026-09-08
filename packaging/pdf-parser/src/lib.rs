@@ -304,6 +304,58 @@ mod tests {
     }
 
     #[test]
+    fn closed_subpaths_preserve_visible_text_and_missing_points_refuse() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let content = document.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), Vec::new()));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        for (path, valid) in [
+            ("10 20 m 30 40 l h 50 60 70 80 v S", true),
+            ("10 20 30 40 re 50 60 70 80 v S", true),
+            (
+                "10 20 m 30 40 l h 90 100 m 110 120 l h 50 60 70 80 v S",
+                true,
+            ),
+            ("10 20 m 30 40 50 60 70 80 c 90 100 110 120 v S", true),
+            ("50 60 70 80 v", false),
+            ("h 50 60 70 80 v", false),
+            ("10 20 m n 50 60 70 80 v", false),
+        ] {
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(format!("{path} BT /F1 12 Tf 72 700 Td (Visible) Tj ET").into_bytes());
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).unwrap();
+            let result = parse(&bytes);
+            if valid {
+                let (wire, _) = result.unwrap();
+                assert_eq!(std::str::from_utf8(&wire[12..]).unwrap().trim(), "Visible");
+            } else {
+                assert_eq!(result, Err(Failure::Malformed));
+            }
+        }
+    }
+
+    #[test]
     fn postscript_xobjects_do_not_change_displayed_text() {
         let mut document = lopdf::Document::new();
         let pages = document.new_object_id();
