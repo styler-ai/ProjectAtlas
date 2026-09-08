@@ -46,6 +46,11 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **AND** inherited page rotation uses validated integer quarter turns before text layout; malformed rotation fails before publication
 - **AND** Form XObjects inherit graphics state and compose their matrix with the caller transform, preserving positioned and nested text evidence; malformed matrices fail before publication
 
+#### Scenario: Empty document replacement
+- **WHEN** an indexed document is replaced by an admitted PDF or DOCX with no text, including a PDF with a structurally valid zero-page tree
+- **THEN** refresh publishes empty text and no document blocks, regenerates the content summary and any suggested purpose without removed blocks, and preserves authored purposes
+- **AND** malformed page-tree counts remain typed failures that preserve the previous complete publication
+
 #### Scenario: Valid DOCX
 - **WHEN** a ZIP container passes entry/path/compressed/expanded/recursion limits and contains admitted `word/document.xml` with Transitional or Strict WordprocessingML namespace identity, independent of its prefix
 - **THEN** ProjectAtlas publishes bounded text with exact part, paragraph, run, and text-span locator plus parser/version provenance

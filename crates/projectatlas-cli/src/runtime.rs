@@ -6682,7 +6682,7 @@ fn parse_document_symbol_job(
             Ok(graph) => graph,
             Err(error) => return document_parse_error_outcome(&job.path, error),
         };
-    let summary = summarize_symbol_graph(&graph, job.fallback_summary.as_deref());
+    let summary = summarize_symbol_graph(&graph, None);
     let purpose_suggestion = job
         .purpose_needs_suggestion
         .then(|| suggest_file_purpose(&job.path, &summary));
@@ -13626,6 +13626,54 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                 .contains("pdf:page=1;text-span="),
             &true,
             "document locator persisted in graph symbol",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn empty_document_refresh_discards_previous_summary() -> Result<(), Box<dyn Error>> {
+        let bytes = runtime_pdf_fixture();
+        let mut job = SymbolParseJob {
+            path: "guide.pdf".to_owned(),
+            native_path: PathBuf::from("guide.pdf"),
+            expected_content_hash: String::new(),
+            language: Some("pdf".to_owned()),
+            fallback_summary: None,
+            purpose_needs_suggestion: true,
+        };
+        let options = SymbolBuildOptions::new(
+            projectatlas_symbols::MAX_DOCUMENT_OUTPUT_BYTES as u64,
+            Some(1),
+            None,
+        );
+        let control = standalone_index_work_control();
+        let SymbolParseOutcome::Parsed(previous) =
+            parse_document_symbol_job(&job, &bytes, &options, &control)
+        else {
+            return Err(io::Error::other("document did not parse").into());
+        };
+        require_eq(&previous.graph.symbols.len(), &1, "previous document block")?;
+        job.fallback_summary = Some(previous.summary.clone());
+        let empty = String::from_utf8(bytes)?.replace("Runtime PDF", "           ");
+        let SymbolParseOutcome::Parsed(current) =
+            parse_document_symbol_job(&job, empty.as_bytes(), &options, &control)
+        else {
+            return Err(io::Error::other("empty document did not parse").into());
+        };
+        require_eq(&current.graph.symbols.len(), &0, "empty document blocks")?;
+        require_eq(
+            &current.summary.contains("document-block-1"),
+            &false,
+            "summary must discard removed document blocks",
+        )?;
+        require_eq(
+            &current
+                .purpose_suggestion
+                .as_deref()
+                .unwrap_or_default()
+                .contains("document-block-1"),
+            &false,
+            "suggested purpose must discard removed document blocks",
         )?;
         Ok(())
     }

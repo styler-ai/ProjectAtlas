@@ -357,7 +357,7 @@ fn read_output(
         .get(ptr..end)
         .ok_or_else(|| malformed("PDF output range invalid"))?;
     let count = word(&mut wire)? as usize;
-    if count == 0 || count > MAX_DOCUMENT_FACTS {
+    if count > MAX_DOCUMENT_FACTS {
         return Err(malformed("PDF page count invalid"));
     }
     let mut pages = Vec::with_capacity(count);

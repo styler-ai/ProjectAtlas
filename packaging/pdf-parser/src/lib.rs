@@ -89,9 +89,6 @@ fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
     }
     let pages = document.get_pages();
     validate_page_tree(&document, &pages)?;
-    if pages.is_empty() {
-        return Err(Failure::Malformed);
-    }
     if pages.len() > FACT_LIMIT {
         return Err(Failure::Pages);
     }
@@ -205,7 +202,7 @@ fn validate_page_tree(
             _ => return Err(Failure::Malformed),
         }
     }
-    if discovered == 0 || discovered != pages.len() {
+    if discovered != pages.len() {
         return Err(Failure::Malformed);
     }
     Ok(())
@@ -240,6 +237,28 @@ pub extern "C" fn output_len() -> u32 {
 mod tests {
     use super::*;
     use lopdf::dictionary;
+
+    #[test]
+    fn empty_page_tree_publishes_empty_output_and_checks_declared_count() {
+        let mut document = lopdf::Document::new();
+        let pages = document.add_object(dictionary! {
+            "Type" => "Pages", "Kids" => Vec::<lopdf::Object>::new(), "Count" => 0
+        });
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        assert_eq!(parse(&bytes), Ok((0u32.to_le_bytes().to_vec(), 0)));
+        OUTPUT.with(|output| *output.borrow_mut() = b"previous text".to_vec());
+        INPUT.with(|input| *input.borrow_mut() = bytes);
+        assert_eq!(extract(), 0);
+        OUTPUT.with(|output| assert_eq!(*output.borrow(), 0u32.to_le_bytes()));
+
+        document.get_dictionary_mut(pages).unwrap().set("Count", 1);
+        let mut invalid = Vec::new();
+        document.save_to(&mut invalid).unwrap();
+        assert_eq!(parse(&invalid), Err(Failure::Malformed));
+    }
 
     #[test]
     fn invalid_input_cannot_expose_previous_output() {
