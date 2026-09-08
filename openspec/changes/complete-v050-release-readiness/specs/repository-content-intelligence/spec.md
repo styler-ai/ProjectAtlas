@@ -38,6 +38,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **WHEN** PDF magic and all input/time/memory/output limits pass
 - **THEN** ProjectAtlas publishes bounded text with exact page and text-span locator, parser/version provenance, completeness, and coverage
 
+- **AND** vertical Type 0 writing returns typed unsupported input rather than fabricating horizontal positions; horizontal text measures its baseline and height independently under scaling and rotation
 - **AND** CID width ranges apply the declared width to every character through the inclusive last CID, preserving text spacing
 - **AND** ExtGState font selections update the font and size with scoped dictionary identity, preserve graphics-state save/restore and Form resources, and reject malformed font entries before publication
 - **AND** marked-content ActualText replacements return typed unsupported input, including named properties and Form-local resource scopes, rather than publishing the underlying glyphs as complete text

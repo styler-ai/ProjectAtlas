@@ -502,6 +502,49 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 .set_content(format!("BT /F1 12 Tf 72 500 Td {text} ET").into_bytes());
             assert_eq!(text::page(&document, 1, 128).unwrap().trim(), expected);
         }
+        let resources = document
+            .get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        resources.set(
+            "ExtGState",
+            dictionary! { "GS" => dictionary! { "Font" => vec![font.into(), 12.into()] } },
+        );
+        let vertical_cmap = document.add_object(lopdf::Stream::new(
+            dictionary! { "Type" => "CMap", "WMode" => 1 },
+            br"begincmap /WMode 1 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 begincidchar <0001> 1 endcidchar endcmap"
+                .to_vec(),
+        ));
+        for encoding in [
+            lopdf::Object::Name(b"Identity-V".to_vec()),
+            vertical_cmap.into(),
+        ] {
+            document
+                .get_object_mut(font)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Encoding", encoding);
+            for selection in ["/F1 12 Tf", "/GS gs"] {
+                document
+                    .get_object_mut(content)
+                    .unwrap()
+                    .as_stream_mut()
+                    .unwrap()
+                    .set_content(format!("BT {selection} 72 500 Td <0001> Tj ET").into_bytes());
+                assert!(matches!(
+                    text::page(&document, 1, 128),
+                    Err(Failure::Unsupported)
+                ));
+            }
+        }
     }
 
     #[test]
@@ -717,6 +760,27 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             b"BT /F1 12 Tf 20 TL 72 700 Td (First) Tj (Second) ' 3 2 (Third word) \" (tail) Tj ET".to_vec()
         );
         assert_eq!(text::page(&document, 1, 256).unwrap(), expected);
+        for (transform, scale, text, expected) in [
+            ("", 400, "(First) Tj (Second) Tj", "FirstSecond"),
+            ("", 25, "(A) Tj 4 0 Td (B) Tj", "A B"),
+            (
+                "4 0 0 1 0 0 cm",
+                100,
+                "(First) Tj (Second) Tj",
+                "FirstSecond",
+            ),
+            ("1 0 0 4 0 0 cm", 100, "(A) Tj 12 0 Td (B) Tj", "A B"),
+        ] {
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(
+                    format!("{transform} BT /F1 12 Tf {scale} Tz 72 500 Td {text} ET").into_bytes(),
+                );
+            assert_eq!(text::page(&document, 1, 256).unwrap().trim(), expected);
+        }
         for malformed in [
             b"BT /F1 12 Tf 1 ' ET".as_slice(),
             b"BT /F1 12 Tf (text) 1 ' ET",

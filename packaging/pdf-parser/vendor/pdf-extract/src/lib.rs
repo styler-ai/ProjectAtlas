@@ -319,16 +319,30 @@ struct PdfType3Font<'a> {
 }
 
 
-fn make_font<'a>(doc: &'a Document, font: &'a Dictionary) -> Rc<dyn PdfFont + 'a> {
+fn make_font<'a>(doc: &'a Document, font: &'a Dictionary,
+                 fonts: &mut HashMap<*const Dictionary, Rc<dyn PdfFont + 'a>>) -> Result<Rc<dyn PdfFont + 'a>, OutputError> {
+    let entry = fonts.entry(std::ptr::from_ref(font));
+    if let Entry::Occupied(entry) = entry {
+        return Ok(entry.get().clone());
+    }
     let subtype = get_name_string(doc, font, b"Subtype");
     dlog!("MakeFont({})", subtype);
-    if subtype == "Type0" {
+    let font: Rc<dyn PdfFont + 'a> = if subtype == "Type0" {
+        let vertical = match doc.dereference(font.get(b"Encoding")?)?.1 {
+            Object::Name(name) => name == b"Identity-V",
+            Object::Stream(stream) => get::<Option<i64>>(doc, &stream.dict, b"WMode") == Some(1),
+            _ => false,
+        };
+        if vertical {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "vertical PDF fonts require unsupported writing metrics").into());
+        }
         Rc::new(PdfCIDFont::new(doc, font))
     } else if subtype == "Type3" {
         Rc::new(PdfType3Font::new(doc, font))
     } else {
         Rc::new(PdfSimpleFont::new(doc, font))
-    }
+    };
+    Ok(entry.or_insert(font).clone())
 }
 
 fn is_core_font(name: &str) -> bool {
@@ -980,7 +994,7 @@ impl<'a> PdfCIDFont<'a> {
             &Object::Name(ref name) => {
                 let name = pdf_to_utf8(name);
                 dlog!("encoding {:?}", name);
-                if name == "Identity-H" || name == "Identity-V" {
+                if name == "Identity-H" {
                     ByteMapping { codespace: vec![CodeRange{width: 2, start: 0, end: 0xffff }], cid: vec![CIDRange{ src_code_lo: 0, src_code_hi: 0xffff, dst_CID_lo: 0 }]}
                 } else {
                     panic!("unsupported encoding {}", name);
@@ -1355,7 +1369,7 @@ fn apply_state<'a>(doc: &'a Document, gs: &mut GraphicsState<'a>, state: &'a Dic
                 if !size.is_finite() {
                     return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "non-finite ExtGState font size").into());
                 }
-                gs.ts.font = Some(fonts.entry(std::ptr::from_ref(dictionary)).or_insert_with(|| make_font(doc, dictionary)).clone());
+                gs.ts.font = Some(make_font(doc, dictionary, fonts)?);
                 gs.ts.font_size = size;
             }
             b"SMask" => { match maybe_deref(doc, v)  {
@@ -1722,7 +1736,7 @@ impl<'a> Processor<'a> {
                     let name = operation.operands[0].as_name().unwrap();
                     // Resource names are scoped; two Forms can have unrelated /F1 fonts.
                     let dictionary = get::<&Dictionary>(doc, fonts, name);
-                    let font = self.font_table.entry(std::ptr::from_ref(dictionary)).or_insert_with(|| make_font(doc, dictionary)).clone();
+                    let font = make_font(doc, dictionary, &mut self.font_table)?;
                     {
                         /*let file = font.get_descriptor().and_then(|desc| desc.get_file());
                     if let Some(file) = file {
@@ -2208,23 +2222,23 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
     }
     fn output_character(&mut self, trm: &Transform, width: f64, _spacing: f64, font_size: f64, char: &str) -> Result<(), OutputError> {
         let position = trm.post_transform(&self.flip_ctm);
-        // The absolute determinant preserves glyph-cell area across rotation and reflection.
-        let transformed_font_size = font_size.abs() * trm.determinant().abs().sqrt();
+        let font_height = font_size.abs() * trm.m21.hypot(trm.m22);
+        let font_width = font_size.abs() * trm.m11.hypot(trm.m12);
         let (x, y) = (position.m31, position.m32);
         use std::fmt::Write;
         //dlog!("last_end: {} x: {}, width: {}", self.last_end, x, width);
         if self.first_char {
-            if (y - self.last_y).abs() > transformed_font_size * 1.5 {
+            if (y - self.last_y).abs() > font_height * 1.5 {
                 write!(self.writer, "\n")?;
             }
 
             // we've moved to the left and down
-            if x < self.last_end && (y - self.last_y).abs() > transformed_font_size * 0.5 {
+            if x < self.last_end && (y - self.last_y).abs() > font_height * 0.5 {
                 write!(self.writer, "\n")?;
             }
 
-            if x > self.last_end + transformed_font_size * 0.1 {
-                dlog!("width: {}, space: {}, thresh: {}", width, x - self.last_end, transformed_font_size * 0.1);
+            if x > self.last_end + font_width * 0.1 {
+                dlog!("width: {}, space: {}, thresh: {}", width, x - self.last_end, font_width * 0.1);
                 write!(self.writer, " ")?;
             }
         }
@@ -2232,7 +2246,7 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
         write!(self.writer, "{}", char)?;
         self.first_char = false;
         self.last_y = y;
-        self.last_end = x + width * transformed_font_size;
+        self.last_end = x + width * font_width;
         Ok(())
     }
     fn begin_word(&mut self) -> Result<(), OutputError> {

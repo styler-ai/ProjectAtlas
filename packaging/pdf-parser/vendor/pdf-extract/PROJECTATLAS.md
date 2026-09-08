@@ -20,7 +20,8 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Interpret quote text-showing operators with their line movement and spacing semantics.
 - Apply CID range widths to both inclusive endpoints using the declared width.
 - Apply ExtGState font dictionaries and finite sizes through the existing scoped font cache.
-- Derive plain-text font scale from the absolute transform determinant so ordinary rotated text retains word boundaries.
+- Measure plain-text horizontal advances and font heights from their separate transformed vectors, preserving rotated and anisotropically scaled text spacing.
+- Refuse vertical Type 0 fonts selected by Identity-V or an encoding CMap with WMode 1 through the shared font cache owner.
 - Apply inherited integer page rotation in the initial graphics transform; reject non-quarter-turn or non-integer rotation before publication.
 - Interpret Form XObjects with inherited graphics state and composed caller/Form
   transforms, skip Image pixels without OCR, and refuse unknown XObject subtypes
