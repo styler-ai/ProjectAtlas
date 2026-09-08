@@ -793,6 +793,16 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e_lifecycle
 
+      - name: Native source-observer teardown and MCP identity
+        if: contains(matrix.contracts, 'mcp')
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::native_observer_teardown_releases_root_and_external_config -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::native_observer_failed_registration_releases_admitted_root -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features mcp::tests::mcp_calls_share_server_identity_and_new_server_uses_another -- --exact --nocapture
+
       - name: Persistent MCP Git config stdin E2E
         if: contains(matrix.contracts, 'mcp')
         timeout-minutes: 5
