@@ -477,7 +477,51 @@ impl<'a> PdfSimpleFont<'a> {
         };
 
 
-        let mut encoding_table = None;
+        // Resolve the font's base map once, independently of widths or Differences.
+        let mut builtin_encoding = None;
+        let embedded = descriptor.is_some_and(|d| [b"FontFile".as_slice(), b"FontFile2", b"FontFile3"]
+            .iter().any(|key| d.get(key).is_ok()));
+        if let Some(type1_encoding) = type1_encoding {
+            let mut table = vec![0; 256];
+            dlog!("type1encoding");
+            for (code, name) in type1_encoding {
+                let unicode = glyphnames::name_to_unicode(&pdf_to_utf8(&name));
+                if let Some(unicode) = unicode {
+                    table[code as usize] = unicode;
+                } else {
+                    dlog!("unknown character {}", pdf_to_utf8(&name));
+                }
+            }
+            builtin_encoding = Some(table)
+        }
+        if builtin_encoding.is_none() && !embedded {
+            // The Latin Base-14 metrics share StandardEncoding; this selects a map, not a substitute font.
+            let encoding_name = if is_core_font(&base_name) { base_name.as_str() }
+                else if descriptor.and_then(|d| maybe_get::<i64>(doc, d, b"Flags"))
+                    .is_some_and(|flags| flags & 32 != 0 && flags & 4 == 0) { "Helvetica" }
+                else { "" };
+            for font_metrics in core_fonts::metrics().iter() {
+                if font_metrics.0 == encoding_name {
+                    let mut table = vec![0; 256];
+                    for w in font_metrics.2 {
+                        dlog!("{} {}", w.0, w.2);
+                        // -1 is "not encoded"
+                        if w.0 != -1 {
+                            table[w.0 as usize] = if base_name == "ZapfDingbats" {
+                                zapfglyphnames::zapfdigbats_names_to_unicode(w.2).unwrap_or_else(|| panic!("bad name {:?}", w))
+                            } else {
+                                glyphnames::name_to_unicode(w.2).unwrap()
+                            }
+                        }
+                    }
+
+                    builtin_encoding = Some(table);
+                    break;
+                }
+            }
+        }
+
+        let encoding_table;
         match encoding {
             Some(&Object::Name(ref encoding_name)) => {
                 dlog!("encoding {:?}", pdf_to_utf8(encoding_name));
@@ -489,7 +533,7 @@ impl<'a> PdfSimpleFont<'a> {
                     dlog!("BaseEncoding {:?}", base_encoding);
                     encoding_to_unicode_table(base_encoding)
                 } else {
-                    Vec::from(PDFDocEncoding)
+                    builtin_encoding.take().unwrap_or_else(|| vec![0; 256])
                 };
                 let differences = maybe_get_array(doc, encoding, b"Differences");
                 if let Some(differences) = differences {
@@ -504,8 +548,8 @@ impl<'a> PdfSimpleFont<'a> {
                                 // XXX: names of Type1 fonts can map to arbitrary strings instead of real
                                 // unicode names, so we should probably handle this differently
                                 let unicode = glyphnames::name_to_unicode(&name);
+                                table[code as usize] = unicode.unwrap_or(0);
                                 if let Some(unicode) = unicode{
-                                    table[code as usize] = unicode;
                                     if let Some(ref mut unicode_map) = unicode_map {
                                         let be = [unicode];
                                         match unicode_map.entry(code as u32) {
@@ -559,23 +603,8 @@ impl<'a> PdfSimpleFont<'a> {
                 encoding_table = Some(table);
             }
             None => {
-                if let Some(type1_encoding) = type1_encoding {
-                    let mut table = Vec::from(PDFDocEncoding);
-                    dlog!("type1encoding");
-                    for (code, name) in type1_encoding {
-                        let unicode = glyphnames::name_to_unicode(&pdf_to_utf8(&name));
-                        if let Some(unicode) = unicode {
-                            table[code as usize] = unicode;
-                        } else {
-                            dlog!("unknown character {}", pdf_to_utf8(&name));
-                        }
-                    }
-                    encoding_table = Some(table)
-                } else if subtype == "TrueType" {
-                    encoding_table = Some(encodings::WIN_ANSI_ENCODING.iter()
-                        .map(|x| if let &Some(x) = x { glyphnames::name_to_unicode(x).unwrap() } else { 0 })
-                        .collect());
-                }
+                encoding_table = builtin_encoding;
+
             }
             _ => { panic!() }
         }
@@ -623,7 +652,7 @@ impl<'a> PdfSimpleFont<'a> {
             };
             for font_metrics in core_fonts::metrics().iter() {
                 if font_metrics.0 == base_name {
-                    if let Some(ref encoding) = encoding_table {
+                    if let Some(encoding) = encoding_table.as_ref().filter(|_| encoding.is_some() || embedded) {
                         dlog!("has encoding");
                         for w in font_metrics.2 {
                             let c = glyphnames::name_to_unicode(w.2).unwrap();
@@ -648,29 +677,6 @@ impl<'a> PdfSimpleFont<'a> {
                     // assert!(maybe_get_obj(doc, font, b"FirstChar").is_none());
                     // assert!(maybe_get_obj(doc, font, b"LastChar").is_none());
                     // assert!(maybe_get_obj(doc, font, b"Widths").is_none());
-                }
-            }
-        }
-
-        // Built-in character encoding is independent of explicit glyph widths.
-        if encoding_table.is_none() {
-            for font_metrics in core_fonts::metrics().iter() {
-                if font_metrics.0 == base_name {
-                    let mut table = vec![0; 256];
-                    for w in font_metrics.2 {
-                        dlog!("{} {}", w.0, w.2);
-                        // -1 is "not encoded"
-                        if w.0 != -1 {
-                            table[w.0 as usize] = if base_name == "ZapfDingbats" {
-                                zapfglyphnames::zapfdigbats_names_to_unicode(w.2).unwrap_or_else(|| panic!("bad name {:?}", w))
-                            } else {
-                                glyphnames::name_to_unicode(w.2).unwrap()
-                            }
-                        }
-                    }
-
-                    encoding_table = Some(table);
-                    break;
                 }
             }
         }
@@ -744,7 +750,7 @@ impl<'a> PdfType3Font<'a> {
                     dlog!("BaseEncoding {:?}", base_encoding);
                     encoding_to_unicode_table(base_encoding)
                 } else {
-                    Vec::from(PDFDocEncoding)
+                    vec![0; 256]
                 };
                 let differences = maybe_get_array(doc, encoding, b"Differences");
                 if let Some(differences) = differences {
@@ -758,9 +764,7 @@ impl<'a> PdfType3Font<'a> {
                                 // XXX: names of Type1 fonts can map to arbitrary strings instead of real
                                 // unicode names, so we should probably handle this differently
                                 let unicode = glyphnames::name_to_unicode(&name);
-                                if let Some(unicode) = unicode{
-                                    table[code as usize] = unicode;
-                                }
+                                table[code as usize] = unicode.unwrap_or(0);
                                 dlog!("{} = {} ({:?})", code, name, unicode);
                                 if let Some(ref unicode_map) = unicode_map {
                                     dlog!("{} {:?}", code, unicode_map.get(&(code as u32)));
@@ -878,7 +882,7 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
             };
             return Ok(s)
         }
-        let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
+        let encoding = self.encoding.as_deref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "PDF character has no known font encoding"))?;
         //dlog!("char_code {:?} {:?}", char, self.encoding);
         let s = to_utf8(encoding, &slice)?;
         Ok(s)
@@ -928,7 +932,7 @@ impl<'a> PdfFont for PdfType3Font<'a> {
             };
             return Ok(s)
         }
-        let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
+        let encoding = self.encoding.as_deref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "PDF character has no known font encoding"))?;
         //dlog!("char_code {:?} {:?}", char, self.encoding);
         let s = to_utf8(encoding, &slice)?;
         Ok(s)
@@ -1472,6 +1476,7 @@ pub enum ColorSpace {
     DeviceRGB,
     DeviceCMYK,
     DeviceN,
+    Indexed,
     Pattern,
     CalRGB(CalRGB),
     CalGray(CalGray),
@@ -1585,6 +1590,7 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
                     "DeviceRGB" => ColorSpace::DeviceRGB,
                     "DeviceCMYK" => ColorSpace::DeviceCMYK,
                     "DeviceN" => ColorSpace::DeviceN,
+                    "Indexed" => ColorSpace::Indexed,
                     _ => {
                         panic!("color_space {:?} {:?} {:?}", name, cs_name, cs)
                     }

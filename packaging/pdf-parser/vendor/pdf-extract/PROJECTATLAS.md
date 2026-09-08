@@ -27,7 +27,8 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Use known font encodings for missing ToUnicode entries, including built-in Base-14 encodings with explicit widths; refuse used characters without a known fallback and unmapped CID characters through the existing typed unsupported path.
 - Read simple-font MissingWidth from its font descriptor; reject malformed descriptors or nonnumeric/nonfinite widths.
 - Transform Type 3 glyph widths through the required finite FontMatrix's horizontal component, including rotated and reflected matrices, before shared text advancement.
-- Accept DeviceCMYK and Pattern aliases through the existing shared fill/stroke color-space resolver.
+- Accept DeviceCMYK, Pattern, and Indexed resources through the existing shared fill/stroke color-space resolver; Indexed lookup tables are visual-only and are not read or rendered.
+- Seed encoding dictionaries from known font-program or standard-font maps before applying Differences; unknown or explicitly undefined glyphs remain unsupported unless ToUnicode provides the character. Type 3 dictionaries do not inherit a metadata-string encoding, and unparsed TrueType cmap data is not guessed as WinAnsi.
 - Reject used undefined font-encoding slots before emitting text, while preserving explicit ToUnicode mappings and the existing WinAnsi bullet mappings.
 - Admit only Identity-H Type 0 font encodings through the shared font cache owner.
   Vertical and custom stream CMap encodings return typed unsupported input: the

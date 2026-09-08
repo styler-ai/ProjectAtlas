@@ -709,6 +709,20 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 );
             assert_eq!(text::page(&document, 1, 128).unwrap(), expected);
         }
+        document.get_dictionary_mut(font).unwrap().set(
+            "Encoding",
+            dictionary! { "Differences" => vec![66.into(), "B".into()] },
+        );
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 12 Tf 72 500 Td (A) Tj ET".to_vec());
+        assert!(matches!(
+            text::page(&document, 1, 128),
+            Err(Failure::Unsupported)
+        ));
         {
             let font = document.get_dictionary_mut(font).unwrap();
             font.set("Encoding", "WinAnsiEncoding");
@@ -800,6 +814,144 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         );
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
+        for (base, code, encoding, expected) in [
+            ("Helvetica", "27", dictionary! {}, Some("\u{2019}")),
+            ("Symbol", "42", dictionary! {}, Some("\u{0392}")),
+            ("Fixture", "42", dictionary! {}, None),
+            (
+                "Helvetica",
+                "27",
+                dictionary! { "BaseEncoding" => "WinAnsiEncoding" },
+                Some("'"),
+            ),
+            (
+                "Helvetica",
+                "27",
+                dictionary! { "Differences" => vec![39.into(), "quotesingle".into()] },
+                Some("'"),
+            ),
+            (
+                "Helvetica",
+                "27",
+                dictionary! { "Differences" => vec![39.into(), ".notdef".into()] },
+                None,
+            ),
+            (
+                "Helvetica",
+                "41",
+                dictionary! { "Differences" => vec![65.into(), ".notdef".into()] },
+                Some("Z"),
+            ),
+        ] {
+            let selected = document.get_dictionary_mut(font).unwrap();
+            selected.set("BaseFont", base);
+            selected.set("Encoding", encoding);
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(format!("BT /F1 12 Tf 72 500 Td <{code}> Tj ET").into_bytes());
+            let result = text::page(&document, 1, 128);
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap(), expected),
+                None => assert!(matches!(result, Err(Failure::Unsupported)), "{result:?}"),
+            }
+        }
+        let program = document.add_object(lopdf::Stream::new(
+            dictionary! {},
+            b"/Encoding 256 array dup 39 /quotesingle put readonly def".to_vec(),
+        ));
+        for (descriptor, subtype, code, encoding, expected) in [
+            (
+                dictionary! { "Flags" => 32, "FontFile" => program },
+                "Type1",
+                "27",
+                Some(dictionary! {}),
+                Some("'"),
+            ),
+            (
+                dictionary! { "Flags" => 32, "FontFile" => program },
+                "Type1",
+                "27",
+                None,
+                Some("'"),
+            ),
+            (
+                dictionary! { "Flags" => 32, "FontFile" => program },
+                "Type1",
+                "27",
+                Some(dictionary! { "Differences" => vec![39.into(), "quoteright".into()] }),
+                Some("\u{2019}"),
+            ),
+            (
+                dictionary! { "Flags" => 32 },
+                "Type1",
+                "27",
+                Some(dictionary! {}),
+                Some("\u{2019}"),
+            ),
+            (
+                dictionary! { "Flags" => 4 },
+                "Type1",
+                "27",
+                Some(dictionary! {}),
+                None,
+            ),
+            (dictionary! { "Flags" => 4 }, "TrueType", "27", None, None),
+            (
+                dictionary! { "Flags" => 4 },
+                "TrueType",
+                "41",
+                None,
+                Some("Z"),
+            ),
+            (
+                dictionary! { "Flags" => 4 },
+                "TrueType",
+                "27",
+                Some(dictionary! { "BaseEncoding" => "WinAnsiEncoding" }),
+                Some("'"),
+            ),
+        ] {
+            let selected = document.get_dictionary_mut(font).unwrap();
+            selected.set("BaseFont", "Fixture");
+            selected.set("Subtype", subtype);
+            selected.set("FontDescriptor", descriptor);
+            selected.remove(b"Encoding");
+            if let Some(encoding) = encoding {
+                selected.set("Encoding", encoding);
+            }
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(format!("BT /F1 12 Tf 72 500 Td <{code}> Tj ET").into_bytes());
+            let result = text::page(&document, 1, 128);
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap(), expected),
+                None => assert!(matches!(result, Err(Failure::Unsupported)), "{result:?}"),
+            }
+        }
+        document
+            .get_dictionary_mut(font)
+            .unwrap()
+            .remove(b"FontDescriptor");
+        document
+            .get_dictionary_mut(font)
+            .unwrap()
+            .set("Subtype", "Type1");
+        document
+            .get_dictionary_mut(font)
+            .unwrap()
+            .remove(b"Encoding");
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 12 Tf 72 500 Td (AB) Tj ET".to_vec());
         for (base, expected) in [
             ("Helvetica", "ZB"),
             ("Symbol", "Z\u{0392}"),
@@ -991,7 +1143,9 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! {
                 "Font" => dictionary! { "Plain" => plain, "Mapped" => mapped },
-                "ColorSpace" => dictionary! { "CMYK" => "DeviceCMYK", "PatternAlias" => "Pattern" },
+                "ColorSpace" => dictionary! { "CMYK" => "DeviceCMYK", "PatternAlias" => "Pattern",
+                    "IndexedAlias" => vec!["Indexed".into(), "DeviceRGB".into(), 255.into(),
+                        lopdf::Object::String(vec![0; 768], lopdf::StringFormat::Hexadecimal)] },
                 "ExtGState" => dictionary! { "GS" => state },
                 "XObject" => dictionary! { "Form" => form }
             }
@@ -1008,6 +1162,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         for (stream, expected) in [
             (
                 b"/CMYK cs 0 0 0 1 sc /CMYK CS 0 0 0 1 SC /GS gs BT 72 500 Td (A) Tj ET".as_slice(),
+                vec!["Z"],
+            ),
+            (
+                b"/IndexedAlias cs 0 sc /IndexedAlias CS 0 SC /GS gs BT 72 500 Td (A) Tj ET",
                 vec!["Z"],
             ),
             (
