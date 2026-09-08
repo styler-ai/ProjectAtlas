@@ -13653,7 +13653,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             return Err(io::Error::other("document did not parse").into());
         };
         require_eq(&previous.graph.symbols.len(), &1, "previous document block")?;
-        job.fallback_summary = Some(previous.summary.clone());
+        job.fallback_summary = Some(previous.summary);
         let empty = String::from_utf8(bytes)?.replace("Runtime PDF", "           ");
         let SymbolParseOutcome::Parsed(current) =
             parse_document_symbol_job(&job, empty.as_bytes(), &options, &control)
