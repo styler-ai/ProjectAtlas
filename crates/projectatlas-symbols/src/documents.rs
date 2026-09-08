@@ -1670,6 +1670,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_pdf_publishes_complete_text_without_facts() {
+        let mut document = lopdf::Document::new();
+        let mut pages = lopdf::Dictionary::new();
+        pages.set("Type", "Pages");
+        pages.set("Kids", Vec::<lopdf::Object>::new());
+        pages.set("Count", 0);
+        let pages = document.add_object(pages);
+        let mut catalog = lopdf::Dictionary::new();
+        catalog.set("Type", "Catalog");
+        catalog.set("Pages", pages);
+        let catalog = document.add_object(catalog);
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("empty fixture");
+        let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+            .expect("empty page tree must pass the embedded guest and host");
+        assert_eq!(result.completeness, DocumentCompleteness::Complete);
+        assert!(result.text.is_empty());
+        assert!(result.facts.is_empty());
+        assert!(
+            result
+                .symbol_graph("guide.pdf", Some("pdf"))
+                .symbols
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn pdf_missing_page_tree_child_never_publishes_a_complete_prefix() {
         for declared_count in [1, 2] {
             let mut document = lopdf::Document::load_mem(&multi_page_pdf()).expect("fixture PDF");
@@ -1836,7 +1864,7 @@ mod tests {
             .expect("page stream")
             .as_stream_mut()
             .expect("stream")
-            .set_content(b"/GS gs BT 72 500 Td (Graphics Font) Tj ET".to_vec());
+            .set_content(b"/GS gs BT 10 Tw 2 Tc 72 500 Td (Graphics ) Tj (Font) Tj ET".to_vec());
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).expect("fixture serialization");
         let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())

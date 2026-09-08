@@ -9659,7 +9659,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         pdf
     };
     let pdf_path = docs.join(PDF_FILE);
-    let original_page_content = "0 1 -1 0 612 0 cm\n/GS gs BT 400 Tz 72 720 Td 0 0 (Runtime P) \" (DF) Tj ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q";
+    let original_page_content = "0 1 -1 0 612 0 cm\n/GS gs BT 400 Tz 72 720 Td 3 2 (Runtime P) \" (DF) Tj ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q";
     fs::write(&pdf_path, make_pdf(original_page_content))?;
 
     let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
@@ -10080,6 +10080,96 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         ))
         .into());
     }
+
+    let authored_purpose = "Authored document responsibility survives empty replacement.";
+    for path in ["docs/guide.pdf", "docs/guide.docx"] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .args(["purpose", "set", path, authored_purpose])
+            .assert()
+            .success();
+    }
+    // Equal-length page-tree replacement preserves the fixture's xref offsets.
+    let empty_pdf = String::from_utf8(make_pdf(""))?
+        .replace("/Kids [3 0 R] /Count 1", "/Kids [     ] /Count 0");
+    fs::write(&pdf_path, &empty_pdf)?;
+    let mut empty_docx = ZipWriter::new(fs::File::create(&docx_path)?);
+    empty_docx.start_file("word/document.xml", FileOptions::default())?;
+    empty_docx.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#)?;
+    empty_docx.finish()?;
+    run_scan(&repo, &database)?;
+    for path in ["docs/guide.pdf", "docs/guide.docx"] {
+        let summary = json_summary_command(&repo, &database, path)?;
+        require_json_usize(&summary, &["symbol_count"], 0)?;
+        let current_summary = json_at(&summary, &["content_summary"])?;
+        if current_summary.to_string().contains("document-block-") {
+            return Err(io::Error::other("empty document kept its old summary").into());
+        }
+        let persisted = Connection::open(&database)?;
+        let text: String = persisted.query_row(
+            "SELECT content FROM file_texts WHERE path = ?1",
+            [path],
+            |row| row.get(0),
+        )?;
+        let purpose: (String, String, String) = persisted.query_row(
+            "SELECT p.purpose, p.status, p.source FROM purposes p JOIN nodes n ON n.id = p.node_id WHERE n.path = ?1",
+            [path], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if !text.is_empty()
+            || purpose
+                != (
+                    authored_purpose.to_owned(),
+                    "approved".to_owned(),
+                    "agent".to_owned(),
+                )
+        {
+            return Err(io::Error::other(format!(
+                "empty {path} retained text or changed authored purpose: {purpose:?}"
+            ))
+            .into());
+        }
+        drop(persisted);
+        let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+        let result = session.call_tool(
+            "atlas_file_summary",
+            &json!({
+                "project_path": repo.as_path(), "file": path,
+                "content_selection": "documentation", "limit": 10
+            }),
+        );
+        let shutdown = session.shutdown();
+        let payload: Value = toon_format::decode_default(&result?)?;
+        shutdown?;
+        require_json_usize(&payload, &["file_summary", "symbol_count"], 0)?;
+        if json_at(&payload, &["file_summary", "content_summary"])?
+            .to_string()
+            .contains("document-block-")
+        {
+            return Err(io::Error::other("MCP empty summary retained old document blocks").into());
+        }
+    }
+    let before_bad_count = mcp_database_snapshot(&database)?;
+    fs::write(&pdf_path, empty_pdf.replace("/Count 0", "/Count 1"))?;
+    let bad_count = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .output()?;
+    if bad_count.status.success()
+        || !String::from_utf8_lossy(&bad_count.stderr).contains("malformed pdf document")
+        || before_bad_count.authoritative != mcp_database_snapshot(&database)?.authoritative
+    {
+        return Err(io::Error::other(
+            "malformed empty page tree replaced the complete publication",
+        )
+        .into());
+    }
+    fs::write(&pdf_path, &empty_pdf)?;
+    write_docx(&docx_path, "DOCX replacement marker")?;
+    run_scan(&repo, &database)?;
 
     fs::remove_file(&pdf_path)?;
     run_scan(&repo, &database)?;
