@@ -3256,7 +3256,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 &control(),
                 IndexWorkStage::TextIndex
             )
-            .unwrap()
+            .expect("cached field result remains literal text")
             .text,
             "7"
         );
@@ -3294,7 +3294,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                             &control(),
                             IndexWorkStage::TextIndex
                         )
-                        .unwrap()
+                        .expect("discarded dynamic text does not require evaluation")
                         .text,
                         "7",
                         "{name}"

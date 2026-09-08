@@ -1416,7 +1416,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             "Encoding" => dictionary! { "Type" => "Encoding", "BaseEncoding" => "WinAnsiEncoding",
                 "Differences" => vec![65.into(), lopdf::Object::Name(b"Z".to_vec())] }
         });
-        let state = document.add_object(dictionary! { "Font" => vec![mapped.into(), 12.into()] });
+        let state_type = document.add_object(lopdf::Object::Name(b"ExtGState".to_vec()));
+        let state = document.add_object(dictionary! {
+            "Type" => state_type, "Font" => vec![mapped.into(), 12.into()]
+        });
         let content = document.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), Vec::new()));
         let form = document.add_object(lopdf::Stream::new(dictionary! {
             "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],

@@ -1389,7 +1389,7 @@ fn apply_state<'a>(doc: &'a Document, gs: &mut GraphicsState<'a>, state: &'a Dic
                 }
                 _ => { panic!("unexpected smask type {:?}", v) }
             }}
-            b"Type" => { match v {
+            b"Type" => { match maybe_deref(doc, v) {
                 &Object::Name(ref name) => {
                     assert_eq!(name, b"ExtGState")
                 }
