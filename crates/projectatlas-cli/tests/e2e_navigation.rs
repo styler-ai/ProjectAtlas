@@ -10437,6 +10437,14 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "dynamic DOCX text blocks",
         ),
         (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:footnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "dynamic DOCX text blocks",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:endnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "dynamic DOCX text blocks",
+        ),
+        (
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
             "font-specific symbols",
         ),

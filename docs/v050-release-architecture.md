@@ -260,8 +260,9 @@ cached field results and instruction-text leaves outside field-code regions
 remain literal document text. Each complete decoded text leaf honors inherited
 `xml:space`, trimming only XML edge whitespace in default mode and retaining it
 in preserve mode before logical run offsets are published; invalid modes fail
-as malformed input. Live page-number and date blocks return typed
-unsupported input because their text requires field evaluation. Field nesting has its own 64-level bound and is
+as malformed input. Live page-number and date blocks and footnote/endnote reference
+markers return typed unsupported input because their text requires evaluation;
+note parts are not traversed. Field nesting has its own 64-level bound and is
 isolated across text-box contexts. Markup Compatibility alternatives select only
 the first choice whose required namespaces are understood WordprocessingML, or
 the fallback. Root `mc:Ignorable` policies retain at most 64 distinct namespace

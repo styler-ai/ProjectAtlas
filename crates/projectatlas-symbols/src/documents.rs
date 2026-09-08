@@ -1225,13 +1225,12 @@ fn parse_docx(
                         }
                     }
                     "pgNum" | "dayShort" | "dayLong" | "monthShort" | "monthLong" | "yearShort"
-                    | "yearLong"
+                    | "yearLong" | "footnoteReference" | "endnoteReference"
                         if paragraph.run.is_some() && deleted_depth.is_none() =>
                     {
                         return Err(DocumentExtractionError::UnsupportedDocxInput {
-                            message:
-                                "dynamic DOCX text blocks require unsupported field evaluation"
-                                    .to_owned(),
+                            message: "dynamic DOCX text blocks require unsupported text evaluation"
+                                .to_owned(),
                         });
                     }
                     "sym" if paragraph.run.is_some() && deleted_depth.is_none() => {
@@ -3358,7 +3357,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
-    fn docx_dynamic_text_blocks_refuse_without_evaluating_fields() {
+    fn docx_dynamic_text_blocks_refuse_without_evaluation() {
         let template = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><w:body><w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple>BLOCK</w:p></w:body></w:document>"#;
         assert_eq!(
             parse_docx(
@@ -3378,8 +3377,18 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             "monthLong",
             "yearShort",
             "yearLong",
+            "footnoteReference",
+            "endnoteReference",
         ] {
-            for element in [format!("<w:{name}/>"), format!("<w:{name}></w:{name}>")] {
+            let attributes = if matches!(name, "footnoteReference" | "endnoteReference") {
+                " w:id=\"1\""
+            } else {
+                ""
+            };
+            for element in [
+                format!("<w:{name}{attributes}/>"),
+                format!("<w:{name}{attributes}></w:{name}>"),
+            ] {
                 let run = format!("<w:r>{element}</w:r>");
                 assert!(
                     matches!(
@@ -3394,6 +3403,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 );
                 for discarded in [
                     format!("<w:del>{run}</w:del>"),
+                    format!("<w:moveFrom>{run}</w:moveFrom>"),
                     format!(
                         r#"<mc:AlternateContent><mc:Choice Requires="future">{run}</mc:Choice><mc:Fallback/></mc:AlternateContent>"#
                     ),
