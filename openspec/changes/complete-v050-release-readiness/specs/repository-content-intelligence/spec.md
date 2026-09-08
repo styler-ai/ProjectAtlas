@@ -43,6 +43,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **AND** ExtGState font selections update the font and size with scoped dictionary identity, preserve graphics-state save/restore and Form resources, and reject malformed font entries before publication
 - **AND** marked-content ActualText replacements return typed unsupported input, including named properties and Form-local resource scopes, rather than publishing the underlying glyphs as complete text
 - **AND** quote text-showing operators preserve the corresponding line movement, spacing changes, and text emission
+- **AND** configured character and word spacing contributes to the transformed glyph endpoint without fabricating extra spaces between adjacent text operations; genuine geometric gaps remain word boundaries
 - **AND** inherited page rotation uses validated integer quarter turns before text layout; malformed rotation fails before publication
 - **AND** Form XObjects inherit graphics state and compose their matrix with the caller transform, preserving positioned and nested text evidence; malformed matrices fail before publication
 

@@ -21,6 +21,7 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Apply CID range widths to both inclusive endpoints using the declared width.
 - Apply ExtGState font dictionaries and finite sizes through the existing scoped font cache.
 - Measure plain-text horizontal advances and font heights from their separate transformed vectors, preserving rotated and anisotropically scaled text spacing.
+- Include configured character and word spacing in the recorded glyph endpoint so adjacent text operations do not fabricate spaces.
 - Admit only Identity-H Type 0 font encodings through the shared font cache owner.
   Vertical and custom stream CMap encodings return typed unsupported input: the
   pinned CMap byte-width and CID-range mappings cannot provide correct custom

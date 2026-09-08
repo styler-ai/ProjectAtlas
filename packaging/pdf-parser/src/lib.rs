@@ -799,6 +799,13 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         );
         assert_eq!(text::page(&document, 1, 256).unwrap(), expected);
         for (transform, scale, text, expected) in [
+            ("", 100, "2 Tc (A) Tj (B) Tj", "AB"),
+            ("", 100, "2 Tc [(A) (B)] TJ", "AB"),
+            ("", 100, "10 Tw (A ) Tj (B) Tj", "A B"),
+            ("", 100, "-2 Tc (A) Tj (B) Tj", "AB"),
+            ("", 25, "8 Tc (A) Tj (B) Tj", "AB"),
+            ("4 0 0 1 0 0 cm", 100, "2 Tc (A) Tj (B) Tj", "AB"),
+            ("", 100, "2 Tc (A) Tj 16 0 Td (B) Tj", "A B"),
             ("", 400, "(First) Tj (Second) Tj", "FirstSecond"),
             ("", 25, "(A) Tj 4 0 Td (B) Tj", "A B"),
             (

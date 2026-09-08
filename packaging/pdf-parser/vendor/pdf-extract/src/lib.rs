@@ -2201,10 +2201,11 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
     fn end_page(&mut self) -> Result<(), OutputError> {
         Ok(())
     }
-    fn output_character(&mut self, trm: &Transform, width: f64, _spacing: f64, font_size: f64, char: &str) -> Result<(), OutputError> {
+    fn output_character(&mut self, trm: &Transform, width: f64, spacing: f64, font_size: f64, char: &str) -> Result<(), OutputError> {
         let position = trm.post_transform(&self.flip_ctm);
         let font_height = font_size.abs() * trm.m21.hypot(trm.m22);
-        let font_width = font_size.abs() * trm.m11.hypot(trm.m12);
+        let baseline_scale = trm.m11.hypot(trm.m12);
+        let font_width = font_size.abs() * baseline_scale;
         let (x, y) = (position.m31, position.m32);
         use std::fmt::Write;
         //dlog!("last_end: {} x: {}, width: {}", self.last_end, x, width);
@@ -2227,7 +2228,7 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
         write!(self.writer, "{}", char)?;
         self.first_char = false;
         self.last_y = y;
-        self.last_end = x + width * font_width;
+        self.last_end = x + width * font_width + spacing * baseline_scale;
         Ok(())
     }
     fn begin_word(&mut self) -> Result<(), OutputError> {
