@@ -631,29 +631,10 @@ impl<'a> PdfSimpleFont<'a> {
                             }
                         }
                     } else {
-                        // Instead of using the encoding from the core font we'll just look up all
-                        // of the character names. We should probably verify that this produces the
-                        // same result.
-
-                        let mut table = vec![0; 256];
-                        for w in font_metrics.2 {
-                            dlog!("{} {}", w.0, w.2);
-                            // -1 is "not encoded"
-                            if w.0 != -1 {
-                                table[w.0 as usize] = if base_name == "ZapfDingbats" {
-                                    zapfglyphnames::zapfdigbats_names_to_unicode(w.2).unwrap_or_else(|| panic!("bad name {:?}", w))
-                                } else {
-                                    glyphnames::name_to_unicode(w.2).unwrap()
-                                }
-                            }
-                        }
-
-                        let encoding = &table[..];
                         for w in font_metrics.2 {
                             width_map.insert(w.0 as CharCode, w.1 as f64);
                             // -1 is "not encoded"
                         }
-                        encoding_table = Some(encoding.to_vec());
                     }
                     /* "Ordinarily, a font dictionary that refers to one of the standard fonts
                         should omit the FirstChar, LastChar, Widths, and FontDescriptor entries.
@@ -664,6 +645,29 @@ impl<'a> PdfSimpleFont<'a> {
                     // assert!(maybe_get_obj(doc, font, b"FirstChar").is_none());
                     // assert!(maybe_get_obj(doc, font, b"LastChar").is_none());
                     // assert!(maybe_get_obj(doc, font, b"Widths").is_none());
+                }
+            }
+        }
+
+        // Built-in character encoding is independent of explicit glyph widths.
+        if encoding_table.is_none() {
+            for font_metrics in core_fonts::metrics().iter() {
+                if font_metrics.0 == base_name {
+                    let mut table = vec![0; 256];
+                    for w in font_metrics.2 {
+                        dlog!("{} {}", w.0, w.2);
+                        // -1 is "not encoded"
+                        if w.0 != -1 {
+                            table[w.0 as usize] = if base_name == "ZapfDingbats" {
+                                zapfglyphnames::zapfdigbats_names_to_unicode(w.2).unwrap_or_else(|| panic!("bad name {:?}", w))
+                            } else {
+                                glyphnames::name_to_unicode(w.2).unwrap()
+                            }
+                        }
+                    }
+
+                    encoding_table = Some(table);
+                    break;
                 }
             }
         }
@@ -805,7 +809,7 @@ impl<'a> Iterator for PdfFontIter<'a> {
 trait PdfFont : Debug {
     fn get_width(&self, id: CharCode) -> f64;
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)>;
-    fn decode_char(&self, char: CharCode) -> String;
+    fn decode_char(&self, char: CharCode) -> Result<String, OutputError>;
 
         /*fn char_codes<'a>(&'a self, chars: &'a [u8]) -> PdfFontIter {
             let p = self;
@@ -818,9 +822,9 @@ impl<'a> dyn PdfFont + 'a {
     fn char_codes(&'a self, chars: &'a [u8]) -> PdfFontIter {
         PdfFontIter{i: chars.iter(), font: self}
     }
-    fn decode(&self, chars: &[u8]) -> String {
-        let strings = self.char_codes(chars).map(|x| self.decode_char(x.0)).collect::<Vec<_>>();
-        strings.join("")
+    fn decode(&self, chars: &[u8]) -> Result<String, OutputError> {
+        let strings = self.char_codes(chars).map(|x| self.decode_char(x.0)).collect::<Result<Vec<_>, _>>()?;
+        Ok(strings.join(""))
     }
 
 }
@@ -846,7 +850,7 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)> {
         iter.next().map(|x| (*x as CharCode, 1))
     }
-    fn decode_char(&self, char: CharCode) -> String {
+    fn decode_char(&self, char: CharCode) -> Result<String, OutputError> {
         let slice = [char as u8];
         if let Some(ref unicode_map) = self.unicode_map {
             let s = unicode_map.get(&char);
@@ -855,19 +859,19 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
                     debug!("missing char {:?} in unicode map {:?} for {:?}", char, unicode_map, self.font);
                     // some pdf's like http://arxiv.org/pdf/2312.00064v1 are missing entries in their unicode map but do have
                     // entries in the encoding.
-                    let encoding = self.encoding.as_ref().map(|x| &x[..]).expect("missing unicode map and encoding");
+                    let encoding = self.encoding.as_deref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "unmapped PDF character has no known font encoding"))?;
                     let s = to_utf8(encoding, &slice);
                     debug!("falling back to encoding {} -> {:?}", char, s);
                     s
                 }
                 Some(s) => { s.clone() }
             };
-            return s
+            return Ok(s)
         }
         let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
         //dlog!("char_code {:?} {:?}", char, self.encoding);
         let s = to_utf8(encoding, &slice);
-        s
+        Ok(s)
     }
 }
 
@@ -896,7 +900,7 @@ impl<'a> PdfFont for PdfType3Font<'a> {
     fn next_char(&self, iter: &mut Iter<u8>) -> Option<(CharCode, u8)> {
         iter.next().map(|x| (*x as CharCode, 1))
     }
-    fn decode_char(&self, char: CharCode) -> String {
+    fn decode_char(&self, char: CharCode) -> Result<String, OutputError> {
         let slice = [char as u8];
         if let Some(ref unicode_map) = self.unicode_map {
             let s = unicode_map.get(&char);
@@ -905,19 +909,19 @@ impl<'a> PdfFont for PdfType3Font<'a> {
                     debug!("missing char {:?} in unicode map {:?} for {:?}", char, unicode_map, self.font);
                     // some pdf's like http://arxiv.org/pdf/2312.00577v1 are missing entries in their unicode map but do have
                     // entries in the encoding.
-                    let encoding = self.encoding.as_ref().map(|x| &x[..]).expect("missing unicode map and encoding");
+                    let encoding = self.encoding.as_deref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "unmapped PDF character has no known font encoding"))?;
                     let s = to_utf8(encoding, &slice);
                     debug!("falling back to encoding {} -> {:?}", char, s);
                     s
                 }
                 Some(s) => { s.clone() }
             };
-            return s
+            return Ok(s)
         }
         let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
         //dlog!("char_code {:?} {:?}", char, self.encoding);
         let s = to_utf8(encoding, &slice);
-        s
+        Ok(s)
     }
 }
 
@@ -1083,14 +1087,9 @@ impl<'a> PdfFont for PdfCIDFont<'a> {
         }
         None
     }
-    fn decode_char(&self, char: CharCode) -> String {
-        let s = self.to_unicode.as_ref().and_then(|x| x.get(&char));
-        if let Some(s) = s {
-            s.clone()
-        } else {
-            dlog!("Unknown character {:?} in {:?} {:?}", char, self.font, self.to_unicode);
-            "".to_string()
-        }
+    fn decode_char(&self, char: CharCode) -> Result<String, OutputError> {
+        self.to_unicode.as_ref().and_then(|map| map.get(&char)).cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "unmapped PDF CID character has no Unicode mapping").into())
     }
 }
 
@@ -1286,7 +1285,7 @@ fn show_text(gs: &mut GraphicsState, s: &[u8],
     let font = ts.font.as_ref().unwrap();
     //let encoding = font.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
     dlog!("{:?}", font.decode(s));
-    dlog!("{:?}", font.decode(s).as_bytes());
+    dlog!("{:?}", font.decode(s)?.as_bytes());
     dlog!("{:?}", s);
     output.begin_word()?;
 
@@ -1318,7 +1317,7 @@ fn show_text(gs: &mut GraphicsState, s: &[u8],
         let is_space = c == 32 && length == 1;
         if is_space { spacing += ts.word_spacing }
 
-        output.output_character(&trm, w0, spacing, ts.font_size, &font.decode_char(c))?;
+        output.output_character(&trm, w0, spacing, ts.font_size, &font.decode_char(c)?)?;
         let tj = 0.;
         let ty = 0.;
         let tx = ts.horizontal_scaling * ((w0 - tj/1000.)* ts.font_size + spacing);

@@ -554,6 +554,16 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 .set_content(format!("BT /F1 12 Tf 72 500 Td {text} ET").into_bytes());
             assert_eq!(text::page(&document, 1, 128).unwrap().trim(), expected);
         }
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 12 Tf 72 500 Td <00010005> Tj ET".to_vec());
+        assert!(matches!(
+            text::page(&document, 1, 128),
+            Err(Failure::Unsupported)
+        ));
         let resources = document
             .get_object_mut(page)
             .unwrap()
@@ -616,6 +626,89 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             text::page(&document, 1, 128),
             Err(Failure::Malformed)
         ));
+    }
+
+    #[test]
+    fn partial_unicode_maps_use_known_font_encodings_or_refuse() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let cmap = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            br"/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Fixture def /CMapType 2 def
+1 begincodespacerange <00> <FF> endcodespacerange
+1 beginbfchar <41> <005A> endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end"
+                .to_vec(),
+        ));
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "FirstChar" => 65, "LastChar" => 66, "Widths" => vec![600.into(), 600.into()],
+            "ToUnicode" => cmap
+        });
+        let content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"BT /F1 12 Tf 72 500 Td (AB) Tj ET".to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        for (base, expected) in [
+            ("Helvetica", "ZB"),
+            ("Symbol", "Z\u{0392}"),
+            ("ZapfDingbats", "Z\u{2722}"),
+        ] {
+            document
+                .get_dictionary_mut(font)
+                .unwrap()
+                .set("BaseFont", base);
+            assert_eq!(text::page(&document, 1, 128).unwrap().trim(), expected);
+        }
+        document
+            .get_dictionary_mut(font)
+            .unwrap()
+            .set("BaseFont", "Fixture");
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        assert_eq!(parse(&bytes), Err(Failure::Unsupported));
+        OUTPUT.with(|output| *output.borrow_mut() = b"previous text".to_vec());
+        INPUT.with(|input| *input.borrow_mut() = bytes);
+        assert_eq!(extract(), Failure::Unsupported as i32);
+        assert_eq!(output_len(), 0);
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 12 Tf 72 500 Td (A) Tj ET".to_vec());
+        assert_eq!(text::page(&document, 1, 128).unwrap().trim(), "Z");
+        let map = document
+            .get_object_mut(cmap)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        let complete = String::from_utf8(map.content.clone()).unwrap().replace(
+            "1 beginbfchar <41> <005A>",
+            "2 beginbfchar <41> <005A> <42> <0042>",
+        );
+        map.set_content(complete.into_bytes());
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 12 Tf 72 500 Td (AB) Tj ET".to_vec());
+        assert_eq!(text::page(&document, 1, 128).unwrap().trim(), "ZB");
     }
 
     #[test]
