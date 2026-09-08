@@ -1964,8 +1964,14 @@ mod tests {
             .expect("resources")
             .as_dict_mut()
             .expect("dictionary")
-            .set("ColorSpace", lopdf::dictionary! { "CS1" => "DeviceCMYK" });
-        for color in ["", "/CS1 cs 0 0 0 1 sc /CS1 CS 0 0 0 1 SC"] {
+            .set("ColorSpace", lopdf::dictionary! { "CS1" => "DeviceCMYK",
+                "IndexedAlias" => vec!["Indexed".into(), "DeviceRGB".into(), 1.into(),
+                    lopdf::Object::String(vec![0, 0, 0, 255, 255, 255], lopdf::StringFormat::Hexadecimal)] });
+        for color in [
+            "",
+            "/CS1 cs 0 0 0 1 sc /CS1 CS 0 0 0 1 SC",
+            "/IndexedAlias cs 1 sc /IndexedAlias CS 1 SC",
+        ] {
             document
                 .get_object_mut((4, 0))
                 .expect("content")
@@ -2002,6 +2008,45 @@ mod tests {
                 format: DocumentFormat::Pdf,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn pdf_implicit_encoding_preserves_exact_text_and_refuses_undefined_glyphs() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        document
+            .get_dictionary_mut((5, 0))
+            .expect("font")
+            .set("Encoding", lopdf::Dictionary::new());
+        document
+            .get_object_mut((4, 0))
+            .expect("content")
+            .as_stream_mut()
+            .expect("stream")
+            .set_content(b"BT /F1 12 Tf 72 500 Td <27> Tj ET".to_vec());
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+            .expect("implicit standard font encoding");
+        assert_eq!(facts.text, "\u{2019}");
+        assert_eq!(facts.facts.len(), 1);
+        assert!(matches!(
+            facts.facts[0].locator,
+            DocumentLocator::Pdf {
+                page: 1,
+                text_start: 0,
+                text_end: 3
+            }
+        ));
+        document.get_dictionary_mut((5, 0)).expect("font").set(
+            "Encoding",
+            lopdf::dictionary! { "Differences" => vec![39.into(), ".notdef".into()] },
+        );
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        assert!(matches!(
+            extract_document_text_controlled(&bytes, "guide.pdf", None, &control()),
+            Err(DocumentExtractionError::UnsupportedPdfInput)
         ));
     }
 
