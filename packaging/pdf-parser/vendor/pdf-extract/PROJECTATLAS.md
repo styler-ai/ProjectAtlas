@@ -20,6 +20,7 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Refuse ReversedChars marked content before publishing unsupported logical text order; validate BMC/BDC operand counts and tag names.
 - Interpret quote text-showing operators with their line movement and spacing semantics.
 - Apply CID range widths to both inclusive endpoints using the declared width.
+- Read CID default widths as PDF numbers, preserving fractional advances and the omitted default.
 - Apply ExtGState font dictionaries and finite sizes through the existing scoped font cache.
 - Measure plain-text horizontal advances and font heights from their separate transformed vectors, preserving rotated and anisotropically scaled text spacing.
 - Measure logical word and line gaps in the preceding glyph frame using the existing affine inverse; preserve rotated, scaled, reflected, and sheared text and skip inferred separators for degenerate frames.

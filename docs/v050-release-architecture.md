@@ -255,7 +255,8 @@ and deleted-text carriers are validated without execution or publication;
 enclosing deleted/moved-from revisions also suppress every text leaf, separator,
 and field-state mutation while retaining source paragraph/run numbering;
 cached field results and instruction-text leaves outside field-code regions
-remain literal document text. Field nesting has its own 64-level bound and is
+remain literal document text. Live page-number and date blocks return typed
+unsupported input because their text requires field evaluation. Field nesting has its own 64-level bound and is
 isolated across text-box contexts. Markup Compatibility alternatives select only
 the first choice whose required namespaces are understood WordprocessingML, or
 the fallback. Root `mc:Ignorable` policies retain at most 64 distinct namespace

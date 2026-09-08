@@ -78,6 +78,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** explicit hyphens, tabs, and saved page breaks retain their text/separator characters and exact UTF-8 spans; font-coded symbols return typed unsupported input without replacing the last complete publication
 - **AND** field instructions and deleted text are validated without execution or publication, while cached field results and instruction text outside field-code regions remain literal text
+- **AND** live page-number and date blocks requiring evaluation return typed unsupported input; deleted and unselected blocks remain excluded
 - **AND** deleted and moved-from revision containers suppress all text leaves, separators, and field-state changes while preserving source paragraph/run numbering
 - **AND** field nesting is bounded independently of XML depth and isolated within each text container
 - **AND** Markup Compatibility alternatives emit only the first choice requiring understood WordprocessingML namespaces, or its fallback; unselected branches cannot change extraction context or duplicate evidence

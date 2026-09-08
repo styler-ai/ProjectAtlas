@@ -1029,7 +1029,7 @@ impl<'a> PdfCIDFont<'a> {
         let font_dict = maybe_get_obj(doc, ciddict, b"FontDescriptor").expect("required");
         dlog!("{:?}", font_dict);
         let _f = font_dict.as_dict().expect("must be dict");
-        let default_width = get::<Option<i64>>(doc, ciddict, b"DW").unwrap_or(1000);
+        let default_width = get::<Option<f64>>(doc, ciddict, b"DW").unwrap_or(1000.0);
         let w: Option<Vec<&Object>> = get(doc, ciddict, b"W");
         dlog!("widths {:?}", w);
         let mut widths = HashMap::new();
@@ -1056,7 +1056,7 @@ impl<'a> PdfCIDFont<'a> {
                 }
             }
         }
-        PdfCIDFont{doc, font, widths, to_unicode: unicode_map, encoding, default_width: Some(default_width as f64) }
+        PdfCIDFont{doc, font, widths, to_unicode: unicode_map, encoding, default_width: Some(default_width) }
     }
 }
 

@@ -1180,6 +1180,16 @@ fn parse_docx(
                             )?;
                         }
                     }
+                    "pgNum" | "dayShort" | "dayLong" | "monthShort" | "monthLong" | "yearShort"
+                    | "yearLong"
+                        if paragraph.run.is_some() && deleted_depth.is_none() =>
+                    {
+                        return Err(DocumentExtractionError::UnsupportedDocxInput {
+                            message:
+                                "dynamic DOCX text blocks require unsupported field evaluation"
+                                    .to_owned(),
+                        });
+                    }
                     "sym" if paragraph.run.is_some() && deleted_depth.is_none() => {
                         return Err(DocumentExtractionError::UnsupportedDocxInput {
                             message: "font-specific symbols require unsupported font decoding"
@@ -3234,6 +3244,63 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                     text_end: 5,
                 }
             );
+        }
+    }
+
+    #[test]
+    fn docx_dynamic_text_blocks_refuse_without_evaluating_fields() {
+        let template = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><w:body><w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple>BLOCK</w:p></w:body></w:document>"#;
+        assert_eq!(
+            parse_docx(
+                template.replace("BLOCK", "").as_bytes(),
+                &control(),
+                IndexWorkStage::TextIndex
+            )
+            .unwrap()
+            .text,
+            "7"
+        );
+        for name in [
+            "pgNum",
+            "dayShort",
+            "dayLong",
+            "monthShort",
+            "monthLong",
+            "yearShort",
+            "yearLong",
+        ] {
+            for element in [format!("<w:{name}/>"), format!("<w:{name}></w:{name}>")] {
+                let run = format!("<w:r>{element}</w:r>");
+                assert!(
+                    matches!(
+                        parse_docx(
+                            template.replace("BLOCK", &run).as_bytes(),
+                            &control(),
+                            IndexWorkStage::TextIndex
+                        ),
+                        Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+                    ),
+                    "{name}"
+                );
+                for discarded in [
+                    format!("<w:del>{run}</w:del>"),
+                    format!(
+                        r#"<mc:AlternateContent><mc:Choice Requires="future">{run}</mc:Choice><mc:Fallback/></mc:AlternateContent>"#
+                    ),
+                ] {
+                    assert_eq!(
+                        parse_docx(
+                            template.replace("BLOCK", &discarded).as_bytes(),
+                            &control(),
+                            IndexWorkStage::TextIndex
+                        )
+                        .unwrap()
+                        .text,
+                        "7",
+                        "{name}"
+                    );
+                }
+            }
         }
     }
 

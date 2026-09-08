@@ -556,8 +556,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn nested_forms_preserve_graphics_state_and_composed_transforms() {
+    fn glyph_transforms(document: &lopdf::Document) -> Vec<[f64; 6]> {
         #[derive(Default)]
         struct GlyphTransforms(Vec<[f64; 6]>);
         impl pdf_extract::OutputDev for GlyphTransforms {
@@ -600,11 +599,13 @@ mod tests {
                 Ok(())
             }
         }
-        let transforms = |document: &lopdf::Document| {
-            let mut output = GlyphTransforms::default();
-            pdf_extract::output_doc_page(document, &mut output, 1).unwrap();
-            output.0
-        };
+        let mut output = GlyphTransforms::default();
+        pdf_extract::output_doc_page(document, &mut output, 1).unwrap();
+        output.0
+    }
+
+    #[test]
+    fn nested_forms_preserve_graphics_state_and_composed_transforms() {
         let mut document = lopdf::Document::new();
         let pages = document.new_object_id();
         let font = document.add_object(dictionary! {
@@ -649,9 +650,9 @@ mod tests {
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
         let expected = text::page(&document, 1, 128).unwrap();
-        let expected_transforms = transforms(&document);
+        let expected_transforms = glyph_transforms(&document);
         let assert_transforms = |document: &lopdf::Document| {
-            let actual = transforms(document);
+            let actual = glyph_transforms(document);
             assert_eq!(actual.len(), expected_transforms.len());
             for (actual, expected) in actual
                 .iter()
@@ -688,7 +689,7 @@ mod tests {
             .as_stream_mut()
             .unwrap()
             .set_content(text_scope.to_vec());
-        let positions = transforms(&document);
+        let positions = glyph_transforms(&document);
         assert_eq!(
             positions.iter().map(|m| (m[4], m[5])).collect::<Vec<_>>(),
             [(172., 400.), (72., 480.)]
@@ -709,7 +710,7 @@ mod tests {
                 b"BT /F1 12 Tf 72 600 Td (C) Tj ET /Inner Do BT /F1 12 Tf 72 300 Td (D) Tj ET"
                     .to_vec(),
             );
-        let positions = transforms(&document);
+        let positions = glyph_transforms(&document);
         assert_eq!(
             positions.iter().map(|m| (m[4], m[5])).collect::<Vec<_>>(),
             [(72., 600.), (172., 400.), (72., 480.), (72., 300.)]
@@ -783,9 +784,15 @@ mod tests {
 endcmap CMapName currentdict /CMap defineresource pop end end"
                 .to_vec(),
         ));
+        let descriptor = document.add_object(dictionary! {
+            "Type" => "FontDescriptor", "FontName" => "Fixture", "Flags" => 4,
+            "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 1000.into()],
+            "ItalicAngle" => 0, "Ascent" => 800, "Descent" => -200,
+            "CapHeight" => 700, "StemV" => 80
+        });
         let descendant = document.add_object(dictionary! {
             "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "Fixture",
-            "FontDescriptor" => lopdf::Dictionary::new(), "DW" => 1000,
+            "FontDescriptor" => descriptor, "DW" => 1000,
             "CIDSystemInfo" => dictionary! { "Registry" => lopdf::Object::string_literal("Adobe"),
                 "Ordering" => lopdf::Object::string_literal("Identity"), "Supplement" => 0 }
         });
@@ -805,6 +812,32 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         );
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
+        document.version = "2.0".to_owned();
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 10 Tf 72 500 Td <00010002> Tj ET".to_vec());
+        for (width, advance) in [
+            (lopdf::Object::Integer(500), 5.0),
+            (lopdf::Object::Real(500.5), 5.005),
+        ] {
+            document
+                .get_dictionary_mut(descendant)
+                .unwrap()
+                .set("DW", width);
+            let positions = glyph_transforms(&document);
+            assert_eq!(positions.len(), 2);
+            assert_eq!((positions[0][4], positions[0][5]), (72.0, 500.0));
+            assert!((positions[1][4] - 72.0 - advance).abs() < 1e-9);
+            assert_eq!(positions[1][5], 500.0);
+        }
+        document
+            .get_dictionary_mut(descendant)
+            .unwrap()
+            .remove(b"DW");
+        assert_eq!(glyph_transforms(&document)[1][4], 82.0);
         for (widths, text, expected) in [
             (
                 vec![1.into(), 2.into(), 200.into()],
