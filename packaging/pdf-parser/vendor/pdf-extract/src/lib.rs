@@ -328,13 +328,12 @@ fn make_font<'a>(doc: &'a Document, font: &'a Dictionary,
     let subtype = get_name_string(doc, font, b"Subtype");
     dlog!("MakeFont({})", subtype);
     let font: Rc<dyn PdfFont + 'a> = if subtype == "Type0" {
-        let vertical = match doc.dereference(font.get(b"Encoding")?)?.1 {
-            Object::Name(name) => name == b"Identity-V",
-            Object::Stream(stream) => get::<Option<i64>>(doc, &stream.dict, b"WMode") == Some(1),
-            _ => false,
-        };
-        if vertical {
-            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "vertical PDF fonts require unsupported writing metrics").into());
+        match doc.dereference(font.get(b"Encoding")?)?.1 {
+            Object::Name(name) if name == b"Identity-H" => {},
+            Object::Name(_) | Object::Stream(_) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Type 0 PDF fonts require Identity-H encoding; vertical and custom CMap encodings are unsupported").into());
+            }
+            _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Type 0 font encoding").into()),
         }
         Rc::new(PdfCIDFont::new(doc, font))
     } else if subtype == "Type3" {
@@ -987,26 +986,8 @@ impl<'a> PdfCIDFont<'a> {
         let base_name = get_name_string(doc, font, b"BaseFont");
         let descendants = maybe_get_array(doc, font, b"DescendantFonts").expect("Descendant fonts required");
         let ciddict = maybe_deref(doc, &descendants[0]).as_dict().expect("should be CID dict");
-        let encoding = maybe_get_obj(doc, font, b"Encoding").expect("Encoding required in type0 fonts");
-        dlog!("base_name {} {:?}", base_name, font);
-
-        let encoding = match encoding {
-            &Object::Name(ref name) => {
-                let name = pdf_to_utf8(name);
-                dlog!("encoding {:?}", name);
-                if name == "Identity-H" {
-                    ByteMapping { codespace: vec![CodeRange{width: 2, start: 0, end: 0xffff }], cid: vec![CIDRange{ src_code_lo: 0, src_code_hi: 0xffff, dst_CID_lo: 0 }]}
-                } else {
-                    panic!("unsupported encoding {}", name);
-                }
-            }
-            &Object::Stream(ref stream) => {
-                let contents = get_contents(stream);
-                dlog!("Stream: {}", String::from_utf8(contents.clone()).unwrap());
-                adobe_cmap_parser::get_byte_mapping(&contents).unwrap()
-            }
-            _ => { panic!("unsupported encoding {:?}", encoding)}
-        };
+        // The shared font constructor admits only the fixed horizontal identity mapping.
+        let encoding = ByteMapping { codespace: vec![CodeRange{width: 2, start: 0, end: 0xffff }], cid: vec![CIDRange{ src_code_lo: 0, src_code_hi: 0xffff, dst_CID_lo: 0 }]};
 
         // Sometimes a Type0 font might refer to the same underlying data as regular font. In this case we may be able to extract some encoding
         // data.

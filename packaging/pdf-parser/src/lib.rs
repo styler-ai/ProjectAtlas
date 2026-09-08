@@ -516,10 +516,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             dictionary! { "GS" => dictionary! { "Font" => vec![font.into(), 12.into()] } },
         );
         let vertical_cmap = document.add_object(lopdf::Stream::new(
-            dictionary! { "Type" => "CMap", "WMode" => 1 },
+            dictionary! { "Type" => "CMap" },
             br"begincmap /WMode 1 def
 1 begincodespacerange <0000> <FFFF> endcodespacerange
-1 begincidchar <0001> 1 endcidchar endcmap"
+1 begincidrange <0001> <0001> 1 endcidrange endcmap"
                 .to_vec(),
         ));
         for encoding in [
@@ -545,6 +545,25 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 ));
             }
         }
+        for declaration in ["", "/WMode 0 def", "/WMode 1 def"] {
+            document.get_object_mut(vertical_cmap).unwrap().as_stream_mut().unwrap().set_content(
+                format!("begincmap {declaration}\n1 begincodespacerange <0000> <FFFF> endcodespacerange\n1 begincidrange <0001> <0001> 1 endcidrange endcmap").into_bytes()
+            );
+            assert!(matches!(
+                text::page(&document, 1, 128),
+                Err(Failure::Unsupported)
+            ));
+        }
+        document
+            .get_object_mut(font)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Encoding", 12);
+        assert!(matches!(
+            text::page(&document, 1, 128),
+            Err(Failure::Malformed)
+        ));
     }
 
     #[test]
