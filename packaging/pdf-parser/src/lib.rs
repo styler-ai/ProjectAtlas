@@ -4,7 +4,7 @@
 //! No output is published until all pages have been accepted.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 #[path = "../limits.rs"]
 mod limits;
@@ -88,26 +88,39 @@ fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
         return Err(Failure::Encrypted);
     }
     refuse_structure_replacements(&document)?;
+    let discovered = validate_page_tree(&mut document)?;
     let pages = document.get_pages();
-    validate_page_tree(&document, &pages)?;
+    if pages.len() != discovered {
+        return Err(Failure::Malformed);
+    }
     if pages.len() > FACT_LIMIT {
         return Err(Failure::Pages);
     }
     // Decode admitted streams once with an aggregate ceiling. The canonical
     // formatter therefore never reaches its historical decompression fallback.
     // Images remain opaque because their pixels are outside text extraction.
+    let images: HashSet<_> = document
+        .objects
+        .iter()
+        .filter_map(|(id, object)| {
+            let lopdf::Object::Stream(stream) = object else {
+                return None;
+            };
+            (stream
+                .dict
+                .get_deref(b"Subtype", &document)
+                .and_then(lopdf::Object::as_name)
+                .ok()
+                == Some(b"Image".as_slice()))
+            .then_some(*id)
+        })
+        .collect();
     let mut expanded = 0usize;
-    for object in document.objects.values_mut() {
+    for (id, object) in &mut document.objects {
         let lopdf::Object::Stream(stream) = object else {
             continue;
         };
-        if stream
-            .dict
-            .get(b"Subtype")
-            .and_then(lopdf::Object::as_name)
-            .ok()
-            == Some(b"Image".as_slice())
-        {
+        if images.contains(id) {
             continue;
         }
         if stream.dict.has(b"Filter") {
@@ -124,6 +137,7 @@ fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
         stream.dict.remove(b"Filter");
         stream.dict.remove(b"DecodeParms");
     }
+    drop(images);
     let mut wire = Vec::new();
     wire.extend_from_slice(&(pages.len() as u32).to_le_bytes());
     let mut total = 0usize;
@@ -191,10 +205,7 @@ fn refuse_structure_replacements(document: &lopdf::Document) -> Result<(), Failu
 }
 
 /// Check every declared page-tree edge; the library iterator may silently skip it.
-fn validate_page_tree(
-    document: &lopdf::Document,
-    pages: &BTreeMap<u32, lopdf::ObjectId>,
-) -> Result<(), Failure> {
+fn validate_page_tree(document: &mut lopdf::Document) -> Result<usize, Failure> {
     let root = document
         .catalog()
         .map_err(parser_failure)?
@@ -221,12 +232,18 @@ fn validate_page_tree(
         if !visited.insert(id) {
             return Err(Failure::Malformed);
         }
-        match node
-            .get(b"Type")
+        let indirect_type = matches!(node.get(b"Type"), Ok(lopdf::Object::Reference(_)));
+        let node_type = match node
+            .get_deref(b"Type", document)
             .map_err(parser_failure)?
             .as_name()
             .map_err(parser_failure)?
         {
+            b"Pages" => b"Pages".as_slice(),
+            b"Page" => b"Page".as_slice(),
+            _ => return Err(Failure::Malformed),
+        };
+        match node_type {
             b"Pages" => {
                 let children = node
                     .get_deref(b"Kids", document)
@@ -243,17 +260,19 @@ fn validate_page_tree(
                 if discovered > FACT_LIMIT {
                     return Err(Failure::Pages);
                 }
-                if pages.get(&(discovered as u32)) != Some(&id) {
-                    return Err(Failure::Malformed);
-                }
             }
             _ => return Err(Failure::Malformed),
         }
+        if indirect_type {
+            // The upstream page iterator requires direct type names. Only
+            // canonicalize validated nodes in this private parsed document.
+            document
+                .get_dictionary_mut(id)
+                .map_err(parser_failure)?
+                .set("Type", lopdf::Object::Name(node_type.to_vec()));
+        }
     }
-    if discovered != pages.len() {
-        return Err(Failure::Malformed);
-    }
-    Ok(())
+    Ok(discovered)
 }
 
 /// Parse the admitted input atomically; failed calls expose no previous output.
@@ -310,6 +329,31 @@ mod tests {
         let mut indirect = Vec::new();
         document.save_to(&mut indirect).unwrap();
         assert_eq!(parse(&indirect), Ok((0u32.to_le_bytes().to_vec(), 0)));
+
+        let cycle = document.new_object_id();
+        document
+            .objects
+            .insert(cycle, lopdf::Object::Reference(cycle));
+        for invalid_type in [
+            None,
+            Some(lopdf::Object::Integer(7)),
+            Some(lopdf::Object::Reference((999, 0))),
+            Some(lopdf::Object::Reference(cycle)),
+        ] {
+            let node = document.get_dictionary_mut(pages).unwrap();
+            if let Some(value) = invalid_type {
+                node.set("Type", value);
+            } else {
+                node.remove(b"Type");
+            }
+            let mut invalid = Vec::new();
+            document.save_to(&mut invalid).unwrap();
+            assert_eq!(parse(&invalid), Err(Failure::Malformed));
+        }
+        document
+            .get_dictionary_mut(pages)
+            .unwrap()
+            .set("Type", "Pages");
 
         document.get_dictionary_mut(pages).unwrap().set("Count", 1);
         let mut invalid = Vec::new();
@@ -514,16 +558,23 @@ mod tests {
             },
             b"/Print Do BT /F1 12 Tf 72 700 Td (Visible) Tj ET".to_vec(),
         ));
+        let image = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Filter" => "DCTDecode",
+                "Width" => 1, "Height" => 1, "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8
+            },
+            vec![0],
+        ));
         let content = document.add_object(lopdf::Stream::new(
             lopdf::Dictionary::new(),
-            b"/Print Do /Form Do".to_vec(),
+            b"/Image Do /Print Do /Form Do".to_vec(),
         ));
         let page = document.add_object(dictionary! {
             "Type" => "Page", "Parent" => pages, "Contents" => content,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! {
                 "Font" => dictionary! { "F1" => font },
-                "XObject" => dictionary! { "Print" => postscript, "Form" => form }
+                "XObject" => dictionary! { "Print" => postscript, "Form" => form, "Image" => image }
             }
         });
         document.objects.insert(
@@ -535,14 +586,35 @@ mod tests {
         );
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
-        for subtype in ["PS", "Form", "Unknown"] {
-            let stream = document
-                .get_object_mut(postscript)
-                .unwrap()
-                .as_stream_mut()
-                .unwrap();
-            stream.dict.set("Subtype", subtype);
-            stream.dict.set("Subtype2", "PS");
+        for (indirect, subtype) in [
+            (false, "PS"),
+            (false, "Form"),
+            (false, "Unknown"),
+            (true, "PS"),
+            (true, "Form"),
+            (true, "Unknown"),
+        ] {
+            for (id, key, name) in [
+                (pages, "Type", "Pages"),
+                (page, "Type", "Page"),
+                (form, "Subtype", "Form"),
+                (image, "Subtype", "Image"),
+                (postscript, "Subtype", subtype),
+                (postscript, "Subtype2", "PS"),
+            ] {
+                let value = lopdf::Object::Name(name.as_bytes().to_vec());
+                let value = if indirect {
+                    document.add_object(value).into()
+                } else {
+                    value
+                };
+                let dictionary = match document.get_object_mut(id).unwrap() {
+                    lopdf::Object::Stream(stream) => &mut stream.dict,
+                    lopdf::Object::Dictionary(dictionary) => dictionary,
+                    _ => unreachable!(),
+                };
+                dictionary.set(key, value);
+            }
             let mut bytes = Vec::new();
             document.save_to(&mut bytes).unwrap();
             let result = parse(&bytes);

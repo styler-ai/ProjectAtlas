@@ -1926,7 +1926,7 @@ impl<'a> Processor<'a> {
                     let xobject: &Dictionary = get(&doc, resources, b"XObject");
                     let name = operation.operands[0].as_name().unwrap();
                     let xf: &Stream = get(&doc, xobject, name);
-                    match xf.dict.get(b"Subtype")?.as_name()? {
+                    match doc.dereference(xf.dict.get(b"Subtype")?)?.1.as_name()? {
                         b"Image" | b"PS" => continue, // Pixels and print-only PostScript do not supply displayed text.
                         b"Form" if maybe_get_obj(doc, &xf.dict, b"Subtype2")
                             .and_then(|value| value.as_name().ok()) == Some(b"PS".as_slice()) => continue,
