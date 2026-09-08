@@ -3082,19 +3082,32 @@ mod tests {
             "Explain document ownership.".to_owned(),
         )]);
         let (records, missing, invalid) = super::build_file_records(&files, &config, &purposes)?;
-        assert_eq!(missing, ["guide.pdf", "guide.DOCX"]);
-        assert!(invalid.is_empty());
-        assert_eq!(records.len(), 4);
-        for record in &records[..2] {
-            assert_eq!(record.summary, "MISSING");
-            assert_eq!(record.source, "missing");
+        let actual = records
+            .iter()
+            .map(|record| {
+                (
+                    record.path.as_str(),
+                    record.summary.as_str(),
+                    record.source.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if missing != ["guide.pdf", "guide.DOCX"]
+            || !invalid.is_empty()
+            || actual
+                != [
+                    ("guide.pdf", "MISSING", "missing"),
+                    ("guide.DOCX", "MISSING", "missing"),
+                    ("approved.docx", "Explain document ownership.", "database"),
+                    ("lib.rs", "Explain source ownership.", "header"),
+                ]
+        {
+            return Err(io::Error::other("map changed binary or text purpose ownership").into());
         }
-        assert_eq!(records[2].summary, "Explain document ownership.");
-        assert_eq!(records[2].source, "database");
-        assert_eq!(records[3].summary, "Explain source ownership.");
-        assert_eq!(records[3].source, "header");
         fs::write(temp.path().join("invalid.rs"), b"\xff")?;
-        assert!(super::build_file_records(&["invalid.rs".to_owned()], &config, &purposes).is_err());
+        if super::build_file_records(&["invalid.rs".to_owned()], &config, &purposes).is_ok() {
+            return Err(io::Error::other("map accepted invalid UTF-8 source headers").into());
+        }
         Ok(())
     }
 
