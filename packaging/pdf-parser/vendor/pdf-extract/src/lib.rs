@@ -160,14 +160,17 @@ fn pdf_to_utf8(s: &[u8]) -> String {
     }
 }
 
-fn to_utf8(encoding: &[u16], s: &[u8]) -> String {
+fn to_utf8(encoding: &[u16], s: &[u8]) -> Result<String, OutputError> {
+    if s.iter().any(|code| encoding.get(*code as usize).copied().unwrap_or(0) == 0) {
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "used PDF character has no encoding mapping").into());
+    }
     if s.len() > 2 && s[0] == 0xfe && s[1] == 0xff {
-        return UTF_16BE.decode_without_bom_handling_and_without_replacement(&s[2..]).unwrap().to_string()
+        return Ok(UTF_16BE.decode_without_bom_handling_and_without_replacement(&s[2..]).unwrap().to_string())
     } else {
         let r : Vec<u8> = s.iter().map(|x| *x).flat_map(|x| {
             let k = encoding[x as usize];
             vec![(k>>8) as u8, k as u8].into_iter()}).collect();
-        return UTF_16BE.decode_without_bom_handling_and_without_replacement(&r).unwrap().to_string()
+        return Ok(UTF_16BE.decode_without_bom_handling_and_without_replacement(&r).unwrap().to_string())
     }
 }
 
@@ -337,7 +340,7 @@ fn make_font<'a>(doc: &'a Document, font: &'a Dictionary,
         }
         Rc::new(PdfCIDFont::new(doc, font))
     } else if subtype == "Type3" {
-        Rc::new(PdfType3Font::new(doc, font))
+        Rc::new(PdfType3Font::new(doc, font)?)
     } else {
         Rc::new(PdfSimpleFont::new(doc, font)?)
     };
@@ -717,8 +720,15 @@ impl<'a> PdfSimpleFont<'a> {
 
 
 impl<'a> PdfType3Font<'a> {
-    fn new(doc: &'a Document, font: &'a Dictionary) -> PdfType3Font<'a> {
-
+    fn new(doc: &'a Document, font: &'a Dictionary) -> Result<PdfType3Font<'a>, OutputError> {
+        let matrix = doc.dereference(font.get(b"FontMatrix")?)?.1.as_array()?;
+        if matrix.len() != 6 || matrix.iter().any(|value|
+            !matches!(value, Object::Integer(_) | Object::Real(_)) || !as_num(value).is_finite()) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Type 3 font matrix").into());
+        }
+        // Type 3 widths are glyph-space vectors; only their transformed horizontal
+        // component contributes to text displacement, even for a rotated matrix.
+        let width_scale = as_num(&matrix[0]) * 1000.;
         let unicode_map = get_unicode_map(doc, font);
         let encoding: Option<&Object> = get(doc, font, b"Encoding");
 
@@ -783,11 +793,11 @@ impl<'a> PdfType3Font<'a> {
         dlog!("first_char {:?}, last_char: {:?}, widths: {} {:?}", first_char, last_char, widths.len(), widths);
 
         for w in widths {
-            width_map.insert((first_char + i) as CharCode, w);
+            width_map.insert((first_char + i) as CharCode, w * width_scale);
             i += 1;
         }
         assert_eq!(first_char + i - 1, last_char);
-        PdfType3Font {doc, font, widths: width_map, encoding: encoding_table, unicode_map}
+        Ok(PdfType3Font {doc, font, widths: width_map, encoding: encoding_table, unicode_map})
     }
 }
 
@@ -860,7 +870,7 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
                     // some pdf's like http://arxiv.org/pdf/2312.00064v1 are missing entries in their unicode map but do have
                     // entries in the encoding.
                     let encoding = self.encoding.as_deref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "unmapped PDF character has no known font encoding"))?;
-                    let s = to_utf8(encoding, &slice);
+                    let s = to_utf8(encoding, &slice)?;
                     debug!("falling back to encoding {} -> {:?}", char, s);
                     s
                 }
@@ -870,7 +880,7 @@ impl<'a> PdfFont for PdfSimpleFont<'a> {
         }
         let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
         //dlog!("char_code {:?} {:?}", char, self.encoding);
-        let s = to_utf8(encoding, &slice);
+        let s = to_utf8(encoding, &slice)?;
         Ok(s)
     }
 }
@@ -910,7 +920,7 @@ impl<'a> PdfFont for PdfType3Font<'a> {
                     // some pdf's like http://arxiv.org/pdf/2312.00577v1 are missing entries in their unicode map but do have
                     // entries in the encoding.
                     let encoding = self.encoding.as_deref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "unmapped PDF character has no known font encoding"))?;
-                    let s = to_utf8(encoding, &slice);
+                    let s = to_utf8(encoding, &slice)?;
                     debug!("falling back to encoding {} -> {:?}", char, s);
                     s
                 }
@@ -920,7 +930,7 @@ impl<'a> PdfFont for PdfType3Font<'a> {
         }
         let encoding = self.encoding.as_ref().map(|x| &x[..]).unwrap_or(&PDFDocEncoding);
         //dlog!("char_code {:?} {:?}", char, self.encoding);
-        let s = to_utf8(encoding, &slice);
+        let s = to_utf8(encoding, &slice)?;
         Ok(s)
     }
 }
@@ -1583,6 +1593,8 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
                 match pdf_to_utf8(cs).as_ref() {
                     "DeviceRGB" => ColorSpace::DeviceRGB,
                     "DeviceGray" => ColorSpace::DeviceGray,
+                    "DeviceCMYK" => ColorSpace::DeviceCMYK,
+                    "Pattern" => ColorSpace::Pattern,
                     _ => panic!()
                 }
             } else {

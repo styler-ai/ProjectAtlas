@@ -26,6 +26,9 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Save and restore both text matrices with q/Q, following the [ISO-approved text-object errata](https://pdf-issues.pdfa.org/32000-2-2020/clause09.html#941-general), while preserving Form-local execution.
 - Use known font encodings for missing ToUnicode entries, including built-in Base-14 encodings with explicit widths; refuse used characters without a known fallback and unmapped CID characters through the existing typed unsupported path.
 - Read simple-font MissingWidth from its font descriptor; reject malformed descriptors or nonnumeric/nonfinite widths.
+- Transform Type 3 glyph widths through the required finite FontMatrix's horizontal component, including rotated and reflected matrices, before shared text advancement.
+- Accept DeviceCMYK and Pattern aliases through the existing shared fill/stroke color-space resolver.
+- Reject used undefined font-encoding slots before emitting text, while preserving explicit ToUnicode mappings and the existing WinAnsi bullet mappings.
 - Admit only Identity-H Type 0 font encodings through the shared font cache owner.
   Vertical and custom stream CMap encodings return typed unsupported input: the
   pinned CMap byte-width and CID-range mappings cannot provide correct custom

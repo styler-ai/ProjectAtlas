@@ -658,6 +658,114 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn type3_widths_follow_the_font_matrix() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let glyph = document.add_object(lopdf::Stream::new(dictionary! {}, b"600 0 d0".to_vec()));
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type3",
+            "FontBBox" => vec![0.into(), 0.into(), 600.into(), 600.into()],
+            "CharProcs" => dictionary! { "A" => glyph, "B" => glyph },
+            "Encoding" => dictionary! { "Differences" => vec![65.into(), "A".into(), "B".into()] },
+            "FirstChar" => 65, "LastChar" => 66, "Widths" => vec![600.into(), 600.into()]
+        });
+        let content = document.add_object(lopdf::Stream::new(dictionary! {}, Vec::new()));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        for (matrix, next_x, expected) in [
+            ([0.002, 0., 0., 0.002, 0., 0.], 86.4, "AB"),
+            ([0.002, 0., 0., 0.002, 0., 0.], 90., "A B"),
+            ([0., 0.002, -0.002, 0., 0., 0.], 75., "A B"),
+            ([-0.002, 0., 0., 0.002, 0., 0.], 60., "A B"),
+            ([0.001, 0., 0., 0.001, 10., 20.], 79.2, "AB"),
+        ] {
+            let matrix = document.add_object(lopdf::Object::Array(
+                matrix.into_iter().map(Into::into).collect(),
+            ));
+            document
+                .get_dictionary_mut(font)
+                .unwrap()
+                .set("FontMatrix", matrix);
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(
+                    format!("BT /F1 12 Tf 72 500 Td (A) Tj 1 0 0 1 {next_x} 500 Tm (B) Tj ET")
+                        .into_bytes(),
+                );
+            assert_eq!(text::page(&document, 1, 128).unwrap(), expected);
+        }
+        {
+            let font = document.get_dictionary_mut(font).unwrap();
+            font.set("Encoding", "WinAnsiEncoding");
+            font.set("FirstChar", 0);
+            font.set("LastChar", 255);
+            font.set("Widths", vec![lopdf::Object::Integer(600); 256]);
+        }
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 12 Tf 72 500 Td <4181> Tj ET".to_vec());
+        assert_eq!(text::page(&document, 1, 128).unwrap(), "A\u{2022}");
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 12 Tf 72 500 Td <4101> Tj ET".to_vec());
+        assert!(matches!(
+            text::page(&document, 1, 128),
+            Err(Failure::Unsupported)
+        ));
+        for matrix in [
+            None,
+            Some(lopdf::Object::Array(vec![1.into()])),
+            Some(lopdf::Object::Array(vec![
+                "bad".into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                0.into(),
+                0.into(),
+            ])),
+            Some(lopdf::Object::Array(vec![
+                f32::INFINITY.into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                0.into(),
+                0.into(),
+            ])),
+        ] {
+            let font = document.get_dictionary_mut(font).unwrap();
+            font.remove(b"FontMatrix");
+            if let Some(matrix) = matrix {
+                font.set("FontMatrix", matrix);
+            }
+            assert!(matches!(
+                text::page(&document, 1, 128),
+                Err(Failure::Malformed)
+            ));
+        }
+    }
+
+    #[test]
     fn partial_unicode_maps_use_known_font_encodings_or_refuse() {
         let mut document = lopdf::Document::new();
         let pages = document.new_object_id();
@@ -738,6 +846,54 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             .unwrap()
             .set_content(b"BT /F1 12 Tf 72 500 Td (AB) Tj ET".to_vec());
         assert_eq!(text::page(&document, 1, 128).unwrap().trim(), "ZB");
+        for (encoding, code, expected) in [
+            ("WinAnsiEncoding", "4181", Some("Z\u{2022}")),
+            ("WinAnsiEncoding", "4101", None),
+            ("MacRomanEncoding", "4101", None),
+            ("MacExpertEncoding", "4100", None),
+        ] {
+            document
+                .get_dictionary_mut(font)
+                .unwrap()
+                .set("Encoding", encoding);
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(format!("BT /F1 12 Tf 72 500 Td <{code}> Tj ET").into_bytes());
+            match expected {
+                Some(expected) => assert_eq!(text::page(&document, 1, 128).unwrap(), expected),
+                None => {
+                    assert!(matches!(
+                        text::page(&document, 1, 128),
+                        Err(Failure::Unsupported)
+                    ));
+                    let mut bytes = Vec::new();
+                    document.save_to(&mut bytes).unwrap();
+                    INPUT.with(|input| *input.borrow_mut() = bytes);
+                    OUTPUT.with(|output| *output.borrow_mut() = b"previous text".to_vec());
+                    assert_eq!(extract(), Failure::Unsupported as i32);
+                    assert_eq!(output_len(), 0);
+                }
+            }
+        }
+        let map = document
+            .get_object_mut(cmap)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        let complete = String::from_utf8(map.content.clone())
+            .unwrap()
+            .replace("2 beginbfchar", "3 beginbfchar <01> <0043>");
+        map.set_content(complete.into_bytes());
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"BT /F1 12 Tf 72 500 Td <4101> Tj ET".to_vec());
+        assert_eq!(text::page(&document, 1, 128).unwrap(), "ZC");
     }
 
     #[test]
@@ -835,6 +991,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "Resources" => dictionary! {
                 "Font" => dictionary! { "Plain" => plain, "Mapped" => mapped },
+                "ColorSpace" => dictionary! { "CMYK" => "DeviceCMYK", "PatternAlias" => "Pattern" },
                 "ExtGState" => dictionary! { "GS" => state },
                 "XObject" => dictionary! { "Form" => form }
             }
@@ -849,6 +1006,14 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
         for (stream, expected) in [
+            (
+                b"/CMYK cs 0 0 0 1 sc /CMYK CS 0 0 0 1 SC /GS gs BT 72 500 Td (A) Tj ET".as_slice(),
+                vec!["Z"],
+            ),
+            (
+                b"/PatternAlias cs /PatternAlias CS /GS gs BT 72 500 Td (A) Tj ET",
+                vec!["Z"],
+            ),
             (
                 b"/GS gs BT 72 500 Td (A) Tj 20 0 Td (A) Tj ET".as_slice(),
                 vec!["Z", "Z"],

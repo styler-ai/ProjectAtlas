@@ -1701,8 +1701,8 @@ mod tests {
             facts.facts[1].locator,
             DocumentLocator::Pdf {
                 page: 2,
-                text_start: 2,
-                text_end: 10
+                text_start: 0,
+                text_end: 8
             }
         ));
     }
@@ -1886,7 +1886,7 @@ mod tests {
                 assert_eq!(fact.line_end, index + 1);
             }
         }
-        for rotation in [90, 270] {
+        for rotation in [90, 180, 270] {
             document
                 .get_object_mut((2, 0))
                 .expect("page tree")
@@ -1899,11 +1899,8 @@ mod tests {
             document.save_to(&mut bytes).expect("fixture serialization");
             let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
                 .expect("ordinary rotated text");
-            assert_eq!(
-                facts.text.split_whitespace().collect::<Vec<_>>(),
-                ["First", "Second", "Next"]
-            );
-            assert_eq!(facts.facts.len(), 3);
+            assert_eq!(facts.text, "First Second\nNext");
+            assert_eq!(facts.facts.len(), 2);
             for (index, fact) in facts.facts.iter().enumerate() {
                 assert!(matches!(fact.locator, DocumentLocator::Pdf { page: 1, .. }));
                 assert_eq!((fact.line_start, fact.line_end), (index + 1, index + 1));

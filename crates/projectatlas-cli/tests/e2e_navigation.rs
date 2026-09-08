@@ -9756,7 +9756,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "docs/guide.pdf",
             "Runtime PDF",
             "pdf document",
-            "pdf:page=1;text-span=2..13",
+            "pdf:page=1;text-span=0..11",
         ),
         (
             "docs/guide.docx",
@@ -10022,12 +10022,12 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "symbols".to_owned(),
             "slice".to_owned(),
             "docs/guide.pdf".to_owned(),
-            "document-block-2".to_owned(),
+            "document-block-1".to_owned(),
             "--content-selection".to_owned(),
             "documentation".to_owned(),
         ],
     )?;
-    require_json_string(&rotated_slice, &["content"], "Second")?;
+    require_json_string(&rotated_slice, &["content"], "First Second")?;
     let mcp_pdf_slice = || -> Result<Value, Box<dyn Error>> {
         let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
         let result = session.call_tool(
@@ -10042,7 +10042,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         shutdown?;
         Ok(toon_format::decode_default(&text)?)
     };
-    require_json_string(&mcp_pdf_slice()?, &["slice", "content"], "Second")?;
+    require_json_string(&mcp_pdf_slice()?, &["slice", "content"], "Next")?;
     for (content, expected) in [
         (
             "0 1 -1 0 612 0 cm\nBT /F3 12 Tf 20 TL 72 500 Td q 100 -100 Td (A) Tj Q T* (StateB) Tj 1 0 0 1 115.2 480 Tm (C) Tj ET",

@@ -230,7 +230,9 @@ embedded canonical guest through extraction, CLI/MCP navigation, and measurement
 The build resolves dependency sources before canonical source-path remapping and
 uses one release code-generation unit. Cross-host compiler output equality is
 not an artifact claim.
-Each parse has 64 MiB linear memory, a 1 MiB
+One process-local admission lease covers both document formats and observes caller
+cancellation and deadlines while queued, preventing source-worker parallelism from
+multiplying parser memory envelopes. Each parse has 64 MiB linear memory, a 1 MiB
 interpreter value stack, 256 call depth, 500 million total instruction fuel,
 and a ten-second ceiling that respects an earlier caller deadline. Fuel
 suspensions check cancellation; real allocation denial remains a typed limit.
