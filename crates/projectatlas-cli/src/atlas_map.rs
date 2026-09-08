@@ -7,7 +7,8 @@ use projectatlas_core::{
     validated_repo_file_key,
 };
 use projectatlas_db::AtlasStore;
-use projectatlas_fs::{ScanOptions, scan_repo};
+use projectatlas_fs::{ScanOptions, explicit_language_override, scan_repo};
+use projectatlas_symbols::document_format_for_path;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -1863,7 +1864,10 @@ fn extract_purpose_header_with_reader<E, F>(
 where
     F: FnMut(&Path) -> Result<String, E>,
 {
-    if DOCUMENT_SOURCE_EXTENSIONS.contains(&normalized_extension(rel_path).as_str()) {
+    let extension = normalized_extension(rel_path);
+    let language =
+        explicit_language_override(rel_path, Some(&extension), &config.language_overrides);
+    if document_format_for_path(rel_path, language).is_some() {
         return Ok((
             None,
             vec!["missing database purpose for document".to_owned()],
@@ -3107,6 +3111,59 @@ mod tests {
         fs::write(temp.path().join("invalid.rs"), b"\xff")?;
         if super::build_file_records(&["invalid.rs".to_owned()], &config, &purposes).is_ok() {
             return Err(io::Error::other("map accepted invalid UTF-8 source headers").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn document_map_headers_follow_scanner_language_overrides() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        for (path, overrides, text_header) in [
+            ("guide.pdf", vec![(".pdf", "rust")], true),
+            ("guide.DOCX", vec![(".docx", "rust")], true),
+            ("guide.rs", vec![(".rs", "pdf")], false),
+            ("guide.rs", vec![("guide.rs", "docx")], false),
+            (
+                "guide.pdf",
+                vec![(".pdf", "pdf"), ("guide.pdf", "rust")],
+                true,
+            ),
+            (
+                "guide.text.pdf",
+                vec![(".pdf", "pdf"), (".text.pdf", "rust")],
+                true,
+            ),
+        ] {
+            let mut config = test_config(temp.path().join("projectatlas.toon"));
+            config.language_overrides = overrides
+                .into_iter()
+                .map(|(selector, language)| (selector.to_owned(), language.to_owned()))
+                .collect();
+            fs::write(
+                temp.path().join(path),
+                if text_header {
+                    b"// Purpose: Explain configured source ownership.\n".as_slice()
+                } else {
+                    b"\xff\xfe binary document"
+                },
+            )?;
+            let (records, missing, invalid) =
+                super::build_file_records(&[path.to_owned()], &config, &BTreeMap::new())?;
+            let expected = if text_header {
+                "Explain configured source ownership."
+            } else {
+                "MISSING"
+            };
+            if records.len() != 1
+                || records[0].summary != expected
+                || missing.is_empty() != text_header
+                || !invalid.is_empty()
+            {
+                return Err(io::Error::other(format!(
+                    "map ignored language override for {path}: {records:?}"
+                ))
+                .into());
+            }
         }
         Ok(())
     }

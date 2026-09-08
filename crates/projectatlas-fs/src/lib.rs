@@ -1332,7 +1332,9 @@ fn admitted_scan_language(
 }
 
 /// Select one configured explicit override before built-in detector rules.
-fn explicit_language_override<'a>(
+/// Exact filenames take precedence over the longest matching extension selector.
+#[must_use]
+pub fn explicit_language_override<'a>(
     path: &str,
     extension: Option<&str>,
     overrides: &'a BTreeMap<String, String>,

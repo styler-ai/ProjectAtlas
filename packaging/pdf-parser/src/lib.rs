@@ -1472,6 +1472,9 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             b"BT /F1 12 Tf /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET".as_slice(),
             b"BT /F1 12 Tf /Artifact BMC /Span /Replacement BDC (glyph) Tj EMC EMC ET",
             b"/Form Do",
+            b"BT /F1 12 Tf /ReversedChars BMC (desrever) Tj EMC ET",
+            b"BT /F1 12 Tf /ReversedChars << /MCID 0 >> BDC (desrever) Tj EMC ET",
+            b"BT /F1 12 Tf /ReversedChars /Local BDC (desrever) Tj EMC ET",
         ] {
             document
                 .get_object_mut(content)
@@ -1496,6 +1499,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 true,
             ),
             (b"BT /F1 12 Tf /Span /Local BDC (Visible) Tj EMC ET", true),
+            (b"BT /F1 12 Tf /Span BMC (Visible) Tj EMC ET", true),
+            (b"BT /F1 12 Tf BMC (Visible) Tj EMC ET", false),
+            (b"BT /F1 12 Tf 1 BMC (Visible) Tj EMC ET", false),
+            (b"BT /F1 12 Tf /Span /Extra BMC (Visible) Tj EMC ET", false),
             (
                 b"BT /F1 12 Tf /Span << /ActualText 12 >> BDC (Visible) Tj EMC ET",
                 false,
@@ -1518,6 +1525,24 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 assert!(matches!(result, Err(Failure::Malformed)));
             }
         }
+        for (target, stream) in [
+            (
+                form,
+                b"BT /F1 12 Tf /ReversedChars BMC (desrever) Tj EMC ET".as_slice(),
+            ),
+            (content, b"/Form Do".as_slice()),
+        ] {
+            document
+                .get_object_mut(target)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(stream.to_vec());
+        }
+        assert!(matches!(
+            text::page(&document, 1, 256),
+            Err(Failure::Unsupported)
+        ));
     }
 
     #[test]

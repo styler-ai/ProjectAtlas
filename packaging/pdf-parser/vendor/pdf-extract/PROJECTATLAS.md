@@ -17,6 +17,7 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
   document, preserving independent page and Form resource scopes.
 - Refuse incomplete or unmapped character codes instead of silently ending text.
 - Refuse ActualText replacement semantics in direct or resource-named marked-content properties before publishing underlying glyphs.
+- Refuse ReversedChars marked content before publishing unsupported logical text order; validate BMC/BDC operand counts and tag names.
 - Interpret quote text-showing operators with their line movement and spacing semantics.
 - Apply CID range widths to both inclusive endpoints using the declared width.
 - Apply ExtGState font dictionaries and finite sizes through the existing scoped font cache.

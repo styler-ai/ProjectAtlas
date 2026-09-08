@@ -1893,26 +1893,28 @@ impl<'a> Processor<'a> {
                     dlog!("discard {:?}", path);
                     path.ops.clear();
                 }
-                "BDC" => {
-                    if operation.operands.len() != 2 {
+                "BMC" | "BDC" => {
+                    let has_properties = operation.operator == "BDC";
+                    if operation.operands.len() != if has_properties { 2 } else { 1 } {
                         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid marked-content operands").into());
                     }
-                    operation.operands[0].as_name()?;
-                    let property = match &operation.operands[1] {
-                        Object::Name(name) => {
-                            let (_, properties) = doc.dereference(resources.get(b"Properties")?)?;
-                            properties.as_dict()?.get(name)?
-                        }
-                        property => property,
-                    };
-                    let (_, property) = doc.dereference(property)?;
-                    if let Ok(actual_text) = property.as_dict()?.get(b"ActualText") {
-                        doc.dereference(actual_text)?.1.as_str()?;
-                        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ActualText replacement requires unsupported text decoding").into());
+                    if operation.operands[0].as_name()? == b"ReversedChars" {
+                        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ReversedChars requires unsupported text ordering").into());
                     }
-                    mc_stack.push(operation);
-                }
-                "BMC" => {
+                    if has_properties {
+                        let property = match &operation.operands[1] {
+                            Object::Name(name) => {
+                                let (_, properties) = doc.dereference(resources.get(b"Properties")?)?;
+                                properties.as_dict()?.get(name)?
+                            }
+                            property => property,
+                        };
+                        let (_, property) = doc.dereference(property)?;
+                        if let Ok(actual_text) = property.as_dict()?.get(b"ActualText") {
+                            doc.dereference(actual_text)?.1.as_str()?;
+                            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ActualText replacement requires unsupported text decoding").into());
+                        }
+                    }
                     mc_stack.push(operation);
                 }
                 "EMC" => {
