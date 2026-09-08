@@ -1919,7 +1919,9 @@ impl<'a> Processor<'a> {
                     let name = operation.operands[0].as_name().unwrap();
                     let xf: &Stream = get(&doc, xobject, name);
                     match xf.dict.get(b"Subtype")?.as_name()? {
-                        b"Image" => continue, // Text extraction never interprets image pixels.
+                        b"Image" | b"PS" => continue, // Pixels and print-only PostScript do not supply displayed text.
+                        b"Form" if maybe_get_obj(doc, &xf.dict, b"Subtype2")
+                            .and_then(|value| value.as_name().ok()) == Some(b"PS".as_slice()) => continue,
                         b"Form" => {},
                         _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported XObject subtype").into()),
                     }

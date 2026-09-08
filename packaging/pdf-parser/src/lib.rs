@@ -304,6 +304,66 @@ mod tests {
     }
 
     #[test]
+    fn postscript_xobjects_do_not_change_displayed_text() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let postscript = document.add_object(lopdf::Stream::new(
+            dictionary! { "Type" => "XObject", "Subtype" => "PS" },
+            b"/Helvetica findfont 12 scalefont setfont (Print only) show".to_vec(),
+        ));
+        let form = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()]
+            },
+            b"/Print Do BT /F1 12 Tf 72 700 Td (Visible) Tj ET".to_vec(),
+        ));
+        let content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"/Print Do /Form Do".to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => font },
+                "XObject" => dictionary! { "Print" => postscript, "Form" => form }
+            }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        for subtype in ["PS", "Form", "Unknown"] {
+            let stream = document
+                .get_object_mut(postscript)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap();
+            stream.dict.set("Subtype", subtype);
+            stream.dict.set("Subtype2", "PS");
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).unwrap();
+            let result = parse(&bytes);
+            if subtype == "Unknown" {
+                assert_eq!(result, Err(Failure::Malformed));
+            } else {
+                let (wire, count) = result.unwrap();
+                assert_eq!(std::str::from_utf8(&wire[12..]).unwrap().trim(), "Visible");
+                assert_eq!(count, wire.len() - 12);
+            }
+        }
+    }
+
+    #[test]
     fn nested_forms_preserve_graphics_state_and_composed_transforms() {
         #[derive(Default)]
         struct GlyphTransforms(Vec<[f64; 6]>);
