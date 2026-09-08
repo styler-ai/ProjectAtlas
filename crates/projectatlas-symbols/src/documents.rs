@@ -1991,7 +1991,18 @@ mod tests {
 
     #[test]
     fn pdf_cid_text_requires_every_character_to_decode() {
-        for (codes, accepted) in [("0001", true), ("00010002", false), ("000100", false)] {
+        for (encoding, codes, expected) in [
+            ("Identity-H", "0001", Some("Z")),
+            (
+                "Identity-H",
+                "0001> Tj 3 0 Td <0001> Tj 8 0 Td <0001",
+                Some("ZZ Z"),
+            ),
+            ("Identity-H", "00010002", None),
+            ("Identity-H", "000100", None),
+            ("Identity-V", "0001", None),
+            ("custom", "0001", None),
+        ] {
             let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
             let cmap = document.add_object(lopdf::Stream::new(
                 lopdf::Dictionary::new(),
@@ -2012,6 +2023,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             descendant.set("Type", "Font");
             descendant.set("Subtype", "CIDFontType2");
             descendant.set("BaseFont", "Fixture");
+            descendant.set("W", vec![lopdf::Object::Integer(1), 1.into(), 200.into()]);
             descendant.set("CIDSystemInfo", system);
             descendant.set("FontDescriptor", lopdf::Dictionary::new());
             let descendant = document.add_object(descendant);
@@ -2019,7 +2031,15 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             font.set("Type", "Font");
             font.set("Subtype", "Type0");
             font.set("BaseFont", "Fixture");
-            font.set("Encoding", "Identity-H");
+            if encoding == "custom" {
+                let encoding = document.add_object(lopdf::Stream::new(
+                    lopdf::Dictionary::new(),
+                    b"begincmap /WMode 0 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 1 begincidrange <0000> <FFFF> 0 endcidrange endcmap".to_vec(),
+                ));
+                font.set("Encoding", encoding);
+            } else {
+                font.set("Encoding", encoding);
+            }
             font.set(
                 "DescendantFonts",
                 vec![lopdf::Object::Reference(descendant)],
@@ -2035,8 +2055,13 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             let mut bytes = Vec::new();
             document.save_to(&mut bytes).expect("fixture serialization");
             let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
-            if accepted {
-                assert_eq!(result.expect("mapped CID").text, "Z");
+            if let Some(expected) = expected {
+                assert_eq!(result.expect("mapped horizontal CID").text, expected);
+            } else if encoding != "Identity-H" {
+                assert!(
+                    matches!(result, Err(DocumentExtractionError::UnsupportedPdfInput)),
+                    "{result:?}"
+                );
             } else {
                 assert!(
                     matches!(

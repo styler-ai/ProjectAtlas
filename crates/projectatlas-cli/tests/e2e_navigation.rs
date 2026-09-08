@@ -9597,7 +9597,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         let pdf_objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>\nendobj\n".as_slice(),
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
             page_object.as_bytes(),
             b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
         ];
@@ -9613,6 +9613,26 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         pdf.extend_from_slice(b"\nendstream\nendobj\n");
         offsets.push(pdf.len());
         pdf.extend_from_slice(b"7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Matrix [1 0 0 1 0 600] /Length 41 >>\nstream\nBT /F1 12 Tf 72 0 Td (Runtime Form) ' ET\nendstream\nendobj\n");
+        let custom_encoding = "begincmap /WMode 0 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 1 begincidrange <0000> <FFFF> 0 endcidrange endcmap";
+        let encoding_object = format!(
+            "9 0 obj\n<< /Length {} >>\nstream\n{custom_encoding}\nendstream\nendobj\n",
+            custom_encoding.len()
+        );
+        let unicode = "begincmap /CMapType 2 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <0001> <005A> endbfchar endcmap";
+        let unicode_object = format!(
+            "11 0 obj\n<< /Length {} >>\nstream\n{unicode}\nendstream\nendobj\n",
+            unicode.len()
+        );
+        for object in [
+            "8 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding 9 0 R /DescendantFonts [10 0 R] /ToUnicode 11 0 R >>\nendobj\n",
+            encoding_object.as_str(),
+            "10 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fixture /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 12 0 R /CIDToGIDMap /Identity >>\nendobj\n",
+            unicode_object.as_str(),
+            "12 0 obj\n<< /Type /FontDescriptor /FontName /Fixture /Flags 4 /FontBBox [0 -200 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>\nendobj\n",
+        ] {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(object.as_bytes());
+        }
         let object_count = offsets.len() + 1;
         let xref = pdf.len();
         pdf.extend_from_slice(format!("xref\n0 {object_count}\n").as_bytes());
@@ -9627,7 +9647,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         pdf
     };
     let pdf_path = docs.join(PDF_FILE);
-    let original_page_content = "0 1 -1 0 612 0 cm\n/GS gs BT 72 720 Td 0 0 (Runtime PDF) \" ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q";
+    let original_page_content = "0 1 -1 0 612 0 cm\n/GS gs BT 400 Tz 72 720 Td 0 0 (Runtime P) \" (DF) Tj ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q";
     fs::write(&pdf_path, make_pdf(original_page_content))?;
 
     let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
@@ -9987,34 +10007,37 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     };
     require_json_string(&mcp_pdf_slice()?, &["slice", "content"], "Second")?;
     let before_unsupported_pdf = mcp_database_snapshot(&database)?;
-    fs::write(
-        &pdf_path,
-        make_pdf(
-            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET",
-        ),
-    )?;
-    let unsupported_pdf = StdCommand::new(&executable)
-        .current_dir(&repo)
-        .arg("--db")
-        .arg(&database)
-        .args(["scan", "."])
-        .output()?;
-    if unsupported_pdf.status.success()
-        || !String::from_utf8_lossy(&unsupported_pdf.stderr)
-            .contains("unsupported PDF text semantics")
-        || before_unsupported_pdf.authoritative != mcp_database_snapshot(&database)?.authoritative
-    {
-        return Err(io::Error::other("unsupported PDF replaced the complete publication").into());
-    }
-    require_json_contains(
-        &mcp_pdf_slice()?,
-        &["error", "message"],
-        "unsupported PDF text semantics",
-    )?;
-    if before_unsupported_pdf.authoritative != mcp_database_snapshot(&database)?.authoritative {
-        return Err(
-            io::Error::other("unsupported PDF navigation changed authoritative state").into(),
-        );
+    for unsupported_content in [
+        "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET",
+        "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F2 12 Tf <0001> Tj ET",
+    ] {
+        fs::write(&pdf_path, make_pdf(unsupported_content))?;
+        let unsupported_pdf = StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .args(["scan", "."])
+            .output()?;
+        if unsupported_pdf.status.success()
+            || !String::from_utf8_lossy(&unsupported_pdf.stderr)
+                .contains("unsupported PDF text semantics")
+            || before_unsupported_pdf.authoritative
+                != mcp_database_snapshot(&database)?.authoritative
+        {
+            return Err(
+                io::Error::other("unsupported PDF replaced the complete publication").into(),
+            );
+        }
+        require_json_contains(
+            &mcp_pdf_slice()?,
+            &["error", "message"],
+            "unsupported PDF text semantics",
+        )?;
+        if before_unsupported_pdf.authoritative != mcp_database_snapshot(&database)?.authoritative {
+            return Err(
+                io::Error::other("unsupported PDF navigation changed authoritative state").into(),
+            );
+        }
     }
     fs::write(&pdf_path, make_pdf(original_page_content))?;
     run_scan(&repo, &database)?;
