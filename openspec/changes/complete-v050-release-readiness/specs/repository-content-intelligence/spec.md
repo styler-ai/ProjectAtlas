@@ -102,6 +102,11 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 ### Requirement: Document evidence is exact, sparse, and atomic
 PDF/DOCX extracted text, locators, provenance, coverage, and any document/source relations SHALL publish through existing indexed-text/graph authority when representable; otherwise the smallest constrained SQLite delta SHALL land first. Relations SHALL require exact typed evidence and SHALL not fan a long document out by topical similarity.
 
+#### Scenario: Literal document summary
+- **WHEN** an admitted PDF or DOCX publishes extracted text
+- **THEN** its content summary and generated purpose use a bounded literal text excerpt rather than synthetic graph block names, without inferring headings or titles
+- **AND** empty extracted text produces an explicit empty summary, while authored purposes remain unchanged
+
 #### Scenario: Existing storage is sufficient
 - **WHEN** current text/occurrence/coverage rows express the locator and hot queries within bounds
 - **THEN** no new schema or index is added

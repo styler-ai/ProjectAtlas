@@ -380,14 +380,31 @@ pub fn extract_document_graph_controlled(
     language: Option<&str>,
     control: &IndexWorkControl,
 ) -> Result<SymbolGraph, DocumentExtractionError> {
-    Ok(extract_document_controlled_with_stage(
+    Ok(
+        extract_document_symbol_facts_controlled(bytes, path, language, control)?
+            .symbol_graph(path, language),
+    )
+}
+
+/// Extract document text and exact facts for symbol publication and content summaries.
+///
+/// # Errors
+///
+/// Returns a typed admission, parser, resource, cancellation, or deadline failure
+/// without returning partial facts.
+pub fn extract_document_symbol_facts_controlled(
+    bytes: &[u8],
+    path: &str,
+    language: Option<&str>,
+    control: &IndexWorkControl,
+) -> Result<DocumentFacts, DocumentExtractionError> {
+    extract_document_controlled_with_stage(
         bytes,
         path,
         language,
         control,
         IndexWorkStage::SymbolParsing,
-    )?
-    .symbol_graph(path, language))
+    )
 }
 
 /// Extract one document while applying the caller-selected work stage.
@@ -2304,7 +2321,9 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     #[test]
     fn pdf_extended_graphics_state_selects_text_font() {
         let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let state_type = document.add_object(lopdf::Object::Name(b"ExtGState".to_vec()));
         let mut state = lopdf::Dictionary::new();
+        state.set("Type", state_type);
         state.set("Font", vec![lopdf::Object::Reference((5, 0)), 12.into()]);
         let mut states = lopdf::Dictionary::new();
         states.set("GS", state);
@@ -2648,7 +2667,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn pdf_cid_text_requires_every_character_to_decode() {
-        for (encoding, codes, expected) in [
+        for (encoding, codes, expected, default_width) in [
             ("Identity-H", "0001", Some("Z")),
             (
                 "Identity-H",
@@ -2659,7 +2678,15 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             ("Identity-H", "000100", None),
             ("Identity-V", "0001", None),
             ("custom", "0001", None),
-        ] {
+        ]
+        .into_iter()
+        .map(|(encoding, codes, expected)| (encoding, codes, expected, None))
+        .chain([(
+            "Identity-H",
+            "0001> Tj 18.006 0 Td <0001",
+            Some("ZZ"),
+            Some(1500.5_f32),
+        )]) {
             let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
             let cmap = document.add_object(lopdf::Stream::new(
                 lopdf::Dictionary::new(),
@@ -2680,9 +2707,20 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             descendant.set("Type", "Font");
             descendant.set("Subtype", "CIDFontType2");
             descendant.set("BaseFont", "Fixture");
-            descendant.set("W", vec![lopdf::Object::Integer(1), 1.into(), 200.into()]);
+            if let Some(width) = default_width {
+                document.version = "2.0".to_owned();
+                descendant.set("DW", lopdf::Object::Real(width));
+            } else {
+                descendant.set("W", vec![lopdf::Object::Integer(1), 1.into(), 200.into()]);
+            }
             descendant.set("CIDSystemInfo", system);
-            descendant.set("FontDescriptor", lopdf::Dictionary::new());
+            let descriptor = document.add_object(lopdf::dictionary! {
+                "Type" => "FontDescriptor", "FontName" => "Fixture", "Flags" => 4,
+                "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 1000.into()],
+                "ItalicAngle" => 0, "Ascent" => 800, "Descent" => -200,
+                "CapHeight" => 700, "StemV" => 80
+            });
+            descendant.set("FontDescriptor", descriptor);
             let descendant = document.add_object(descendant);
             let mut font = lopdf::Dictionary::new();
             font.set("Type", "Font");

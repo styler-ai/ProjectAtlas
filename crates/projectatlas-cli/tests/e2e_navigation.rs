@@ -9599,7 +9599,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         );
         let pdf_objects = [
             if structure_replacement {
-                b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 28 0 R >>\nendobj\n"
+                b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 29 0 R >>\nendobj\n"
                     .as_slice()
             } else {
                 b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice()
@@ -9607,14 +9607,14 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             b"2 0 obj\n<< /Type /Pages /Kids 25 0 R /Count 26 0 R /Rotate 90 >>\nendobj\n"
                 .as_slice(),
             if structure_replacement {
-                b"3 0 obj\n<< /Type /Page /StructParents 0 /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] /CalGray [/CalGray 27 0 R] /CalRGB [/CalRGB 27 0 R] /Lab [/Lab 27 0 R] /MissingColor [/CalRGB 999 0 R] /WrongColor [/CalRGB 26 0 R] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
+                b"3 0 obj\n<< /Type /Page /StructParents 0 /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] /CalGray [/CalGray 27 0 R] /CalRGB [/CalRGB 27 0 R] /Lab [/Lab 27 0 R] /MissingColor [/CalRGB 999 0 R] /WrongColor [/CalRGB 26 0 R] >> /ExtGState << /GS << /Type 28 0 R /Font [5 0 R 12] >> /MissingState << /Type 999 0 R >> /WrongState << /Type 26 0 R >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
             } else {
-                b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] /CalGray [/CalGray 27 0 R] /CalRGB [/CalRGB 27 0 R] /Lab [/Lab 27 0 R] /MissingColor [/CalRGB 999 0 R] /WrongColor [/CalRGB 26 0 R] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
+                b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] /CalGray [/CalGray 27 0 R] /CalRGB [/CalRGB 27 0 R] /Lab [/Lab 27 0 R] /MissingColor [/CalRGB 999 0 R] /WrongColor [/CalRGB 26 0 R] >> /ExtGState << /GS << /Type 28 0 R /Font [5 0 R 12] >> /MissingState << /Type 999 0 R >> /WrongState << /Type 26 0 R >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
             },
             page_object.as_bytes(),
             b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
         ];
-        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut pdf = b"%PDF-2.0\n".to_vec();
         let mut offsets = Vec::new();
         for object in pdf_objects {
             offsets.push(pdf.len());
@@ -9659,7 +9659,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         for object in [
             "8 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding 9 0 R /DescendantFonts [10 0 R] /ToUnicode 11 0 R >>\nendobj\n",
             encoding_object.as_str(),
-            "10 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fixture /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 12 0 R /CIDToGIDMap /Identity >>\nendobj\n",
+            "10 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fixture /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 12 0 R /CIDToGIDMap /Identity /DW 1500.5 >>\nendobj\n",
             unicode_object.as_str(),
             "12 0 obj\n<< /Type /FontDescriptor /FontName /Fixture /Flags 4 /FontBBox [0 -200 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>\nendobj\n",
             "13 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /Encoding /WinAnsiEncoding /FontDescriptor 14 0 R /FirstChar 65 /LastChar 65 /Widths [600] >>\nendobj\n",
@@ -9677,15 +9677,16 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "25 0 obj\n[3 0 R]\nendobj\n",
             "26 0 obj\n1\nendobj\n",
             "27 0 obj\n<< /WhitePoint [1 1 1] >>\nendobj\n",
+            "28 0 obj\n/ExtGState\nendobj\n",
         ] {
             offsets.push(pdf.len());
             pdf.extend_from_slice(object.as_bytes());
         }
         if structure_replacement {
             for object in [
-                "28 0 obj\n<< /Type /StructTreeRoot /K 29 0 R /ParentTree 30 0 R >>\nendobj\n",
-                "29 0 obj\n<< /Type /StructElem /S /Span /P 28 0 R /Pg 3 0 R /K 0 /ActualText (replacement) >>\nendobj\n",
-                "30 0 obj\n<< /Nums [0 [29 0 R]] >>\nendobj\n",
+                "29 0 obj\n<< /Type /StructTreeRoot /K 30 0 R /ParentTree 31 0 R >>\nendobj\n",
+                "30 0 obj\n<< /Type /StructElem /S /Span /P 29 0 R /Pg 3 0 R /K 0 /ActualText (replacement) >>\nendobj\n",
+                "31 0 obj\n<< /Nums [0 [30 0 R]] >>\nendobj\n",
             ] {
                 offsets.push(pdf.len());
                 pdf.extend_from_slice(object.as_bytes());
@@ -9834,6 +9835,26 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         let summary = json_summary_command(&repo, &database, path)?;
         require_json_string(&summary, &["parser_kind"], "structural-symbol-graph")?;
         require_json_contains(&summary, &["content_summary"], description)?;
+        require_json_contains(&summary, &["content_summary"], marker)?;
+        if json_at(&summary, &["content_summary"])?
+            .as_str()
+            .unwrap_or_default()
+            .contains("document-block-")
+        {
+            return Err(io::Error::other("document summary exposed graph identities").into());
+        }
+        let persisted = Connection::open(&database)?;
+        let purpose: String = persisted.query_row(
+            "SELECT p.purpose FROM purposes p JOIN nodes n ON n.id = p.node_id WHERE n.path = ?1",
+            [path],
+            |row| row.get(0),
+        )?;
+        if !purpose.contains(marker) || purpose.contains("document-block-") {
+            return Err(
+                io::Error::other(format!("document purpose lost literal text: {purpose}")).into(),
+            );
+        }
+        drop(persisted);
         require_json_usize(
             &summary,
             &["symbol_count"],
@@ -10001,6 +10022,17 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
                     io::Error::other(format!("MCP summary omitted {path}: {summary}")).into(),
                 );
             }
+            let payload: Value = toon_format::decode_default(&summary)?;
+            require_json_contains(&payload, &["file_summary", "content_summary"], marker)?;
+            if json_at(&payload, &["file_summary", "content_summary"])?
+                .as_str()
+                .unwrap_or_default()
+                .contains("document-block-")
+            {
+                return Err(
+                    io::Error::other("MCP document summary exposed graph identities").into(),
+                );
+            }
             let symbols = session.call_tool(
                 "atlas_symbols",
                 &json!({
@@ -10089,6 +10121,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     require_json_string(&mcp_pdf_slice()?, &["slice", "content"], "Next")?;
     for (content, expected) in [
         (
+            "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F6 12 Tf 72 500 Td <0001> Tj 18.006 0 Td <0001> Tj ET",
+            "ZZ",
+        ),
+        (
             "0 1 -1 0 612 0 cm\nBT /F3 12 Tf 20 TL 72 500 Td q 100 -100 Td (A) Tj Q T* (StateB) Tj 1 0 0 1 115.2 480 Tm (C) Tj ET",
             "StateBC",
         ),
@@ -10130,6 +10166,14 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     }
     let before_unsupported_pdf = mcp_database_snapshot(&database)?;
     for (unsupported_content, diagnostic, structure_replacement) in [
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /MissingState gs",
+            "malformed pdf",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /WrongState gs",
+            "malformed pdf",
+        ),
         (
             "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /MissingColor cs",
             "malformed pdf",

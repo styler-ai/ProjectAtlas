@@ -19,7 +19,8 @@ pub use documents::{
     MAX_DOCUMENT_COMPRESSED_BYTES, MAX_DOCUMENT_ENTRIES, MAX_DOCUMENT_EXPANDED_BYTES,
     MAX_DOCUMENT_FACTS, MAX_DOCUMENT_MEMORY_BYTES, MAX_DOCUMENT_OUTPUT_BYTES,
     MAX_DOCUMENT_RECURSION_DEPTH, PDF_EXTRACT_VERSION, QUICK_XML_VERSION, document_format_for_path,
-    extract_document_graph_controlled, extract_document_text_controlled,
+    extract_document_graph_controlled, extract_document_symbol_facts_controlled,
+    extract_document_text_controlled,
 };
 pub use markdown::{
     DocumentLinkCandidate, DocumentLinkSource, MAX_DOCUMENT_LINK_CANDIDATES,

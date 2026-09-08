@@ -216,6 +216,8 @@ flowchart LR
     limits -->|exceeded or canceled| bounded[Typed bounded failure; no complete claim]
 ```
 
+The same extraction result supplies bounded literal content summaries and suggested
+purposes before its sparse graph is published; authored purposes remain unchanged.
 The document boundary pins a fixed `pdf-extract` `0.12.0+projectatlas` guest
 with `lopdf` `0.44.0`, the `wasmi`/`wasmi_core` `2.0.0` host, `quick-xml`
 `0.42.0`, and `zip` `0.6.6` (ZIP defaults disabled, only `deflate` enabled).

@@ -16,8 +16,8 @@ use crate::atlas_map::{
     load_atlas_config_from_text,
 };
 use crate::structural::{
-    is_scanner_fallback_summary, is_structural_summary_candidate, markdown_summary_from_facts,
-    structural_summary_for_path,
+    document_summary_from_facts, is_scanner_fallback_summary, is_structural_summary_candidate,
+    markdown_summary_from_facts, structural_summary_for_path,
 };
 use crate::{
     CliError, OutputFormat, WATCH_MODE_NOTIFY, WATCH_MODE_ONCE, WATCH_MODE_POLLING, truthy_env,
@@ -93,9 +93,9 @@ use projectatlas_service::{
 };
 use projectatlas_symbols::{
     DocumentExtractionError, DocumentLimit, MAX_DOCUMENT_COMPRESSED_BYTES, MarkdownFacts,
-    document_format_for_path, extract_document_graph_controlled, extract_document_text_controlled,
-    extract_markdown_facts_controlled, extract_symbol_graph_with_source_controlled,
-    semantic_resolution_contract_digest,
+    document_format_for_path, extract_document_symbol_facts_controlled,
+    extract_document_text_controlled, extract_markdown_facts_controlled,
+    extract_symbol_graph_with_source_controlled, semantic_resolution_contract_digest,
 };
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -6676,13 +6676,17 @@ fn parse_document_symbol_job(
     _options: &SymbolBuildOptions,
     control: &IndexWorkControl,
 ) -> SymbolParseOutcome {
-    let graph =
-        match extract_document_graph_controlled(bytes, &job.path, job.language.as_deref(), control)
-        {
-            Ok(graph) => graph,
-            Err(error) => return document_parse_error_outcome(&job.path, error),
-        };
-    let summary = summarize_symbol_graph(&graph, None);
+    let facts = match extract_document_symbol_facts_controlled(
+        bytes,
+        &job.path,
+        job.language.as_deref(),
+        control,
+    ) {
+        Ok(facts) => facts,
+        Err(error) => return document_parse_error_outcome(&job.path, error),
+    };
+    let summary = document_summary_from_facts(&facts);
+    let graph = facts.symbol_graph(&job.path, job.language.as_deref());
     let purpose_suggestion = job
         .purpose_needs_suggestion
         .then(|| suggest_file_purpose(&job.path, &summary));
@@ -7087,7 +7091,12 @@ pub(crate) fn relation_targets(
 /// Create a generated file-purpose suggestion from a path and content summary.
 pub(crate) fn suggest_file_purpose(path: &str, summary: &str) -> String {
     let subject = path_context_subject(path);
-    if summary.contains("dataset manifest") {
+    if let Some(text) = summary
+        .strip_prefix("pdf document text: ")
+        .or_else(|| summary.strip_prefix("docx document text: "))
+    {
+        format!("Document {text}")
+    } else if summary.contains("dataset manifest") {
         if let Some(datasets) = summary_between(summary, " including ", " and keys") {
             format!("Define the {subject} dataset manifest for {datasets}.")
         } else {
@@ -13653,6 +13662,20 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             return Err(io::Error::other("document did not parse").into());
         };
         require_eq(&previous.graph.symbols.len(), &1, "previous document block")?;
+        require_eq(
+            &previous.summary.contains("Runtime PDF"),
+            &true,
+            "literal document summary",
+        )?;
+        require_eq(
+            &previous
+                .purpose_suggestion
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Runtime PDF"),
+            &true,
+            "literal document purpose suggestion",
+        )?;
         job.fallback_summary = Some(previous.summary);
         let empty = String::from_utf8(bytes)?.replace("Runtime PDF", "           ");
         let SymbolParseOutcome::Parsed(current) =
@@ -13661,6 +13684,11 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             return Err(io::Error::other("empty document did not parse").into());
         };
         require_eq(&current.graph.symbols.len(), &0, "empty document blocks")?;
+        require_eq(
+            &current.summary.contains("Runtime PDF"),
+            &false,
+            "removed document text",
+        )?;
         require_eq(
             &current.summary.contains("document-block-1"),
             &false,
