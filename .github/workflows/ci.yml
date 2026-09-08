@@ -469,6 +469,17 @@ jobs:
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
 
+      - name: Install cargo-deny for PDF source validation
+        if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: Fixed PDF parser source validation
+        if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        timeout-minutes: 10
+        run: python3 packaging/pdf-parser/build.py --validate --source-only
+
       - name: Fixed PDF parser platform proof
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
         timeout-minutes: 15
