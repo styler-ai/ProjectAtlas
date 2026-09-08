@@ -2183,8 +2183,7 @@ impl<'a> ConvertToFmt for &'a mut File {
 
 pub struct PlainTextOutput<W: ConvertToFmt>   {
     writer: W::Writer,
-    last_end: f64,
-    last_y: f64,
+    last_text_inverse: Option<Transform>,
     first_char: bool,
     flip_ctm: Transform,
 }
@@ -2193,9 +2192,8 @@ impl<W: ConvertToFmt> PlainTextOutput<W> {
     pub fn new(writer: W) -> PlainTextOutput<W> {
         PlainTextOutput{
             writer: writer.convert(),
-            last_end: 100000.,
+            last_text_inverse: None,
             first_char: false,
-            last_y: 0.,
             flip_ctm: Transform2D::identity(),
         }
     }
@@ -2213,32 +2211,34 @@ impl<W: ConvertToFmt> OutputDev for PlainTextOutput<W> {
     }
     fn output_character(&mut self, trm: &Transform, width: f64, spacing: f64, font_size: f64, char: &str) -> Result<(), OutputError> {
         let position = trm.post_transform(&self.flip_ctm);
-        let font_height = font_size.abs() * trm.m21.hypot(trm.m22);
-        let baseline_scale = trm.m11.hypot(trm.m12);
-        let font_width = font_size.abs() * baseline_scale;
-        let (x, y) = (position.m31, position.m32);
+        // Anchor the previous font-space frame at its glyph endpoint. Its inverse
+        // measures logical gaps independently of page rotation, scaling, or shear.
+        let mut frame = position.pre_scale(font_size, font_size);
+        let advance = width * font_size + spacing;
+        frame.m31 += position.m11 * advance;
+        frame.m32 += position.m12 * advance;
+        let scale = frame.m11.hypot(frame.m12) * frame.m21.hypot(frame.m22);
+        let inverse = if frame.determinant().abs() > f64::EPSILON * scale {
+            frame.inverse().filter(|value| value.to_row_major_array().iter().all(|value| value.is_finite()))
+        } else {
+            None
+        };
         use std::fmt::Write;
-        //dlog!("last_end: {} x: {}, width: {}", self.last_end, x, width);
-        if self.first_char {
-            if (y - self.last_y).abs() > font_height * 1.5 {
-                write!(self.writer, "\n")?;
-            }
-
-            // we've moved to the left and down
-            if x < self.last_end && (y - self.last_y).abs() > font_height * 0.5 {
-                write!(self.writer, "\n")?;
-            }
-
-            if x > self.last_end + font_width * 0.1 {
-                dlog!("width: {}, space: {}, thresh: {}", width, x - self.last_end, font_width * 0.1);
-                write!(self.writer, " ")?;
+        if self.first_char && inverse.is_some() {
+            if let Some(previous) = self.last_text_inverse {
+                let gap = previous.transform_point(euclid::point2(position.m31, position.m32));
+                if gap.x.is_finite() && gap.y.is_finite() {
+                    if gap.y.abs() > 1.5 || (gap.x < 0. && gap.y.abs() > 0.5) {
+                        write!(self.writer, "\n")?;
+                    } else if gap.x > 0.1 {
+                        write!(self.writer, " ")?;
+                    }
+                }
             }
         }
-        //let norm = unicode_normalization::UnicodeNormalization::nfkc(char);
         write!(self.writer, "{}", char)?;
         self.first_char = false;
-        self.last_y = y;
-        self.last_end = x + width * font_width + spacing * baseline_scale;
+        self.last_text_inverse = inverse;
         Ok(())
     }
     fn begin_word(&mut self) -> Result<(), OutputError> {

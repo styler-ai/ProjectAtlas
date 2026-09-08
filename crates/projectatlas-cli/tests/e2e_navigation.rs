@@ -9597,7 +9597,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         let pdf_objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>\nendobj\n".as_slice(),
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
             page_object.as_bytes(),
             b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
         ];
@@ -9635,12 +9635,26 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "11 0 obj\n<< /Length {} >>\nstream\n{unicode}\nendstream\nendobj\n",
             unicode.len()
         );
+
+        let partial_unicode = unicode
+            .replace("<0000> <FFFF>", "<00> <FF>")
+            .replace("<0001> <005A>", "<41> <005A>");
+        let partial_unicode_object = format!(
+            "16 0 obj\n<< /Length {} >>\nstream\n{partial_unicode}\nendstream\nendobj\n",
+            partial_unicode.len()
+        );
         for object in [
             "8 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding 9 0 R /DescendantFonts [10 0 R] /ToUnicode 11 0 R >>\nendobj\n",
             encoding_object.as_str(),
             "10 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fixture /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 12 0 R /CIDToGIDMap /Identity >>\nendobj\n",
             unicode_object.as_str(),
             "12 0 obj\n<< /Type /FontDescriptor /FontName /Fixture /Flags 4 /FontBBox [0 -200 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>\nendobj\n",
+            "13 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /Encoding /WinAnsiEncoding /FontDescriptor 14 0 R /FirstChar 65 /LastChar 65 /Widths [600] >>\nendobj\n",
+            "14 0 obj\n<< /Type /FontDescriptor /FontName /Fixture /Flags 32 /FontBBox [0 -200 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /MissingWidth 600 >>\nendobj\n",
+            "15 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Symbol /FirstChar 65 /LastChar 66 /Widths [600 600] /ToUnicode 16 0 R >>\nendobj\n",
+            partial_unicode_object.as_str(),
+            "17 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /FirstChar 65 /LastChar 66 /Widths [600 600] /ToUnicode 16 0 R >>\nendobj\n",
+            "18 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding /Identity-H /DescendantFonts [10 0 R] /ToUnicode 11 0 R >>\nendobj\n",
         ] {
             offsets.push(pdf.len());
             pdf.extend_from_slice(object.as_bytes());
@@ -10029,10 +10043,41 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         Ok(toon_format::decode_default(&text)?)
     };
     require_json_string(&mcp_pdf_slice()?, &["slice", "content"], "Second")?;
+    for (content, expected) in [
+        (
+            "0 1 -1 0 612 0 cm\nBT /F3 12 Tf 20 TL 72 500 Td q 100 -100 Td (A) Tj Q T* (StateB) Tj 1 0 0 1 115.2 480 Tm (C) Tj ET",
+            "StateBC",
+        ),
+        (
+            "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F4 12 Tf 72 500 Td (AB) Tj ET",
+            "Z\u{0392}",
+        ),
+    ] {
+        fs::write(&pdf_path, make_pdf(content))?;
+        run_scan(&repo, &database)?;
+        let slice = run_mcp_contract_json(
+            &executable,
+            &repo,
+            &[
+                "--db".to_owned(),
+                database.display().to_string(),
+                "symbols".to_owned(),
+                "slice".to_owned(),
+                "docs/guide.pdf".to_owned(),
+                "document-block-2".to_owned(),
+                "--content-selection".to_owned(),
+                "documentation".to_owned(),
+            ],
+        )?;
+        require_json_string(&slice, &["content"], expected)?;
+        require_json_string(&mcp_pdf_slice()?, &["slice", "content"], expected)?;
+    }
     let before_unsupported_pdf = mcp_database_snapshot(&database)?;
     for unsupported_content in [
         "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET",
         "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F2 12 Tf <0001> Tj ET",
+        "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F5 12 Tf (AB) Tj ET",
+        "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F6 12 Tf <00010002> Tj ET",
     ] {
         fs::write(&pdf_path, make_pdf(unsupported_content))?;
         let unsupported_pdf = StdCommand::new(&executable)

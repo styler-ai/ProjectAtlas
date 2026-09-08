@@ -40,6 +40,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 
 - **AND** Type 0 fonts admit Identity-H with ToUnicode mapping; vertical and custom stream encoding CMaps return typed unsupported input rather than fabricating character codes or positions; horizontal text measures its baseline and height independently under scaling and rotation
 - **AND** CID width ranges apply the declared width to every character through the inclusive last CID, preserving text spacing
+- **AND** word and line gaps use the previous glyph's transformed text frame, preserving exact logical text across rotation, nonuniform scaling, reflection, and shear; degenerate frames emit literal characters without inferred separators
 - **AND** partial ToUnicode maps use a known font encoding for missing entries, including built-in Base-14 encodings independently of explicit widths; used characters with no known fallback and unmapped CID characters return typed unsupported input without publishing partial text
 - **AND** simple fonts use the font descriptor's MissingWidth for codes outside their explicit width range, default to zero when absent, and reject malformed descriptors or nonnumeric/nonfinite widths
 - **AND** ExtGState font selections update the font and size with scoped dictionary identity, preserve graphics-state save/restore and Form resources, and reject malformed font entries before publication

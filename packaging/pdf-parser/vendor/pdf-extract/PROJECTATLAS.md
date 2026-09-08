@@ -21,6 +21,7 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Apply CID range widths to both inclusive endpoints using the declared width.
 - Apply ExtGState font dictionaries and finite sizes through the existing scoped font cache.
 - Measure plain-text horizontal advances and font heights from their separate transformed vectors, preserving rotated and anisotropically scaled text spacing.
+- Measure logical word and line gaps in the preceding glyph frame using the existing affine inverse; preserve rotated, scaled, reflected, and sheared text and skip inferred separators for degenerate frames.
 - Include configured character and word spacing in the recorded glyph endpoint so adjacent text operations do not fabricate spaces.
 - Save and restore both text matrices with q/Q, following the [ISO-approved text-object errata](https://pdf-issues.pdfa.org/32000-2-2020/clause09.html#941-general), while preserving Form-local execution.
 - Use known font encodings for missing ToUnicode entries, including built-in Base-14 encodings with explicit widths; refuse used characters without a known fallback and unmapped CID characters through the existing typed unsupported path.

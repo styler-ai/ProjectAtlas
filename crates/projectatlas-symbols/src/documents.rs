@@ -1912,6 +1912,84 @@ mod tests {
     }
 
     #[test]
+    fn pdf_text_state_and_missing_width_preserve_block_text() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let descriptor = lopdf::dictionary! {
+            "Type" => "FontDescriptor", "FontName" => "Fixture", "Flags" => 32,
+            "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 1000.into()],
+            "ItalicAngle" => 0, "Ascent" => 800, "Descent" => -200, "CapHeight" => 700,
+            "StemV" => 80, "MissingWidth" => 600
+        };
+        document.objects.insert(
+            (5, 0),
+            lopdf::dictionary! {
+                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Fixture",
+                "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+                "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()]
+            }
+            .into(),
+        );
+        document.get_object_mut((4, 0)).expect("content").as_stream_mut().expect("stream")
+            .set_content(b"BT /F1 12 Tf 20 TL 72 500 Td q 100 -100 Td (A) Tj Q T* (StateB) Tj 1 0 0 1 115.2 480 Tm (C) Tj ET".to_vec());
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+            .expect("scoped text with descriptor widths");
+        assert_eq!(facts.text, "A\nStateBC");
+        assert_eq!(facts.facts.len(), 2);
+        assert_eq!(facts.facts[1].text, "StateBC");
+        assert_eq!((facts.facts[1].line_start, facts.facts[1].line_end), (2, 2));
+        assert!(matches!(
+            facts.facts[1].locator,
+            DocumentLocator::Pdf { page: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn pdf_partial_unicode_uses_builtin_font_or_refuses() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let cmap = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            br"/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Fixture def /CMapType 2 def
+1 begincodespacerange <00> <FF> endcodespacerange
+1 beginbfchar <41> <005A> endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end"
+                .to_vec(),
+        ));
+        document
+            .get_object_mut((4, 0))
+            .expect("content")
+            .as_stream_mut()
+            .expect("stream")
+            .set_content(b"BT /F1 12 Tf 72 500 Td (AB) Tj ET".to_vec());
+        for (base, expected) in [("Symbol", Some("Z\u{0392}")), ("Fixture", None)] {
+            document.objects.insert(
+                (5, 0),
+                lopdf::dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base,
+                    "FirstChar" => 65, "LastChar" => 66, "Widths" => vec![600.into(), 600.into()],
+                    "ToUnicode" => cmap
+                }
+                .into(),
+            );
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+            if let Some(expected) = expected {
+                assert_eq!(result.expect("known built-in encoding").text, expected);
+            } else {
+                assert!(
+                    matches!(result, Err(DocumentExtractionError::UnsupportedPdfInput)),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pdf_extended_graphics_state_selects_text_font() {
         let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
         let mut state = lopdf::Dictionary::new();
@@ -2161,7 +2239,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
             if let Some(expected) = expected {
                 assert_eq!(result.expect("mapped horizontal CID").text, expected);
-            } else if encoding != "Identity-H" {
+            } else if encoding != "Identity-H" || codes == "00010002" {
                 assert!(
                     matches!(result, Err(DocumentExtractionError::UnsupportedPdfInput)),
                     "{result:?}"

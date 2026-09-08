@@ -461,6 +461,35 @@ mod tests {
             positions.iter().map(|m| (m[4], m[5])).collect::<Vec<_>>(),
             [(72., 600.), (172., 400.), (72., 480.), (72., 300.)]
         );
+        let form = document
+            .get_object_mut(inner)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        form.dict
+            .set("BBox", vec![0.into(), 0.into(), 612.into(), 792.into()]);
+        form.dict.set(
+            "Matrix",
+            vec![
+                0.into(),
+                1.into(),
+                (-1).into(),
+                0.into(),
+                800.into(),
+                0.into(),
+            ],
+        );
+        form.set_content(
+            b"BT /F1 12 Tf 72 500 Td (First) Tj 108 0 Td (Second) Tj -108 -100 Td (Next) Tj ET"
+                .to_vec(),
+        );
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"/Inner Do".to_vec());
+        assert_eq!(text::page(&document, 1, 128).unwrap(), "First Second\nNext");
         for invalid in [
             vec![1.into()],
             vec![
@@ -996,6 +1025,12 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         assert_eq!(text::page(&document, 1, 256).unwrap(), expected);
         for (transform, scale, text, expected) in [
             ("", 100, "2 Tc (A) Tj (B) Tj", "AB"),
+            ("0 1 -1 0 0 0 cm", 100, "2 Tc (A) Tj (B) Tj", "AB"),
+            ("0 -1 1 0 0 0 cm", 100, "10 Tw (A ) Tj (B) Tj", "A B"),
+            ("4 0 2 1 0 0 cm", 100, "2 Tc (A) Tj 16 0 Td (B) Tj", "A B"),
+            ("", 0, "(A) Tj (B) Tj", "AB"),
+            ("", 100, "/F1 0 Tf (A) Tj 16 0 Td (B) Tj", "AB"),
+            ("", 100, "/F1 -12 Tf 2 Tc (A) Tj (B) Tj", "AB"),
             ("", 100, "2 Tc [(A) (B)] TJ", "AB"),
             ("", 100, "10 Tw (A ) Tj (B) Tj", "A B"),
             ("", 100, "-2 Tc (A) Tj (B) Tj", "AB"),
@@ -1068,7 +1103,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
         let expected = text::page(&document, 1, 128).unwrap();
-        assert!(expected.contains("First Second"));
+        assert_eq!(expected, "First Second\nNext");
         for (rotation, matrix, positions) in [
             (0, [1, 0, 0, 1], [[72, 500], [180, 500], [72, 400]]),
             (90, [0, 1, -1, 0], [[112, 72], [112, 180], [212, 72]]),
@@ -1117,11 +1152,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 .unwrap()
                 .set_content(direct.to_vec());
             let text = text::page(&document, 1, 128).unwrap();
-            assert_eq!(
-                text.split_whitespace().collect::<Vec<_>>(),
-                ["First", "Second", "Next"],
-                "ordinary rotated text: rotation={rotation}, text={text:?}"
-            );
+            assert_eq!(text, expected, "ordinary rotated text: rotation={rotation}");
         }
         document
             .get_object_mut(page)
@@ -1140,6 +1171,22 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             expected,
             "leaf overrides inherited rotation"
         );
+        for matrix in ["0.6 0.8 -0.8 0.6", "4 0 2 1", "-1 0 0 1"] {
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(
+                    format!("{matrix} 0 0 cm {}", std::str::from_utf8(direct).unwrap())
+                        .into_bytes(),
+                );
+            assert_eq!(
+                text::page(&document, 1, 128).unwrap(),
+                expected,
+                "matrix={matrix}"
+            );
+        }
         for invalid in [
             lopdf::Object::Integer(45),
             lopdf::Object::Real(90.0),
