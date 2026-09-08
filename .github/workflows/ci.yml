@@ -462,7 +462,7 @@ jobs:
       - name: Built-in PHP parser platform regression
         if: contains(matrix.contracts, 'compile')
         # Includes cold compilation of the symbol, CLI, and navigation test targets.
-        timeout-minutes: 15
+        timeout-minutes: 20
         shell: bash
         run: |
           cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
