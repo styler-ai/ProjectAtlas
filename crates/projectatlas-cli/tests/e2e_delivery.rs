@@ -31020,10 +31020,10 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         drop(install_a.wait());
         return Err(error);
     }
+    // Keep unique ready markers until fixture teardown: their Windows writer may
+    // still be closing after the waiter observes the pathname. Only gates release children.
     fs::remove_file(&discovery_a)?;
     fs::remove_file(&discovery_b)?;
-    fs::remove_file(&discovery_a_ready)?;
-    fs::remove_file(&discovery_b_ready)?;
     let migration_started = Instant::now();
     let output_a = match wait_for_plugin_installer_output(
         install_a,
@@ -31144,7 +31144,6 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         return Err(error);
     }
     fs::remove_file(&recovery_discovery_a)?;
-    fs::remove_file(&recovery_discovery_a_ready)?;
     if let Err(error) = wait_for_ready(
         &mut interrupted_a,
         &recovery_acquired_a_ready,
@@ -31159,9 +31158,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     interrupted_a.kill()?;
     let interrupted_output = interrupted_a.wait_with_output()?;
     fs::remove_file(&recovery_acquired_a)?;
-    fs::remove_file(&recovery_acquired_a_ready)?;
     fs::remove_file(&recovery_discovery_b)?;
-    fs::remove_file(&recovery_discovery_b_ready)?;
     let recovering_output = wait_for_plugin_installer_output(
         recovering_b,
         "recovering opposite installer B",
@@ -31260,14 +31257,12 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         "repair-race repair owner did not publish the candidate capability state",
     )?;
     fs::remove_file(&repair_state)?;
-    fs::remove_file(&repair_state_ready)?;
     let repair_b_output = wait_for_plugin_installer_output(
         repair_b,
         "repair-race installer B",
         Duration::from_secs(35),
     )?;
     fs::remove_file(&repair_discovery)?;
-    fs::remove_file(&repair_discovery_ready)?;
     let repair_a_output = wait_for_plugin_installer_output(
         repair_a,
         "repair-race installer A",
@@ -31415,9 +31410,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     // Reaping the interrupted owner also drains its descendants' output pipes;
     // that cleanup is independent of the contender's shared lock deadline.
     let held_first_output = held_first.child.wait_with_output()?;
-    fs::remove_file(&timed_first_attempt_ready)?;
     fs::remove_file(&held_first_gate)?;
-    fs::remove_file(&held_first_ready)?;
     require(
         !held_first_output.status.success() && state_snapshot()? == deadline_state_before_first,
         format!(
@@ -31484,7 +31477,6 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         ),
     )?;
     fs::remove_file(&held_second_gate)?;
-    fs::remove_file(&held_second_ready)?;
     let held_second_output = wait_for_plugin_installer_output(
         held_second,
         "deadline held-second owner release",
@@ -31559,7 +31551,6 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         }
     };
     fs::remove_file(&held_second_gate)?;
-    fs::remove_file(&held_second_ready)?;
     let held_second_output = wait_for_plugin_installer_output(
         held_second,
         "deadline held-second owner release",
