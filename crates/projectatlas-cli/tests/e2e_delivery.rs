@@ -18514,7 +18514,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
          }\n\
          fn helper() {}\n",
     )?;
-    let db = repo.join(".projectatlas").join("projectatlas.db");
+    let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
