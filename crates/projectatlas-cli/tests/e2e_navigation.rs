@@ -9597,7 +9597,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         let pdf_objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>\nendobj\n".as_slice(),
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R >> /ColorSpace << /CS1 /DeviceCMYK >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
             page_object.as_bytes(),
             b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
         ];
@@ -9655,6 +9655,9 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             partial_unicode_object.as_str(),
             "17 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /FirstChar 65 /LastChar 66 /Widths [600 600] /ToUnicode 16 0 R >>\nendobj\n",
             "18 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding /Identity-H /DescendantFonts [10 0 R] /ToUnicode 11 0 R >>\nendobj\n",
+            "19 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 600] /FontMatrix [.002 0 0 .002 0 0] /CharProcs << /A 20 0 R /B 20 0 R >> /Encoding << /Differences [65 /A /B] >> /FirstChar 65 /LastChar 66 /Widths [600 600] >>\nendobj\n",
+            "20 0 obj\n<< /Length 8 >>\nstream\n600 0 d0\nendstream\nendobj\n",
+            "21 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 600] /FontMatrix [.002] /CharProcs << /A 20 0 R /B 20 0 R >> /Encoding << /Differences [65 /A /B] >> /FirstChar 65 /LastChar 66 /Widths [600 600] >>\nendobj\n",
         ] {
             offsets.push(pdf.len());
             pdf.extend_from_slice(object.as_bytes());
@@ -10052,6 +10055,14 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F4 12 Tf 72 500 Td (AB) Tj ET",
             "Z\u{0392}",
         ),
+        (
+            "0 1 -1 0 612 0 cm\n/CS1 cs 0 0 0 1 sc /CS1 CS 0 0 0 1 SC BT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F7 12 Tf 72 500 Td (A) Tj 14.4 0 Td (B) Tj ET",
+            "AB",
+        ),
+        (
+            "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F3 12 Tf 72 500 Td <4181> Tj ET",
+            "A\u{2022}",
+        ),
     ] {
         fs::write(&pdf_path, make_pdf(content))?;
         run_scan(&repo, &database)?;
@@ -10073,11 +10084,31 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         require_json_string(&mcp_pdf_slice()?, &["slice", "content"], expected)?;
     }
     let before_unsupported_pdf = mcp_database_snapshot(&database)?;
-    for unsupported_content in [
-        "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET",
-        "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F2 12 Tf <0001> Tj ET",
-        "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F5 12 Tf (AB) Tj ET",
-        "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F6 12 Tf <00010002> Tj ET",
+    for (unsupported_content, diagnostic) in [
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F2 12 Tf <0001> Tj ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F5 12 Tf (AB) Tj ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F6 12 Tf <00010002> Tj ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F3 12 Tf <4101> Tj ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F8 12 Tf (AB) Tj ET",
+            "malformed pdf",
+        ),
     ] {
         fs::write(&pdf_path, make_pdf(unsupported_content))?;
         let unsupported_pdf = StdCommand::new(&executable)
@@ -10087,8 +10118,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             .args(["scan", "."])
             .output()?;
         if unsupported_pdf.status.success()
-            || !String::from_utf8_lossy(&unsupported_pdf.stderr)
-                .contains("unsupported PDF text semantics")
+            || !String::from_utf8_lossy(&unsupported_pdf.stderr).contains(diagnostic)
             || before_unsupported_pdf.authoritative
                 != mcp_database_snapshot(&database)?.authoritative
         {
@@ -10096,11 +10126,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
                 io::Error::other("unsupported PDF replaced the complete publication").into(),
             );
         }
-        require_json_contains(
-            &mcp_pdf_slice()?,
-            &["error", "message"],
-            "unsupported PDF text semantics",
-        )?;
+        require_json_contains(&mcp_pdf_slice()?, &["error", "message"], diagnostic)?;
         if before_unsupported_pdf.authoritative != mcp_database_snapshot(&database)?.authoritative {
             return Err(
                 io::Error::other("unsupported PDF navigation changed authoritative state").into(),

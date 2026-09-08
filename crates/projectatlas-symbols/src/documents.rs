@@ -1943,6 +1943,69 @@ mod tests {
     }
 
     #[test]
+    fn pdf_font_matrix_and_color_aliases_preserve_text() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let glyph = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"600 0 d0".to_vec(),
+        ));
+        document.objects.insert((5, 0), lopdf::dictionary! {
+            "Type" => "Font", "Subtype" => "Type3",
+            "FontBBox" => vec![0.into(), 0.into(), 600.into(), 600.into()],
+            "FontMatrix" => vec![0.002.into(), 0.into(), 0.into(), 0.002.into(), 0.into(), 0.into()],
+            "CharProcs" => lopdf::dictionary! { "A" => glyph, "B" => glyph },
+            "Encoding" => lopdf::dictionary! { "Differences" => vec![65.into(), "A".into(), "B".into()] },
+            "FirstChar" => 65, "LastChar" => 66, "Widths" => vec![600.into(), 600.into()]
+        }.into());
+        document
+            .get_dictionary_mut((3, 0))
+            .expect("page")
+            .get_mut(b"Resources")
+            .expect("resources")
+            .as_dict_mut()
+            .expect("dictionary")
+            .set("ColorSpace", lopdf::dictionary! { "CS1" => "DeviceCMYK" });
+        for color in ["", "/CS1 cs 0 0 0 1 sc /CS1 CS 0 0 0 1 SC"] {
+            document
+                .get_object_mut((4, 0))
+                .expect("content")
+                .as_stream_mut()
+                .expect("stream")
+                .set_content(
+                    format!("{color} BT /F1 12 Tf 72 500 Td (A) Tj 14.4 0 Td (B) Tj ET")
+                        .into_bytes(),
+                );
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+                .expect("Type 3 text and visual-only color aliases");
+            assert_eq!(facts.text, "AB");
+            assert_eq!(facts.facts.len(), 1);
+            assert!(matches!(
+                facts.facts[0].locator,
+                DocumentLocator::Pdf {
+                    page: 1,
+                    text_start: 0,
+                    text_end: 2
+                }
+            ));
+        }
+        document
+            .get_dictionary_mut((5, 0))
+            .expect("font")
+            .set("FontMatrix", vec![lopdf::Object::Real(0.002)]);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        assert!(matches!(
+            extract_document_text_controlled(&bytes, "guide.pdf", None, &control()),
+            Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Pdf,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn pdf_partial_unicode_uses_builtin_font_or_refuses() {
         let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
         let cmap = document.add_object(lopdf::Stream::new(
