@@ -2293,6 +2293,71 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn pdf_structure_replacements_refuse_partial_text_publication() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        document
+            .get_object_mut((4, 0))
+            .expect("page stream")
+            .as_stream_mut()
+            .expect("stream")
+            .set_content(
+                b"BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /MCID 0 >> BDC (glyph) Tj EMC ET"
+                    .to_vec(),
+            );
+        let root = document.new_object_id();
+        let mut element = lopdf::Dictionary::new();
+        element.set("Type", "StructElem");
+        element.set("S", "Span");
+        element.set("P", root);
+        element.set("Pg", (3, 0));
+        element.set("K", 0);
+        let element = document.add_object(element);
+        let mut parents = lopdf::Dictionary::new();
+        parents.set(
+            "Nums",
+            vec![0.into(), lopdf::Object::Array(vec![element.into()])],
+        );
+        let parents = document.add_object(parents);
+        let mut structure = lopdf::Dictionary::new();
+        structure.set("Type", "StructTreeRoot");
+        structure.set("K", element);
+        structure.set("ParentTree", parents);
+        document.objects.insert(root, structure.into());
+        document
+            .get_dictionary_mut((3, 0))
+            .expect("page")
+            .set("StructParents", 0);
+        document
+            .get_dictionary_mut((1, 0))
+            .expect("catalog")
+            .set("StructTreeRoot", root);
+        for replacement in [false, true] {
+            if replacement {
+                document
+                    .get_dictionary_mut(element)
+                    .expect("structure element")
+                    .set("ActualText", lopdf::Object::string_literal("replacement"));
+            }
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+            if replacement {
+                assert!(
+                    matches!(result, Err(DocumentExtractionError::UnsupportedPdfInput)),
+                    "{result:?}"
+                );
+            } else {
+                let extracted = result.expect("ordinary tagged content remains supported");
+                assert_eq!(extracted.text.trim(), "Prefixglyph");
+                assert!(matches!(
+                    extracted.facts[0].locator,
+                    DocumentLocator::Pdf { page: 1, .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn pdf_reversed_chars_refuses_partial_text_publication() {
         for content in [
             b"BT /F1 12 Tf 72 500 Td (Prefix) Tj /ReversedChars BMC (desrever) Tj EMC ET".as_slice(),
