@@ -868,14 +868,10 @@ fn parse_docx(
                 if skipped_branch_depth.is_some() {
                     continue;
                 }
-                if !wordprocessing
+                let ignorable = !wordprocessing
                     && !compatibility
                     && matches!(&namespace, ResolveResult::Bound(namespace)
-                        if ignorable_namespaces.iter().any(|ignored| ignored == namespace.as_ref()))
-                {
-                    skipped_branch_depth = Some(element_depth);
-                    continue;
-                }
+                        if ignorable_namespaces.iter().any(|ignored| ignored == namespace.as_ref()));
                 if compatibility && matches!(name.as_ref(), "Choice" | "Fallback") {
                     let alternative = alternatives
                         .last_mut()
@@ -1021,6 +1017,10 @@ fn parse_docx(
                             ignorable_namespaces.push(namespace.as_ref().to_owned());
                         }
                     }
+                }
+                if ignorable {
+                    skipped_branch_depth = Some(element_depth);
+                    continue;
                 }
                 if compatibility && matches!(name.as_ref(), "Choice" | "Fallback") {
                     continue;
@@ -3106,6 +3106,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn docx_root_ignorable_policy_preserves_visible_text_and_refuses_other_policies() {
+        use std::fmt::Write as _;
         let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future" mc:Ignorable="future"><w:body><future:wrapper><w:p><w:r><w:t>Ignored</w:t></w:r></w:p></future:wrapper><w:p><w:r><w:t>Visible</w:t></w:r></w:p></w:body></w:document>"#;
         for source in [
             xml.to_owned(),
@@ -3120,10 +3121,6 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             xml.replace(
                 "mc:Ignorable=\"future\"",
                 "mc:Ignorable=\"future future w\"",
-            ),
-            xml.replace(
-                "<future:wrapper>",
-                "<future:wrapper mc:ProcessContent=\"future:child\">",
             ),
             xml.replace(
                 "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -3184,6 +3181,9 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 "mc:Ignorable=\"future\"",
                 "mc:ProcessContent=\"future:wrapper\"",
             ),
+            xml.replace("<future:wrapper>", "<future:wrapper mc:ProcessContent=\"future:child\">"),
+            xml.replace("<future:wrapper>", "<future:wrapper mc:MustUnderstand=\"future\">"),
+            xml.replace("<future:wrapper>", "<future:wrapper mc:Ignorable=\"future\">"),
             xml.replace("<w:body>", "<w:body><mc:AlternateContent><mc:Choice Requires=\"w\" mc:ProcessContent=\"future:wrapper\">").replace("</w:body>", "</mc:Choice></mc:AlternateContent></w:body>"),
             xml.replace("mc:Ignorable=\"future\"", "mc:MustUnderstand=\"future\""),
             xml.replace(" mc:Ignorable=\"future\"", "")
@@ -3212,12 +3212,13 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             MAX_DOCX_IGNORABLE_NAMESPACES,
             MAX_DOCX_IGNORABLE_NAMESPACES + 1,
         ] {
-            let declarations = (0..count)
-                .map(|index| format!("xmlns:n{index}=\"urn:{index}\" "))
-                .collect::<String>();
-            let prefixes = (0..count)
-                .map(|index| format!("n{index} "))
-                .collect::<String>();
+            let mut declarations = String::new();
+            let mut prefixes = String::new();
+            for index in 0..count {
+                write!(declarations, "xmlns:n{index}=\"urn:{index}\" ")
+                    .expect("namespace declaration");
+                write!(prefixes, "n{index} ").expect("namespace prefix");
+            }
             let source = xml.replace(
                 "mc:Ignorable=\"future\"",
                 &format!("{declarations} mc:Ignorable=\"{prefixes}\""),
