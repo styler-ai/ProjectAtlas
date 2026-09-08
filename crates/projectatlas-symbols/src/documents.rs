@@ -2244,6 +2244,54 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn pdf_calibrated_color_dictionaries_preserve_text_or_refuse() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let parameters = document.add_object(lopdf::dictionary! {
+            "WhitePoint" => vec![1.into(), 1.into(), 1.into()]
+        });
+        let wrong_type = document.add_object(42);
+        document.get_object_mut((4, 0)).expect("content").as_stream_mut().expect("stream")
+            .set_content(b"BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /Calibrated cs /Calibrated CS BT /F1 12 Tf 72 480 Td (Visible) Tj ET".to_vec());
+        for space in ["CalGray", "CalRGB", "Lab"] {
+            for (reference, valid) in [(parameters, true), (wrong_type, false), ((999, 0), false)] {
+                document.get_dictionary_mut((3, 0)).expect("page")
+                    .get_mut(b"Resources").expect("resources").as_dict_mut().expect("dictionary")
+                    .set("ColorSpace", lopdf::dictionary! {
+                        "Calibrated" => vec![lopdf::Object::Name(space.as_bytes().to_vec()), reference.into()]
+                    });
+                let mut bytes = Vec::new();
+                document.save_to(&mut bytes).expect("fixture serialization");
+                let result =
+                    extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+                if valid {
+                    let facts = result.expect("indirect calibrated dictionary");
+                    assert_eq!(
+                        facts.text.split_whitespace().collect::<Vec<_>>(),
+                        ["Prefix", "Visible"]
+                    );
+                    assert_eq!(facts.facts.len(), 2);
+                    for (fact, (text_start, text_end)) in facts.facts.iter().zip([(0, 6), (7, 14)])
+                    {
+                        assert_eq!(
+                            fact.locator,
+                            DocumentLocator::Pdf {
+                                page: 1,
+                                text_start,
+                                text_end
+                            }
+                        );
+                    }
+                } else {
+                    assert!(
+                        matches!(result, Err(DocumentExtractionError::Malformed { .. })),
+                        "{space}: {result:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn pdf_extended_graphics_state_selects_text_font() {
         let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
         let mut state = lopdf::Dictionary::new();

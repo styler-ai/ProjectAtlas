@@ -9591,7 +9591,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
 
     let make_pdf_with_replacement = |page_content: &str, structure_replacement: bool| {
         let page_content = format!(
-            "10 20 30 40 re s 10 20 30 40 re f* 10 20 30 40 re B 10 20 30 40 re B* 10 20 30 40 re b 10 20 30 40 re b* 10 20 m 30 40 l h 50 60 70 80 v S 10 20 30 40 re 50 60 70 80 v S /Ps Do /LegacyPs Do\n{page_content}"
+            "10 20 30 40 re s 10 20 30 40 re f* 10 20 30 40 re B 10 20 30 40 re B* 10 20 30 40 re b 10 20 30 40 re b* 10 20 m 30 40 l h 50 60 70 80 v S 10 20 30 40 re 50 60 70 80 v S /Ps Do /LegacyPs Do /CalGray cs /CalGray CS /CalRGB cs /CalRGB CS /Lab cs /Lab CS\n{page_content}"
         );
         let page_object = format!(
             "4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n",
@@ -9599,7 +9599,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         );
         let pdf_objects = [
             if structure_replacement {
-                b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 27 0 R >>\nendobj\n"
+                b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 28 0 R >>\nendobj\n"
                     .as_slice()
             } else {
                 b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice()
@@ -9607,9 +9607,9 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
             b"2 0 obj\n<< /Type /Pages /Kids 25 0 R /Count 26 0 R /Rotate 90 >>\nendobj\n"
                 .as_slice(),
             if structure_replacement {
-                b"3 0 obj\n<< /Type /Page /StructParents 0 /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
+                b"3 0 obj\n<< /Type /Page /StructParents 0 /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] /CalGray [/CalGray 27 0 R] /CalRGB [/CalRGB 27 0 R] /Lab [/Lab 27 0 R] /MissingColor [/CalRGB 999 0 R] /WrongColor [/CalRGB 26 0 R] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
             } else {
-                b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
+                b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] /CalGray [/CalGray 27 0 R] /CalRGB [/CalRGB 27 0 R] /Lab [/Lab 27 0 R] /MissingColor [/CalRGB 999 0 R] /WrongColor [/CalRGB 26 0 R] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
             },
             page_object.as_bytes(),
             b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
@@ -9676,15 +9676,16 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "24 0 obj\n<< /Type /XObject /Subtype /Form /Subtype2 /PS /Length 58 >>\nstream\n/Helvetica findfont 12 scalefont setfont (Print only) show\nendstream\nendobj\n",
             "25 0 obj\n[3 0 R]\nendobj\n",
             "26 0 obj\n1\nendobj\n",
+            "27 0 obj\n<< /WhitePoint [1 1 1] >>\nendobj\n",
         ] {
             offsets.push(pdf.len());
             pdf.extend_from_slice(object.as_bytes());
         }
         if structure_replacement {
             for object in [
-                "27 0 obj\n<< /Type /StructTreeRoot /K 28 0 R /ParentTree 29 0 R >>\nendobj\n",
-                "28 0 obj\n<< /Type /StructElem /S /Span /P 27 0 R /Pg 3 0 R /K 0 /ActualText (replacement) >>\nendobj\n",
-                "29 0 obj\n<< /Nums [0 [28 0 R]] >>\nendobj\n",
+                "28 0 obj\n<< /Type /StructTreeRoot /K 29 0 R /ParentTree 30 0 R >>\nendobj\n",
+                "29 0 obj\n<< /Type /StructElem /S /Span /P 28 0 R /Pg 3 0 R /K 0 /ActualText (replacement) >>\nendobj\n",
+                "30 0 obj\n<< /Nums [0 [29 0 R]] >>\nendobj\n",
             ] {
                 offsets.push(pdf.len());
                 pdf.extend_from_slice(object.as_bytes());
@@ -10129,6 +10130,14 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     }
     let before_unsupported_pdf = mcp_database_snapshot(&database)?;
     for (unsupported_content, diagnostic, structure_replacement) in [
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /MissingColor cs",
+            "malformed pdf",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /WrongColor CS",
+            "malformed pdf",
+        ),
         (
             "BT /F1 12 Tf 72 500 Td (Prefix) Tj /ReversedChars BMC (desrever) Tj EMC ET",
             "unsupported PDF text semantics",
