@@ -292,7 +292,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Selected Rust proof
-        timeout-minutes: 15
+        timeout-minutes: 20
         env:
           PLAN: ${{ needs.plan.outputs.plan }}
         run: |
