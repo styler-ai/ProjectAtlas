@@ -38,6 +38,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **WHEN** PDF magic and all input/time/memory/output limits pass
 - **THEN** ProjectAtlas publishes bounded text with exact page and text-span locator, parser/version provenance, completeness, and coverage
 
+- **AND** CID width ranges apply the declared width to every character through the inclusive last CID, preserving text spacing
 - **AND** ExtGState font selections update the font and size with scoped dictionary identity, preserve graphics-state save/restore and Form resources, and reject malformed font entries before publication
 - **AND** marked-content ActualText replacements return typed unsupported input, including named properties and Form-local resource scopes, rather than publishing the underlying glyphs as complete text
 - **AND** quote text-showing operators preserve the corresponding line movement, spacing changes, and text emission
@@ -47,6 +48,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 #### Scenario: Valid DOCX
 - **WHEN** a ZIP container passes entry/path/compressed/expanded/recursion limits and contains admitted `word/document.xml` with Transitional or Strict WordprocessingML namespace identity, independent of its prefix
 - **THEN** ProjectAtlas publishes bounded text with exact part, paragraph, run, and text-span locator plus parser/version provenance
+- **AND** live ruby annotations return typed unsupported input rather than a malformed-input error; deleted ruby content remains excluded
 - **AND** alternate-format chunks return typed unsupported input rather than omitting referenced content
 - **AND** unsupported XML encodings, including UTF-16, return typed unsupported input without replacing the last complete publication
 - **AND** foreign-namespace character data requiring unsupported semantic decoding returns typed unsupported input, while recognized Word text boxes remain supported through drawing wrappers

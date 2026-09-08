@@ -18,6 +18,7 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Refuse incomplete or unmapped character codes instead of silently ending text.
 - Refuse ActualText replacement semantics in direct or resource-named marked-content properties before publishing underlying glyphs.
 - Interpret quote text-showing operators with their line movement and spacing semantics.
+- Apply CID range widths to both inclusive endpoints using the declared width.
 - Apply ExtGState font dictionaries and finite sizes through the existing scoped font cache.
 - Derive plain-text font scale from the absolute transform determinant so ordinary rotated text retains word boundaries.
 - Apply inherited integer page rotation in the initial graphics transform; reject non-quarter-turn or non-integer rotation before publication.

@@ -937,6 +937,16 @@ fn parse_docx(
                                     .to_owned(),
                         });
                     }
+                    "ruby" => {
+                        if deleted_depth.is_some() {
+                            skipped_branch_depth = Some(element_depth);
+                        } else {
+                            return Err(DocumentExtractionError::UnsupportedDocxInput {
+                                message: "ruby annotations require unsupported nested run decoding"
+                                    .to_owned(),
+                            });
+                        }
+                    }
                     "del" | "moveFrom" if deleted_depth.is_none() => {
                         deleted_depth = Some(element_depth);
                     }
@@ -1805,6 +1815,41 @@ mod tests {
     }
 
     #[test]
+    fn pdf_extended_graphics_state_selects_text_font() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        let mut state = lopdf::Dictionary::new();
+        state.set("Font", vec![lopdf::Object::Reference((5, 0)), 12.into()]);
+        let mut states = lopdf::Dictionary::new();
+        states.set("GS", state);
+        document
+            .get_object_mut((3, 0))
+            .expect("page")
+            .as_dict_mut()
+            .expect("page dictionary")
+            .get_mut(b"Resources")
+            .expect("resources")
+            .as_dict_mut()
+            .expect("resource dictionary")
+            .set("ExtGState", states);
+        document
+            .get_object_mut((4, 0))
+            .expect("page stream")
+            .as_stream_mut()
+            .expect("stream")
+            .set_content(b"/GS gs BT 72 500 Td (Graphics Font) Tj ET".to_vec());
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+            .expect("ExtGState font is usable without Tf");
+        assert_eq!(facts.text.trim(), "Graphics Font");
+        assert_eq!(facts.facts.len(), 1);
+        assert!(matches!(
+            facts.facts[0].locator,
+            DocumentLocator::Pdf { page: 1, .. }
+        ));
+    }
+
+    #[test]
     fn pdf_actual_text_refuses_partial_text_publication() {
         let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
         document.get_object_mut((4, 0)).expect("page stream").as_stream_mut()
@@ -2335,6 +2380,24 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 }),
             ));
         }
+    }
+
+    #[test]
+    fn docx_ruby_annotations_are_typed_unsupported() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Prefix</w:t><w:ruby><w:rt><w:r><w:t>Reading</w:t></w:r></w:rt><w:rubyBase><w:r><w:t>Base</w:t></w:r></w:rubyBase></w:ruby></w:r></w:p></w:body></w:document>"#;
+        assert!(matches!(
+            parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+        ));
+        let deleted = xml
+            .replace("<w:ruby>", "<w:del><w:ruby>")
+            .replace("</w:ruby>", "</w:ruby></w:del>");
+        assert_eq!(
+            parse_docx(deleted.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("deleted ruby stays excluded")
+                .text,
+            "Prefix"
+        );
     }
 
     #[test]

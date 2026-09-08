@@ -435,6 +435,76 @@ mod tests {
     }
 
     #[test]
+    fn cid_range_widths_match_explicit_widths_including_endpoints() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let cmap = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            br"/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Fixture def /CMapType 2 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+4 beginbfchar <0001> <0041> <0002> <0042> <0003> <0043> <0004> <0044> endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end"
+                .to_vec(),
+        ));
+        let descendant = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "CIDFontType2", "BaseFont" => "Fixture",
+            "FontDescriptor" => lopdf::Dictionary::new(), "DW" => 1000,
+            "CIDSystemInfo" => dictionary! { "Registry" => lopdf::Object::string_literal("Adobe"),
+                "Ordering" => lopdf::Object::string_literal("Identity"), "Supplement" => 0 }
+        });
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "Fixture",
+            "Encoding" => "Identity-H", "DescendantFonts" => vec![descendant.into()], "ToUnicode" => cmap
+        });
+        let content = document.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), Vec::new()));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        for (widths, text, expected) in [
+            (
+                vec![1.into(), 2.into(), 200.into()],
+                "<0001> Tj 3 0 Td <0002> Tj 8 0 Td <0003> Tj 8 0 Td <0004> Tj",
+                "AB CD",
+            ),
+            (
+                vec![1.into(), lopdf::Object::Array(vec![200.into(), 200.into()])],
+                "<0001> Tj 3 0 Td <0002> Tj 8 0 Td <0003> Tj 8 0 Td <0004> Tj",
+                "AB CD",
+            ),
+            (
+                vec![1.into(), 1.into(), 200.into()],
+                "<0001> Tj 8 0 Td <0002> Tj",
+                "A B",
+            ),
+        ] {
+            document
+                .get_object_mut(descendant)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("W", widths);
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(format!("BT /F1 12 Tf 72 500 Td {text} ET").into_bytes());
+            assert_eq!(text::page(&document, 1, 128).unwrap().trim(), expected);
+        }
+    }
+
+    #[test]
     fn extended_graphics_state_fonts_preserve_selection_and_scope() {
         let mut document = lopdf::Document::new();
         let pages = document.new_object_id();

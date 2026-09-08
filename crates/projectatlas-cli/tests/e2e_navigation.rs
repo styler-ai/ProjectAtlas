@@ -9597,7 +9597,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         let pdf_objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>\nendobj\n".as_slice(),
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
             page_object.as_bytes(),
             b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
         ];
@@ -9627,7 +9627,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         pdf
     };
     let pdf_path = docs.join(PDF_FILE);
-    let original_page_content = "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 720 Td 0 0 (Runtime PDF) \" ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q";
+    let original_page_content = "0 1 -1 0 612 0 cm\n/GS gs BT 72 720 Td 0 0 (Runtime PDF) \" ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q";
     fs::write(&pdf_path, make_pdf(original_page_content))?;
 
     let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
@@ -10101,6 +10101,10 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         (
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r></w:p><w:altChunk r:id="html"/></w:body></w:document>"#.as_bytes().to_vec(),
             "alternate-format DOCX chunks",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:ruby><w:rt><w:r><w:t>Reading</w:t></w:r></w:rt><w:rubyBase><w:r><w:t>Base</w:t></w:r></w:rubyBase></w:ruby></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "ruby annotations",
         ),
     ] {
         {
