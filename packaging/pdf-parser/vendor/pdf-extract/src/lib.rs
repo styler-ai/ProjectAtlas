@@ -1336,10 +1336,28 @@ pub struct MediaBox {
     pub ury: f64
 }
 
-fn apply_state(doc: &Document, gs: &mut GraphicsState, state: &Dictionary) {
+fn apply_state<'a>(doc: &'a Document, gs: &mut GraphicsState<'a>, state: &'a Dictionary,
+                   fonts: &mut HashMap<*const Dictionary, Rc<dyn PdfFont + 'a>>) -> Result<(), OutputError> {
     for (k, v) in state.iter() {
         let k : &[u8] = k.as_ref();
         match k {
+            b"Font" => {
+                let values = doc.dereference(v)?.1.as_array()?;
+                if values.len() != 2 {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ExtGState Font array").into());
+                }
+                let dictionary = doc.dereference(&values[0])?.1.as_dict()?;
+                let size = doc.dereference(&values[1])?.1;
+                if !matches!(size, Object::Integer(_) | Object::Real(_)) {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ExtGState font size").into());
+                }
+                let size = as_num(size);
+                if !size.is_finite() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "non-finite ExtGState font size").into());
+                }
+                gs.ts.font = Some(fonts.entry(std::ptr::from_ref(dictionary)).or_insert_with(|| make_font(doc, dictionary)).clone());
+                gs.ts.font_size = size;
+            }
             b"SMask" => { match maybe_deref(doc, v)  {
                 &Object::Name(ref name) => {
                     if name == b"None" {
@@ -1362,7 +1380,7 @@ fn apply_state(doc: &Document, gs: &mut GraphicsState, state: &Dictionary) {
             _ => {  dlog!("unapplied state: {:?} {:?}", k, v); }
         }
     }
-
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1788,7 +1806,7 @@ impl<'a> Processor<'a> {
                     let ext_gstate: &Dictionary = get(doc, resources, b"ExtGState");
                     let name = operation.operands[0].as_name().unwrap();
                     let state: &Dictionary = get(doc, ext_gstate, name);
-                    apply_state(doc, &mut gs, state);
+                    apply_state(doc, &mut gs, state, &mut self.font_table)?;
                 }
                 "i" => { dlog!("unhandled graphics state flattness operator {:?}", operation); }
                 "w" => { gs.line_width = as_num(&operation.operands[0]); }

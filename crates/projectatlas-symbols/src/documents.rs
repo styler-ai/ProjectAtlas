@@ -1779,6 +1779,43 @@ mod tests {
                 assert_eq!(fact.line_end, index + 1);
             }
         }
+        for rotation in [90, 270] {
+            document
+                .get_object_mut((2, 0))
+                .expect("page tree")
+                .as_dict_mut()
+                .expect("page tree dictionary")
+                .set("Rotate", rotation);
+            document.get_object_mut((4, 0)).expect("page stream").as_stream_mut()
+                .expect("stream").set_content(b"BT /F1 12 Tf 72 500 Td (First) Tj 108 0 Td (Second) Tj -108 -100 Td (Next) Tj ET".to_vec());
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+                .expect("ordinary rotated text");
+            assert_eq!(
+                facts.text.split_whitespace().collect::<Vec<_>>(),
+                ["First", "Second", "Next"]
+            );
+            assert_eq!(facts.facts.len(), 3);
+            for (index, fact) in facts.facts.iter().enumerate() {
+                assert!(matches!(fact.locator, DocumentLocator::Pdf { page: 1, .. }));
+                assert_eq!((fact.line_start, fact.line_end), (index + 1, index + 1));
+            }
+        }
+    }
+
+    #[test]
+    fn pdf_actual_text_refuses_partial_text_publication() {
+        let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+        document.get_object_mut((4, 0)).expect("page stream").as_stream_mut()
+            .expect("stream").set_content(b"BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET".to_vec());
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+        assert!(
+            matches!(result, Err(DocumentExtractionError::UnsupportedPdfInput)),
+            "{result:?}"
+        );
     }
 
     fn pdf_with_xobject(xobject: lopdf::Stream) -> Vec<u8> {

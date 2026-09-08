@@ -9589,38 +9589,46 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
     let docs = repo.join("docs");
     fs::create_dir_all(&docs)?;
 
-    let pdf_objects = [
-        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
-        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>\nendobj\n".as_slice(),
-        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
-        b"4 0 obj\n<< /Length 121 >>\nstream\n0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 720 Td 0 0 (Runtime PDF) \" ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q\nendstream\nendobj\n".as_slice(),
-        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
-    ];
-    let mut pdf = b"%PDF-1.4\n".to_vec();
-    let mut offsets = Vec::new();
-    for object in pdf_objects {
+    let make_pdf = |page_content: &str| {
+        let page_object = format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n",
+            page_content.len()
+        );
+        let pdf_objects = [
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>\nendobj\n".as_slice(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Fm 7 0 R >> >> >>\nendobj\n".as_slice(),
+            page_object.as_bytes(),
+            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for object in pdf_objects {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(object);
+        }
         offsets.push(pdf.len());
-        pdf.extend_from_slice(object);
-    }
-    offsets.push(pdf.len());
-    pdf.extend_from_slice(b"6 0 obj\n<< /Length 2000001 /Subtype /Image >>\nstream\n");
-    pdf.extend(std::iter::repeat_n(b' ', 2_000_001));
-    pdf.extend_from_slice(b"\nendstream\nendobj\n");
-    offsets.push(pdf.len());
-    pdf.extend_from_slice(b"7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Matrix [1 0 0 1 0 600] /Length 41 >>\nstream\nBT /F1 12 Tf 72 0 Td (Runtime Form) ' ET\nendstream\nendobj\n");
-    let object_count = offsets.len() + 1;
-    let xref = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {object_count}\n").as_bytes());
-    pdf.extend_from_slice(b"0000000000 65535 f \n");
-    for offset in offsets {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!("trailer\n<< /Size {object_count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n")
-            .as_bytes(),
-    );
+        pdf.extend_from_slice(b"6 0 obj\n<< /Length 2000001 /Subtype /Image >>\nstream\n");
+        pdf.extend(std::iter::repeat_n(b' ', 2_000_001));
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(b"7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Matrix [1 0 0 1 0 600] /Length 41 >>\nstream\nBT /F1 12 Tf 72 0 Td (Runtime Form) ' ET\nendstream\nendobj\n");
+        let object_count = offsets.len() + 1;
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {object_count}\n").as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size {object_count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n")
+                .as_bytes(),
+        );
+        pdf
+    };
     let pdf_path = docs.join(PDF_FILE);
-    fs::write(&pdf_path, pdf)?;
+    let original_page_content = "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 720 Td 0 0 (Runtime PDF) \" ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q";
+    fs::write(&pdf_path, make_pdf(original_page_content))?;
 
     let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
         let docx_file = fs::File::create(path)?;
@@ -9940,6 +9948,76 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         Ok(())
     })();
     complete_mcp_test_after_shutdown(operation_result, || session.shutdown())?;
+
+    fs::write(
+        &pdf_path,
+        make_pdf(
+            "BT /F1 12 Tf 72 500 Td (First) Tj 108 0 Td (Second) Tj -108 -100 Td (Next) Tj ET",
+        ),
+    )?;
+    run_scan(&repo, &database)?;
+    let rotated_slice = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "symbols".to_owned(),
+            "slice".to_owned(),
+            "docs/guide.pdf".to_owned(),
+            "document-block-2".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    require_json_string(&rotated_slice, &["content"], "Second")?;
+    let mcp_pdf_slice = || -> Result<Value, Box<dyn Error>> {
+        let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+        let result = session.call_tool(
+            "atlas_slice",
+            &json!({
+                "project_path": repo.as_path(), "file": "docs/guide.pdf",
+                "symbol": "document-block-2", "content_selection": "documentation"
+            }),
+        );
+        let shutdown = session.shutdown();
+        let text = result?;
+        shutdown?;
+        Ok(toon_format::decode_default(&text)?)
+    };
+    require_json_string(&mcp_pdf_slice()?, &["slice", "content"], "Second")?;
+    let before_unsupported_pdf = mcp_database_snapshot(&database)?;
+    fs::write(
+        &pdf_path,
+        make_pdf(
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET",
+        ),
+    )?;
+    let unsupported_pdf = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .output()?;
+    if unsupported_pdf.status.success()
+        || !String::from_utf8_lossy(&unsupported_pdf.stderr)
+            .contains("unsupported PDF text semantics")
+        || before_unsupported_pdf.authoritative != mcp_database_snapshot(&database)?.authoritative
+    {
+        return Err(io::Error::other("unsupported PDF replaced the complete publication").into());
+    }
+    require_json_contains(
+        &mcp_pdf_slice()?,
+        &["error", "message"],
+        "unsupported PDF text semantics",
+    )?;
+    if before_unsupported_pdf.authoritative != mcp_database_snapshot(&database)?.authoritative {
+        return Err(
+            io::Error::other("unsupported PDF navigation changed authoritative state").into(),
+        );
+    }
+    fs::write(&pdf_path, make_pdf(original_page_content))?;
+    run_scan(&repo, &database)?;
 
     write_docx(&docx_path, "DOCX replacement marker")?;
     run_scan(&repo, &database)?;

@@ -435,6 +435,100 @@ mod tests {
     }
 
     #[test]
+    fn extended_graphics_state_fonts_preserve_selection_and_scope() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let plain = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let mapped = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Encoding" => dictionary! { "Type" => "Encoding", "BaseEncoding" => "WinAnsiEncoding",
+                "Differences" => vec![65.into(), lopdf::Object::Name(b"Z".to_vec())] }
+        });
+        let state = document.add_object(dictionary! { "Font" => vec![mapped.into(), 12.into()] });
+        let content = document.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), Vec::new()));
+        let form = document.add_object(lopdf::Stream::new(dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "ExtGState" => dictionary! {
+                "GS" => dictionary! { "Font" => vec![plain.into(), 12.into()] }
+            } }
+        }, b"/GS gs BT 72 400 Td (A) Tj ET".to_vec()));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "Plain" => plain, "Mapped" => mapped },
+                "ExtGState" => dictionary! { "GS" => state },
+                "XObject" => dictionary! { "Form" => form }
+            }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        for (stream, expected) in [
+            (
+                b"/GS gs BT 72 500 Td (A) Tj 20 0 Td (A) Tj ET".as_slice(),
+                vec!["Z", "Z"],
+            ),
+            (
+                b"BT /Plain 48 Tf ET /GS gs BT 72 500 Td (A) Tj 20 0 Td (A) Tj ET",
+                vec!["Z", "Z"],
+            ),
+            (
+                b"BT /Plain 12 Tf ET q /GS gs BT 72 500 Td (A) Tj ET Q BT 72 400 Td (A) Tj ET",
+                vec!["Z", "A"],
+            ),
+            (b"/GS gs BT 72 500 Td (A) Tj ET /Form Do", vec!["Z", "A"]),
+        ] {
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(stream.to_vec());
+            assert_eq!(
+                text::page(&document, 1, 128)
+                    .unwrap()
+                    .split_whitespace()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"/GS gs BT 72 500 Td (A) Tj ET".to_vec());
+        for invalid in [
+            lopdf::Object::Array(vec![mapped.into()]),
+            lopdf::Object::Array(vec![mapped.into(), 12.into(), 1.into()]),
+            lopdf::Object::Array(vec![lopdf::Object::Reference((999, 0)), 12.into()]),
+            lopdf::Object::Array(vec![12.into(), 12.into()]),
+            lopdf::Object::Array(vec![mapped.into(), lopdf::Object::Name(b"large".to_vec())]),
+            lopdf::Object::Array(vec![mapped.into(), lopdf::Object::Real(f32::NAN)]),
+        ] {
+            document
+                .get_object_mut(state)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Font", invalid);
+            assert!(matches!(
+                text::page(&document, 1, 128),
+                Err(Failure::Malformed)
+            ));
+        }
+    }
+
+    #[test]
     fn actual_text_requires_supported_semantics_before_text_publication() {
         let mut document = lopdf::Document::new();
         let pages = document.new_object_id();
