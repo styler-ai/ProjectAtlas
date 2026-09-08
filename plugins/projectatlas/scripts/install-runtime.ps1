@@ -2832,7 +2832,7 @@ function Invoke-ProjectAtlasAtlasForwarderStatePublicationPause {
         "$gate.ready",
         "ready`r`n",
         (New-Object System.Text.UTF8Encoding($false)))
-    while (Test-Path -LiteralPath $gate) {
+    while ([System.IO.File]::Exists($gate)) {
         Start-Sleep -Milliseconds 50
     }
 }
@@ -2846,7 +2846,7 @@ function Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause {
         "$gate.ready",
         "ready`r`n",
         (New-Object System.Text.UTF8Encoding($false)))
-    while (Test-Path -LiteralPath $gate) {
+    while ([System.IO.File]::Exists($gate)) {
         Start-Sleep -Milliseconds 50
     }
 }
@@ -2871,7 +2871,7 @@ function Invoke-ProjectAtlasAtlasForwarderLockAcquiredPause {
         "$gate.ready",
         "ready`r`n",
         (New-Object System.Text.UTF8Encoding($false)))
-    while (Test-Path -LiteralPath $gate) {
+    while ([System.IO.File]::Exists($gate)) {
         Start-Sleep -Milliseconds 50
     }
 }
