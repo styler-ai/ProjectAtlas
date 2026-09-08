@@ -58,6 +58,7 @@
     }
   },
   "changes": {
+    "stabilize-installer-test-gate-release": 572,
     "accept-compiler-config-utf8-bom": 408,
     "admit-purpose-mutations-through-freshness": 463,
     "add-agent-session-brief": 292,
