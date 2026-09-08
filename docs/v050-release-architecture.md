@@ -239,7 +239,11 @@ suspensions check cancellation; real allocation denial remains a typed limit.
 The host supplies bounded entropy and an empty environment, with no filesystem,
 network, clock, or process capabilities. Page-tree validation and bounded
 stream decoding precede exact-page formatting, including Form text with inherited graphics state, composed caller/Form
-matrices, and scoped fonts. Image pixels remain opaque. Local dependency patches and retained
+matrices, and scoped fonts. A structure-root child-link preflight refuses ActualText
+replacements before formatting, including replacements on ancestors of marked content.
+Ordinary tagged content remains admitted; malformed or cyclic child links fail closed.
+The preflight neither interprets logical order nor follows ParentTree mappings.
+Image pixels remain opaque. Local dependency patches and retained
 attribution are documented in `packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md`.
 PDF admission requires a `%PDF-` header and extracts only page text; DOCX
 admission requires a ZIP header, admits only stored or DEFLATE entries, rejects

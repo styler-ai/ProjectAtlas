@@ -87,6 +87,7 @@ fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
     if document.is_encrypted() {
         return Err(Failure::Encrypted);
     }
+    refuse_structure_replacements(&document)?;
     let pages = document.get_pages();
     validate_page_tree(&document, &pages)?;
     if pages.len() > FACT_LIMIT {
@@ -140,6 +141,53 @@ fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
         wire.extend_from_slice(text.as_bytes());
     }
     Ok((wire, total))
+}
+
+/// Inspect only structure children, without interpreting logical order or replacements.
+fn refuse_structure_replacements(document: &lopdf::Document) -> Result<(), Failure> {
+    let catalog = document.catalog().map_err(parser_failure)?;
+    let root = match catalog.get(b"StructTreeRoot") {
+        Ok(root) => root,
+        Err(lopdf::Error::DictKey(_)) => return Ok(()),
+        Err(error) => return Err(parser_failure(error)),
+    };
+    document
+        .dereference(root)
+        .map_err(parser_failure)?
+        .1
+        .as_dict()
+        .map_err(parser_failure)?;
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(object) = pending.pop() {
+        let (id, object) = document.dereference(object).map_err(parser_failure)?;
+        if matches!(
+            object,
+            lopdf::Object::Dictionary(_) | lopdf::Object::Array(_)
+        ) && id.is_some_and(|id| !visited.insert(id))
+        {
+            return Err(Failure::Malformed);
+        }
+        match object {
+            lopdf::Object::Dictionary(node) => {
+                if node.has(b"ActualText") {
+                    node.get_deref(b"ActualText", document)
+                        .map_err(parser_failure)?
+                        .as_str()
+                        .map_err(parser_failure)?;
+                    return Err(Failure::Unsupported);
+                }
+                if let Ok(children) = node.get(b"K") {
+                    pending.push(children);
+                }
+            }
+            lopdf::Object::Array(children) => pending.extend(children),
+            lopdf::Object::Integer(value) if *value >= 0 => {}
+            lopdf::Object::Null => {}
+            _ => return Err(Failure::Malformed),
+        }
+    }
+    Ok(())
 }
 
 /// Check every declared page-tree edge; the library iterator may silently skip it.
@@ -1543,6 +1591,151 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             text::page(&document, 1, 256),
             Err(Failure::Unsupported)
         ));
+    }
+
+    #[test]
+    fn structure_replacements_refuse_without_rejecting_ordinary_tags() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let root = document.new_object_id();
+        let ancestor = document.new_object_id();
+        let element = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let content = document.add_object(lopdf::Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /MCID 0 >> BDC (glyph) Tj EMC ET"
+                .to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content, "StructParents" => 0,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1
+            }
+            .into(),
+        );
+        document.objects.insert(
+            element,
+            dictionary! {
+                "Type" => "StructElem", "S" => "Span", "P" => ancestor, "Pg" => page, "K" => 0
+            }
+            .into(),
+        );
+        document.objects.insert(
+            ancestor,
+            dictionary! {
+                "Type" => "StructElem", "S" => "P", "P" => root, "K" => vec![element.into()]
+            }
+            .into(),
+        );
+        let parent_tree = document.add_object(dictionary! {
+            "Nums" => vec![0.into(), lopdf::Object::Array(vec![element.into()])]
+        });
+        document.objects.insert(
+            root,
+            dictionary! {
+                "Type" => "StructTreeRoot", "K" => ancestor, "ParentTree" => parent_tree
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => pages, "StructTreeRoot" => root,
+            "MarkInfo" => dictionary! { "Marked" => true }
+        });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        let (wire, _) = parse(&bytes).unwrap();
+        assert_eq!(&wire[12..], b"Prefixglyph");
+        for target in [element, ancestor] {
+            document
+                .get_dictionary_mut(target)
+                .unwrap()
+                .set("ActualText", lopdf::Object::string_literal("replacement"));
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).unwrap();
+            assert_eq!(parse(&bytes), Err(Failure::Unsupported));
+            INPUT.with(|input| *input.borrow_mut() = bytes);
+            OUTPUT.with(|output| *output.borrow_mut() = b"previous text".to_vec());
+            assert_eq!(extract(), Failure::Unsupported as i32);
+            assert_eq!(output_len(), 0);
+            document
+                .get_dictionary_mut(target)
+                .unwrap()
+                .remove(b"ActualText");
+        }
+        let form = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form", "StructParents" => 1,
+                "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+            },
+            b"BT /F1 12 Tf /Span << /MCID 0 >> BDC (glyph) Tj EMC ET".to_vec(),
+        ));
+        document.get_dictionary_mut(page).unwrap().set(
+            "Resources",
+            dictionary! { "XObject" => dictionary! { "Form" => form } },
+        );
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"/Form Do".to_vec());
+        document.get_dictionary_mut(element).unwrap().set(
+            "K",
+            dictionary! { "Type" => "MCR", "Pg" => page, "Stm" => form, "MCID" => 0 },
+        );
+        document.get_dictionary_mut(parent_tree).unwrap().set(
+            "Nums",
+            vec![1.into(), lopdf::Object::Array(vec![element.into()])],
+        );
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        assert_eq!(&parse(&bytes).unwrap().0[12..], b"glyph");
+        document
+            .get_dictionary_mut(element)
+            .unwrap()
+            .set("ActualText", lopdf::Object::string_literal("replacement"));
+        for child in [
+            lopdf::Object::Reference(element),
+            document.get_dictionary(element).unwrap().clone().into(),
+        ] {
+            document
+                .get_dictionary_mut(ancestor)
+                .unwrap()
+                .set("K", child);
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).unwrap();
+            assert_eq!(parse(&bytes), Err(Failure::Unsupported));
+            INPUT.with(|input| *input.borrow_mut() = bytes);
+            OUTPUT.with(|output| *output.borrow_mut() = b"previous text".to_vec());
+            assert_eq!(extract(), Failure::Unsupported as i32);
+            assert_eq!(output_len(), 0);
+        }
+        for child in [
+            lopdf::Object::Reference(root),
+            lopdf::Object::Reference((999, 0)),
+            lopdf::Object::string_literal("invalid child"),
+        ] {
+            document
+                .get_dictionary_mut(ancestor)
+                .unwrap()
+                .set("K", child);
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).unwrap();
+            assert_eq!(parse(&bytes), Err(Failure::Malformed));
+            INPUT.with(|input| *input.borrow_mut() = bytes);
+            OUTPUT.with(|output| *output.borrow_mut() = b"previous text".to_vec());
+            assert_eq!(extract(), Failure::Malformed as i32);
+            assert_eq!(output_len(), 0);
+        }
     }
 
     #[test]
