@@ -428,6 +428,39 @@ mod tests {
             .set_content(b"BT (Form Marker) Tj ET".to_vec());
         assert_eq!(text::page(&document, 1, 128).unwrap(), expected);
         assert_transforms(&document);
+        let text_scope = b"BT /F1 12 Tf 20 TL 72 500 Td q 100 -100 Td (A) Tj Q T* (B) Tj ET";
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(text_scope.to_vec());
+        let positions = transforms(&document);
+        assert_eq!(
+            positions.iter().map(|m| (m[4], m[5])).collect::<Vec<_>>(),
+            [(172., 400.), (72., 480.)]
+        );
+        let form = document
+            .get_object_mut(inner)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        form.dict.remove(b"Matrix");
+        form.set_content(text_scope.to_vec());
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(
+                b"BT /F1 12 Tf 72 600 Td (C) Tj ET /Inner Do BT /F1 12 Tf 72 300 Td (D) Tj ET"
+                    .to_vec(),
+            );
+        let positions = transforms(&document);
+        assert_eq!(
+            positions.iter().map(|m| (m[4], m[5])).collect::<Vec<_>>(),
+            [(72., 600.), (172., 400.), (72., 480.), (72., 300.)]
+        );
         for invalid in [
             vec![1.into()],
             vec![
@@ -583,6 +616,76 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             text::page(&document, 1, 128),
             Err(Failure::Malformed)
         ));
+    }
+
+    #[test]
+    fn simple_font_missing_width_comes_from_its_descriptor() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let descriptor = document.add_object(dictionary! {
+            "Type" => "FontDescriptor", "FontName" => "Fixture", "Flags" => 32,
+            "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 1000.into()],
+            "ItalicAngle" => 0, "Ascent" => 800, "Descent" => -200, "CapHeight" => 700,
+            "StemV" => 80, "MissingWidth" => 600
+        });
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Fixture",
+            "Encoding" => "WinAnsiEncoding", "FontDescriptor" => descriptor,
+            "FirstChar" => 65, "LastChar" => 65, "Widths" => vec![600.into()]
+        });
+        let content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"BT /F1 12 Tf 72 500 Td (B) Tj 6 0 Td (C) Tj ET".to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        for width in [lopdf::Object::Integer(600), lopdf::Object::Real(600.)] {
+            document
+                .get_dictionary_mut(descriptor)
+                .unwrap()
+                .set("MissingWidth", width);
+            assert_eq!(text::page(&document, 1, 128).unwrap().trim(), "BC");
+        }
+        for width in [
+            lopdf::Object::string_literal("600"),
+            lopdf::Object::Real(f32::INFINITY),
+        ] {
+            document
+                .get_dictionary_mut(descriptor)
+                .unwrap()
+                .set("MissingWidth", width);
+            assert!(matches!(
+                text::page(&document, 1, 128),
+                Err(Failure::Malformed)
+            ));
+        }
+        for invalid in [
+            lopdf::Object::Integer(1),
+            lopdf::Object::Reference((999, 0)),
+        ] {
+            document
+                .get_dictionary_mut(font)
+                .unwrap()
+                .set("FontDescriptor", invalid);
+            assert!(matches!(
+                text::page(&document, 1, 128),
+                Err(Failure::Malformed)
+            ));
+        }
+        document
+            .get_dictionary_mut(font)
+            .unwrap()
+            .remove(b"FontDescriptor");
+        assert_eq!(text::page(&document, 1, 128).unwrap().trim(), "B C");
     }
 
     #[test]

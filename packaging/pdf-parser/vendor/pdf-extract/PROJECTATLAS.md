@@ -22,6 +22,8 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
 - Apply ExtGState font dictionaries and finite sizes through the existing scoped font cache.
 - Measure plain-text horizontal advances and font heights from their separate transformed vectors, preserving rotated and anisotropically scaled text spacing.
 - Include configured character and word spacing in the recorded glyph endpoint so adjacent text operations do not fabricate spaces.
+- Save and restore both text matrices with q/Q, following the [ISO-approved text-object errata](https://pdf-issues.pdfa.org/32000-2-2020/clause09.html#941-general), while preserving Form-local execution.
+- Read simple-font MissingWidth from its font descriptor; reject malformed descriptors or nonnumeric/nonfinite widths.
 - Admit only Identity-H Type 0 font encodings through the shared font cache owner.
   Vertical and custom stream CMap encodings return typed unsupported input: the
   pinned CMap byte-width and CID-range mappings cannot provide correct custom

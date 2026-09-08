@@ -40,10 +40,12 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 
 - **AND** Type 0 fonts admit Identity-H with ToUnicode mapping; vertical and custom stream encoding CMaps return typed unsupported input rather than fabricating character codes or positions; horizontal text measures its baseline and height independently under scaling and rotation
 - **AND** CID width ranges apply the declared width to every character through the inclusive last CID, preserving text spacing
+- **AND** simple fonts use the font descriptor's MissingWidth for codes outside their explicit width range, default to zero when absent, and reject malformed descriptors or nonnumeric/nonfinite widths
 - **AND** ExtGState font selections update the font and size with scoped dictionary identity, preserve graphics-state save/restore and Form resources, and reject malformed font entries before publication
 - **AND** marked-content ActualText replacements return typed unsupported input, including named properties and Form-local resource scopes, rather than publishing the underlying glyphs as complete text
 - **AND** quote text-showing operators preserve the corresponding line movement, spacing changes, and text emission
 - **AND** configured character and word spacing contributes to the transformed glyph endpoint without fabricating extra spaces between adjacent text operations; genuine geometric gaps remain word boundaries
+- **AND** q/Q save and restore the text and text-line matrices together, including within Form-local execution, so subsequent positioning uses the restored origin
 - **AND** inherited page rotation uses validated integer quarter turns before text layout; malformed rotation fails before publication
 - **AND** Form XObjects inherit graphics state and compose their matrix with the caller transform, preserving positioned and nested text evidence; malformed matrices fail before publication
 
@@ -51,6 +53,16 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **WHEN** an indexed document is replaced by an admitted PDF or DOCX with no text, including a PDF with a structurally valid zero-page tree
 - **THEN** refresh publishes empty text and no document blocks, regenerates the content summary and any suggested purpose without removed blocks, and preserves authored purposes
 - **AND** malformed page-tree counts remain typed failures that preserve the previous complete publication
+
+#### Scenario: Bounded concurrent document admission
+- **WHEN** concurrent CLI, MCP, or source-parser jobs request document extraction in one process
+- **THEN** only one PDF or DOCX parser executes at a time, preventing their heavyweight memory envelopes from multiplying by the ordinary source-worker count
+- **AND** queued document work observes the caller's cancellation and deadline before parser allocation, and every success or failure releases admission
+
+#### Scenario: Generated configuration upgrade
+- **WHEN** an existing configuration contains the exact ordered pre-document generated source-extension defaults
+- **THEN** runtime normalization admits PDF and DOCX without rewriting the configuration
+- **AND** absent settings use current defaults while reordered, shortened, extended, or empty custom lists remain authoritative
 
 #### Scenario: Valid DOCX
 - **WHEN** a ZIP container passes entry/path/compressed/expanded/recursion limits and contains admitted `word/document.xml` with Transitional or Strict WordprocessingML namespace identity, independent of its prefix

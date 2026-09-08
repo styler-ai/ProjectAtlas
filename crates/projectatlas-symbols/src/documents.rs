@@ -10,6 +10,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::{Cursor, Read};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::time::Duration;
 use thiserror::Error;
 use zip::{CompressionMethod, ZipArchive};
 
@@ -41,6 +43,28 @@ const MAX_DOCX_XML_DEPTH: usize = 64;
 pub const MAX_DOCUMENT_FACTS: usize = limits::FACT_LIMIT;
 /// The only DOCX package part admitted to the parser.
 pub const DOCX_DOCUMENT_PART: &str = "word/document.xml";
+
+/// Keep heavyweight document parser envelopes from multiplying by source workers.
+/// ponytail: one parser per process; add bounded parallel admission only if measured throughput requires it.
+static DOCUMENT_EXECUTION: Mutex<()> = Mutex::new(());
+
+/// Admit one process-local document parser without hiding cancellation while queued.
+fn lock_document_execution(
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+) -> Result<MutexGuard<'static, ()>, DocumentExtractionError> {
+    loop {
+        control.check(stage)?;
+        match DOCUMENT_EXECUTION.try_lock() {
+            Ok(guard) => return Ok(guard),
+            // The lock owns no mutable parser state; each call owns and drops its parser.
+            Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+        }
+    }
+}
 
 /// A repository document format supported by the bounded extraction boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -385,6 +409,7 @@ fn extract_document_controlled_with_stage(
             language: language.unwrap_or("unknown").to_owned(),
         }
     })?;
+    let _execution = lock_document_execution(control, stage)?;
     let facts = match format {
         DocumentFormat::Pdf => extract_pdf(bytes, control, stage)?,
         DocumentFormat::Docx => extract_docx(bytes, control, stage)?,
@@ -1413,6 +1438,50 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn document_admission_observes_queued_deadline_and_cancellation() {
+        let lease = lock_document_execution(&control(), IndexWorkStage::TextIndex)
+            .expect("initial document lease");
+        let docx = docx_archive(
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+            CompressionMethod::Stored,
+        );
+        for (path, bytes) in [
+            ("guide.docx", docx.as_slice()),
+            ("guide.pdf", minimal_pdf().as_slice()),
+        ] {
+            let waiting =
+                IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_millis(100)));
+            assert!(
+                matches!(
+                    extract_document_text_controlled(bytes, path, None, &waiting),
+                    Err(DocumentExtractionError::Work(
+                        IndexWorkFailure::DeadlineExceeded {
+                            stage: IndexWorkStage::TextIndex
+                        }
+                    ))
+                ),
+                "{path} must wait for the shared document lease"
+            );
+        }
+        let cancellation = IndexCancellation::new();
+        let waiting = IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(5)));
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            cancellation.cancel();
+        });
+        let result = extract_document_text_controlled(&docx, "guide.docx", None, &waiting);
+        cancel.join().expect("cancellation thread");
+        assert!(matches!(
+            result,
+            Err(DocumentExtractionError::Work(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::TextIndex
+            }))
+        ));
+        drop(lease);
+        assert!(extract_document_text_controlled(&docx, "guide.docx", None, &control()).is_ok());
     }
 
     fn mark_zip_encrypted(bytes: &mut [u8]) {

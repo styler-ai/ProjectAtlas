@@ -9687,8 +9687,19 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         repo.join("src/oversized.rs"),
         " ".repeat(2_000_001) + "pub fn oversized_source() {}",
     )?;
-    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas)?;
+    let config_path = atlas.join("config.toml");
+    let legacy_config = format!(
+        "[project]\nroot = \".\"\n[scan]\nsource_extensions = {}\n",
+        serde_json::to_string(BROAD_SOURCE_EXTENSIONS)?,
+    );
+    fs::write(&config_path, &legacy_config)?;
+    let database = atlas.join("projectatlas.db");
     run_scan(&repo, &database)?;
+    if fs::read_to_string(&config_path)? != legacy_config {
+        return Err(io::Error::other("document upgrade rewrote the existing configuration").into());
+    }
     let persisted = Connection::open(&database)?;
     let oversized_symbols: i64 = persisted.query_row(
         "SELECT COUNT(*) FROM symbols WHERE path = 'src/oversized.rs'",

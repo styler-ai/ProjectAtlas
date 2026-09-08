@@ -339,7 +339,7 @@ fn make_font<'a>(doc: &'a Document, font: &'a Dictionary,
     } else if subtype == "Type3" {
         Rc::new(PdfType3Font::new(doc, font))
     } else {
-        Rc::new(PdfSimpleFont::new(doc, font))
+        Rc::new(PdfSimpleFont::new(doc, font)?)
     };
     Ok(entry.or_insert(font).clone())
 }
@@ -384,13 +384,14 @@ fn encoding_to_unicode_table(name: &[u8]) -> Vec<u16> {
     described in Section 5.5.5, “Character Encoding.”
 */
 impl<'a> PdfSimpleFont<'a> {
-    fn new(doc: &'a Document, font: &'a Dictionary) -> PdfSimpleFont<'a> {
+    fn new(doc: &'a Document, font: &'a Dictionary) -> Result<PdfSimpleFont<'a>, OutputError> {
         let base_name = get_name_string(doc, font, b"BaseFont");
         let subtype = get_name_string(doc, font, b"Subtype");
 
         let encoding: Option<&Object> = get(doc, font, b"Encoding");
         dlog!("base_name {} {} enc:{:?} {:?}", base_name, subtype, encoding, font);
-        let descriptor: Option<&Dictionary> = get(doc, font, b"FontDescriptor");
+        let descriptor = font.get(b"FontDescriptor").ok()
+            .map(|value| doc.dereference(value)?.1.as_dict()).transpose()?;
         let mut type1_encoding = None;
         let mut unicode_map = None;
         if let Some(descriptor) = descriptor {
@@ -667,8 +668,17 @@ impl<'a> PdfSimpleFont<'a> {
             }
         }
 
-        let missing_width = get::<Option<f64>>(doc, font, b"MissingWidth").unwrap_or(0.);
-        PdfSimpleFont {doc, font, widths: width_map, encoding: encoding_table, missing_width, unicode_map}
+        let missing_width = match descriptor.and_then(|descriptor| descriptor.get(b"MissingWidth").ok()) {
+            Some(value) => {
+                let value = doc.dereference(value)?.1;
+                if !matches!(value, Object::Integer(_) | Object::Real(_)) || !as_num(value).is_finite() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid font descriptor MissingWidth").into());
+                }
+                as_num(value)
+            }
+            None => 0.,
+        };
+        Ok(PdfSimpleFont {doc, font, widths: width_map, encoding: encoding_table, missing_width, unicode_map})
     }
 
     #[allow(dead_code)]
@@ -1788,11 +1798,12 @@ impl<'a> Processor<'a> {
                     dlog!("T* matrix {:?}", gs.ts.tm);
                     output.end_line()?;
                 }
-                "q" => { gs_stack.push(gs.clone()); }
+                "q" => { gs_stack.push((gs.clone(), tlm)); }
                 "Q" => {
                     let s = gs_stack.pop();
-                    if let Some(s) = s {
+                    if let Some((s, saved_tlm)) = s {
                         gs = s;
+                        tlm = saved_tlm;
                     } else {
                         warn!("No state to pop");
                     }

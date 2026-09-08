@@ -1302,6 +1302,12 @@ fn normalize_config(
             .unwrap_or_else(|| DEFAULT_LEGACY_PURPOSE_FILENAME.to_string()),
         source_extensions: normalize_set(
             scan.source_extensions
+                .filter(|extensions| {
+                    !extensions
+                        .iter()
+                        .map(String::as_str)
+                        .eq(DEFAULT_SOURCE_EXTENSIONS.iter().copied())
+                })
                 .unwrap_or_else(default_source_extensions),
         ),
         exclude_dir_names: exclude_dir_name_set(scan.exclude_dir_names),
@@ -3163,6 +3169,43 @@ root = "."
         }
         if config.scan_options().language_overrides != config.language_overrides {
             return Err(io::Error::other("scanner did not receive language overrides").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn config_extends_only_the_exact_generated_source_extension_list() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join(".projectatlas").join("config.toml");
+        let legacy = super::DEFAULT_SOURCE_EXTENSIONS.to_vec();
+        let mut reordered = legacy.clone();
+        reordered.reverse();
+        for (extensions, documents) in [
+            (legacy, true),
+            (vec![".rs"], false),
+            (reordered, false),
+            (Vec::new(), false),
+        ] {
+            let text = format!(
+                "[project]\nroot = \".\"\n[scan]\nsource_extensions = {}\n",
+                serde_json::to_string(&extensions)?
+            );
+            let config = load_atlas_config_from_text(&path, &text)?;
+            if config.source_extensions.contains(".pdf") != documents
+                || config.source_extensions.contains(".docx") != documents
+                || (!documents
+                    && config.source_extensions
+                        != extensions
+                            .iter()
+                            .map(|value| value.to_ascii_lowercase())
+                            .collect())
+            {
+                return Err(io::Error::other(format!(
+                    "legacy defaults or custom extension policy changed incorrectly: documents={documents}, input={extensions:?}, actual={:?}", config.source_extensions,
+                ))
+                .into());
+            }
         }
         Ok(())
     }
