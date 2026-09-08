@@ -18514,7 +18514,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
          }\n\
          fn helper() {}\n",
     )?;
-    let db = temp.path().join("projectatlas.db");
+    let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -18591,6 +18591,22 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     let mut analysis_messages = vec![messages[0].clone(), messages[1].clone()];
     analysis_messages.extend(messages[21..].iter().cloned());
     stdout.push_str(&run_phase(&analysis_messages)?);
+    let expected_db = fs::canonicalize(&db)?;
+    for (request_id, scope) in [(3, "init"), (18, "settings")] {
+        let payload: Value = toon_format::decode_default(&mcp_tool_text(&stdout, request_id)?)?;
+        let reported_db = payload[scope]["db"]["path"]
+            .as_str()
+            .ok_or_else(|| io::Error::other(format!("MCP {scope} omitted its database path")))?;
+        let reported_db = fs::canonicalize(reported_db)?;
+        if reported_db != expected_db {
+            return Err(io::Error::other(format!(
+                "MCP {scope} selected {} instead of fixture database {}",
+                reported_db.display(),
+                expected_db.display()
+            ))
+            .into());
+        }
+    }
     assert_frozen_mcp_surfaces_compatible(&stdout)?;
     let session_brief_text = mcp_tool_text(&stdout, 19)?;
     let analysis_text = mcp_tool_text(&stdout, 23)?;
