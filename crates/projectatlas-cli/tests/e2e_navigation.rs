@@ -10109,6 +10109,14 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     let before_unsupported_pdf = mcp_database_snapshot(&database)?;
     for (unsupported_content, diagnostic) in [
         (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /ReversedChars BMC (desrever) Tj EMC ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /ReversedChars << /MCID 0 >> BDC (desrever) Tj EMC ET",
+            "unsupported PDF text semantics",
+        ),
+        (
             "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET",
             "unsupported PDF text semantics",
         ),

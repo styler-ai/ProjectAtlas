@@ -476,6 +476,12 @@ jobs:
         run: |
           cargo test --locked -p projectatlas-symbols documents:: -- --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact
+
+      - name: Document resource proof
+        if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        timeout-minutes: 15
+        shell: bash
+        run: |
           cargo build --locked --release -p projectatlas-cli
           binary="target/release/projectatlas"
           if [[ "$RUNNER_OS" == "Windows" ]]; then

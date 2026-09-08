@@ -2292,6 +2292,22 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         );
     }
 
+    #[test]
+    fn pdf_reversed_chars_refuses_partial_text_publication() {
+        for content in [
+            b"BT /F1 12 Tf 72 500 Td (Prefix) Tj /ReversedChars BMC (desrever) Tj EMC ET".as_slice(),
+            b"BT /F1 12 Tf 72 500 Td (Prefix) Tj /ReversedChars << /MCID 0 >> BDC (desrever) Tj EMC ET",
+        ] {
+            let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
+            document.get_object_mut((4, 0)).expect("page stream").as_stream_mut()
+                .expect("stream").set_content(content.to_vec());
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+            assert!(matches!(result, Err(DocumentExtractionError::UnsupportedPdfInput)), "{result:?}");
+        }
+    }
+
     fn pdf_with_xobject(xobject: lopdf::Stream) -> Vec<u8> {
         let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
         let object = document.add_object(xobject);
