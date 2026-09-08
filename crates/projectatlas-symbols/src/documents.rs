@@ -1866,6 +1866,56 @@ mod tests {
     }
 
     #[test]
+    fn pdf_indirect_page_tree_fields_preserve_exact_facts() {
+        let original = multi_page_pdf();
+        let expected = extract_document_text_controlled(&original, "guide.pdf", None, &control())
+            .expect("direct page tree");
+        let mut document = lopdf::Document::load_mem(&original).expect("fixture PDF");
+        let children = document
+            .get_dictionary((2, 0))
+            .expect("page tree")
+            .get(b"Kids")
+            .expect("children")
+            .clone();
+        let children = document.add_object(children);
+        let alias = document.add_object(lopdf::Object::Reference(children));
+        let count = document.add_object(2);
+        let node = document.get_dictionary_mut((2, 0)).expect("page tree");
+        node.set("Kids", alias);
+        node.set("Count", count);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture serialization");
+        let actual = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
+            .expect("indirect page-tree fields");
+        assert_eq!(actual, expected);
+
+        let cycle = document.new_object_id();
+        document
+            .objects
+            .insert(cycle, lopdf::Object::Reference(cycle));
+        let missing = document.new_object_id();
+        for invalid in [lopdf::Object::Null, 0.into(), cycle.into(), missing.into()] {
+            document
+                .get_dictionary_mut((2, 0))
+                .expect("page tree")
+                .set("Kids", invalid);
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).expect("fixture serialization");
+            let result = extract_document_text_controlled(&bytes, "guide.pdf", None, &control());
+            assert!(
+                matches!(
+                    result,
+                    Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Pdf,
+                        ..
+                    })
+                ),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn pdf_missing_page_tree_child_never_publishes_a_complete_prefix() {
         for declared_count in [1, 2] {
             let mut document = lopdf::Document::load_mem(&multi_page_pdf()).expect("fixture PDF");

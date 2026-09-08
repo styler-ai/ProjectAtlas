@@ -9599,7 +9599,7 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         );
         let pdf_objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
-            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>\nendobj\n".as_slice(),
+            b"2 0 obj\n<< /Type /Pages /Kids 25 0 R /Count 26 0 R /Rotate 90 >>\nendobj\n".as_slice(),
             b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] >> /ExtGState << /GS << /Font [5 0 R 12] >> >> /XObject << /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice(),
             page_object.as_bytes(),
             b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
@@ -9664,6 +9664,8 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "22 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << >> >>\nendobj\n",
             "23 0 obj\n<< /Type /XObject /Subtype /PS /Length 58 >>\nstream\n/Helvetica findfont 12 scalefont setfont (Print only) show\nendstream\nendobj\n",
             "24 0 obj\n<< /Type /XObject /Subtype /Form /Subtype2 /PS /Length 58 >>\nstream\n/Helvetica findfont 12 scalefont setfont (Print only) show\nendstream\nendobj\n",
+            "25 0 obj\n[3 0 R]\nendobj\n",
+            "26 0 obj\n1\nendobj\n",
         ] {
             offsets.push(pdf.len());
             pdf.extend_from_slice(object.as_bytes());
@@ -10196,7 +10198,8 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     }
     // Equal-length page-tree replacement preserves the fixture's xref offsets.
     let empty_pdf = String::from_utf8(make_pdf(""))?
-        .replace("/Kids [3 0 R] /Count 1", "/Kids [     ] /Count 0");
+        .replace("25 0 obj\n[3 0 R]\nendobj\n", "25 0 obj\n[     ]\nendobj\n")
+        .replace("26 0 obj\n1\nendobj\n", "26 0 obj\n0\nendobj\n");
     fs::write(&pdf_path, &empty_pdf)?;
     let mut empty_docx = ZipWriter::new(fs::File::create(&docx_path)?);
     empty_docx.start_file("word/document.xml", FileOptions::default())?;
@@ -10254,7 +10257,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         }
     }
     let before_bad_count = mcp_database_snapshot(&database)?;
-    fs::write(&pdf_path, empty_pdf.replace("/Count 0", "/Count 1"))?;
+    fs::write(
+        &pdf_path,
+        empty_pdf.replace("26 0 obj\n0\nendobj\n", "26 0 obj\n1\nendobj\n"),
+    )?;
     let bad_count = StdCommand::new(&executable)
         .current_dir(&repo)
         .arg("--db")
