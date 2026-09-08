@@ -161,7 +161,7 @@ fn validate_page_tree(
         let node = document.get_dictionary(id).map_err(parser_failure)?;
         if let Some(before) = entered_at {
             let declared = node
-                .get(b"Count")
+                .get_deref(b"Count", document)
                 .map_err(parser_failure)?
                 .as_i64()
                 .map_err(parser_failure)?;
@@ -181,7 +181,7 @@ fn validate_page_tree(
         {
             b"Pages" => {
                 let children = node
-                    .get(b"Kids")
+                    .get_deref(b"Kids", document)
                     .map_err(parser_failure)?
                     .as_array()
                     .map_err(parser_failure)?;
@@ -254,6 +254,15 @@ mod tests {
         assert_eq!(extract(), 0);
         OUTPUT.with(|output| assert_eq!(*output.borrow(), 0u32.to_le_bytes()));
 
+        let children = document.add_object(Vec::<lopdf::Object>::new());
+        let count = document.add_object(0);
+        let node = document.get_dictionary_mut(pages).unwrap();
+        node.set("Kids", children);
+        node.set("Count", count);
+        let mut indirect = Vec::new();
+        document.save_to(&mut indirect).unwrap();
+        assert_eq!(parse(&indirect), Ok((0u32.to_le_bytes().to_vec(), 0)));
+
         document.get_dictionary_mut(pages).unwrap().set("Count", 1);
         let mut invalid = Vec::new();
         document.save_to(&mut invalid).unwrap();
@@ -301,6 +310,77 @@ mod tests {
                 .contains("Output Marker")
         );
         assert!(matches!(text::page(&document, 1, 4), Err(Failure::Output)));
+
+        let parse_document = |document: &mut lopdf::Document| {
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).unwrap();
+            parse(&bytes)
+        };
+        let direct = parse_document(&mut document).unwrap();
+        let children = document.add_object(vec![lopdf::Object::Reference(page)]);
+        let count = document.add_object(1);
+        for (kids, declared) in [
+            (children.into(), lopdf::Object::Integer(1)),
+            (lopdf::Object::Array(vec![page.into()]), count.into()),
+            (children.into(), count.into()),
+        ] {
+            let node = document.get_dictionary_mut(pages).unwrap();
+            node.set("Kids", kids);
+            node.set("Count", declared);
+            assert_eq!(parse_document(&mut document), Ok(direct.clone()));
+        }
+
+        let nested = document.add_object(dictionary! {
+            "Type" => "Pages", "Parent" => pages, "Kids" => children, "Count" => count
+        });
+        document
+            .get_dictionary_mut(page)
+            .unwrap()
+            .set("Parent", nested);
+        let nested_children = document.add_object(vec![lopdf::Object::Reference(nested)]);
+        let nested_alias = document.add_object(lopdf::Object::Reference(nested_children));
+        document
+            .get_dictionary_mut(pages)
+            .unwrap()
+            .set("Kids", nested_alias);
+        assert_eq!(parse_document(&mut document), Ok(direct));
+
+        let cycle = document.new_object_id();
+        document
+            .objects
+            .insert(cycle, lopdf::Object::Reference(cycle));
+        let missing = lopdf::Object::Reference(document.new_object_id());
+        for invalid in [
+            lopdf::Object::Null,
+            0.into(),
+            cycle.into(),
+            missing.clone(),
+            lopdf::Object::Array(vec![missing.clone()]),
+            lopdf::Object::Array(vec![pages.into()]),
+        ] {
+            document
+                .get_dictionary_mut(pages)
+                .unwrap()
+                .set("Kids", invalid);
+            assert_eq!(parse_document(&mut document), Err(Failure::Malformed));
+        }
+        document
+            .get_dictionary_mut(pages)
+            .unwrap()
+            .set("Kids", nested_alias);
+        for invalid in [
+            lopdf::Object::Null,
+            cycle.into(),
+            missing,
+            0.into(),
+            2.into(),
+        ] {
+            document
+                .get_dictionary_mut(pages)
+                .unwrap()
+                .set("Count", invalid);
+            assert_eq!(parse_document(&mut document), Err(Failure::Malformed));
+        }
     }
 
     #[test]
