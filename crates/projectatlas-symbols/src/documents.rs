@@ -1910,6 +1910,13 @@ mod tests {
         let node = document.get_dictionary_mut((2, 0)).expect("page tree");
         node.set("Kids", alias);
         node.set("Count", count);
+        for (id, name) in [((2, 0), "Pages"), ((3, 0), "Page"), ((6, 0), "Page")] {
+            let name = document.add_object(lopdf::Object::Name(name.as_bytes().to_vec()));
+            document
+                .get_dictionary_mut(id)
+                .expect("page-tree node")
+                .set("Type", name);
+        }
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).expect("fixture serialization");
         let actual = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
@@ -1974,7 +1981,8 @@ mod tests {
         let mut document = lopdf::Document::load_mem(&minimal_pdf()).expect("fixture PDF");
         let mut form = lopdf::Dictionary::new();
         form.set("Type", "XObject");
-        form.set("Subtype", "Form");
+        let subtype = document.add_object(lopdf::Object::Name(b"Form".to_vec()));
+        form.set("Subtype", subtype);
         form.set(
             "Matrix",
             vec![1.into(), 0.into(), 0.into(), 1.into(), 0.into(), 600.into()],
@@ -2629,6 +2637,28 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         let facts = extract_document_text_controlled(&bytes, "guide.pdf", None, &control())
             .expect("text and image PDF");
         assert_eq!(facts.text, "Hello PDF");
+        let mut document = lopdf::Document::load_mem(&bytes).expect("image fixture");
+        let subtype = document.add_object(lopdf::Object::Name(b"Image".to_vec()));
+        for object in document.objects.values_mut() {
+            if let lopdf::Object::Stream(stream) = object
+                && stream
+                    .dict
+                    .get(b"Subtype")
+                    .and_then(lopdf::Object::as_name)
+                    .ok()
+                    == Some(b"Image".as_slice())
+            {
+                stream.dict.set("Subtype", subtype);
+                stream.dict.set("Filter", "DCTDecode");
+            }
+        }
+        let mut indirect = Vec::new();
+        document
+            .save_to(&mut indirect)
+            .expect("fixture serialization");
+        let actual = extract_document_text_controlled(&indirect, "guide.pdf", None, &control())
+            .expect("indirect image subtype keeps opaque pixels outside decoding");
+        assert_eq!(actual, facts);
     }
 
     #[test]
