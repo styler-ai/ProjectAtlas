@@ -1412,6 +1412,56 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         );
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
+        for (space, components) in [("CalGray", 1), ("CalRGB", 3), ("Lab", 3)] {
+            let parameters = dictionary! { "WhitePoint" => vec![1.into(), 1.into(), 1.into()] };
+            let indirect = document.add_object(parameters.clone());
+            let tint = document.add_object(dictionary! {
+                "FunctionType" => 2, "Domain" => vec![0.into(), 1.into()], "N" => 1,
+                "C0" => vec![lopdf::Object::Integer(0); components],
+                "C1" => vec![lopdf::Object::Integer(1); components]
+            });
+            for parameters in [lopdf::Object::Dictionary(parameters), indirect.into()] {
+                let calibrated = lopdf::Object::Array(vec![
+                    lopdf::Object::Name(space.as_bytes().to_vec()),
+                    parameters,
+                ]);
+                for selected in [
+                    calibrated.clone(),
+                    lopdf::Object::Array(vec![
+                        "Separation".into(),
+                        "Spot".into(),
+                        calibrated,
+                        tint.into(),
+                    ]),
+                ] {
+                    document
+                        .get_dictionary_mut(page)
+                        .unwrap()
+                        .get_mut(b"Resources")
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .get_mut(b"ColorSpace")
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .set("Calibrated", selected);
+                    document
+                        .get_object_mut(content)
+                        .unwrap()
+                        .as_stream_mut()
+                        .unwrap()
+                        .set_content(
+                            b"/Calibrated cs /Calibrated CS /GS gs BT 72 500 Td (A) Tj ET".to_vec(),
+                        );
+                    assert_eq!(
+                        text::page(&document, 1, 128).unwrap().trim(),
+                        "Z",
+                        "{space}"
+                    );
+                }
+            }
+        }
         for (stream, expected) in [
             (
                 b"/CMYK cs 0 0 0 1 sc /CMYK CS 0 0 0 1 SC /GS gs BT 72 500 Td (A) Tj ET".as_slice(),
