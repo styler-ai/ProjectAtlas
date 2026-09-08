@@ -9613,12 +9613,24 @@ fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Err
         pdf.extend_from_slice(b"\nendstream\nendobj\n");
         offsets.push(pdf.len());
         pdf.extend_from_slice(b"7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Matrix [1 0 0 1 0 600] /Length 41 >>\nstream\nBT /F1 12 Tf 72 0 Td (Runtime Form) ' ET\nendstream\nendobj\n");
-        let custom_encoding = "begincmap /WMode 0 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 1 begincidrange <0000> <FFFF> 0 endcidrange endcmap";
+        let custom_encoding = "/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def
+/CMapName /FixtureEncoding def /CMapType 1 def /WMode 0 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 begincidrange <0000> <FFFF> 0 endcidrange
+endcmap CMapName currentdict /CMap defineresource pop end end";
         let encoding_object = format!(
             "9 0 obj\n<< /Length {} >>\nstream\n{custom_encoding}\nendstream\nendobj\n",
             custom_encoding.len()
         );
-        let unicode = "begincmap /CMapType 2 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <0001> <005A> endbfchar endcmap";
+        let unicode = "/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /FixtureUnicode def /CMapType 2 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 beginbfchar <0001> <005A> endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end";
         let unicode_object = format!(
             "11 0 obj\n<< /Length {} >>\nstream\n{unicode}\nendstream\nendobj\n",
             unicode.len()

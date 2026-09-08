@@ -2034,7 +2034,14 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             if encoding == "custom" {
                 let encoding = document.add_object(lopdf::Stream::new(
                     lopdf::Dictionary::new(),
-                    b"begincmap /WMode 0 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 1 begincidrange <0000> <FFFF> 0 endcidrange endcmap".to_vec(),
+                    b"/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def
+/CMapName /FixtureEncoding def /CMapType 1 def /WMode 0 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 begincidrange <0000> <FFFF> 0 endcidrange
+endcmap CMapName currentdict /CMap defineresource pop end end"
+                        .to_vec(),
                 ));
                 font.set("Encoding", encoding);
             } else {
