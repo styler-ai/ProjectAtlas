@@ -81,6 +81,7 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **AND** deleted and moved-from revision containers suppress all text leaves, separators, and field-state changes while preserving source paragraph/run numbering
 - **AND** field nesting is bounded independently of XML depth and isolated within each text container
 - **AND** Markup Compatibility alternatives emit only the first choice requiring understood WordprocessingML namespaces, or its fallback; unselected branches cannot change extraction context or duplicate evidence
+- **AND** root `mc:Ignorable` declarations admit at most 64 distinct resolved namespace URIs and suppress unknown extension subtrees without suppressing understood Word content; aliases follow URI identity, while nested policies and nonempty `mc:ProcessContent` or `mc:MustUnderstand` return typed unsupported input before publication
 
 #### Scenario: Explicit language overrides a document extension
 - **WHEN** an accepted language override selects another language for a `.pdf` or `.docx` path

@@ -336,6 +336,19 @@ mod tests {
             ("50 60 70 80 v", false),
             ("h 50 60 70 80 v", false),
             ("10 20 m n 50 60 70 80 v", false),
+            ("10 20 m s 50 60 70 80 v", false),
+            ("10 20 m f* 50 60 70 80 v", false),
+            ("10 20 m B 50 60 70 80 v", false),
+            ("10 20 m B* 50 60 70 80 v", false),
+            ("10 20 m b 50 60 70 80 v", false),
+            ("10 20 m b* 50 60 70 80 v", false),
+            ("10 20 m S 50 60 70 80 v", false),
+            ("10 20 m f 50 60 70 80 v", false),
+            ("10 20 m F 50 60 70 80 v", false),
+            (
+                "10 20 30 40 re s 10 20 30 40 re f* 10 20 30 40 re B 10 20 30 40 re B* 10 20 30 40 re b 10 20 30 40 re b*",
+                true,
+            ),
         ] {
             document
                 .get_object_mut(content)

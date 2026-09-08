@@ -1876,8 +1876,9 @@ impl<'a> Processor<'a> {
                                                as_num(&operation.operands[2]),
                                                as_num(&operation.operands[3])))
                 }
-                "s" | "f*" | "B" | "B*" | "b" => {
+                "s" | "f*" | "B" | "B*" | "b" | "b*" => {
                     dlog!("unhandled path op {:?}", operation);
+                    path.ops.clear();
                 }
                 "S" => {
                     output.stroke(&gs.ctm, &gs.stroke_colorspace, &gs.stroke_color, &path)?;

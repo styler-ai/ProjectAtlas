@@ -254,7 +254,10 @@ cached field results and instruction-text leaves outside field-code regions
 remain literal document text. Field nesting has its own 64-level bound and is
 isolated across text-box contexts. Markup Compatibility alternatives select only
 the first choice whose required namespaces are understood WordprocessingML, or
-the fallback. Unselected branches cannot alter text, locators, or field context;
+the fallback. Root `mc:Ignorable` policies retain at most 64 distinct namespace
+URIs and skip unknown extension subtrees; aliases follow URI identity. Nested
+policies and nonempty `mc:ProcessContent` or `mc:MustUnderstand` return typed
+unsupported input. Unselected branches cannot alter text, locators, or field context;
 they retain XML depth, well-formedness, and declaration checks. Explicit language overrides take precedence
 over a PDF/DOCX extension. Explicit nonbreaking and soft hyphens retain their
 Unicode characters and count toward decoded byte offsets. Positional tabs and

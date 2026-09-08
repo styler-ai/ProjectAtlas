@@ -36,6 +36,7 @@ ProjectAtlas carries these local changes for its fixed, contained PDF guest:
   encoding semantics. ToUnicode maps remain supported for admitted fonts.
 - Apply inherited integer page rotation in the initial graphics transform; reject non-quarter-turn or non-integer rotation before publication.
 - Preserve the current point after closed subpaths and rectangles; a curve without a current point returns malformed input instead of panicking.
+- Clear completed paths after every painting operator so obsolete segments cannot accumulate or supply a current point to a later curve.
 - Interpret Form XObjects with inherited graphics state and composed caller/Form
   transforms, skip Image pixels without OCR and print-only PostScript XObjects
   (including the legacy Form/Subtype2 representation), and refuse unknown XObject subtypes

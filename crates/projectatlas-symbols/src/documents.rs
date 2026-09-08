@@ -39,6 +39,8 @@ pub const MAX_DOCUMENT_ENTRIES: usize = 256;
 pub const MAX_DOCUMENT_RECURSION_DEPTH: usize = 1;
 /// Maximum XML element nesting admitted within the document part.
 const MAX_DOCX_XML_DEPTH: usize = 64;
+/// Maximum distinct ignorable namespace URIs in the supported root policy.
+const MAX_DOCX_IGNORABLE_NAMESPACES: usize = 64;
 /// Maximum evidence facts retained from one document.
 pub const MAX_DOCUMENT_FACTS: usize = limits::FACT_LIMIT;
 /// The only DOCX package part admitted to the parser.
@@ -673,13 +675,14 @@ fn extract_docx(
     drop(archive);
     drop(names);
     control.check(stage)?;
-    // Retain XML, parser staging, and namespace resolver copies, plus geometric string
-    // growth in the current run/output/facts, and the bounded fact vector.
+    // Retain XML, parser staging, namespace resolver and deduplicated root policy
+    // copies, plus geometric string growth in the run/output/facts and the fact vector.
     // Archive metadata has already been dropped before these allocations overlap.
     check_memory_budget(
         bytes
             .len()
-            .saturating_add(xml.capacity().saturating_mul(3))
+            .saturating_add(xml.capacity().saturating_mul(4))
+            .saturating_add(MAX_DOCX_IGNORABLE_NAMESPACES * std::mem::size_of::<String>())
             .saturating_add(MAX_DOCUMENT_OUTPUT_BYTES.saturating_mul(4))
             .saturating_add(MAX_DOCX_XML_DEPTH.saturating_mul(
                 std::mem::size_of::<(DocxTextContext, usize)>()
@@ -784,6 +787,7 @@ fn parse_docx(
     let mut text_boxes = Vec::new();
     let mut text_carrier = None;
     let mut alternatives: Vec<DocxAlternative> = Vec::new();
+    let mut ignorable_namespaces: Vec<String> = Vec::new();
     let mut skipped_branch_depth = None;
     let mut deleted_depth = None;
     let mut foreign_depth = None;
@@ -803,7 +807,7 @@ fn parse_docx(
                 })?;
         let compatibility = matches!(&namespace, ResolveResult::Bound(namespace)
             if namespace.as_ref() == "http://schemas.openxmlformats.org/markup-compatibility/2006");
-        let wordprocessing = match namespace {
+        let wordprocessing = match &namespace {
             ResolveResult::Bound(namespace) => wordprocessing_namespace(namespace.as_ref()),
             ResolveResult::Unbound => false,
             ResolveResult::Unknown(prefix) => {
@@ -862,6 +866,14 @@ fn parse_docx(
                     });
                 }
                 if skipped_branch_depth.is_some() {
+                    continue;
+                }
+                if !wordprocessing
+                    && !compatibility
+                    && matches!(&namespace, ResolveResult::Bound(namespace)
+                        if ignorable_namespaces.iter().any(|ignored| ignored == namespace.as_ref()))
+                {
+                    skipped_branch_depth = Some(element_depth);
                     continue;
                 }
                 if compatibility && matches!(name.as_ref(), "Choice" | "Fallback") {
@@ -930,7 +942,87 @@ fn parse_docx(
                         alternative.selected = true;
                     } else {
                         skipped_branch_depth = Some(element_depth);
+                        continue;
                     }
+                }
+                if deleted_depth.is_none()
+                    && !(wordprocessing && matches!(name.as_ref(), "del" | "moveFrom"))
+                {
+                    for (index, attribute) in event.attributes().enumerate() {
+                        check_parser_iteration(index, &mut || control.check(stage))?;
+                        let attribute =
+                            attribute.map_err(|error| DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: error.to_string(),
+                            })?;
+                        let (attribute_namespace, attribute_name) =
+                            reader.resolver().resolve_attribute(attribute.key);
+                        if let ResolveResult::Unknown(prefix) = &attribute_namespace {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: format!(
+                                    "DOCX XML attribute has an undeclared namespace prefix: {prefix}"
+                                ),
+                            });
+                        }
+                        if !matches!(attribute_namespace, ResolveResult::Bound(namespace)
+                            if namespace.as_ref() == "http://schemas.openxmlformats.org/markup-compatibility/2006")
+                            || !matches!(
+                                attribute_name.as_ref(),
+                                "Ignorable" | "ProcessContent" | "MustUnderstand"
+                            )
+                        {
+                            continue;
+                        }
+                        let value =
+                            quick_xml::escape::unescape(&attribute.value).map_err(|error| {
+                                DocumentExtractionError::Malformed {
+                                    format: DocumentFormat::Docx,
+                                    message: error.to_string(),
+                                }
+                            })?;
+                        if value.split_whitespace().next().is_none() {
+                            continue;
+                        }
+                        if attribute_name.as_ref() != "Ignorable" || element_depth != 1 {
+                            return Err(DocumentExtractionError::UnsupportedDocxInput {
+                                message: "DOCX compatibility policy supports only root Ignorable namespaces".to_owned(),
+                            });
+                        }
+                        for (index, prefix) in value.split_whitespace().enumerate() {
+                            check_parser_iteration(index, &mut || control.check(stage))?;
+                            if prefix.contains(':') {
+                                return Err(DocumentExtractionError::Malformed {
+                                    format: DocumentFormat::Docx,
+                                    message: "DOCX Ignorable policy requires namespace prefixes, not qualified names".to_owned(),
+                                });
+                            }
+                            let qualified = format!("{prefix}:ignored");
+                            let (resolved, _) =
+                                reader.resolver().resolve_element(QName(&qualified));
+                            let ResolveResult::Bound(namespace) = resolved else {
+                                return Err(DocumentExtractionError::Malformed {
+                                    format: DocumentFormat::Docx,
+                                    message: "DOCX Ignorable policy names an undeclared namespace"
+                                        .to_owned(),
+                                });
+                            };
+                            if ignorable_namespaces
+                                .iter()
+                                .any(|ignored| ignored == namespace.as_ref())
+                            {
+                                continue;
+                            }
+                            if ignorable_namespaces.len() == MAX_DOCX_IGNORABLE_NAMESPACES {
+                                return Err(DocumentExtractionError::UnsupportedDocxInput {
+                                    message: "DOCX root Ignorable policy exceeds the supported namespace count".to_owned(),
+                                });
+                            }
+                            ignorable_namespaces.push(namespace.as_ref().to_owned());
+                        }
+                    }
+                }
+                if compatibility && matches!(name.as_ref(), "Choice" | "Fallback") {
                     continue;
                 }
                 if alternatives
@@ -3010,6 +3102,140 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn docx_root_ignorable_policy_preserves_visible_text_and_refuses_other_policies() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future" mc:Ignorable="future"><w:body><future:wrapper><w:p><w:r><w:t>Ignored</w:t></w:r></w:p></future:wrapper><w:p><w:r><w:t>Visible</w:t></w:r></w:p></w:body></w:document>"#;
+        for source in [
+            xml.to_owned(),
+            xml.replace("<future:wrapper><w:p><w:r><w:t>Ignored</w:t></w:r></w:p></future:wrapper>", ""),
+            xml.replace("mc:Ignorable=\"future\"", &format!("mc:Ignorable=\"{}\"", "future ".repeat(128))),
+            xml.replace("<future:wrapper>", "<mc:AlternateContent><mc:Choice Requires=\"future\" mc:ProcessContent=\"future:wrapper\"><future:wrapper>").replace("</future:wrapper>", "</future:wrapper></mc:Choice><mc:Fallback/></mc:AlternateContent>"),
+            xml.replace(
+                "<future:wrapper>",
+                "<alias:wrapper xmlns:alias=\"urn:future\">",
+            )
+            .replace("</future:wrapper>", "</alias:wrapper>"),
+            xml.replace(
+                "mc:Ignorable=\"future\"",
+                "mc:Ignorable=\"future future w\"",
+            ),
+            xml.replace(
+                "<future:wrapper>",
+                "<future:wrapper mc:ProcessContent=\"future:child\">",
+            ),
+            xml.replace(
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "http://purl.oclc.org/ooxml/wordprocessingml/main",
+            ),
+            xml.replace("mc:", "compat:")
+                .replace("xmlns:mc=", "xmlns:compat="),
+        ] {
+            let parsed = parse_docx(source.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("ignore only unknown root-policy namespaces");
+            assert_eq!(parsed.text, "Visible");
+            assert_eq!(parsed.facts.len(), 1);
+            assert!(matches!(
+                parsed.facts[0].locator,
+                DocumentLocator::Docx {
+                    paragraph: 1,
+                    run: 1,
+                    text_start: 0,
+                    text_end: 7,
+                    ..
+                }
+            ));
+        }
+        let deleted = xml
+            .replace("<future:wrapper>", "<w:del mc:Ignorable=\"future\">")
+            .replace("</future:wrapper>", "</w:del>");
+        let parsed = parse_docx(deleted.as_bytes(), &control(), IndexWorkStage::TextIndex)
+            .expect("deleted policies do not affect live text");
+        assert_eq!(parsed.text, "Visible");
+        assert!(matches!(
+            parsed.facts[0].locator,
+            DocumentLocator::Docx {
+                paragraph: 2,
+                run: 1,
+                text_start: 0,
+                text_end: 7,
+                ..
+            }
+        ));
+        for source in [
+            xml.replace("mc:Ignorable=\"future\"", "mc:Ignorable=\"\""),
+            xml.replace("mc:Ignorable=\"future\"", "mc:Ignorable=\"w\""),
+            xml.replace(
+                "<future:wrapper>",
+                "<future:wrapper xmlns:future=\"urn:different\">",
+            ),
+            xml.replace("mc:Ignorable=\"future\"", "Ignorable=\"future\""),
+        ] {
+            assert_eq!(
+                parse_docx(source.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                    .expect("unlisted wrappers retain existing behavior")
+                    .text,
+                "Ignored\nVisible"
+            );
+        }
+        for source in [
+            xml.replace(
+                "mc:Ignorable=\"future\"",
+                "mc:ProcessContent=\"future:wrapper\"",
+            ),
+            xml.replace("<w:body>", "<w:body><mc:AlternateContent><mc:Choice Requires=\"w\" mc:ProcessContent=\"future:wrapper\">").replace("</w:body>", "</mc:Choice></mc:AlternateContent></w:body>"),
+            xml.replace("mc:Ignorable=\"future\"", "mc:MustUnderstand=\"future\""),
+            xml.replace(" mc:Ignorable=\"future\"", "")
+                .replace("<w:body>", "<w:body mc:Ignorable=\"future\">"),
+        ] {
+            assert!(matches!(
+                parse_docx(source.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+            ));
+        }
+        for policy in ["missing", "future:wrapper"] {
+            assert!(matches!(
+                parse_docx(
+                    xml.replace(
+                        "mc:Ignorable=\"future\"",
+                        &format!("mc:Ignorable=\"{policy}\"")
+                    )
+                    .as_bytes(),
+                    &control(),
+                    IndexWorkStage::TextIndex
+                ),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+        for count in [
+            MAX_DOCX_IGNORABLE_NAMESPACES,
+            MAX_DOCX_IGNORABLE_NAMESPACES + 1,
+        ] {
+            let declarations = (0..count)
+                .map(|index| format!("xmlns:n{index}=\"urn:{index}\" "))
+                .collect::<String>();
+            let prefixes = (0..count)
+                .map(|index| format!("n{index} "))
+                .collect::<String>();
+            let source = xml.replace(
+                "mc:Ignorable=\"future\"",
+                &format!("{declarations} mc:Ignorable=\"{prefixes}\""),
+            );
+            let bytes = docx_archive(source.as_bytes(), CompressionMethod::Deflated);
+            let result = extract_document_text_controlled(&bytes, "guide.docx", None, &control());
+            if count == MAX_DOCX_IGNORABLE_NAMESPACES {
+                assert_eq!(
+                    result.expect("bounded distinct namespaces").text,
+                    "Ignored\nVisible"
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+                ));
+            }
+        }
     }
 
     #[test]
