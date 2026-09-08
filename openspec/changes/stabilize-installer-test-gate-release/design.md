@@ -37,7 +37,7 @@ N/A: Existing installer, fixture, process, and lifecycle-lock owners are unchang
 
 ## Dependencies / Cross-Issue Impact
 
-No implementation prerequisite. #572 is a direct child and blocker of #492 and a
+Validation requires the accepted #574 MCP fixture repair on main. #572 is a direct child and blocker of #492 and a
 shared validation prerequisite of #465. Document source and parser artifacts stay
 in #465; this change repairs only the installer fixture baseline.
 
