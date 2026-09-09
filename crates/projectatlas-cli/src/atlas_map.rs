@@ -7,7 +7,8 @@ use projectatlas_core::{
     validated_repo_file_key,
 };
 use projectatlas_db::AtlasStore;
-use projectatlas_fs::{ScanOptions, scan_repo};
+use projectatlas_fs::{ScanOptions, explicit_language_override, scan_repo};
+use projectatlas_symbols::document_format_for_path;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -47,6 +48,9 @@ const OVERVIEW_KEYS: &[&str] = &[
 ];
 /// Source extensions scanned for Purpose metadata by default.
 const DEFAULT_SOURCE_EXTENSIONS: &[&str] = BROAD_SOURCE_EXTENSIONS;
+/// Document extensions admitted by the bounded document parser in addition to
+/// the frozen v0.3.26 broad-source compatibility set.
+const DOCUMENT_SOURCE_EXTENSIONS: &[&str] = &[".pdf", ".docx"];
 /// Directory names excluded from scans even when config is hand-edited.
 const REQUIRED_EXCLUDE_DIR_NAMES: &[&str] = &[".git", ".projectatlas"];
 /// Directory names excluded from scans by default.
@@ -1297,12 +1301,16 @@ fn normalize_config(
         purpose_filename: project
             .purpose_filename
             .unwrap_or_else(|| DEFAULT_LEGACY_PURPOSE_FILENAME.to_string()),
-        source_extensions: normalize_set(scan.source_extensions.unwrap_or_else(|| {
-            DEFAULT_SOURCE_EXTENSIONS
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })),
+        source_extensions: normalize_set(
+            scan.source_extensions
+                .filter(|extensions| {
+                    !extensions
+                        .iter()
+                        .map(String::as_str)
+                        .eq(DEFAULT_SOURCE_EXTENSIONS.iter().copied())
+                })
+                .unwrap_or_else(default_source_extensions),
+        ),
         exclude_dir_names: exclude_dir_name_set(scan.exclude_dir_names),
         exclude_dir_suffixes: string_set(scan.exclude_dir_suffixes, &[".egg-info"]),
         exclude_path_prefixes: normalize_prefix_set(scan.exclude_path_prefixes)?,
@@ -1856,6 +1864,15 @@ fn extract_purpose_header_with_reader<E, F>(
 where
     F: FnMut(&Path) -> Result<String, E>,
 {
+    let extension = normalized_extension(rel_path);
+    let language =
+        explicit_language_override(rel_path, Some(&extension), &config.language_overrides);
+    if document_format_for_path(rel_path, language).is_some() {
+        return Ok((
+            None,
+            vec!["missing database purpose for document".to_owned()],
+        ));
+    }
     let content = read_text(path)?;
     let lines = content.lines().map(ToString::to_string).collect::<Vec<_>>();
     let style = resolve_purpose_style(rel_path, config);
@@ -2906,7 +2923,12 @@ fn resolve_config_parent(parent: &Path) -> PathBuf {
 
 /// Build default config text with the supplied project root value.
 fn default_config_text_with_root(root_value: &str) -> String {
-    let source_extensions = toml_array(DEFAULT_SOURCE_EXTENSIONS);
+    let default_source_extensions = default_source_extensions();
+    let source_extension_refs = default_source_extensions
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let source_extensions = toml_array(&source_extension_refs);
     [
         "[project]",
         &format!(
@@ -2948,6 +2970,15 @@ fn default_config_text_with_root(root_value: &str) -> String {
         "",
     ]
     .join("\n")
+}
+
+/// Return the normal source-extension defaults plus supported document files.
+fn default_source_extensions() -> Vec<String> {
+    DEFAULT_SOURCE_EXTENSIONS
+        .iter()
+        .chain(DOCUMENT_SOURCE_EXTENSIONS)
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Default `.gitignore` text created only by the explicit setup helper.
@@ -3035,6 +3066,106 @@ mod tests {
             purpose_default_style: "line-comment".to_string(),
             line_comment_prefixes: vec!["//".to_string()],
         }
+    }
+
+    #[test]
+    fn document_map_records_preserve_purposes_without_reading_binary_headers()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let config = test_config(temp.path().join("projectatlas.toon"));
+        for path in ["guide.pdf", "guide.DOCX", "approved.docx"] {
+            fs::write(temp.path().join(path), b"\xff\xfe binary document")?;
+        }
+        fs::write(
+            temp.path().join("lib.rs"),
+            "// Purpose: Explain source ownership.\n",
+        )?;
+        let files = ["guide.pdf", "guide.DOCX", "approved.docx", "lib.rs"].map(str::to_owned);
+        let purposes = BTreeMap::from([(
+            "approved.docx".to_owned(),
+            "Explain document ownership.".to_owned(),
+        )]);
+        let (records, missing, invalid) = super::build_file_records(&files, &config, &purposes)?;
+        let actual = records
+            .iter()
+            .map(|record| {
+                (
+                    record.path.as_str(),
+                    record.summary.as_str(),
+                    record.source.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if missing != ["guide.pdf", "guide.DOCX"]
+            || !invalid.is_empty()
+            || actual
+                != [
+                    ("guide.pdf", "MISSING", "missing"),
+                    ("guide.DOCX", "MISSING", "missing"),
+                    ("approved.docx", "Explain document ownership.", "database"),
+                    ("lib.rs", "Explain source ownership.", "header"),
+                ]
+        {
+            return Err(io::Error::other("map changed binary or text purpose ownership").into());
+        }
+        fs::write(temp.path().join("invalid.rs"), b"\xff")?;
+        if super::build_file_records(&["invalid.rs".to_owned()], &config, &purposes).is_ok() {
+            return Err(io::Error::other("map accepted invalid UTF-8 source headers").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn document_map_headers_follow_scanner_language_overrides() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        for (path, overrides, text_header) in [
+            ("guide.pdf", vec![(".pdf", "rust")], true),
+            ("guide.DOCX", vec![(".docx", "rust")], true),
+            ("guide.rs", vec![(".rs", "pdf")], false),
+            ("guide.rs", vec![("guide.rs", "docx")], false),
+            (
+                "guide.pdf",
+                vec![(".pdf", "pdf"), ("guide.pdf", "rust")],
+                true,
+            ),
+            (
+                "guide.text.pdf",
+                vec![(".pdf", "pdf"), (".text.pdf", "rust")],
+                true,
+            ),
+        ] {
+            let mut config = test_config(temp.path().join("projectatlas.toon"));
+            config.language_overrides = overrides
+                .into_iter()
+                .map(|(selector, language)| (selector.to_owned(), language.to_owned()))
+                .collect();
+            fs::write(
+                temp.path().join(path),
+                if text_header {
+                    b"// Purpose: Explain configured source ownership.\n".as_slice()
+                } else {
+                    b"\xff\xfe binary document"
+                },
+            )?;
+            let (records, missing, invalid) =
+                super::build_file_records(&[path.to_owned()], &config, &BTreeMap::new())?;
+            let expected = if text_header {
+                "Explain configured source ownership."
+            } else {
+                "MISSING"
+            };
+            if records.len() != 1
+                || records[0].summary != expected
+                || missing.is_empty() != text_header
+                || !invalid.is_empty()
+            {
+                return Err(io::Error::other(format!(
+                    "map ignored language override for {path}: {records:?}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -3148,6 +3279,43 @@ root = "."
         }
         if config.scan_options().language_overrides != config.language_overrides {
             return Err(io::Error::other("scanner did not receive language overrides").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn config_extends_only_the_exact_generated_source_extension_list() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join(".projectatlas").join("config.toml");
+        let legacy = super::DEFAULT_SOURCE_EXTENSIONS.to_vec();
+        let mut reordered = legacy.clone();
+        reordered.reverse();
+        for (extensions, documents) in [
+            (legacy, true),
+            (vec![".rs"], false),
+            (reordered, false),
+            (Vec::new(), false),
+        ] {
+            let text = format!(
+                "[project]\nroot = \".\"\n[scan]\nsource_extensions = {}\n",
+                serde_json::to_string(&extensions)?
+            );
+            let config = load_atlas_config_from_text(&path, &text)?;
+            if config.source_extensions.contains(".pdf") != documents
+                || config.source_extensions.contains(".docx") != documents
+                || (!documents
+                    && config.source_extensions
+                        != extensions
+                            .iter()
+                            .map(|value| value.to_ascii_lowercase())
+                            .collect())
+            {
+                return Err(io::Error::other(format!(
+                    "legacy defaults or custom extension policy changed incorrectly: documents={documents}, input={extensions:?}, actual={:?}", config.source_extensions,
+                ))
+                .into());
+            }
         }
         Ok(())
     }

@@ -72,6 +72,27 @@ pub(crate) fn is_scanner_fallback_summary(summary: &str) -> bool {
     !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
 }
 
+/// Summarize a bounded literal excerpt without inferring document headings or titles.
+pub(crate) fn document_summary_from_facts(facts: &projectatlas_symbols::DocumentFacts) -> String {
+    let prefix = facts
+        .text
+        .split_whitespace()
+        .flat_map(|word| word.chars().chain(std::iter::once(' ')))
+        .take(LABEL_LIMIT + 1)
+        .collect::<String>();
+    let excerpt = prefix.trim_end();
+    if excerpt.is_empty() {
+        format!("{} document with no extracted text.", facts.format)
+    } else {
+        let excerpt = if excerpt.chars().count() > LABEL_LIMIT {
+            truncate_chars(excerpt, LABEL_LIMIT)
+        } else {
+            excerpt.to_owned()
+        };
+        format!("{} document text: {excerpt}", facts.format)
+    }
+}
+
 /// Summarize a Markdown or MDX document from parsed `CommonMark` headings.
 fn markdown_summary(content: &str) -> Option<String> {
     markdown_summary_from_facts(
@@ -810,6 +831,34 @@ fn truncate_chars(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{is_scanner_fallback_summary, structural_summary_for_path};
+
+    #[test]
+    fn document_summary_preserves_literal_punctuation_and_bounds_unicode() {
+        use projectatlas_symbols::{
+            DocumentCompleteness, DocumentFacts, DocumentFormat, DocumentParserProvenance,
+        };
+        let mut facts = DocumentFacts {
+            format: DocumentFormat::Docx,
+            text: "\"#\"\n\t#".to_owned(),
+            facts: Vec::new(),
+            completeness: DocumentCompleteness::Complete,
+            provenance: DocumentParserProvenance::QuickXml,
+        };
+        assert_eq!(
+            super::document_summary_from_facts(&facts),
+            "docx document text: \"#\" #"
+        );
+        facts.text = "\n\t".to_owned() + &"界".repeat(1000);
+        assert_eq!(
+            super::document_summary_from_facts(&facts),
+            format!("docx document text: {}...", "界".repeat(77))
+        );
+        facts.text = " \n\t".to_owned();
+        assert_eq!(
+            super::document_summary_from_facts(&facts),
+            "docx document with no extracted text."
+        );
+    }
 
     #[test]
     fn summarizes_markdown_headings() {

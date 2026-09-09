@@ -56,10 +56,10 @@
 
 ## 9. Real host configuration consumption (#390)
 
-- [ ] 9.1 Trace installer-generated Claude Code and OpenCode configuration ownership, native schemas, absolute runtime/database/config fields, version guards, restart messaging, isolated host roots, and collision-safe repair paths.
-- [ ] 9.2 Make each installed host consume its generated configuration through the real host reader and establish a ProjectAtlas MCP session without weakening per-project routing or treating structural parsing or checked-in fallback state as proof.
-- [ ] 9.3 Exercise installer-generated Claude Code and OpenCode configuration through the actual installed host readers in isolated homes/config roots on supported platforms. Cover valid launch and MCP initialize/session/source-evidence readback; missing host; invalid, stale, wrong-version, and repaired configuration; shared-registry default versus explicit project-root routing; and uninstall. Do not mutate unrelated host-global configuration, credentials, authentication state, or project data.
-- [ ] 9.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 9.1 Trace installer-generated Claude Code and OpenCode configuration ownership, native schemas, absolute runtime/database/config fields, version guards, restart messaging, isolated host roots, and collision-safe repair paths.
+- [x] 9.2 Make each installed host consume its generated configuration through the real host reader and establish a ProjectAtlas MCP session without weakening per-project routing or treating structural parsing or checked-in fallback state as proof.
+- [x] 9.3 Exercise installer-generated Claude Code and OpenCode configuration through the actual installed host readers in isolated homes/config roots on supported platforms. Cover valid launch and MCP initialize/session/source-evidence readback; missing host; invalid, stale, wrong-version, and repaired configuration; shared-registry default versus explicit project-root routing; and uninstall. Do not mutate unrelated host-global configuration, credentials, authentication state, or project data.
+- [x] 9.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 10. Released-main database baseline decision (#456)
 
@@ -77,10 +77,10 @@
 
 ## 12. Bounded PDF and DOCX extraction (#465)
 
-- [ ] 12.1 Freeze PDF and DOCX as the only v0.5 formats; pin and audit `pdf-extract` 0.12.0, `quick-xml` 0.42.0, and `zip` 0.6.6 with default features disabled and only `deflate` enabled plus their exact locked transitive trees for license, security, unsafe, panic, decompression, cancellation, and supported-format limits using `cargo tree -e features` and the locked `cargo deny --all-features` gate; admit only PDF content streams and stored or DEFLATE DOCX `word/document.xml`, reject encrypted or unsupported compression as typed unsupported input before text publication, and define PDF page/text-span and DOCX part/paragraph/run/text-span locators, magic/extension admission, provenance, completeness, compressed/input/expanded/output/time/memory/recursion/entry ceilings, typed failures, sparse-link policy, and the exact existing-or-new SQLite schema/index/query/transaction plan before adapters.
-- [ ] 12.2 Implement one bounded in-process extraction boundary in `projectatlas-symbols` and runtime publication using the pinned crates and existing text/graph services; DOCX admits only the declared XML part, PDF executes no scripts or external references, and neither format invokes arbitrary programs, OCR, macros, networking, or embedded recursive parsers.
-- [ ] 12.3 Cover valid multi-page PDF and DOCX, exact locator round-trip, malformed/truncated/encrypted/password PDF, ZIP slip/duplicate entry/compression bomb/oversized/recursive DOCX, unsupported/mismatched magic, non-UTF-8 metadata, cancellation/timeout, wrong root, sparse linkage, incremental replace/delete, rollback, CLI/MCP navigation, and Windows/Linux/macOS E2E with intended-scale CPU/RSS/I/O/database/output bounds.
-- [ ] 12.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 12.1 Freeze PDF and DOCX as the only v0.5 formats; pin and audit the fixed `pdf-extract` 0.12.0+projectatlas guest with `lopdf` 0.44.0, the `wasmi`/`wasmi_core` 2.0.0 host, `quick-xml` 0.42.0, and `zip` 0.6.6 (ZIP default features disabled, only `deflate` enabled) plus their exact locked transitive trees for license, security, unsafe, panic, decompression, cancellation, and supported-format limits using `cargo tree -e features` and the locked `cargo deny --all-features` gate; admit only PDF content streams and stored or DEFLATE DOCX `word/document.xml`, reject encrypted or unsupported compression as typed unsupported input before text publication, and define PDF page/text-span and DOCX part/paragraph/run/text-span locators, magic/extension admission, provenance, completeness, compressed/input/expanded/output/time/memory/recursion/entry ceilings, typed failures, sparse-link policy, and the exact existing-or-new SQLite schema/index/query/transaction plan before adapters.
+- [x] 12.2 Implement one bounded in-process extraction boundary in `projectatlas-symbols` and runtime publication using the pinned crates and existing text/graph services; DOCX admits only the declared XML part, PDF executes no scripts or external references, and neither format invokes arbitrary programs, OCR, macros, networking, or embedded recursive parsers.
+- [x] 12.3 Cover valid multi-page PDF and DOCX, exact locator round-trip, malformed/truncated/encrypted/password PDF, ZIP slip/duplicate entry/compression bomb/oversized/recursive DOCX, unsupported/mismatched magic, non-UTF-8 metadata, cancellation/timeout, wrong root, sparse linkage, incremental replace/delete, rollback, CLI/MCP navigation, and Windows/Linux/macOS E2E with intended-scale CPU/RSS/I/O/database/output bounds.
+- [x] 12.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 13. Invalid graph identity admission (#476)
 
@@ -91,10 +91,10 @@
 
 ## 14. Built-in PHP support (#477)
 
-- [ ] 14.1 Pin `tree-sitter-php` 0.24.2 against the workspace Tree-sitter 0.26.9 contract and freeze PHP 8 registration, grammar dispatch, symbol kinds/parents/signatures, byte/line/column spans, namespace/import/include/call relation rules, parser provenance, mixed HTML/PHP handling, dynamic/unsupported fallback, cancellation, and file/node/output budgets without a provider framework.
-- [ ] 14.2 Add PHP to the existing `LanguageCapability` and built-in Tree-sitter dispatch and implement the smallest PHP-specific node mapping inside `projectatlas-symbols`; centralize identifiers at the owning registry/parser boundary and preserve existing runtime/graph publication.
-- [ ] 14.3 Cover functions, namespaces, classes/interfaces/traits/enums, methods/properties/constants, `use` aliases, include/require, malformed/recovery trees, mixed HTML/PHP, dynamic constructs, duplicate/ambiguous names, exact spans, large/canceled parses, incremental refresh, CLI/MCP navigation, representative Composer repositories, and Windows/Linux/macOS behavior.
-- [ ] 14.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 14.1 Pin `tree-sitter-php` 0.24.2 against the workspace Tree-sitter 0.26.9 contract and freeze PHP 8 registration, grammar dispatch, symbol kinds/parents/signatures, byte/line/column spans, namespace/import/include/call relation rules, parser provenance, mixed HTML/PHP handling, dynamic/unsupported fallback, cancellation, and file/node/output budgets without a provider framework.
+- [x] 14.2 Add PHP to the existing `LanguageCapability` and built-in Tree-sitter dispatch and implement the smallest PHP-specific node mapping inside `projectatlas-symbols`; centralize identifiers at the owning registry/parser boundary and preserve existing runtime/graph publication.
+- [x] 14.3 Cover functions, namespaces, classes/interfaces/traits/enums, methods/properties/constants, `use` aliases, include/require, malformed/recovery trees, mixed HTML/PHP, dynamic constructs, duplicate/ambiguous names, exact spans, large/canceled parses, incremental refresh, CLI/MCP navigation, representative Composer repositories, and Windows/Linux/macOS behavior.
+- [x] 14.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 15. Complete bounded document-graph publication (#480)
 
@@ -119,10 +119,10 @@
 
 ## 18. Native non-UTF-8 worktree identity (#484)
 
-- [ ] 18.1 After #481, reuse its native identity and lossless/versioned SQLite codec for worktree root, Git common directory, and Git administrative directory; land the smallest key/constraint/migration/transaction/rollback/recovery delta with real write/read and duplicate-key proof before adapters change.
-- [ ] 18.2 Remove premature UTF-8 conversion from registration, alias routing, duplicate detection, retirement, capacity, watcher, filesystem, Git process, CLI, and MCP boundaries; keep identity native and make UTF-8 display a terminal typed-unavailable conversion.
-- [ ] 18.3 Cover invalid UTF-8 bytes independently in root/common/admin paths, valid Unicode, aliases, duplicate native registration, capacity, retirement, watcher and Git command invocation, UTF-8-only CLI/MCP output, migration, injected failure, rollback, retry, and supported Linux/macOS compatibility.
-- [ ] 18.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 18.1 After #481, reuse its native identity and lossless/versioned SQLite codec for worktree root, Git common directory, and Git administrative directory; land the smallest key/constraint/migration/transaction/rollback/recovery delta with real write/read and duplicate-key proof before adapters change.
+- [x] 18.2 Remove premature UTF-8 conversion from registration, alias routing, duplicate detection, retirement, capacity, watcher, filesystem, Git process, CLI, and MCP boundaries; keep identity native and make UTF-8 display a terminal typed-unavailable conversion.
+- [x] 18.3 Cover invalid UTF-8 bytes independently in root/common/admin paths, valid Unicode, aliases, duplicate native registration, capacity, retirement, watcher and Git command invocation, UTF-8-only CLI/MCP output, migration, injected failure, rollback, retry, and supported Linux/macOS compatibility.
+- [x] 18.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 19. Clean macOS Apple Silicon installed lifecycle (#485)
 
@@ -140,10 +140,10 @@
 
 ## 21. CLI E2E suite contract split (#487)
 
-- [ ] 21.1 Produce and accept a complete test-to-domain move map for every `e2e.rs` test/helper/platform gate using `e2e_lifecycle.rs`, `e2e_delivery.rs`, `e2e_navigation.rs`, `e2e_worktrees.rs`, `e2e_maintenance.rs`, and existing separate suites; identify exact shared-support users and merge any proposed binary whose inventory proves no cohesive boundary rather than preserving symmetry.
-- [ ] 21.2 Move one coherent domain at a time, extracting only multiply-owned process/repository/JSON/platform/package support, preserving durable test names and ignored/platform attributes, and keeping each intermediate integration binary runnable.
-- [ ] 21.3 Compare pre/post test inventory and CI command selection and prove no test, assertion, ignored contract, platform gate, timeout, cleanup, process isolation, packaged-product path, or release selection was dropped or silently weakened; run each binary plus workspace/all-feature gates on affected platforms.
-- [ ] 21.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 21.1 Produce and accept a complete test-to-domain move map for every `e2e.rs` test/helper/platform gate using `e2e_lifecycle.rs`, `e2e_delivery.rs`, `e2e_navigation.rs`, `e2e_worktrees.rs`, `e2e_maintenance.rs`, and existing separate suites; identify exact shared-support users and merge any proposed binary whose inventory proves no cohesive boundary rather than preserving symmetry.
+- [x] 21.2 Move one coherent domain at a time, extracting only multiply-owned process/repository/JSON/platform/package support, preserving durable test names and ignored/platform attributes, and keeping each intermediate integration binary runnable.
+- [x] 21.3 Compare pre/post test inventory and CI command selection and prove no test, assertion, ignored contract, platform gate, timeout, cleanup, process isolation, packaged-product path, or release selection was dropped or silently weakened; run each binary plus workspace/all-feature gates on affected platforms.
+- [x] 21.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 22. Production module responsibility decision (#488)
 
@@ -168,10 +168,10 @@
 
 ## 25. Complete cross-platform atlas CLI (#491)
 
-- [ ] 25.1 Inventory the canonical executable, compatibility executable, installer-owned shim, PATH, package-manager, completion, help, and existing command-namespace collisions, explicitly including `health-check` and the administrative `health resolve` route; define one platform-neutral dispatch and lifecycle contract without introducing a second runtime or command framework.
-- [ ] 25.2 Add one installer-managed collision-safe `atlas` forwarder to the exact verified runtime on Windows, macOS, and Linux, preserving `projectatlas` and the complete present/future argument vector without per-subcommand executables.
-- [ ] 25.3 Harmonize the existing `health` namespace so `atlas health [report flags]` performs the read-only health report, `atlas health resolve ...` retains the existing administrative route, and `health-check` remains a compatibility alias. Cover zero-argument dispatch, help/completion, report-flag versus subcommand ambiguity, stdout/stderr bytes, JSON/TOON, exit status, child signals, Windows/Linux/macOS collisions, stale-shim repair, update, uninstall, and concurrent project isolation.
-- [ ] 25.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 25.1 Inventory the canonical executable, compatibility executable, installer-owned shim, PATH, package-manager, completion, help, and existing command-namespace collisions, explicitly including `health-check` and the administrative `health resolve` route; define one platform-neutral dispatch and lifecycle contract without introducing a second runtime or command framework.
+- [x] 25.2 Add one installer-managed collision-safe `atlas` forwarder to the exact verified runtime on Windows, macOS, and Linux, preserving `projectatlas` and the complete present/future argument vector without per-subcommand executables.
+- [x] 25.3 Harmonize the existing `health` namespace so `atlas health [report flags]` performs the read-only health report, `atlas health resolve ...` retains the existing administrative route, and `health-check` remains a compatibility alias. Cover zero-argument dispatch, help/completion, report-flag versus subcommand ambiguity, stdout/stderr bytes, JSON/TOON, exit status, child signals, Windows/Linux/macOS collisions, stale-shim repair, update, uninstall, and concurrent project isolation.
+- [x] 25.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 26. v0.5.0 release acceptance (#492)
 

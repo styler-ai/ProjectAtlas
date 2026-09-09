@@ -20,7 +20,7 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::language::{SemanticProviderOwner, SymbolParserOwner, language_capability};
 use projectatlas_core::symbols::{
-    ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
 };
 use projectatlas_db::{
     AtlasStore, IndexPublicationGuard, RepositoryAffectedSourceFootprint,
@@ -2048,29 +2048,134 @@ struct GraphOwners {
     symbol_digests: Vec<Option<String>>,
 }
 
+/// Recognize include syntax without treating unknown or legacy import text as alias-free.
+fn php_file_include_context(context: &str) -> bool {
+    let context = context.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    ["include", "include_once", "require", "require_once"]
+        .iter()
+        .any(|keyword| {
+            context
+                .get(..keyword.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+                && context.get(keyword.len()..).is_some_and(|suffix| {
+                    suffix.starts_with(|character: char| character.is_ascii_whitespace())
+                        || suffix.starts_with(['(', '\'', '"', '#'])
+                        || suffix.starts_with("/*")
+                        || suffix.starts_with("//")
+                })
+        })
+}
+
 /// Borrowed per-graph symbol lookup used by every relation in that file.
 struct GraphSymbolIndex<'graph> {
     /// Parser symbol indices grouped by exact source name.
     indices_by_name: BTreeMap<&'graph str, Vec<usize>>,
+    /// PHP call target indices grouped by their case-insensitive source name.
+    php_call_indices_by_name: BTreeMap<String, Vec<usize>>,
+    /// Import positions retained separately across repeated namespace declarations.
+    php_import_positions: BTreeMap<String, BTreeMap<usize, Option<usize>>>,
+    /// Named namespace declaration boundaries; tied line-only blocks stay conservative.
+    php_namespace_start_lines: BTreeMap<String, BTreeSet<usize>>,
+    /// Omitted import declarations cannot prove a namespace-local alias boundary.
+    php_imports_have_unknown_scope: bool,
 }
 
 impl<'graph> GraphSymbolIndex<'graph> {
     /// Build one bounded name index instead of rescanning all symbols per relation.
     fn new(graph: &'graph SymbolGraph, control: &IndexWorkControl) -> Result<Self, CliError> {
         let mut indices_by_name = BTreeMap::new();
+        let mut php_call_indices_by_name = BTreeMap::new();
+        let mut php_import_positions = BTreeMap::<String, BTreeMap<usize, Option<usize>>>::new();
+        let mut php_namespace_start_lines = BTreeMap::<String, BTreeSet<usize>>::new();
+        let mut php_imports_have_unknown_scope = false;
+        let is_php = graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+        // Grouped PHP uses emit one symbol but several relations. Only equal
+        // per-line counts prove that occurrence pairing preserves source order.
+        let mut import_counts = HashMap::<usize, (usize, usize)>::new();
+        let paired_imports = if is_php {
+            for (index, symbol) in graph.symbols.iter().enumerate() {
+                check_graph_work(control, index)?;
+                if symbol.kind == SymbolKind::Import {
+                    import_counts.entry(symbol.line_start).or_default().0 += 1;
+                }
+            }
+            for (index, relation) in graph.relations.iter().enumerate() {
+                check_graph_work(control, index)?;
+                if relation.kind == RelationKind::Imports {
+                    import_counts.entry(relation.line).or_default().1 += 1;
+                }
+            }
+            Some(paired_import_relations(graph, control)?)
+        } else {
+            None
+        };
         for (index, symbol) in graph.symbols.iter().enumerate() {
             check_graph_work(control, index)?;
+            // PHP emits import symbols only for namespace use, not includes or traits.
+            if is_php && symbol.kind == SymbolKind::Import {
+                let ordinal = import_counts
+                    .get(&symbol.line_start)
+                    .filter(|(symbols, relations)| symbols == relations)
+                    .and(paired_imports.as_ref())
+                    .and_then(|paired| paired.by_symbol.get(index).copied().flatten());
+                php_import_positions
+                    .entry(symbol.parent.as_deref().unwrap_or("").to_ascii_lowercase())
+                    .or_default()
+                    .entry(symbol.line_start)
+                    .or_insert(ordinal);
+            }
+            if is_php && symbol.kind == SymbolKind::Module {
+                php_namespace_start_lines
+                    .entry(symbol.name.to_ascii_lowercase())
+                    .or_default()
+                    .insert(symbol.line_start);
+            }
             indices_by_name
                 .entry(symbol.name.as_str())
                 .or_insert_with(Vec::new)
                 .push(index);
+            if is_php && matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method) {
+                php_call_indices_by_name
+                    .entry(symbol.name.to_ascii_lowercase())
+                    .or_insert_with(Vec::new)
+                    .push(index);
+            }
         }
-        Ok(Self { indices_by_name })
+        // Partial extraction may retain an import relation after its symbol was omitted.
+        if is_php && graph.parser != ParserKind::TreeSitter {
+            for (index, relation) in graph.relations.iter().enumerate() {
+                check_graph_work(control, index)?;
+                if relation.kind == RelationKind::Imports
+                    && relation.source_name == MODULE_RELATION_SOURCE
+                    && !php_file_include_context(&relation.context)
+                {
+                    php_imports_have_unknown_scope = true;
+                    break;
+                }
+            }
+        }
+        Ok(Self {
+            indices_by_name,
+            php_call_indices_by_name,
+            php_import_positions,
+            php_namespace_start_lines,
+            php_imports_have_unknown_scope,
+        })
     }
 
     /// Return exact parser symbol rows for one source name.
     fn get(&self, name: &str) -> &[usize] {
         self.indices_by_name.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Return PHP parser symbol rows for one case-insensitive call name.
+    fn get_php_call(&self, name: &str) -> &[usize] {
+        self.php_call_indices_by_name
+            .get(&name.to_ascii_lowercase())
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -2185,6 +2290,10 @@ fn is_cargo_manifest_path(path: &str) -> bool {
 fn qualified_symbol_parents(
     graph: &SymbolGraph,
 ) -> Result<Vec<Option<GraphIdentityText>>, CliError> {
+    let is_php = graph
+        .language
+        .as_deref()
+        .is_some_and(|language| language.eq_ignore_ascii_case("php"));
     let mut order = (0..graph.symbols.len()).collect::<Vec<_>>();
     order.sort_by_key(|&index| (graph.symbols[index].line_start, index));
     let mut active_by_name = BTreeMap::<&str, Vec<usize>>::new();
@@ -2202,7 +2311,18 @@ fn qualified_symbol_parents(
             && let Some(candidates) = active_by_name.get_mut(immediate_parent.as_str())
         {
             while candidates.last().is_some_and(|&candidate_index| {
-                graph.symbols[candidate_index].line_end < symbol.line_end
+                let candidate = &graph.symbols[candidate_index];
+                // Namespace headers may precede their body; concrete PHP scopes
+                // have exact ends even when the next declaration shares a line.
+                if is_php
+                    && candidate.kind != SymbolKind::Module
+                    && let Some((outer, inner)) =
+                        candidate.source_selector.zip(symbol.source_selector)
+                {
+                    outer.byte_end < inner.byte_end
+                } else {
+                    candidate.line_end < symbol.line_end
+                }
             }) {
                 candidates.pop();
             }
@@ -3720,8 +3840,10 @@ fn project_graph_rows(
         let source = relation_source(
             &owners,
             &entities.entity_by_digest,
+            graph,
             &symbol_index,
             source_relation,
+            control,
         )?;
         let dependency_keys = keys_by_relation
             .get(&relation_index)
@@ -3731,6 +3853,7 @@ fn project_graph_rows(
             project,
             generation,
             source_relation,
+            Some(relation_index),
             &owners,
             graph,
             &symbol_index,
@@ -3822,8 +3945,10 @@ fn project_graph_rows(
         let source = relation_source(
             &owners,
             &entities.entity_by_digest,
+            graph,
             &symbol_index,
             &fact.relation,
+            control,
         )?;
         let resolution = derived_relation_resolution(
             project,
@@ -4342,7 +4467,7 @@ fn derived_parser_relation(relation: &SymbolRelation, target_name: String) -> Sy
 fn file_owned_relation(graph: &SymbolGraph, target_name: String) -> SymbolRelation {
     SymbolRelation {
         path: graph.path.clone(),
-        source_name: "<module>".to_string(),
+        source_name: MODULE_RELATION_SOURCE.to_string(),
         target_name,
         kind: RelationKind::Calls,
         line: 1,
@@ -4369,6 +4494,7 @@ fn derived_relation_resolution<'a>(
             project,
             generation,
             &fact.relation,
+            None,
             owners,
             graph,
             symbol_index,
@@ -4663,14 +4789,45 @@ fn file_has_extension(file: &str, expected: &str) -> bool {
 fn relation_source<'a>(
     owners: &GraphOwners,
     entities: &'a BTreeMap<String, GraphEntity>,
+    graph: &SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
-    relation: &projectatlas_core::symbols::SymbolRelation,
+    relation: &SymbolRelation,
+    control: &IndexWorkControl,
 ) -> Result<&'a GraphEntity, CliError> {
     let file = entities.get(&owners.file_digest).ok_or_else(|| {
         CliError::InvalidInput("graph file owner entity was not staged".to_string())
     })?;
+    let is_php_call = relation.kind == RelationKind::Calls
+        && graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    let is_php_contains = relation.kind == RelationKind::Contains
+        && graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    let php_source = if is_php_call {
+        unique_php_call_source(
+            graph,
+            symbol_index,
+            &relation.source_name,
+            relation.line,
+            control,
+        )?
+    } else if is_php_contains {
+        unique_php_containment_source(graph, symbol_index, relation, control)?
+    } else {
+        None
+    };
+    let indices = if is_php_call || is_php_contains {
+        php_source.as_slice()
+    } else {
+        symbol_index.get(&relation.source_name)
+    };
     let mut matched = None;
-    for &index in symbol_index.get(&relation.source_name) {
+    for (candidate_index, &index) in indices.iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
         let digest = owners.symbol_digests.get(index).ok_or_else(|| {
             CliError::InvalidInput("graph symbol owner index was not staged".to_string())
         })?;
@@ -4702,6 +4859,7 @@ fn relation_resolution<'a>(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     relation: &projectatlas_core::symbols::SymbolRelation,
+    relation_index: Option<usize>,
     owners: &GraphOwners,
     graph: &SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
@@ -4714,6 +4872,7 @@ fn relation_resolution<'a>(
     let matches = match relation.kind {
         RelationKind::Contains => local_relation_matches(
             relation,
+            relation_index,
             owners,
             graph,
             symbol_index,
@@ -4723,6 +4882,7 @@ fn relation_resolution<'a>(
         RelationKind::Calls => {
             let local = local_relation_matches(
                 relation,
+                relation_index,
                 owners,
                 graph,
                 symbol_index,
@@ -4774,6 +4934,7 @@ fn relation_resolution<'a>(
 /// Resolve exact declarations owned by the relation's source file.
 fn local_relation_matches<'a>(
     relation: &projectatlas_core::symbols::SymbolRelation,
+    relation_index: Option<usize>,
     owners: &GraphOwners,
     graph: &SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
@@ -4781,13 +4942,160 @@ fn local_relation_matches<'a>(
     control: &IndexWorkControl,
 ) -> Result<ResolutionMatches<'a>, CliError> {
     let mut targets = BTreeMap::<&str, &GraphEntity>::new();
+    let mut global_fallback_targets = BTreeMap::<&str, &GraphEntity>::new();
     let target_name = relation.target_name.trim();
-    let source_parent = if relation.kind == RelationKind::Calls {
-        unique_source_parent(graph, symbol_index, &relation.source_name, control)?
+    let is_php_call = relation.kind == RelationKind::Calls
+        && graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    let is_php_contains = relation.kind == RelationKind::Contains
+        && graph
+            .language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    let php_containment_source = if is_php_contains {
+        unique_php_containment_source(graph, symbol_index, relation, control)?
+            .and_then(|index| graph.symbols.get(index))
     } else {
         None
     };
-    for (candidate_index, &row_index) in symbol_index.get(target_name).iter().enumerate() {
+    let source_parent = if relation.kind == RelationKind::Calls {
+        unique_source_parent(
+            graph,
+            symbol_index,
+            &relation.source_name,
+            is_php_call.then_some(relation.line),
+            control,
+        )?
+    } else {
+        None
+    };
+    let known_source_namespace = if is_php_call {
+        unique_php_source_namespace(graph, symbol_index, source_parent, relation, control)?
+    } else {
+        None
+    };
+    if is_php_call
+        && target_name
+            .split_once("::")
+            .is_some_and(|(scope, _)| scope.eq_ignore_ascii_case("self"))
+        && let Some(parent) = source_parent
+    {
+        for (candidate_index, &index) in symbol_index.get(parent).iter().enumerate() {
+            check_graph_work(control, candidate_index)?;
+            let owner = graph.symbols.get(index).ok_or_else(|| {
+                CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+            })?;
+            if owner.kind == SymbolKind::Trait
+                && owner.line_start <= relation.line
+                && relation.line <= owner.line_end
+            {
+                // A consuming class can override the trait member selected by self.
+                return Ok(ResolutionMatches {
+                    first: None,
+                    count: 0,
+                });
+            }
+        }
+    }
+    let php_imports_may_alias = symbol_index.php_imports_have_unknown_scope
+        || known_source_namespace.map_or(
+            !symbol_index.php_import_positions.is_empty(),
+            |namespace| {
+                let namespace = namespace.to_ascii_lowercase();
+                let block_start = symbol_index
+                    .php_namespace_start_lines
+                    .get(&namespace)
+                    .and_then(|starts| starts.range(..=relation.line).next_back())
+                    .copied()
+                    .unwrap_or(0);
+                symbol_index
+                    .php_import_positions
+                    .get(&namespace)
+                    .and_then(|positions| positions.range(block_start..=relation.line).next())
+                    .is_some_and(|(&line, &import_index)| {
+                        line < relation.line
+                            || import_index
+                                .zip(relation_index)
+                                .is_none_or(|(import, call)| import <= call)
+                    })
+            },
+        );
+    let namespace_relative_target = if is_php_call
+        && let Some((prefix, relative)) = target_name.split_once('\\')
+        && !prefix.is_empty()
+        && (prefix.eq_ignore_ascii_case("namespace") || !php_imports_may_alias)
+    {
+        let Some(namespace) = known_source_namespace else {
+            return Ok(ResolutionMatches {
+                first: None,
+                count: 0,
+            });
+        };
+        let relative = if prefix.eq_ignore_ascii_case("namespace") {
+            relative
+        } else {
+            target_name
+        };
+        Some(if namespace.is_empty() {
+            format!("\\{relative}")
+        } else {
+            format!("\\{namespace}\\{relative}")
+        })
+    } else {
+        None
+    };
+    let lookup_target = namespace_relative_target.as_deref().unwrap_or(target_name);
+    if is_php_call
+        && php_imports_may_alias
+        && !lookup_target.starts_with('\\')
+        && !lookup_target
+            .split_once("::")
+            .is_some_and(|(scope, _)| scope.eq_ignore_ascii_case("self"))
+    {
+        // An import in this namespace, or an import with unknown scope, can
+        // replace an unrooted name. Do not assume a same-file declaration wins.
+        return Ok(ResolutionMatches {
+            first: None,
+            count: 0,
+        });
+    }
+    let (lookup_name, scoped_parent, mut scoped_namespace, target_namespace) = if is_php_call {
+        let Some(lookup) = php_call_lookup(lookup_target, source_parent) else {
+            return Ok(ResolutionMatches {
+                first: None,
+                count: 0,
+            });
+        };
+        lookup
+    } else {
+        (target_name, None, None, None)
+    };
+    if is_php_call && scoped_parent.is_some() && scoped_namespace.is_none() {
+        scoped_namespace = known_source_namespace;
+        if scoped_namespace.is_none() {
+            return Ok(ResolutionMatches {
+                first: None,
+                count: 0,
+            });
+        }
+    }
+    let source_namespace = if is_php_call && scoped_parent.is_none() {
+        if target_namespace.is_some() {
+            target_namespace
+        } else {
+            known_source_namespace
+        }
+    } else {
+        None
+    };
+    let candidate_indices = if is_php_call {
+        symbol_index.get_php_call(lookup_name)
+    } else {
+        symbol_index.get(lookup_name)
+    };
+    for (candidate_index, &row_index) in candidate_indices.iter().enumerate() {
         check_graph_work(control, candidate_index)?;
         let symbol = graph.symbols.get(row_index).ok_or_else(|| {
             CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
@@ -4797,12 +5105,69 @@ fn local_relation_matches<'a>(
         })?;
         let exact_match = match relation.kind {
             RelationKind::Contains => {
-                symbol.name == target_name
+                symbol.name == lookup_name
                     && symbol.parent.as_deref() == Some(relation.source_name.as_str())
+                    && if is_php_contains {
+                        if let Some(source) = php_containment_source {
+                            symbol.line_start == relation.line
+                                && symbol.detail.as_deref() == Some(relation.context.as_str())
+                                && php_entity_matches_qualified_scope(
+                                    staged_entities,
+                                    digest.as_ref(),
+                                    &source.name,
+                                    source.parent.as_deref().unwrap_or(""),
+                                )?
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    }
             }
             RelationKind::Calls => {
-                symbol.name == target_name
-                    && (symbol.parent.is_none()
+                let name_matches = if is_php_call {
+                    symbol.name.eq_ignore_ascii_case(lookup_name)
+                } else {
+                    symbol.name == lookup_name
+                };
+                name_matches
+                    && (!is_php_call
+                        || symbol.kind
+                            == if scoped_parent.is_some() {
+                                SymbolKind::Method
+                            } else {
+                                SymbolKind::Function
+                            })
+                    && scoped_parent.is_none_or(|parent| {
+                        symbol.parent.as_deref().is_some_and(|symbol_parent| {
+                            if is_php_call {
+                                symbol_parent.eq_ignore_ascii_case(parent)
+                            } else {
+                                symbol_parent == parent
+                            }
+                        })
+                    })
+                    && if let (Some(namespace), Some(scoped_parent)) =
+                        (scoped_namespace, scoped_parent)
+                    {
+                        php_entity_matches_qualified_scope(
+                            staged_entities,
+                            digest.as_ref(),
+                            scoped_parent,
+                            namespace,
+                        )?
+                    } else {
+                        true
+                    }
+                    && source_namespace.is_none_or(|namespace| {
+                        symbol.parent.as_deref().is_some_and(|symbol_parent| {
+                            symbol_parent.eq_ignore_ascii_case(namespace)
+                        }) || (target_namespace.is_none_or(str::is_empty)
+                            && symbol.parent.is_none())
+                    })
+                    && (scoped_parent.is_some()
+                        || source_namespace.is_some()
+                        || symbol.parent.is_none()
                         || symbol.parent.as_deref() == Some(relation.source_name.as_str())
                         || source_parent.is_some_and(|source_parent| {
                             symbol.parent.as_deref() == Some(source_parent)
@@ -4814,12 +5179,29 @@ fn local_relation_matches<'a>(
             let entity = staged_entities.get(digest).ok_or_else(|| {
                 CliError::InvalidInput("graph symbol owner entity was not staged".to_string())
             })?;
-            if !targets.contains_key(entity.key().digest()) {
-                enforce_resolution_match_budget(targets.len().saturating_add(1))?;
+            let is_global_fallback = is_php_call
+                && scoped_parent.is_none()
+                && target_namespace.is_none()
+                && source_namespace.is_some()
+                && symbol.kind == SymbolKind::Function
+                && symbol.parent.is_none();
+            let distinct_target_count = targets.len().saturating_add(global_fallback_targets.len());
+            let destination = if is_global_fallback {
+                &mut global_fallback_targets
+            } else {
+                &mut targets
+            };
+            if !destination.contains_key(entity.key().digest()) {
+                enforce_resolution_match_budget(distinct_target_count.saturating_add(1))?;
             }
-            targets.insert(entity.key().digest(), entity);
+            destination.insert(entity.key().digest(), entity);
         }
     }
+    let targets = if targets.is_empty() {
+        global_fallback_targets
+    } else {
+        targets
+    };
     let count = distinct_resolution_count(targets.len())?;
     Ok(ResolutionMatches {
         first: targets.into_values().next(),
@@ -4827,13 +5209,167 @@ fn local_relation_matches<'a>(
     })
 }
 
+/// Select the local PHP call member and, for scoped calls, its owning type.
+fn php_call_lookup<'a>(
+    target_name: &'a str,
+    source_parent: Option<&'a str>,
+) -> Option<(&'a str, Option<&'a str>, Option<&'a str>, Option<&'a str>)> {
+    let Some((scope, member)) = target_name.rsplit_once("::") else {
+        let Some(qualified_target) = target_name.strip_prefix('\\') else {
+            return Some((target_name, None, None, None));
+        };
+        let Some((namespace, function)) = qualified_target.rsplit_once('\\') else {
+            return Some((qualified_target, None, None, Some("")));
+        };
+        if namespace.is_empty() || function.is_empty() {
+            return None;
+        }
+        return Some((function, None, None, Some(namespace)));
+    };
+    if scope.is_empty() || member.is_empty() {
+        return None;
+    }
+    if scope.eq_ignore_ascii_case("self") {
+        return source_parent.map(|parent| (member, Some(parent), None, None));
+    }
+    if scope.eq_ignore_ascii_case("static") {
+        return None;
+    }
+    if scope.eq_ignore_ascii_case("parent") {
+        return None;
+    }
+    if scope.contains('\\') && !scope.starts_with('\\') {
+        return None;
+    }
+    let scope_without_root = scope.strip_prefix('\\').unwrap_or(scope);
+    let (scope, namespace) = match scope_without_root.rsplit_once('\\') {
+        Some((namespace, scope)) if !namespace.is_empty() && !scope.is_empty() => {
+            (scope, Some(namespace))
+        }
+        None if scope.starts_with('\\') && !scope_without_root.is_empty() => {
+            (scope_without_root, Some(""))
+        }
+        None if !scope_without_root.is_empty() => (scope_without_root, None),
+        _ => return None,
+    };
+    Some((member, Some(scope), namespace, None))
+}
+
+/// Confirm a PHP entity belongs to a qualified owner scope.
+fn php_entity_matches_qualified_scope(
+    staged_entities: &BTreeMap<String, GraphEntity>,
+    digest: Option<&String>,
+    scoped_parent: &str,
+    namespace: &str,
+) -> Result<bool, CliError> {
+    let Some(digest) = digest else {
+        return Ok(false);
+    };
+    let entity = staged_entities.get(digest).ok_or_else(|| {
+        CliError::InvalidInput("graph symbol owner entity was not staged".to_string())
+    })?;
+    let EntitySelector::Symbol { symbol } = entity.selector() else {
+        return Ok(false);
+    };
+    let Some(parent) = symbol.parent.as_ref() else {
+        return Ok(false);
+    };
+    Ok(
+        if let Some((owner_namespace, owner_name)) = parent.as_str().rsplit_once("::") {
+            owner_name.eq_ignore_ascii_case(scoped_parent)
+                && owner_namespace.eq_ignore_ascii_case(namespace)
+        } else {
+            namespace.is_empty() && parent.as_str().eq_ignore_ascii_case(scoped_parent)
+        },
+    )
+}
+
+/// Prove a PHP caller's namespace, including the empty global namespace.
+fn unique_php_source_namespace<'a>(
+    graph: &'a SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
+    source_parent: Option<&str>,
+    relation: &projectatlas_core::symbols::SymbolRelation,
+    control: &IndexWorkControl,
+) -> Result<Option<&'a str>, CliError> {
+    let Some(source_parent) = source_parent else {
+        // Partial PHP coverage retains the grammar's proven global source marker.
+        if relation.source_name == MODULE_RELATION_SOURCE {
+            return Ok(Some(""));
+        }
+        let mut global_function = false;
+        let mut namespace = None;
+        for (candidate_index, &row_index) in
+            symbol_index.get(&relation.source_name).iter().enumerate()
+        {
+            check_graph_work(control, candidate_index)?;
+            let symbol = graph.symbols.get(row_index).ok_or_else(|| {
+                CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+            })?;
+            if matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
+                && symbol.line_start <= relation.line
+                && relation.line <= symbol.line_end
+            {
+                if symbol.kind != SymbolKind::Function || symbol.parent.is_some() {
+                    return Ok(None);
+                }
+                global_function = true;
+            } else if symbol.kind == SymbolKind::Module {
+                namespace = Some(symbol.name.as_str());
+            }
+        }
+        return Ok(if global_function { Some("") } else { namespace });
+    };
+    let mut namespace = None;
+    let mut module_namespace = None;
+    let mut source_found = false;
+    for (candidate_index, &row_index) in symbol_index.get(source_parent).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(row_index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        let candidate = match symbol.kind {
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Enum => {
+                if relation.line < symbol.line_start || relation.line > symbol.line_end {
+                    continue;
+                }
+                Some(symbol.parent.as_deref().unwrap_or(""))
+            }
+            SymbolKind::Module if symbol.name == source_parent => {
+                module_namespace = Some(symbol.name.as_str());
+                continue;
+            }
+            _ => continue,
+        };
+        if !source_found {
+            namespace = candidate;
+            source_found = true;
+        } else if namespace != candidate {
+            return Ok(None);
+        }
+    }
+    // A line-matched containing type owns the call before a same-named namespace.
+    Ok(namespace.or(module_namespace))
+}
+
 /// Return one unambiguous containing scope for the parser relation source.
 fn unique_source_parent<'a>(
     graph: &'a SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
     source_name: &str,
+    relation_line: Option<usize>,
     control: &IndexWorkControl,
 ) -> Result<Option<&'a str>, CliError> {
+    if let Some(line) = relation_line {
+        let Some(index) = unique_php_call_source(graph, symbol_index, source_name, line, control)?
+        else {
+            return Ok(None);
+        };
+        let symbol = graph.symbols.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        return Ok(symbol.parent.as_deref());
+    }
     let mut parent = None;
     let mut source_found = false;
     for (candidate_index, &row_index) in symbol_index.get(source_name).iter().enumerate() {
@@ -4850,6 +5386,106 @@ fn unique_source_parent<'a>(
         }
     }
     Ok(parent)
+}
+
+/// Select a PHP containment owner from the target's exact declaration span.
+fn unique_php_containment_source(
+    graph: &SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
+    relation: &SymbolRelation,
+    control: &IndexWorkControl,
+) -> Result<Option<usize>, CliError> {
+    let mut target = None;
+    for (candidate_index, &index) in symbol_index.get(&relation.target_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        if symbol.parent.as_deref() == Some(relation.source_name.as_str())
+            && symbol.line_start == relation.line
+            && symbol.detail.as_deref() == Some(relation.context.as_str())
+            && target.replace(index).is_some()
+        {
+            return Ok(None);
+        }
+    }
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let Some(target_span) = graph.symbols[target].source_selector else {
+        return Ok(None);
+    };
+    let mut matched = None;
+    let mut module = None;
+    for (candidate_index, &index) in symbol_index.get(&relation.source_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        let contains = match symbol.kind {
+            SymbolKind::Module => {
+                module.get_or_insert(index);
+                false
+            }
+            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Enum => {
+                index != target
+                    && symbol.source_selector.is_some_and(|span| {
+                        span.byte_start <= target_span.byte_start
+                            && target_span.byte_end <= span.byte_end
+                    })
+            }
+            _ => false,
+        };
+        if contains && matched.replace(index).is_some() {
+            return Ok(None);
+        }
+    }
+    Ok(matched.or(module))
+}
+
+/// Prefer a proven PHP callable source, falling back to a unique namespace owner.
+fn unique_php_call_source(
+    graph: &SymbolGraph,
+    symbol_index: &GraphSymbolIndex<'_>,
+    source_name: &str,
+    line: usize,
+    control: &IndexWorkControl,
+) -> Result<Option<usize>, CliError> {
+    let mut callable = None;
+    let mut callable_boundary = false;
+    let mut module = None;
+    for (candidate_index, &index) in symbol_index.get(source_name).iter().enumerate() {
+        check_graph_work(control, candidate_index)?;
+        let symbol = graph.symbols.get(index).ok_or_else(|| {
+            CliError::InvalidInput("graph symbol lookup index was invalid".to_string())
+        })?;
+        match symbol.kind {
+            SymbolKind::Function | SymbolKind::Method
+                if symbol.line_start <= line && line <= symbol.line_end =>
+            {
+                if callable.replace(index).is_some() {
+                    return Ok(None);
+                }
+                callable_boundary = line == symbol.line_start || line == symbol.line_end;
+            }
+            SymbolKind::Module => {
+                // Reopened blocks share one line-independent namespace entity.
+                module = Some(index);
+            }
+            _ => {}
+        }
+    }
+    if callable.is_some() {
+        // Line-only facts cannot distinguish a boundary-line call from a
+        // same-named namespace's top-level call beside the declaration.
+        Ok(if module.is_some() && callable_boundary {
+            None
+        } else {
+            callable
+        })
+    } else {
+        Ok(module)
+    }
 }
 
 /// Merge sorted candidate streams without materializing their full union.
@@ -6498,15 +7134,15 @@ mod tests {
         ProjectResolutionRegistry, QUALIFIED_SYMBOL_SCOPE_PREFIX, RepositoryGraphMutation,
         StagedRepositoryGraph, build_entity_projection, build_entity_projection_with_config,
         build_entity_projection_with_config_limit, cleanup_abandoned_graph_staging,
-        document_casefold_resolution_key, document_coverage, document_fact_map_retained_bytes,
-        document_projection_retained_bytes, enforce_incremental_projection_budget,
-        enforce_incremental_projection_limits, enforce_resolution_staging_budget,
-        explicit_external_selector, finish_projection, finish_projection_in_database,
-        finish_projection_in_database_with_documents, finish_projection_with_documents,
-        identity_rejection_keys_retained_bytes, insert_relation, is_cargo_manifest_path,
-        normalize_document_target, project_document_rows, qualified_symbol_identity,
-        qualified_symbol_parents, registry_resolution_matches, relation_resolution,
-        remove_owned_graph_stage_payload, repository_path_belongs_to,
+        coverage_for_graph, document_casefold_resolution_key, document_coverage,
+        document_fact_map_retained_bytes, document_projection_retained_bytes,
+        enforce_incremental_projection_budget, enforce_incremental_projection_limits,
+        enforce_resolution_staging_budget, explicit_external_selector, finish_projection,
+        finish_projection_in_database, finish_projection_in_database_with_documents,
+        finish_projection_with_documents, identity_rejection_keys_retained_bytes, insert_relation,
+        is_cargo_manifest_path, normalize_document_target, project_document_rows,
+        qualified_symbol_identity, qualified_symbol_parents, registry_resolution_matches,
+        relation_resolution, remove_owned_graph_stage_payload, repository_path_belongs_to,
         resolution_projection_map_retained_bytes, resolution_registry_from_exports,
         rust_toolchain_identity, source_symbol_identity, stage_full_repository_graph,
         stage_incremental_repository_graph, stage_incremental_repository_graph_with_test_limit,
@@ -7956,6 +8592,16 @@ mod tests {
         Ok(())
     }
 
+    /// Downgrade a current fixture to the released schema-19 worktree shape.
+    fn drop_native_worktree_identity_schema(connection: &Connection) -> rusqlite::Result<()> {
+        connection.execute_batch(
+            "DROP INDEX IF EXISTS idx_worktree_registrations_active_native_administrative_directory;
+             DROP INDEX IF EXISTS idx_worktree_registrations_active_native_root;
+             ALTER TABLE worktree_registrations DROP COLUMN git_common_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN git_administrative_directory_identity;
+             ALTER TABLE worktree_registrations DROP COLUMN last_root_identity;",
+        )
+    }
     #[cfg(unix)]
     fn create_directory_link(target: &Path, link: &Path) -> io::Result<()> {
         std::os::unix::fs::symlink(target, link)
@@ -9087,6 +9733,7 @@ mod tests {
                     stage_project,
                 )?);
                 let connection = Connection::open(database)?;
+                drop_native_worktree_identity_schema(&connection)?;
                 connection.execute_batch(
                     "DROP TABLE project_root_identity;
                  DROP TABLE IF EXISTS graph_identity_rejections;
@@ -10388,6 +11035,1222 @@ mod tests {
     }
 
     #[test]
+    fn php_scoped_and_case_insensitive_calls_resolve_without_member_edges()
+    -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([31; 16])?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let php_graph = extract_symbol_graph(
+            "src/service.php",
+            Some("php"),
+            r"<?php
+class Service {
+    public string $boot;
+    public static function prepare(): void {}
+    public static function finish(): void {}
+    public static function boot(): void {}
+    public function run(): void {
+        self::prepare();
+        static::finish();
+        Service::boot();
+        SERVICE::BOOT();
+        parent::inherited();
+        $this->boot();
+    }
+}
+function helper(): void {}
+function caller(): void { HELPER(); }
+namespace Atlas\Domain;
+class QualifiedService {
+    public static function boot(): void {}
+    public static function qualified_run(): void {
+        \Atlas\Domain\QualifiedService::boot();
+        \Missing\Domain\QualifiedService::boot();
+        QualifiedService::boot();
+    }
+}
+namespace Other\Domain;
+class QualifiedService {
+    public static function boot(): void {}
+}
+function relative_run(): void {
+    Atlas\Domain\QualifiedService::boot();
+    Alias\QualifiedService::boot();
+    namespace\QualifiedService::boot();
+}
+namespace TopLevel;
+function top_level_helper(): void {}
+top_level_helper();
+namespace Foo;
+function helper(): void {}
+function qualified_helper_run(): void {
+    \Foo\helper();
+}
+function rooted_global_helper_run(): void {
+    \helper();
+}
+function missing_helper_run(): void {
+    \Missing\helper();
+}
+class NamespacedService {
+    public function namespaced_run(): void {
+        helper();
+    }
+}
+class DuplicateA {
+    public static function prepare(): void {}
+    public static function collision_run(): void {
+        self::prepare();
+    }
+}
+class DuplicateB {
+    public static function prepare(): void {}
+    public static function collision_run(): void {
+        self::prepare();
+    }
+}
+",
+        );
+        require(
+            php_graph
+                .relations
+                .iter()
+                .filter(|relation| relation.kind == RelationKind::Calls)
+                .all(|relation| relation.target_name != "boot"),
+            "dynamic member calls must not become unscoped PHP calls",
+        )?;
+        let finish_graph = |graph: &SymbolGraph| {
+            let packages = PackageIndex::from_graphs(std::slice::from_ref(graph))?;
+            let projection = build_entity_projection(
+                project,
+                generation,
+                &[],
+                std::slice::from_ref(graph),
+                &packages,
+                true,
+                &control,
+            )?;
+            let candidates = resolution_registry_from_exports(&projection, &control)?;
+            finish_projection(
+                project,
+                generation,
+                RepositoryGraphMutation::Full,
+                std::slice::from_ref(graph),
+                projection,
+                &candidates,
+                &control,
+            )
+        };
+        let staged = finish_graph(&php_graph)?;
+        for declaration in [
+            "class Service {\nconst FLAG = 1;\npublic $value;\nfunction run() {}\n}",
+            "interface Service {\nconst FLAG = 1;\nfunction run();\n}",
+            "trait Service {\nconst FLAG = 1;\npublic $value;\nfunction run() {}\n}",
+            "enum Service {\ncase Ready;\nconst FLAG = 1;\nfunction run() {}\n}",
+        ] {
+            for (source, namespaces) in [
+                (
+                    format!(
+                        "<?php namespace A {{\n{declaration}\n}}\nnamespace B {{\n{declaration}\n}}"
+                    ),
+                    ["A", "B"],
+                ),
+                (
+                    format!("<?php namespace A;\n{declaration}\nnamespace B;\n{declaration}"),
+                    ["A", "B"],
+                ),
+                (
+                    format!(
+                        "<?php namespace Service {{\n{declaration}\n}}\nnamespace B {{\n{declaration}\n}}"
+                    ),
+                    ["Service", "B"],
+                ),
+                (
+                    format!("<?php namespace Service;\n{declaration}\nnamespace B;\n{declaration}"),
+                    ["Service", "B"],
+                ),
+            ] {
+                let graph = extract_symbol_graph("src/containment.php", Some("php"), &source);
+                require_eq(
+                    &graph
+                        .symbols
+                        .iter()
+                        .filter(|symbol| {
+                            symbol.name == "run" && symbol.parent.as_deref() == Some("Service")
+                        })
+                        .count(),
+                    &2,
+                    "PHP parser retains unqualified member parents",
+                )?;
+                let contained = finish_graph(&graph)?;
+                for namespace in namespaces {
+                    let parent = format!("{namespace}::Service");
+                    for name in ["run", "FLAG"] {
+                        require(
+                            contained.relations.iter().any(|relation| {
+                                relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                                    && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                                        if symbol.name.as_str() == name && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(parent.as_str()))
+                                    && contained.entities.iter().any(|entity| entity.key() == relation.source()
+                                        && matches!(entity.selector(), EntitySelector::Symbol { symbol }
+                                            if symbol.name.as_str() == "Service" && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(namespace)))
+                            }),
+                            &format!("PHP containment must keep its exact namespace owner: {parent}::{name}"),
+                        )?;
+                    }
+                    require(
+                        contained.relations.iter().any(|relation| {
+                            relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                                && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                                    if symbol.name.as_str() == "Service" && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(namespace))
+                                && contained.entities.iter().any(|entity| entity.key() == relation.source()
+                                    && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == namespace))
+                        }),
+                        "PHP namespace containment retains its declared type",
+                    )?;
+                }
+            }
+        }
+        for declaration in [
+            "class N { function caller() { helper(); } }",
+            "trait N { function caller() { helper(); } }",
+            "enum N { case Ready; function caller() { helper(); } }",
+        ] {
+            for source in [
+                format!(
+                    "<?php namespace N {{ function helper() {{}} }}\nnamespace M {{ function helper() {{}} {declaration} }}"
+                ),
+                format!(
+                    "<?php namespace M {{ function helper() {{}} {declaration} }}\nnamespace N {{ function helper() {{}} }}"
+                ),
+                format!(
+                    "<?php namespace N; function helper() {{}}\nnamespace M; function helper() {{}} {declaration}"
+                ),
+                format!(
+                    "<?php namespace M; function helper() {{}} {declaration}\nnamespace N; function helper() {{}}"
+                ),
+            ] {
+                let graph = extract_symbol_graph("src/type-namespace.php", Some("php"), &source);
+                let projected = finish_graph(&graph)?;
+                let calls = projected
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    })
+                    .collect::<Vec<_>>();
+                require_eq(
+                    &calls.len(),
+                    &1,
+                    "PHP type/namespace collision retains its call",
+                )?;
+                require(
+                    matches!(calls[0].resolution(), RelationResolution::Resolved {
+                        selector: ReusableTargetSelector::Symbol { symbol }, ..
+                    } if symbol.name.as_str() == "helper"
+                        && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("M")),
+                    "PHP containing type must retain its namespace despite a same-named module",
+                )?;
+            }
+        }
+        let overlapping = extract_symbol_graph(
+            "src/containment.php",
+            Some("php"),
+            "<?php namespace A { class Service { function run() {} } } namespace B { class Service { function run() {} } }",
+        );
+        let contained = finish_graph(&overlapping)?;
+        require(
+            contained.relations.iter().any(|relation| {
+                relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                    && !matches!(relation.resolution(), RelationResolution::Resolved { .. })
+            }),
+            "PHP overlapping line-only owners remain unresolved",
+        )?;
+        require(
+            !contained.relations.iter().any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. } if symbol.name.as_str() == "run")),
+            "PHP overlapping line-only owners must not invent member containment",
+        )?;
+        for source in [
+            "<?php namespace Service { function boot() {} } namespace { class Service {} Service::boot(); }",
+            "<?php namespace Service {} namespace { class Service { static function boot() {} } \\Service\\boot(); }",
+        ] {
+            let graph = extract_symbol_graph("src/call-kind.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            let calls: Vec<_> = staged
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                })
+                .collect();
+            require_eq(&calls.len(), &1, "PHP callable-kind collision fixture")?;
+            require(
+                matches!(calls[0].resolution(), RelationResolution::Unresolved { .. }),
+                "PHP calls must not resolve across function and method kinds",
+            )?;
+        }
+        for (source, parent) in [
+            (
+                "<?php namespace N; function outer() { function inner() {} } function caller() { inner(); }",
+                Some("N"),
+            ),
+            (
+                "<?php namespace N { class OuterType { function outer() { function inner() {} } } function caller() { inner(); } }",
+                Some("N"),
+            ),
+            (
+                "<?php function outer() { function inner() {} } function caller() { inner(); }",
+                None,
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/nested-call.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            require(staged.relations.iter().any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls) && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. } if symbol.name.as_str() == "inner" && symbol.kind == SymbolKind::Function && symbol.parent.as_ref().map(GraphIdentityText::as_str) == parent)), &format!("nested PHP function identity must resolve in its namespace: {source}"))?;
+        }
+        let calls = staged
+            .relations
+            .iter()
+            .filter(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls))
+            .collect::<Vec<_>>();
+        let staged_call = |target: &str, source: &str| {
+            let parser_relation = php_graph.relations.iter().find(|relation| {
+                relation.kind == RelationKind::Calls
+                    && relation.target_name == target
+                    && relation.source_name == source
+            })?;
+            let line = u32::try_from(parser_relation.line).ok()?;
+            staged
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.span().start_line() == line)
+                .filter_map(|occurrence| {
+                    staged
+                        .relations
+                        .iter()
+                        .find(|relation| relation.key() == occurrence.relation())
+                })
+                .find(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls))
+        };
+        require(
+            matches!(
+                staged_call("\\Atlas\\Domain\\QualifiedService::boot", "qualified_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "boot"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                        == Some("Atlas\\Domain::QualifiedService")
+            ),
+            "fully qualified PHP call did not resolve to the local class method",
+        )?;
+        require(
+            matches!(
+                staged_call("\\Missing\\Domain\\QualifiedService::boot", "qualified_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Unresolved { reference })
+                    if reference.as_str() == "\\Missing\\Domain\\QualifiedService::boot"
+            ),
+            "qualified PHP call with an invalid namespace must remain unresolved",
+        )?;
+        require(
+            matches!(
+                staged_call("QualifiedService::boot", "qualified_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "boot"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                        == Some("Atlas\\Domain::QualifiedService")
+            ),
+            "unqualified PHP class scope must select its caller namespace",
+        )?;
+        for target in [
+            "Atlas\\Domain\\QualifiedService::boot",
+            "Alias\\QualifiedService::boot",
+        ] {
+            require(
+                matches!(
+                    staged_call(target, "relative_run")
+                        .map(projectatlas_core::graph::LogicalRelation::resolution),
+                    Some(RelationResolution::Unresolved { reference })
+                        if reference.as_str() == target
+                ),
+                &format!("non-leading qualified PHP scope must remain unresolved: {target}"),
+            )?;
+        }
+        require(
+            matches!(
+                staged_call("namespace\\QualifiedService::boot", "relative_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                    == Some("Other\\Domain::QualifiedService")
+            ),
+            "explicit namespace-relative PHP static scope must resolve in its caller namespace",
+        )?;
+        require(
+            matches!(
+                staged_call("top_level_helper", "TopLevel")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "top_level_helper"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                        == Some("TopLevel")
+            ),
+            "semicolon namespace top-level call did not resolve locally",
+        )?;
+        require(
+            matches!(
+                staged_call("helper", "namespaced_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Foo")
+            ),
+            "namespaced PHP method call did not prefer its namespace helper",
+        )?;
+        require(
+            matches!(
+                staged_call("\\Foo\\helper", "qualified_helper_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Foo")
+            ),
+            "fully qualified PHP function call did not resolve to its namespace function",
+        )?;
+        require(
+            matches!(
+                staged_call("\\helper", "rooted_global_helper_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper" && symbol.parent.is_none()
+            ),
+            "rooted PHP global function call did not resolve explicitly to the global helper",
+        )?;
+        require(
+            matches!(
+                staged_call("\\Missing\\helper", "missing_helper_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Unresolved { reference })
+                    if reference.as_str() == "\\Missing\\helper"
+            ),
+            "fully qualified PHP function call must not fall back to a global helper",
+        )?;
+        let duplicate_method_calls = php_graph
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.kind == RelationKind::Calls
+                    && relation.target_name == "self::prepare"
+                    && relation.source_name == "collision_run"
+            })
+            .count();
+        require_eq(
+            &duplicate_method_calls,
+            &2,
+            "duplicate PHP method fixture call count",
+        )?;
+        let duplicate_method_parents = calls
+            .iter()
+            .filter_map(|relation| match relation.resolution() {
+                RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                } if symbol.name.as_str() == "prepare" => {
+                    symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        require_eq(
+            &duplicate_method_parents,
+            &BTreeSet::from(["Foo::DuplicateA", "Foo::DuplicateB", "Service"]),
+            "PHP method callers retain their distinct source owners",
+        )?;
+        let duplicate_sources = calls
+            .iter()
+            .filter_map(|relation| {
+                let entity = staged
+                    .entities
+                    .iter()
+                    .find(|entity| entity.key() == relation.source())?;
+                match entity.selector() {
+                    EntitySelector::Symbol { symbol }
+                        if symbol.name.as_str() == "collision_run" =>
+                    {
+                        symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        require_eq(
+            &duplicate_sources,
+            &BTreeSet::from(["Foo::DuplicateA", "Foo::DuplicateB"]),
+            "duplicate PHP calls must originate from their actual method entities",
+        )?;
+        let namespace_call = staged_call("top_level_helper", "TopLevel");
+        require(namespace_call.is_some_and(|relation| staged.entities.iter().any(|entity| entity.key() == relation.source() && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == "TopLevel"))), "semicolon PHP namespace retains top-level call ownership")?;
+        for (source, name, parent) in [
+            (
+                "<?php class caller { function caller() { helper(); } } function helper() {}",
+                "caller",
+                "caller",
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction Foo() {\nhelper();\n}\nfunction helper() {}",
+                "Foo",
+                "Foo",
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/source-collision.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            require(staged.relations.iter().filter(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)).any(|relation| staged.entities.iter().any(|entity| entity.key() == relation.source() && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == name && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(parent)))), "PHP callable source must not be hidden by a same-name class or module")?;
+        }
+        let trait_graph = extract_symbol_graph(
+            "src/trait.php",
+            Some("php"),
+            "<?php trait T { function run() { self::target(); } function target() {} } class C { use T; function target() {} }",
+        );
+        let trait_staged = finish_graph(&trait_graph)?;
+        require(trait_staged.relations.iter().any(|relation| matches!(relation.resolution(), RelationResolution::Unresolved { reference } if reference.as_str() == "self::target")), "PHP trait self calls depend on the consuming class")?;
+        let enum_graph = extract_symbol_graph(
+            "src/enum.php",
+            Some("php"),
+            r"<?php
+namespace {
+function helper(): void {}
+}
+namespace Foo {
+function helper(): void {}
+enum NamespacedState {
+    case Ready;
+    public function enum_run(): void {
+        helper();
+    }
+}
+}
+namespace Bar {
+function fallback_run(): void {
+    helper();
+}
+}
+",
+        );
+        let enum_staged = finish_graph(&enum_graph)?;
+        let enum_call = |target: &str, source: &str| {
+            let parser_relation = enum_graph.relations.iter().find(|relation| {
+                relation.target_name == target && relation.source_name == source
+            })?;
+            let line = u32::try_from(parser_relation.line).ok()?;
+            let occurrence = enum_staged
+                .occurrences
+                .iter()
+                .find(|occurrence| occurrence.span().start_line() == line)?;
+            enum_staged
+                .relations
+                .iter()
+                .find(|relation| relation.key() == occurrence.relation())
+        };
+        require(
+            matches!(
+                enum_call("helper", "enum_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper"
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Foo")
+            ),
+            "namespaced PHP enum method call did not prefer its namespace helper",
+        )?;
+        require(
+            matches!(
+                enum_call("helper", "fallback_run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                }) if symbol.name.as_str() == "helper" && symbol.parent.is_none()
+            ),
+            "namespaced PHP function call did not fall back to the global helper",
+        )?;
+        let mixed_call_line = u32::try_from(
+            php_graph
+                .relations
+                .iter()
+                .find(|relation| relation.target_name == "SERVICE::BOOT")
+                .ok_or("mixed-case PHP call fixture was missing")?
+                .line,
+        )?;
+        let mixed_call_occurrence = staged
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.span().start_line() == mixed_call_line)
+            .ok_or("mixed-case PHP call occurrence was missing")?;
+        let mixed_call_relation = staged
+            .relations
+            .iter()
+            .find(|relation| relation.key() == mixed_call_occurrence.relation())
+            .ok_or("mixed-case PHP logical call was missing")?;
+        require(
+            matches!(
+                mixed_call_relation.resolution(),
+                RelationResolution::Resolved {
+                    selector: ReusableTargetSelector::Symbol { symbol },
+                    ..
+                } if symbol.name.as_str() == "boot"
+                    && symbol.kind == SymbolKind::Method
+                    && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("Service")
+            ),
+            "mixed-case scoped PHP call did not resolve to Service::boot method",
+        )?;
+        for (name, parent) in [
+            ("prepare", "Service"),
+            ("boot", "Service"),
+            ("helper", "<module>"),
+        ] {
+            require(
+                calls.iter().any(|relation| {
+                    matches!(
+                        relation.resolution(),
+                        RelationResolution::Resolved {
+                            selector: ReusableTargetSelector::Symbol { symbol },
+                            ..
+                        } if symbol.name.as_str() == name
+                            && symbol.parent.as_ref().map(GraphIdentityText::as_str)
+                                == (parent != "<module>").then_some(parent)
+                    )
+                }),
+                &format!("PHP call did not resolve to {parent}::{name}"),
+            )?;
+        }
+        require(
+            matches!(
+                staged_call("static::finish", "run")
+                    .map(projectatlas_core::graph::LogicalRelation::resolution),
+                Some(RelationResolution::Unresolved { reference })
+                    if reference.as_str() == "static::finish"
+            ),
+            "late-static PHP calls must remain unresolved without override proof",
+        )?;
+        require(
+            calls.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Unresolved { reference } if reference.as_str() == "parent::inherited"
+                )
+            }),
+            "parent-scoped PHP calls must remain unresolved without a proven base type",
+        )?;
+        require(
+            calls.iter().all(|relation| {
+                !matches!(
+                    relation.resolution(),
+                    RelationResolution::Resolved {
+                        selector: ReusableTargetSelector::Symbol { symbol },
+                        ..
+                    } if symbol.name.as_str() == "boot"
+                        && symbol.parent.is_none()
+                )
+            }),
+            "PHP scoped calls must not resolve through an unrelated global member",
+        )?;
+
+        let mut ambiguous_graph = php_graph;
+        let mut duplicate = ambiguous_graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "helper")
+            .cloned()
+            .ok_or("PHP ambiguity fixture helper was missing")?;
+        duplicate.name = "HELPER".to_string();
+        ambiguous_graph.symbols.push(duplicate);
+        let ambiguous = finish_graph(&ambiguous_graph)?;
+        require(
+            ambiguous.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Ambiguous {
+                        reference,
+                        candidates,
+                    } if reference.as_str() == "HELPER" && candidates.get() == 2
+                )
+            }),
+            "case-insensitive PHP duplicate declarations must remain ambiguous",
+        )?;
+
+        let mut scope_failures = Vec::new();
+        for (source, target, expected_parent) in [
+            (
+                "<?php\nclass Service { public static function boot() {} }\nService::boot();\n$callable();",
+                "partial global static call",
+                Some("Service"),
+            ),
+            (
+                "<?php\nfunction helper() {}\nhelper();\n$callable();",
+                "partial global function call",
+                None,
+            ),
+            (
+                "<?php\nrequire 'bootstrap.php';\nfunction helper() {}\nfunction run() { helper(); }",
+                "require and local helper",
+                None,
+            ),
+            (
+                "<?php\ninclude 'a.php'; include_once 'b.php'; require_once 'c.php';\nfunction helper() {}\nfunction run() { helper(); }",
+                "other include forms and local helper",
+                None,
+            ),
+            (
+                "<?php\nrequire 'bootstrap.php';\nfunction helper() {}\nfunction run() { helper(); $callable(); }",
+                "partial require and local helper",
+                None,
+            ),
+            (
+                "<?php\ninclude 'a.php'; include_once 'b.php'; require_once 'c.php';\nfunction helper() {}\nfunction run() { helper(); $callable(); }",
+                "partial include forms and local helper",
+                None,
+            ),
+            (
+                "<?php\nrequire/* comment */('bootstrap'); include_once(\"config\"); REQUIRE_ONCE # comment\n'library';\nfunction helper() {}\nfunction run() { helper(); $callable(); }",
+                "partial commented and parenthesized includes",
+                None,
+            ),
+            (
+                "<?php\ntrait Shared {}\nclass Service { use Shared; public static function boot() {} }\nfunction run() { Service::boot(); $callable(); }",
+                "partial trait import and local static call",
+                Some("Service"),
+            ),
+            (
+                "<?php\ntrait Shared {}\nclass Service { use Shared; public static function boot() {} }\nfunction run() { Service::boot(); }",
+                "trait import and local static call",
+                Some("Service"),
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction run() { Sub\\helper(); }\nnamespace Foo\\Sub;\nfunction helper() {}",
+                "relative qualified helper",
+                Some("Foo\\Sub"),
+            ),
+            (
+                "<?php\nnamespace { function run() { Sub\\helper(); } }\nnamespace Sub { function helper() {} }",
+                "global qualified helper",
+                Some("Sub"),
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction run() { Sub\\Service::boot(); }\nnamespace Foo\\Sub;\nclass Service { public static function boot() {} }",
+                "relative qualified static method",
+                Some("Foo\\Sub::Service"),
+            ),
+            (
+                "<?php\nclass Service { public static function boot() {} }\nfunction run() { Service::boot(); }",
+                "Service::boot",
+                Some("Service"),
+            ),
+            (
+                "<?php\nclass Service { public static function boot() {} }\nService::boot();",
+                "Service::boot",
+                Some("Service"),
+            ),
+            (
+                "<?php\nfunction helper() {}\nfunction run() { namespace\\helper(); }",
+                "namespace\\helper",
+                None,
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction helper() {}\nfunction run() { namespace\\helper(); }",
+                "namespace\\helper",
+                Some("Foo"),
+            ),
+            (
+                "<?php\nnamespace Foo { use function Other\\helper; function run() { namespace\\helper(); } }\nnamespace Foo { function helper() {} }",
+                "namespace\\helper",
+                Some("Foo"),
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction helper() {}\nNaMeSpAcE\\helper();",
+                "NaMeSpAcE\\helper",
+                Some("Foo"),
+            ),
+            (
+                "<?php\nnamespace Foo;\nfunction run() { namespace\\Child\\helper(); }\nnamespace Foo\\Child;\nfunction helper() {}",
+                "namespace\\Child\\helper",
+                Some("Foo\\Child"),
+            ),
+        ] {
+            let graph = extract_symbol_graph("src/explicit-scope.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            if !staged.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Resolved {
+                        selector: ReusableTargetSelector::Symbol { symbol },
+                        ..
+                    } if symbol.parent.as_ref().map(GraphIdentityText::as_str) == expected_parent
+                ) && relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+            }) {
+                scope_failures.push(target);
+            }
+        }
+        require(
+            scope_failures.is_empty(),
+            &format!("proven PHP call scopes did not resolve: {scope_failures:?}"),
+        )?;
+
+        let mut unknown_caller = extract_symbol_graph(
+            "src/unknown-scope.php",
+            Some("php"),
+            "<?php\nclass Service { public static function boot() {} }\nfunction run() { Service::boot(); }",
+        );
+        for relation in &mut unknown_caller.relations {
+            if relation.kind == RelationKind::Calls {
+                relation.source_name = "unknown_caller".to_string();
+            }
+        }
+        let ambiguous_caller = extract_symbol_graph(
+            "src/ambiguous-scope.php",
+            Some("php"),
+            "<?php namespace { class Service { public static function boot() {} } function run() { Service::boot(); } } namespace Foo { function run() {} }",
+        );
+        for graph in [&unknown_caller, &ambiguous_caller] {
+            let staged = finish_graph(graph)?;
+            require(
+                staged
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    })
+                    .all(|relation| {
+                        staged.entities.iter().any(|entity| {
+                            entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::File { .. })
+                        })
+                    }),
+                "unknown and same-line ambiguous PHP callers must retain file ownership",
+            )?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    matches!(
+                        relation.resolution(),
+                        RelationResolution::Unresolved { reference } if reference.as_str() == "Service::boot"
+                    )
+                }),
+                "unknown or ambiguous PHP callers must not be treated as proven global functions",
+            )?;
+        }
+        for source in [
+            "<?php namespace Foo; function Foo() {} Foo();",
+            "<?php namespace Foo; function Foo() { helper(); } function helper() {}",
+        ] {
+            let graph = extract_symbol_graph("src/namespace-boundary.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            require(
+                staged
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    })
+                    .all(|relation| {
+                        staged.entities.iter().any(|entity| {
+                            entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::File { .. })
+                        })
+                    }),
+                "PHP namespace/callable boundary-line collisions must remain file-owned",
+            )?;
+        }
+
+        for source in [
+            r"<?php namespace A { function helper() {} function before() { helper(); } use function Vendor\{helper, other}; function after() { helper(); } }",
+            r"<?php namespace A; function helper() {} function before() { helper(); } use function Vendor\helper, Vendor\other; function after() { helper(); }",
+            r"<?php namespace A { use function Vendor\{helper, other}; } namespace B { function helper() {} function before() { helper(); } use function Remote\helper; function after() { helper(); } }",
+        ] {
+            let graph = extract_symbol_graph("src/import-groups.php", Some("php"), source);
+            let grouped = finish_graph(&graph)?;
+            for caller in ["before", "after"] {
+                require(
+                    grouped.relations.iter().any(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                            && matches!(relation.resolution(), RelationResolution::Unresolved { .. })
+                            && grouped.entities.iter().any(|entity| entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == caller))
+                    }),
+                    "PHP grouped imports with unmatched source occurrences must stay conservative",
+                )?;
+            }
+        }
+
+        let collision = extract_symbol_graph(
+            "src/containment-collision.php",
+            Some("php"),
+            "<?php namespace Service { class Service { function run() {} } function outside() {} }",
+        );
+        let contained = finish_graph(&collision)?;
+        for (name, parent) in [
+            ("Service", "Service"),
+            ("run", "Service::Service"),
+            ("outside", "Service"),
+        ] {
+            require(
+                contained.relations.iter().any(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                        && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                            if symbol.name.as_str() == name && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some(parent))
+                        && contained.entities.iter().any(|entity| entity.key() == relation.source()
+                            && matches!(entity.selector(), EntitySelector::Symbol { symbol }
+                                if symbol.name.as_str() == "Service" && symbol.parent.as_ref().map(GraphIdentityText::as_str) == if name == "run" { Some("Service") } else { None }))
+                }),
+                &format!("PHP same-line namespace and type collisions must use exact containment spans: {name} {parent}"),
+            )?;
+        }
+
+        for source in [
+            "<?php class A { public $run; function run() {} const run = 1; }",
+            "<?php trait A { public $run; function run() {} const run = 1; }",
+        ] {
+            let graph = extract_symbol_graph("src/member-kinds.php", Some("php"), source);
+            let members = finish_graph(&graph)?;
+            require_eq(
+                &graph
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.name == "run")
+                    .count(),
+                &3,
+                "PHP same-name fixture must retain property, method, and constant",
+            )?;
+            for expected in graph.symbols.iter().filter(|symbol| symbol.name == "run") {
+                require(
+                    members.relations.iter().any(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
+                            && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                                if symbol.name.as_str() == "run" && symbol.kind == expected.kind && symbol.signature.as_str() == expected.signature)
+                            && members.entities.iter().any(|entity| entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == "A"))
+                    }),
+                    &format!("same-line PHP {} must retain its distinct containment edge", expected.signature),
+                )?;
+            }
+        }
+
+        let imported_graph = extract_symbol_graph(
+            "src/imports.php",
+            Some("php"),
+            r"<?php
+namespace Local {
+    use Remote\Service;
+    use Remote\NamespaceAlias as Sub;
+    use function Remote\helper;
+    function run() { Service::boot(); helper(); Sub\helper(); }
+}
+namespace Local {
+    class Service { public static function boot() {} }
+    function helper() {}
+}
+namespace Local\Sub { function helper() {} }
+",
+        );
+        let staged = finish_graph(&imported_graph)?;
+        for target in ["Service::boot", "helper", "Sub\\helper"] {
+            require(
+                staged.relations.iter().any(|relation| {
+                    matches!(
+                        relation.resolution(),
+                        RelationResolution::Unresolved { reference } if reference.as_str() == target
+                    )
+                }),
+                "PHP imports must not be bypassed by same-file unqualified call matching",
+            )?;
+        }
+
+        for source in [
+            r"<?php
+namespace A { use function Vendor\helper; function run_a() { helper(); } }
+namespace B { function helper() {} function run_b() { helper(); } }
+",
+            r"<?php
+namespace A;
+use function Vendor\helper;
+function run_a() { helper(); }
+namespace B;
+function helper() {}
+function run_b() { helper(); }
+",
+        ] {
+            let graph = extract_symbol_graph("src/import-scopes.php", Some("php"), source);
+            let scoped = finish_graph(&graph)?;
+            require(
+                scoped.relations.iter().any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    && matches!(relation.resolution(), RelationResolution::Resolved { selector: ReusableTargetSelector::Symbol { symbol }, .. }
+                        if symbol.name.as_str() == "helper" && symbol.parent.as_ref().map(GraphIdentityText::as_str) == Some("B"))),
+                "PHP import in namespace A must not suppress a proven namespace B call",
+            )?;
+            require(
+                scoped.relations.iter().any(|relation| relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                    && matches!(relation.resolution(), RelationResolution::Unresolved { reference } if reference.as_str() == "helper")),
+                "PHP imported alias remains unresolved in its owning namespace",
+            )?;
+        }
+
+        for source in [
+            r"<?php namespace A { function helper() {} function before() { helper(); } use function Vendor\helper; function after() { helper(); } }",
+            r"<?php namespace A; function before() { Sub\helper(); } use Vendor as Sub; function after() { Sub\helper(); } namespace A\Sub; function helper() {}",
+            r"<?php namespace A { function helper() {} function before() { helper(); } use function Vendor\helper; use Vendor\Other; function after() { helper(); } } namespace B { use function Vendor\helper; function run_b() { helper(); } }",
+            r"<?php
+namespace { function helper() {} }
+namespace A {
+function before() { helper(); }
+use function Vendor\helper;
+function after() { helper(); }
+}
+",
+            r"<?php
+namespace A;
+function before() { Sub\helper(); }
+use Vendor as Sub;
+function after() { Sub\helper(); }
+namespace A\Sub;
+function helper() {}
+",
+        ] {
+            let graph = extract_symbol_graph("src/import-order.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            for (caller, resolved) in [("before", true), ("after", false)] {
+                require(
+                    staged.relations.iter().any(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                            && matches!(relation.resolution(), RelationResolution::Resolved { .. }) == resolved
+                            && staged.entities.iter().any(|entity| entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == caller))
+                    }),
+                    &format!("PHP {caller} call must apply only imports already declared"),
+                )?;
+            }
+        }
+
+        for source in [
+            r"<?php
+namespace A {
+use function Vendor\helper;
+function imported() { helper(); }
+}
+namespace A {
+function helper() {}
+function local() { helper(); }
+}
+",
+            r"<?php
+namespace A;
+use Vendor as Sub;
+function imported() { Sub\helper(); }
+namespace A;
+function local() { Sub\helper(); }
+namespace A\Sub;
+function helper() {}
+",
+        ] {
+            let graph = extract_symbol_graph("src/reopened-namespace.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            for (caller, resolved) in [("imported", false), ("local", true)] {
+                require(
+                    staged.relations.iter().any(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                            && matches!(relation.resolution(), RelationResolution::Resolved { .. }) == resolved
+                            && staged.entities.iter().any(|entity| entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol } if symbol.name.as_str() == caller))
+                    }),
+                    &format!("PHP {caller} call must use only its namespace declaration block"),
+                )?;
+            }
+        }
+
+        for source in [
+            "<?php namespace Foo { function helper() {} } namespace Foo { helper(); }",
+            "<?php\nnamespace Foo;\nfunction helper() {}\nnamespace Foo;\nhelper();",
+        ] {
+            let graph = extract_symbol_graph("src/reopened-top-level.php", Some("php"), source);
+            let staged = finish_graph(&graph)?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                        && staged.entities.iter().any(|entity| {
+                            entity.key() == relation.source()
+                                && matches!(entity.selector(), EntitySelector::Symbol { symbol }
+                                    if symbol.name.as_str() == "Foo" && symbol.kind == SymbolKind::Module)
+                        })
+                }),
+                "Reopened PHP namespace must retain its top-level call source",
+            )?;
+        }
+
+        for (source, remove_namespaces) in [
+            (
+                "<?php namespace A { use function Vendor\\helper; } namespace A { function helper() {} function local() { helper(); } }",
+                false,
+            ),
+            (
+                "<?php\nnamespace A {\nuse function Vendor\\helper;\n}\nnamespace A {\nfunction helper() {}\nfunction local() { helper(); }\n}",
+                true,
+            ),
+        ] {
+            let mut graph =
+                extract_symbol_graph("src/uncertain-namespace.php", Some("php"), source);
+            if remove_namespaces {
+                graph
+                    .symbols
+                    .retain(|symbol| symbol.kind != SymbolKind::Module);
+            }
+            let staged = finish_graph(&graph)?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                        && matches!(relation.resolution(), RelationResolution::Unresolved { .. })
+                }),
+                "PHP imports with tied or missing namespace boundaries remain unresolved",
+            )?;
+            require(
+                !staged.relations.iter().any(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                        && matches!(relation.resolution(), RelationResolution::Resolved { .. })
+                }),
+                "PHP uncertain namespace boundaries must not invent call resolution",
+            )?;
+        }
+
+        let oversized_prefix = "N".repeat(241);
+        for import in [
+            format!("use Vendor\\{oversized_prefix} as Sub;"),
+            format!("use Vendor\\{oversized_prefix}\\Sub;"),
+            format!("use {oversized_prefix}\\{{Sub}};"),
+            format!("use {}\\{{Sub}};", "N".repeat(238)),
+            format!("use Vendor\\Kept, Vendor\\{oversized_prefix} as Sub;"),
+        ] {
+            let source = format!(
+                "<?php namespace Foo {{ {import} function run() {{ Sub\\helper(); namespace\\Sub\\helper(); }} function absolute() {{ \\Foo\\Sub\\helper(); }} }} namespace Foo\\Sub {{ function helper() {{}} }}"
+            );
+            let graph = extract_symbol_graph("src/oversized-imports.php", Some("php"), &source);
+            let staged = finish_graph(&graph)?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    matches!(relation.resolution(), RelationResolution::Unresolved { reference }
+                        if reference.as_str() == "Sub\\helper")
+                }),
+                &format!("omitted PHP import must retain alias uncertainty: {import}"),
+            )?;
+            require_eq(
+                &staged
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                            && matches!(relation.resolution(), RelationResolution::Resolved { .. })
+                    })
+                    .count(),
+                &2,
+                "rooted and namespace-relative PHP calls must remain independently resolvable",
+            )?;
+        }
+
+        let mut partial_imports = imported_graph;
+        partial_imports.parser = ParserKind::Fallback;
+        partial_imports
+            .symbols
+            .retain(|symbol| symbol.kind != SymbolKind::Import);
+        let partial_staged = finish_graph(&partial_imports)?;
+        require(
+            partial_staged.relations.iter().any(|relation| {
+                matches!(relation.resolution(), RelationResolution::Unresolved { reference }
+                    if reference.as_str() == "Sub\\helper")
+            }),
+            "partial PHP import evidence must not prove absence of namespace aliases",
+        )?;
+        for context in [
+            "require\\Sub",
+            "include_once\\Sub",
+            "requireé",
+            "require\u{a0}Alias",
+            "",
+            "use function Vendor\\helper;",
+        ] {
+            for relation in &mut partial_imports.relations {
+                if relation.kind == RelationKind::Imports {
+                    relation.context = context.to_string();
+                }
+            }
+            let staged = finish_graph(&partial_imports)?;
+            require(
+                staged.relations.iter().any(|relation| {
+                    matches!(relation.resolution(), RelationResolution::Unresolved { reference }
+                        if reference.as_str() == "Sub\\helper")
+                }),
+                "unknown, namespace-prefix, and fallback use contexts must retain alias uncertainty",
+            )?;
+        }
+        let missing_relative = extract_symbol_graph(
+            "src/missing-relative.php",
+            Some("php"),
+            "<?php\nnamespace { function helper() {} }\nnamespace Foo { function run() { Missing\\helper(); } }",
+        );
+        let staged = finish_graph(&missing_relative)?;
+        require(
+            staged.relations.iter().any(|relation| {
+                matches!(relation.resolution(), RelationResolution::Unresolved { reference }
+                    if reference.as_str() == "Missing\\helper")
+            }),
+            "qualified PHP functions must not fall back to the global function",
+        )?;
+
+        let wrong_namespace_graph = extract_symbol_graph(
+            "src/scoped.php",
+            Some("php"),
+            "<?php\nnamespace Caller { function run(): void { Service::boot(); } }\nnamespace Other { class Service { public static function boot(): void {} } }\n",
+        );
+        let staged = finish_graph(&wrong_namespace_graph)?;
+        require(
+            staged.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Unresolved { reference } if reference.as_str() == "Service::boot"
+                )
+            }),
+            "unqualified PHP static calls must not resolve to a class in another namespace",
+        )?;
+
+        let case_sensitive_graph = extract_symbol_graph(
+            "src/case-sensitive.js",
+            Some("javascript"),
+            "function helper() {}\nfunction caller() { HELPER(); }\n",
+        );
+        let staged = finish_graph(&case_sensitive_graph)?;
+        require(
+            staged.relations.iter().any(|relation| {
+                matches!(
+                    relation.resolution(),
+                    RelationResolution::Unresolved { reference } if reference.as_str() == "HELPER"
+                )
+            }),
+            "non-PHP call matching must remain case-sensitive",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn configured_module_targets_reuse_graph_ambiguity_ownership() -> Result<(), Box<dyn Error>> {
         let project = ProjectInstanceId::from_bytes([19; 16])?;
         let generation = IndexGeneration::new(1);
@@ -10760,6 +12623,7 @@ mod tests {
                 project,
                 generation,
                 &case.relation,
+                None,
                 &owners,
                 &case.graph,
                 &symbol_index,
@@ -12639,6 +14503,89 @@ mod tests {
             "fallback coverage after reopen",
         )?;
         reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn partial_php_graph_publishes_existing_partial_coverage() -> Result<(), Box<dyn Error>> {
+        let graph = extract_symbol_graph(
+            "src/dynamic.php",
+            Some("php"),
+            "<?php function run(): void { $callable(); helper(); }",
+        );
+        require_eq(
+            &graph.parser,
+            &ParserKind::Fallback,
+            "partial PHP fact parser",
+        )?;
+        let coverage = coverage_for_graph(
+            &graph,
+            IndexGeneration::new(1),
+            &GraphIdentityAdmission::default(),
+            &GraphIdentityAdmission::default(),
+        )?;
+        require_eq(
+            &coverage.state(),
+            &CoverageState::Partial,
+            "partial PHP coverage state",
+        )?;
+        require_eq(&coverage.covered(), &1, "partial PHP covered relations")?;
+        require_eq(&coverage.omitted(), &1, "partial PHP omitted relations")?;
+        require(
+            coverage.reason().is_some(),
+            "partial PHP coverage must disclose its reason",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_php_graph_publishes_complete_coverage() -> Result<(), Box<dyn Error>> {
+        for (path, source, symbol_name) in [
+            (
+                "src/inline-output.php",
+                "//x<?php function marker(): void { helper(); }",
+                "marker",
+            ),
+            (
+                "src/inline-echo.php",
+                "#output<?= $value ?><?php function after_echo(): void { helper(); }",
+                "after_echo",
+            ),
+        ] {
+            let graph = extract_symbol_graph(path, Some("php"), source);
+            require_eq(
+                &graph.parser,
+                &ParserKind::TreeSitter,
+                "mixed PHP fact parser",
+            )?;
+            require(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == symbol_name),
+                "mixed PHP declaration is missing before coverage projection",
+            )?;
+            let coverage = coverage_for_graph(
+                &graph,
+                IndexGeneration::new(1),
+                &GraphIdentityAdmission::default(),
+                &GraphIdentityAdmission::default(),
+            )?;
+            require_eq(
+                &coverage.state(),
+                &CoverageState::Complete,
+                "mixed PHP coverage state",
+            )?;
+            require(
+                coverage.covered() > 0,
+                "mixed PHP complete coverage must retain static relations",
+            )?;
+            require_eq(&coverage.omitted(), &0, "mixed PHP omitted relations")?;
+            require(
+                coverage.reason().is_none(),
+                "complete mixed PHP coverage must not disclose a partial reason",
+            )?;
+        }
         Ok(())
     }
 
