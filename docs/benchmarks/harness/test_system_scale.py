@@ -470,37 +470,53 @@ class SystemScaleHarnessTests(unittest.TestCase):
             self.assertEqual(identity["runtime_info"]["version"], effective_version)
             self.assertEqual(source["checkout_head"], "head")
 
-    def test_all_route_preflight_passes_effective_version_to_publication_identity(
-        self,
-    ) -> None:
-        root = Path(system_scale.ROOT)
-        args = argparse.Namespace(
-            runtime=root
-            / "target/benchmarks/issue-358-candidate-build/debug/projectatlas.exe",
-            preregistration=root
-            / "docs/benchmarks/v0.4-system-scale-preregistration.json",
-            work_root=root / "target/benchmarks/system-scale/issue-358-preflight-test",
-            output=root / "target/benchmarks/system-scale/issue-358-preflight-test.json",
-            corpus_cache=root / "target/benchmarks/system-scale/corpus-cache",
-            required_version="0.4.5",
-            caller_files=1024,
-            small_variant=None,
-            only="all",
-            preflight_only=True,
-        )
-        with mock.patch.object(
-            system_scale,
-            "validate_publication_identity",
-            return_value=(
-                {"runtime_info": {"version": "0.4.5"}},
-                {"checkout_head": "head"},
-            ),
-        ) as validate:
-            system_scale.run_benchmark(args)
-        self.assertEqual(validate.call_args.kwargs["required_version"], "0.4.5")
-        result = json.loads(args.output.read_text(encoding="utf-8"))
-        self.assertTrue(result["preflight"]["passed"])
-        self.assertFalse(result["publication_eligible"])
+    def test_all_route_preflight_preserves_version_and_rejects_small_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime.exe"
+            runtime.touch()
+            preregistration = root / "preregistration.json"
+            preregistration.write_text("{}\n", encoding="utf-8")
+            args = argparse.Namespace(
+                runtime=runtime,
+                preregistration=preregistration,
+                work_root=root / "target/benchmarks/system-scale/issue-358-preflight-test",
+                output=root / "target/benchmarks/system-scale/issue-358-preflight-test.json",
+                corpus_cache=root / "target/benchmarks/system-scale/corpus-cache",
+                required_version="0.4.5",
+                caller_files=1024,
+                small_variant=None,
+                only="all",
+                preflight_only=True,
+            )
+            with (
+                mock.patch.object(system_scale, "runtime_artifact_identity", return_value={}),
+                mock.patch.object(
+                    system_scale, "final_measurement_eligibility",
+                    return_value={"requested": True, "final_platform_eligible": True},
+                ),
+                mock.patch.object(
+                    system_scale, "validate_publication_identity",
+                    return_value=(
+                        {"runtime_info": {"version": "0.4.5"}},
+                        {"checkout_head": "head"},
+                    ),
+                ) as validate,
+            ):
+                system_scale.run_benchmark(args)
+                self.assertEqual(validate.call_args.kwargs["required_version"], "0.4.5")
+                result = json.loads(args.output.read_text(encoding="utf-8"))
+                self.assertTrue(result["preflight"]["passed"])
+                self.assertFalse(result["publication_eligible"])
+                for variant in ("clean", "dirty", "non-git"):
+                    with self.subTest(variant=variant):
+                        args.small_variant = variant
+                        validate.reset_mock()
+                        with self.assertRaisesRegex(
+                            ValueError, "--small-variant cannot be used with --only all"
+                        ):
+                            system_scale.run_benchmark(args)
+                        validate.assert_not_called()
 
     def test_huge_failure_retains_preregistered_external_input(self) -> None:
         corpus = {

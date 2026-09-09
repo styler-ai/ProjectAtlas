@@ -33,6 +33,10 @@ storage peaks, telemetry, and lifecycle results are in
 [`v050-358-current-profile-results.json`](v050-358-current-profile-results.json).
 These are single-run current observations, not a speedup comparison against
 the historical debug builds below.
+Their harness inputs remain frozen at source revision
+`4342b874e1eae28684fd6dae1b3cb08065148d66`. The later validation that rejects
+`--small-variant` with `--only all` does not change these focused measurement
+paths. Full publication runs must include every small fixture variant.
 
 | Shape | Cold wall / CPU (s) | Peak RSS / private commit (bytes) | Cold read / write (bytes) | Unchanged watch (s) | Narrow watch (s) | Rebuild (s) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

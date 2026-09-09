@@ -4040,6 +4040,8 @@ def main() -> None:
 def run_benchmark(
     args: argparse.Namespace, *, command_argv: list[str] | None = None
 ) -> None:
+    if args.only == "all" and args.small_variant is not None:
+        raise ValueError("--small-variant cannot be used with --only all")
     clear_git_repository_environment()
     runtime = args.runtime.resolve(strict=True)
     preregistration_path = args.preregistration.resolve(strict=True)
