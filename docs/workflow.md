@@ -147,7 +147,8 @@ Commit identity is provenance, not a general test invalidation key. After a comm
   schema, or test-support authorities select complete normal-PR proof. A base
   retarget replans against the new base even when the head is unchanged; a title
   or body edit runs no source job, emits no `verify` context, and cannot cancel
-  in-flight source proof.
+  in-flight source proof. The result job still schedules as `metadata-edit` so
+  GitHub evaluates its name; both checkout and source aggregation steps skip.
 - The lightweight required `pr-state` workflow owns exactly-one-open-issue
   reference validation and requires the PR milestone to match that issue's
   milestone. GitHub native required conversation resolution owns all

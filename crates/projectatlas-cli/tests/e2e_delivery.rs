@@ -3729,11 +3729,20 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let verify_job = workflow_job_block(&ci, "verify")?;
     for required in [
         "name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-edit' || 'verify' }}",
-        &format!("if: always() && ({source_event})"),
+        "    if: always()\n",
     ] {
         if !verify_job.contains(required) {
             return Err(io::Error::other(format!(
                 "metadata-only edits must not emit or satisfy source aggregate {required:?}"
+            ))
+            .into());
+        }
+    }
+    for name in ["Checkout exact source", "Aggregate selected proof"] {
+        let step = workflow_job_step(&ci, "verify", name)?;
+        if step["if"].as_str() != Some(source_event) {
+            return Err(io::Error::other(format!(
+                "metadata-only edits must not execute source step {name:?}"
             ))
             .into());
         }

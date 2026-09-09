@@ -881,17 +881,20 @@ jobs:
 
   verify:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-edit' || 'verify' }}
-    if: always() && (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null)
+    # Schedule the job so GitHub resolves its name even when source work is skipped.
+    if: always()
     needs: [plan, repository, rust, e2e-smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact source
+        if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.plan.outputs.head || github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           fetch-depth: 2
 
       - name: Aggregate selected proof
+        if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN: ${{ needs.plan.outputs.plan }}
