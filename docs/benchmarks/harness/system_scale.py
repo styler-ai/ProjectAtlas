@@ -1599,21 +1599,53 @@ def database_profile(database: Path) -> dict[str, Any]:
 def database_graph_digest(database: Path) -> dict[str, Any]:
     """Digest logical graph rows without project-instance or row identifiers."""
 
-    def normalized_identity(value: str) -> str:
+    def normalized_identity(value: str, domain: str) -> str:
         prefix = re.match(
-            r"^(projectatlas\.graph\.(?:entity|resolution)\.v1\|)32:[0-9a-f]{32}\|",
+            rf"^(projectatlas\.graph\.{domain}\.v1\|)32:[0-9a-f]{{32}}\|",
             value,
         )
         if prefix is None:
             raise ValueError("graph identity lacks its typed leading project field")
-        return prefix[1] + "32:" + "0" * 32 + "|" + value[prefix.end():]
+        normalized = prefix[1] + "32:" + "0" * 32 + "|" + value[prefix.end():]
+        if domain != "relation":
+            return normalized
+
+        # Relation fields contain nested entity identities or opaque authored text.
+        # Only typed entity positions may have their project witness normalized.
+        encoded = normalized.encode("utf-8")
+        position = prefix.end()  # The leading project field is entirely ASCII.
+        fields = []
+        for _ in range(4):
+            length = re.match(rb"([0-9]+):", encoded[position:])
+            if length is None:
+                raise ValueError("malformed canonical relation field length")
+            start = position + length.end()
+            end = start + int(length[1])
+            if end > len(encoded):
+                raise ValueError("truncated canonical relation field")
+            fields.append((start, end))
+            position = end
+            if position < len(encoded):
+                if encoded[position:position + 1] != b"|" or position + 1 == len(encoded):
+                    raise ValueError("malformed canonical relation field boundary")
+                position += 1
+        if position != len(encoded):
+            raise ValueError("canonical relation requires four fields after its project")
+        state = encoded[slice(*fields[2])]
+        if state not in (b"resolved", b"external", b"ambiguous", b"unresolved"):
+            raise ValueError("unknown canonical relation resolution status")
+        for index in (0, 3) if state in (b"resolved", b"external") else (0,):
+            start, end = fields[index]
+            nested = normalized_identity(encoded[start:end].decode("utf-8"), "entity")
+            encoded = encoded[:start] + nested.encode("utf-8") + encoded[end:]
+        return encoded.decode("utf-8")
 
     connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
     try:
         connection.execute("PRAGMA query_only=ON")
         entities = {
             bytes(row[0]).hex(): (
-                normalized_identity(str(row[1])),
+                normalized_identity(str(row[1]), "entity"),
                 *row[2:],
             )
             for row in connection.execute(
@@ -1640,7 +1672,10 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
         for key, row in relations.items():
             source = entities[bytes(row[2]).hex()][0]
             target = entities[bytes(row[6]).hex()][0] if row[6] is not None else None
-            record = ["relation", source, row[3], row[4], row[5], target, *row[7:12]]
+            record = [
+                "relation", normalized_identity(str(row[1]), "relation"),
+                source, row[3], row[4], row[5], target, *row[7:12],
+            ]
             relation_records[key] = record
             records.append(record)
         records.extend(
@@ -1655,7 +1690,7 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
             )
         )
         records.extend(
-            ["resolution", row[0], normalized_identity(str(row[1]))]
+            ["resolution", row[0], normalized_identity(str(row[1]), "resolution")]
             for row in connection.execute(
                 "SELECT resolution_domain, canonical_identity "
                 "FROM graph_resolution_keys"
@@ -4042,6 +4077,8 @@ def run_benchmark(
 ) -> None:
     if args.only == "all" and args.small_variant is not None:
         raise ValueError("--small-variant cannot be used with --only all")
+    if args.only == "all" and args.caller_files is not None:
+        raise ValueError("--caller-files cannot be used with --only all")
     clear_git_repository_environment()
     runtime = args.runtime.resolve(strict=True)
     preregistration_path = args.preregistration.resolve(strict=True)

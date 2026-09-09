@@ -66,7 +66,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     )
                 for key, state, target_key, reference in [
                     (b"r", "resolved", b"t", None),
-                    (b"u", "unresolved", None, "b" * 32),
+                    (b"u", "unresolved", None, "32:" + "b" * 32),
                 ]:
                     identity = canonical("relation", project, source, "calls", state, target if target_key else reference)
                     connection.execute(
@@ -84,6 +84,46 @@ class SystemScaleHarnessTests(unittest.TestCase):
             fixture(second, "f" * 32)
             original = system_scale.database_graph_digest(first)
             self.assertEqual(original, system_scale.database_graph_digest(second))
+            for key, before, after in (
+                (b"u", "b" * 32, "e" * 32),
+                (b"r", "src/target.rs", "src/change.rs"),
+            ):
+                with self.subTest(canonical_change=before):
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        identity = connection.execute(
+                            "SELECT canonical_identity FROM graph_relations WHERE relation_key = ?", (key,)
+                        ).fetchone()[0]
+                        connection.execute(
+                            "UPDATE graph_relations SET canonical_identity = ? WHERE relation_key = ?",
+                            (identity.replace(before, after), key),
+                        )
+                    self.assertNotEqual(original, system_scale.database_graph_digest(second))
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(
+                            "UPDATE graph_relations SET canonical_identity = ? WHERE relation_key = ?",
+                            (identity, key),
+                        )
+            for malformed in (
+                identity + "|",
+                identity.replace("relation.v1", "relation.v2"),
+                identity.replace("|32:" + "f" * 32, "|31:" + "f" * 32, 1),
+                identity.replace("|8:resolved", "|8:resolvez"),
+                identity.replace("entity.v1", "entitx.v1", 1),
+                identity[:-1],
+            ):
+                with self.subTest(malformed=malformed):
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(
+                            "UPDATE graph_relations SET canonical_identity = ? WHERE relation_key = ?",
+                            (malformed, b"r"),
+                        )
+                    with self.assertRaises(ValueError):
+                        system_scale.database_graph_digest(second)
+            with closing(sqlite3.connect(second)) as connection, connection:
+                connection.execute(
+                    "UPDATE graph_relations SET canonical_identity = ? WHERE relation_key = ?",
+                    (identity, b"r"),
+                )
             with closing(sqlite3.connect(second)) as connection, connection:
                 connection.execute("UPDATE graph_resolution_keys SET canonical_identity = ?", (canonical("resolution", "f" * 32, "symbol", "d" * 32),))
             self.assertNotEqual(original, system_scale.database_graph_digest(second))
@@ -470,13 +510,15 @@ class SystemScaleHarnessTests(unittest.TestCase):
             self.assertEqual(identity["runtime_info"]["version"], effective_version)
             self.assertEqual(source["checkout_head"], "head")
 
-    def test_all_route_preflight_preserves_version_and_rejects_small_filter(self) -> None:
+    def test_all_route_preflight_preserves_version_and_rejects_corpus_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = root / "runtime.exe"
             runtime.touch()
             preregistration = root / "preregistration.json"
-            preregistration.write_text("{}\n", encoding="utf-8")
+            preregistration.write_text(
+                '{"corpora":{"medium":{"caller_files":1024}}}\n', encoding="utf-8"
+            )
             args = argparse.Namespace(
                 runtime=runtime,
                 preregistration=preregistration,
@@ -484,7 +526,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 output=root / "target/benchmarks/system-scale/issue-358-preflight-test.json",
                 corpus_cache=root / "target/benchmarks/system-scale/corpus-cache",
                 required_version="0.4.5",
-                caller_files=1024,
+                caller_files=None,
                 small_variant=None,
                 only="all",
                 preflight_only=True,
@@ -514,6 +556,16 @@ class SystemScaleHarnessTests(unittest.TestCase):
                         validate.reset_mock()
                         with self.assertRaisesRegex(
                             ValueError, "--small-variant cannot be used with --only all"
+                        ):
+                            system_scale.run_benchmark(args)
+                        validate.assert_not_called()
+                args.small_variant = None
+                for caller_files in (0, -1, 1024, 4096):
+                    with self.subTest(caller_files=caller_files):
+                        args.caller_files = caller_files
+                        validate.reset_mock()
+                        with self.assertRaisesRegex(
+                            ValueError, "--caller-files cannot be used with --only all"
                         ):
                             system_scale.run_benchmark(args)
                         validate.assert_not_called()

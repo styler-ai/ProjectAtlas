@@ -35,8 +35,15 @@ These are single-run current observations, not a speedup comparison against
 the historical debug builds below.
 Their harness inputs remain frozen at source revision
 `4342b874e1eae28684fd6dae1b3cb08065148d66`. The later validation that rejects
-`--small-variant` with `--only all` does not change these focused measurement
-paths. Full publication runs must include every small fixture variant.
+`--small-variant` or `--caller-files` with `--only all` does not change these
+focused measurement paths. Full publication runs must include every small
+fixture variant and the preregistered medium cardinality.
+
+The frozen harness omitted relation canonical identities from graph digests.
+The results retain those originally measured `graph_digest` values and add
+a separate `graph_digest_recomputation` from the unchanged retained databases.
+That read-only correction includes relation identities and their typed nested
+project fields; it does not rerun or relock any resource observation.
 
 | Shape | Cold wall / CPU (s) | Peak RSS / private commit (bytes) | Cold read / write (bytes) | Unchanged watch (s) | Narrow watch (s) | Rebuild (s) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -229,16 +236,18 @@ ignored or special-cased to turn this extra corpus green.
 ## Graph equivalence and SQLite profile
 
 These hashes are a current read-only recomputation of the six retained SQLite
-databases using corrected leading-project-field normalization. The historical
-emitted hashes are retained separately in the results JSON. All three pairs
-remain equal, including their record counts; the corrected normalizer preserves
-authored hexadecimal text and resolved/unresolved relation meaning.
+databases including canonical relation identities and normalizing only typed
+outer and nested entity project fields. The historical emitted hashes remain
+separate in the results JSON. All three pairs and the three current profile
+databases remain equal, including their record counts. Authored hexadecimal
+text and unresolved references remain literal; malformed relation identities
+fail explicitly. Resource measurements and preregistration locks are unchanged.
 
 | Shape | Baseline digest | Candidate digest | Digest records | Equal |
 | --- | --- | --- | ---: | --- |
-| Small clean | `6262bbe69cbf2b648a1578e7b89937f817d91d7130f42e0101361dd127a5faa9` | `6262bbe69cbf2b648a1578e7b89937f817d91d7130f42e0101361dd127a5faa9` | 245 | yes |
-| Synthetic high-degree (1,024 callers) | `54b61d877b60dff12c033f7906372ecbbc9df394af893c548a467c9489dcc3d2` | `54b61d877b60dff12c033f7906372ecbbc9df394af893c548a467c9489dcc3d2` | 30,772 | yes |
-| Synthetic high-edge (4,096 callers) | `5d9a71f10dea9e9d4f0508b99c12faad68c9f0e571cfe4b010a87914632ae81c` | `5d9a71f10dea9e9d4f0508b99c12faad68c9f0e571cfe4b010a87914632ae81c` | 122,253 | yes |
+| Small clean | `1710ccd95d3eedad78721ddb3d699c350eceb3eeb1abc83f43e880d20e27f168` | `1710ccd95d3eedad78721ddb3d699c350eceb3eeb1abc83f43e880d20e27f168` | 245 | yes |
+| Synthetic high-degree (1,024 callers) | `2b1c469f22385b90f492e57b7c819d093bf73d5fcb17c00fa3f3020aa1e92500` | `2b1c469f22385b90f492e57b7c819d093bf73d5fcb17c00fa3f3020aa1e92500` | 30,772 | yes |
+| Synthetic high-edge (4,096 callers) | `b0fa61d466df72243a1d855b2600772880698bda61a3655238515315efeb0bd9` | `b0fa61d466df72243a1d855b2600772880698bda61a3655238515315efeb0bd9` | 122,253 | yes |
 
 Both sides retained the existing SQLite profile: WAL journal mode, full
 synchronous mode, 4,096-byte pages, clean quick-check, zero final WAL/SHM,

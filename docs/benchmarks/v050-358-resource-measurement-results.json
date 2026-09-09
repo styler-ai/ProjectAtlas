@@ -68,7 +68,7 @@
           "stage_directories": 0
         },
         "graph": {
-          "sha256": "6262bbe69cbf2b648a1578e7b89937f817d91d7130f42e0101361dd127a5faa9",
+          "sha256": "1710ccd95d3eedad78721ddb3d699c350eceb3eeb1abc83f43e880d20e27f168",
           "record_count": 245,
           "table_rows": {
             "entities": 29,
@@ -96,7 +96,7 @@
             "identity_rejections": 0
           }
         },
-        "graph_recomputation": "Read-only retained SQLite database recomputation with current leading-project-field normalization; authored identity fields preserved"
+        "graph_recomputation": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes; read-only retained database recomputation, not a measurement rerun"
       },
       "candidate": {
         "cold": {
@@ -118,7 +118,7 @@
           "stage_directories": 0
         },
         "graph": {
-          "sha256": "6262bbe69cbf2b648a1578e7b89937f817d91d7130f42e0101361dd127a5faa9",
+          "sha256": "1710ccd95d3eedad78721ddb3d699c350eceb3eeb1abc83f43e880d20e27f168",
           "record_count": 245,
           "table_rows": {
             "entities": 29,
@@ -146,7 +146,7 @@
             "identity_rejections": 0
           }
         },
-        "graph_recomputation": "Read-only retained SQLite database recomputation with current leading-project-field normalization; authored identity fields preserved"
+        "graph_recomputation": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes; read-only retained database recomputation, not a measurement rerun"
       },
       "threshold_evaluation": {
         "cold_wall_reduction_fraction": 0.268874,
@@ -196,7 +196,7 @@
           "stage_directories": 0
         },
         "graph": {
-          "sha256": "54b61d877b60dff12c033f7906372ecbbc9df394af893c548a467c9489dcc3d2",
+          "sha256": "2b1c469f22385b90f492e57b7c819d093bf73d5fcb17c00fa3f3020aa1e92500",
           "record_count": 30772,
           "table_rows": {
             "entities": 3082,
@@ -224,7 +224,7 @@
             "identity_rejections": 0
           }
         },
-        "graph_recomputation": "Read-only retained SQLite database recomputation with current leading-project-field normalization; authored identity fields preserved"
+        "graph_recomputation": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes; read-only retained database recomputation, not a measurement rerun"
       },
       "candidate": {
         "cold": {
@@ -256,7 +256,7 @@
           "stage_directories": 0
         },
         "graph": {
-          "sha256": "54b61d877b60dff12c033f7906372ecbbc9df394af893c548a467c9489dcc3d2",
+          "sha256": "2b1c469f22385b90f492e57b7c819d093bf73d5fcb17c00fa3f3020aa1e92500",
           "record_count": 30772,
           "table_rows": {
             "entities": 3082,
@@ -284,7 +284,7 @@
             "identity_rejections": 0
           }
         },
-        "graph_recomputation": "Read-only retained SQLite database recomputation with current leading-project-field normalization; authored identity fields preserved"
+        "graph_recomputation": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes; read-only retained database recomputation, not a measurement rerun"
       },
       "threshold_evaluation": {
         "cold_wall_reduction_fraction": -0.270206,
@@ -335,7 +335,7 @@
           "stage_directories": 0
         },
         "graph": {
-          "sha256": "5d9a71f10dea9e9d4f0508b99c12faad68c9f0e571cfe4b010a87914632ae81c",
+          "sha256": "b0fa61d466df72243a1d855b2600772880698bda61a3655238515315efeb0bd9",
           "record_count": 122253,
           "table_rows": {
             "entities": 12201,
@@ -363,7 +363,7 @@
             "identity_rejections": 0
           }
         },
-        "graph_recomputation": "Read-only retained SQLite database recomputation with current leading-project-field normalization; authored identity fields preserved"
+        "graph_recomputation": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes; read-only retained database recomputation, not a measurement rerun"
       },
       "candidate": {
         "cold": {
@@ -395,7 +395,7 @@
           "stage_directories": 0
         },
         "graph": {
-          "sha256": "5d9a71f10dea9e9d4f0508b99c12faad68c9f0e571cfe4b010a87914632ae81c",
+          "sha256": "b0fa61d466df72243a1d855b2600772880698bda61a3655238515315efeb0bd9",
           "record_count": 122253,
           "table_rows": {
             "entities": 12201,
@@ -423,7 +423,7 @@
             "identity_rejections": 0
           }
         },
-        "graph_recomputation": "Read-only retained SQLite database recomputation with current leading-project-field normalization; authored identity fields preserved"
+        "graph_recomputation": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes; read-only retained database recomputation, not a measurement rerun"
       },
       "threshold_evaluation": {
         "cold_wall_reduction_fraction": -0.749201,
@@ -643,5 +643,10 @@
     "status": "baseline-source-binding-unavailable",
     "reason": "Retained raw observations record e86a47df, not the previously declared 5ab51548 binary. The measured baseline executable is no longer retained. No source revision is inferred from a checkout path.",
     "scope": "Unadopted historical observation, not verified exact-source performance or release acceptance. Current optimized profile has an independent build witness."
+  },
+  "graph_digest_recomputation": {
+    "scope": "Read-only recomputation from retained SQLite databases; measurement observations and frozen inputs unchanged",
+    "harness_sha256": "10a1e4717d152984792551f468200a6469a36a6f7284b7fd1f3f4c9f39335f24",
+    "normalization": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes"
   }
 }

@@ -2774,5 +2774,54 @@
     "Transaction and staging peaks are sampled; exact individual stage duration and normal checkpoint frame timing are unavailable.",
     "The unchanged v0.4 diagnostic I/O caps are preserved, including every failed cell; no pool adoption is justified by this profile.",
     "Windows exact terminal owned-tree I/O; hosted Linux and macOS coverage establishes behavior, not equivalent resource measurements."
-  ]
+  ],
+  "graph_digest_recomputation": {
+    "scope": "Read-only recomputation from retained SQLite databases; measurement observations and frozen inputs unchanged",
+    "harness_sha256": "10a1e4717d152984792551f468200a6469a36a6f7284b7fd1f3f4c9f39335f24",
+    "normalization": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes",
+    "cases": {
+      "small": {
+        "sha256": "1710ccd95d3eedad78721ddb3d699c350eceb3eeb1abc83f43e880d20e27f168",
+        "record_count": 245,
+        "table_rows": {
+          "entities": 29,
+          "relations": 19,
+          "occurrences": 19,
+          "resolution_keys": 80,
+          "exports": 79,
+          "dependencies": 13,
+          "coverage": 6,
+          "identity_rejections": 0
+        }
+      },
+      "medium": {
+        "sha256": "2b1c469f22385b90f492e57b7c819d093bf73d5fcb17c00fa3f3020aa1e92500",
+        "record_count": 30772,
+        "table_rows": {
+          "entities": 3082,
+          "relations": 2048,
+          "occurrences": 2048,
+          "resolution_keys": 10260,
+          "exports": 10259,
+          "dependencies": 2048,
+          "coverage": 1027,
+          "identity_rejections": 0
+        }
+      },
+      "large": {
+        "sha256": "b0fa61d466df72243a1d855b2600772880698bda61a3655238515315efeb0bd9",
+        "record_count": 122253,
+        "table_rows": {
+          "entities": 12201,
+          "relations": 8192,
+          "occurrences": 8192,
+          "resolution_keys": 40689,
+          "exports": 40688,
+          "dependencies": 8192,
+          "coverage": 4099,
+          "identity_rejections": 0
+        }
+      }
+    }
+  }
 }
