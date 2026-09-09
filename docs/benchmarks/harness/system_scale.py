@@ -3788,6 +3788,15 @@ def runtime_artifact_identity(runtime: Path) -> dict[str, Any]:
     }
 
 
+def validate_runtime_build_witness(candidate: dict[str, Any], actual: dict[str, Any]) -> None:
+    """Enforce explicit hash-and-size build witnesses in every profile mode."""
+    if "runtime_bytes" in candidate:
+        if type(candidate["runtime_bytes"]) is not int or candidate["runtime_bytes"] <= 0:
+            raise ValueError("candidate runtime byte count is malformed")
+        if any(candidate.get(key) != actual.get(key) for key in ("runtime_sha256", "runtime_bytes")):
+            raise ValueError("runtime bytes do not match the preregistered build witness")
+
+
 def runtime_artifact_identity_or_unavailable(runtime: Path) -> dict[str, Any]:
     """Retain an explicit unavailable identity when failure precedes execution."""
 
@@ -4069,6 +4078,7 @@ def run_benchmark(
         if corpus_cache == work_root or work_root in corpus_cache.parents:
             raise ValueError("--corpus-cache must not be inside --work-root")
     runtime_identity = runtime_artifact_identity(runtime)
+    validate_runtime_build_witness(preregistration.get("candidate", {}), runtime_identity)
     if args.only == "all":
         publication_identity, source_identity = validate_publication_identity(
             runtime,

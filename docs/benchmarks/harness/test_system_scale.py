@@ -20,6 +20,15 @@ import mcp_composition
 
 
 class SystemScaleHarnessTests(unittest.TestCase):
+    def test_focused_profile_rejects_wrong_runtime_build_witness(self) -> None:
+        witness = {"runtime_sha256": "a" * 64, "runtime_bytes": 42}
+        system_scale.validate_runtime_build_witness(witness, dict(witness))
+        for actual in ({**witness, "runtime_sha256": "b" * 64}, {**witness, "runtime_bytes": 43}):
+            with self.assertRaises(ValueError):
+                system_scale.validate_runtime_build_witness(witness, actual)
+        with self.assertRaises(ValueError):
+            system_scale.validate_runtime_build_witness({**witness, "runtime_bytes": True}, witness)
+
     def test_measurement_telemetry_is_preregistered_and_isolated(self) -> None:
         with mock.patch.dict(os.environ, {"PROJECTATLAS_NO_TELEMETRY": "1"}):
             self.assertNotIn("PROJECTATLAS_NO_TELEMETRY", system_scale.measurement_environment("enabled"))
