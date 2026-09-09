@@ -16,7 +16,77 @@ scan wall time and CPU time for every representative shape, with no more than a
 cancellation, contention, or cleanup regression. A faster single incremental
 rebuild was not sufficient to offset a cold-scan regression.
 
-## Measurement boundary
+## Current optimized resource profile
+
+The current profile uses normal telemetry and an optimized Windows build from
+source `52bc7b12a8946cc07ad237b298198328280c7964`. Its SHA-256 is
+`7734bc465af75157e2ddaeb4c2e32677349285193ccadda8a04a5c63dad132e8`
+and its size is 58,554,368 bytes. The preregistration binds that build witness
+and the committed harness inputs; the harness rejects mismatched runtime bytes
+before measurement. The enclosing checkout revision is recorded separately
+and is not treated as compiled-source provenance.
+
+The reproducible commands and unchanged diagnostic thresholds are in
+[`v050-358-current-profile-preregistration.json`](v050-358-current-profile-preregistration.json).
+The bounded operands, every diagnostic check, graph rows/digests, query plans,
+storage peaks, telemetry, and lifecycle results are in
+[`v050-358-current-profile-results.json`](v050-358-current-profile-results.json).
+These are single-run current observations, not a speedup comparison against
+the historical debug builds below.
+
+| Shape | Cold wall / CPU (s) | Peak RSS / private commit (bytes) | Cold read / write (bytes) | Unchanged watch (s) | Narrow watch (s) | Rebuild (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Small clean, 7 files | 0.390582 / 0.125000 | 14,426,112 / 4,190,208 | 675,849 / 3,661,768 | 0.229212 | N/A | N/A |
+| Medium, 1,024 callers | 2.339334 / 2.000000 | 40,603,648 / 31,326,208 | 102,072,286 / 450,857,800 | 0.288656 | 1.134229 | 2.199476 |
+| Large/high-edge, 4,096 callers | 10.467258 / 10.984375 | 130,793,472 / 126,627,840 | 900,325,430 / 2,185,769,564 | 0.289354 | 1.424903 | 11.839484 |
+
+CPU and I/O use terminal Windows Job accounting for the owned process tree.
+RSS and private committed memory use 20 ms samples. Private commit is an
+allocation footprint, not allocator event counts. The scan envelope includes
+parsing, summaries, graph derivation/admission, staging, SQLite publication,
+and cleanup; it does not expose exact individual stage durations. Reported
+parser-worker ceilings are 6, 16, and 16. All three cases preserve bounded
+output, worker/thread limits, stable query publication, and clean SQLite
+quick-check. Each records 26 telemetry rows after the measured MCP queries;
+scan and settings alone legitimately record zero.
+
+Final database sizes are 667,648, 19,136,512, and 72,572,928 bytes. Each final
+observation has zero WAL and staging bytes, with a 32,768-byte SHM file still
+visible at the harness observation boundary. All three representative query
+plans use their owning indexes without temporary B-trees. The profile records
+WAL/full synchronization and 4,096-byte pages; these read-connection PRAGMAs
+are observations, not a new runtime configuration authority.
+
+The small profile passes every diagnostic. Medium retains one failed historical
+I/O cell: rebuild reads 147,115,884 bytes against 134,217,728. Large retains
+seven failed historical cells: full scan read/write, narrow refresh reads,
+expanded-guidance reads, rebuild read/write, and rebuild write amplification.
+Their exact operands remain in the results JSON. These unchanged v0.4 caps
+were copied as diagnostics, including for the larger synthetic fixture; no
+cap was raised and neither failed profile is presented as an all-green run.
+The no-adoption decision does not depend on passing those caps.
+
+The same locked runtime and normal environment pass all four lifecycle phases:
+
+| Phase | Observed result |
+| --- | --- |
+| Two repositories | Eight configured workers per process within a 16-worker host budget; two reported parser workers in aggregate for the narrow edits; conservative summed peak RSS 90,312,704 bytes and private commit 71,716,864 bytes; isolated publication and same-root concurrency pass |
+| Held writer | Typed refusal in 0.218629 s, generation and rows unchanged; retry advances exactly one generation |
+| Active MCP cancellation | Terminal `canceled` in 0.048108 s, published data preserved, writer released before closing the server, no survivors |
+| Forced termination | Quiescent in 0.033103 s, no survivors; production reopen succeeds, `quick_check` is `ok`, recovery checkpoint reports busy/log/checkpointed frames all zero, final WAL/staging bytes zero |
+
+The lifecycle transcript uses the existing harness functions sequentially after
+the three commands in the preregistration. After validating the runtime witness
+and measurement input hashes, use `measurement_environment('enabled')` and the
+preregistered `thresholds.all`: `concurrent_isolation` with 1,024 callers in a
+fresh work root; `publication_contention` on its `concurrent-b` root;
+`cooperative_cancellation_reopen` on the completed large fixture; then
+`forced_termination_quiescence` using that fixture and the lifecycle work root.
+Each function receives the locked runtime, environment, owning timeout/budget,
+and required version `0.4.5`. Preserve each result before proceeding. Recovery
+checkpoint results do not claim a trace of normal checkpoint frame timing.
+
+## Historical measurement boundary
 
 The existing `docs/benchmarks/harness/system_scale.py` is the measurement
 owner. It now accepts `--required-version` and `--caller-files`, so the reviewed
@@ -35,10 +105,15 @@ high-edge shapes; the committed small clean fixture supplied the small shape.
 These are generated fixtures, not an external repository or a claim about the
 preregistered huge corpus.
 
-The exact accepted-main baseline and shared-pool candidate are retained under
-the ignored project-local benchmark/build paths. Their SHA-256/size, source
-revisions, and bounded build command are recorded in the input and results
-artifacts. This is a performance comparison record, not a release binary claim.
+The retained raw baseline runs record runtime SHA-256
+`e86a47dfb4468f79261b98a9a70e1ba98c1650f7f3412852cce12458aa3f82f9`
+(76,443,648 bytes); their compiled source binding is unavailable and that binary
+is no longer retained. The earlier input artifact's different baseline digest
+and source claim are historical declarations, not verified provenance. The
+shared-pool candidate binary remains retained and matches its raw-run digest.
+The results artifact explicitly corrects this discrepancy. This comparison is
+an unadopted historical observation, not a verified exact-source speedup or
+release performance claim; current measurements have a separate build witness.
 
 The sampler records terminal process-tree CPU and I/O bytes, sampled peak RSS
 and threads, SQLite rows/profile/storage, and persistent database/WAL/SHM/stage
@@ -72,7 +147,7 @@ ended with zero WAL and zero graph-stage directories.
 
 | Shape | Cold wall (s) | Cold CPU (s) | Cold RSS (bytes) | Cold read (bytes) | Cold write (bytes) | Persistent DB (bytes) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Small clean (7 files) | 0.592225 / 0.536433 | 0.156250 / 0.156250 | 26,996,736 / 27,648,000 | 734,311 / 737,090 | 3,628,936 / 3,628,936 | 651,264 / 651,264 |
+| Small clean (7 files) | 0.671189 / 0.490724 | 0.187500 / 0.203125 | 27,377,664 / 26,402,816 | 671,219 / 671,426 | 3,620,736 / 3,637,136 | 651,264 / 651,264 |
 | Synthetic high-degree (1,028 files; 1,024 callers) | 4.309553 / 5.474020 | 4.062500 / 4.875000 | 59,396,096 / 59,535,360 | 101,830,670 / 103,485,574 | 451,197,848 / 450,574,864 | 19,140,608 / 19,156,992 |
 | Synthetic high-edge (4,100 files; 4,096 callers) | 19.481111 / 34.076379 | 18.953125 / 27.625000 | 147,451,904 / 144,781,312 | 901,150,599 / 902,420,659 | 2,182,955,980 / 2,185,186,056 | 72,482,816 / 72,519,680 |
 
@@ -105,11 +180,11 @@ failed cell is retained and is part of the no-adoption decision.
 | Writer-lock failure / retry | 1.263722s, `database is locked`; generation unchanged, retry +1; threshold cell failed | 1.264615s, `database is locked`; generation unchanged, retry +1; threshold cell failed |
 | Cooperative MCP cancellation | 0.104863s; terminal `canceled`, generation unchanged, writer released, no survivors | 0.114796s; terminal `canceled`, generation unchanged, writer released, no survivors |
 
-The existing Rust E2E cancellation helper additionally reopens the canceled
-database and compares its bounded logical SQLite snapshot. The
+The existing delivery E2E cancellation helper additionally reopens the canceled
+database and compares its bounded logical SQLite snapshot. Separately, the
 `scan_and_watch_preserve_atomic_publication_across_roots`
 test exercises the real CLI scan/watch, timeout rollback, MCP watch, two-root
-watch, same-root writer lock, retry, and that cancellation helper in one
+watch, same-root writer lock, and retry in one
 bounded fixture. The historical writer-lock rows above include process/setup
 overhead and failed the frozen one-second cell in both binaries.
 
@@ -118,7 +193,7 @@ overhead and failed the frozen one-second cell in both binaries.
 After the production writer-availability probe was added, the exact-head
 runtime was replayed only for same-root contention. This bounded replay is a
 causal refusal check, not a complete eligible resource matrix and does not
-check OpenSpec tasks 5.1–5.4.
+check OpenSpec tasks 5.1â€“5.4.
 
 | Runtime scope | Blocked wall (s) | Error | Complete generation/snapshot unchanged | Retry generation | Staging residue | Result |
 | --- | ---: | --- | --- | ---: | --- | --- |
@@ -142,16 +217,24 @@ external input `https://github.com/microsoft/vscode.git` at commit
 the results artifact with the runtime revision and digest. The scan then
 failed closed on the real repository's malformed compiler configuration at
 `extensions/copilot/test/simulation/fixtures/tests/simple-ts-proj-with-test-file-1/tsconfig.json`;
-there is no external huge-corpus timing, resource, or digest claim. This is a
-real failed gate, not a substitute fixture or a completed task.
+there is no external huge-corpus timing, resource, or digest claim. This remains
+negative fail-closed evidence. The successful 4,096-caller synthetic fixture
+supplies the required large/high-edge profile; no malformed configuration is
+ignored or special-cased to turn this extra corpus green.
 
 ## Graph equivalence and SQLite profile
 
+These hashes are a current read-only recomputation of the six retained SQLite
+databases using corrected leading-project-field normalization. The historical
+emitted hashes are retained separately in the results JSON. All three pairs
+remain equal, including their record counts; the corrected normalizer preserves
+authored hexadecimal text and resolved/unresolved relation meaning.
+
 | Shape | Baseline digest | Candidate digest | Digest records | Equal |
 | --- | --- | --- | ---: | --- |
-| Small clean | `bec258fbb18c32d8868d3fe78ae4aff84f5bbc066be4ef149563d2662731cda3` | `bec258fbb18c32d8868d3fe78ae4aff84f5bbc066be4ef149563d2662731cda3` | 245 | yes |
-| Synthetic high-degree (1,024 callers) | `42eb33c7ae271906c3203f834c15c8077ab8cec296d0999ed78c3677dc515719` | `42eb33c7ae271906c3203f834c15c8077ab8cec296d0999ed78c3677dc515719` | 30,772 | yes |
-| Synthetic high-edge (4,096 callers) | `c72f6d5f82a6a84cc81fde3032df312ec5a7534b7b497bfa00d631d2072f5880` | `c72f6d5f82a6a84cc81fde3032df312ec5a7534b7b497bfa00d631d2072f5880` | 122,253 | yes |
+| Small clean | `6262bbe69cbf2b648a1578e7b89937f817d91d7130f42e0101361dd127a5faa9` | `6262bbe69cbf2b648a1578e7b89937f817d91d7130f42e0101361dd127a5faa9` | 245 | yes |
+| Synthetic high-degree (1,024 callers) | `54b61d877b60dff12c033f7906372ecbbc9df394af893c548a467c9489dcc3d2` | `54b61d877b60dff12c033f7906372ecbbc9df394af893c548a467c9489dcc3d2` | 30,772 | yes |
+| Synthetic high-edge (4,096 callers) | `5d9a71f10dea9e9d4f0508b99c12faad68c9f0e571cfe4b010a87914632ae81c` | `5d9a71f10dea9e9d4f0508b99c12faad68c9f0e571cfe4b010a87914632ae81c` | 122,253 | yes |
 
 Both sides retained the existing SQLite profile: WAL journal mode, full
 synchronous mode, 4,096-byte pages, clean quick-check, zero final WAL/SHM,
@@ -173,13 +256,13 @@ The shared Rayon pool, parallel graph-admission candidate, and candidate-only
 `scan --max-workers` surface were deleted. Current parser/summary pool creation,
 graph derivation and identity admission, synchronous atomic publication, bounded
 staging, cancellation, late-failure rollback, writer contention, and platform
-behavior remain owned by the existing runtime boundaries. OpenSpec tasks 5.1–5.4
-remain unchecked: the corrected Windows evidence and no-change decision are
-recorded, but allocator events, a successful real external huge-repository
-measurement, Linux/macOS measurements, transaction duration, and checkpoint
-frame timing remain unavailable from this bounded existing harness run. The
-external corpus gate is specifically blocked by the fail-closed scan error
-above; platform evidence requires the existing hosted Linux/macOS matrix; and
-allocator/transaction/checkpoint evidence require measurement sources not
-exposed by this runtime/harness. Hosted/reviewer acceptance is not a local
-implementation gate.
+behavior remain owned by the existing runtime boundaries. The current normal
+profile adds sampled allocation footprint, explicit runtime-byte validation,
+parser-worker accounting, and successful writer/cancellation/recovery proof.
+It preserves the historical no-adoption decision and diagnostic failures.
+Exact allocator-event counts and per-stage transaction/checkpoint frame timing
+remain unavailable; no new instrumentation framework is needed to retain the
+existing worker design. OpenSpec tasks 5.1â€“5.4 remain unchecked until independent
+review and required hosted functional platform proof complete. Windows resource
+accounting does not substitute for Linux/macOS execution of the real scan/watch
+and publication regressions.

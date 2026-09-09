@@ -541,6 +541,14 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
 
+      - name: Scan and watch atomic publication resource regression
+        if: contains(matrix.contracts, 'worktree') || contains(matrix.contracts, 'mac-quality')
+        timeout-minutes: 10
+        run: |
+          cargo test --locked -p projectatlas-cli --test e2e_worktrees scan_and_watch_preserve_atomic_publication_across_roots -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::publication_revalidation_rejects_source_policy_and_import_drift -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::canceled_watcher_batch_preserves_last_valid_and_retries_one_generation -- --exact --nocapture
+
       - name: Causal E2E process observer deadline regression
         if: contains(matrix.contracts, 'process')
         timeout-minutes: 10
