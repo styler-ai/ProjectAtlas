@@ -1,15 +1,19 @@
 ## Why
 
-An ordinary pull-request title or body edit skips the dynamically named CI result
-job before GitHub resolves its name, exposing the expression as the check name.
-Earlier blocked merge readiness was observed alongside that defect, but its
-causal connection is unproven. Release work needs an explicit metadata result
-without disturbing source proof; a base retarget must verify the new comparison.
+A body-only edit changes a merge-ready pull request to blocked when the new CI
+run omits the required `verify` job, even when the previous source verification
+and current PR-state checks pass. Correcting the skipped job's dynamic name does
+not repair that transition. Metadata must retain native protected readiness
+without rebuilding source or accepting incomplete base-retarget proof.
 
 ## What Changes
 
-- Keep metadata validation in PR-state and schedule the existing CI result job
-  so GitHub resolves its metadata-only name without executing any source step.
+- Keep issue validation in PR-state. Let the existing required `verify` job
+  revalidate a real successful source run for metadata events, without planning,
+  building, testing, or rerunning the source aggregate.
+- Capture the source event's PR number and base in its native run name; combine
+  that immutable binding with the native run's head, workflow, and conclusion.
+  Never use the mutable PR association on an old workflow run as historical proof.
 - Reuse existing source proof for a base retarget, binding its result to the new
   base and unchanged head before protected merge readiness can succeed.
 - Preserve required `verify` and `pr-state` checks, their GitHub Actions identity,
@@ -36,9 +40,9 @@ API, database, dependency, planner, or selected test inventory changes are neede
 
 ## Non-Goals
 
-No new proof ledger or planner, fabricated statuses, skipped-as-success source
-proof, branch-protection relaxation, repeat source proof for metadata edits,
-stable release promotion, or revival of the declined CI proposal.
+No new workflow, artifact ledger, planner, fabricated statuses, skipped-as-success
+source proof, branch-protection relaxation, repeat source proof for metadata
+edits, stable release promotion, or revival of the declined CI proposal.
 
 ## Readiness
 

@@ -1,12 +1,10 @@
 ## Context
 
-The existing source workflow already distinguishes base retargets from title/body
-edits. However, skipping its dynamically named result job prevents GitHub from
-evaluating that name: the hosted check exposes the literal expression instead of
-`metadata-edit`. Earlier blocked merge readiness was observed alongside that
-defect; the check-name defect has not been established as its cause. Hosted
-acceptance must independently inspect source-check identity and native protection
-instead of treating any blocked merge state as a source-check failure.
+The source workflow distinguishes base retargets from title/body edits. A native
+body-only edit nevertheless changes a clean PR to blocked when its new CI run has
+no `verify` job. Scheduling a correctly named `metadata-edit` and rerunning the
+previous source aggregate both leave it blocked. Required-check lists alone do
+not expose this failure; hosted acceptance must inspect protected readiness.
 
 ## Goals / Non-Goals
 
@@ -17,28 +15,43 @@ dependency, status writer, or additional source execution for metadata activity.
 
 ## Decisions
 
-Schedule the existing result job with `always()` so its dynamic name can resolve
-even when all dependencies are skipped. Move the existing source-event condition
-to both source-owning steps: checkout and aggregate. For ordinary metadata the job
-is named `metadata-edit` and executes no source steps; for base retargets and other
-source events it is named `verify` and executes the unchanged aggregate.
+Keep `verify` as the native required job on every CI event. Source events execute
+the existing exact planner, selected jobs, and aggregate. Metadata only fetches
+the verification helper at the exact head and reads native Actions results. It does not execute a
+source plan, build, test, or aggregate, or rerun an earlier job.
+
+For PR source events, `run-name` captures the PR number and full base/head SHAs from
+the event. The native run also records its head and workflow identity.
+Metadata selects the latest source run for that PR/head in the same workflow;
+its captured base must match both the metadata event and the live PR. Require a
+successful terminal source run. Pending source work may be observed with bounded
+waiting; failed, cancelled, skipped, missing, stale, malformed, inaccessible, or
+ambiguous evidence cannot pass. Recheck the live comparison and latest source run
+before acceptance. Never borrow an older success over a newer incomplete run.
+
+Use the existing proof script, Python standard library, and authenticated `gh`.
+Bound run discovery to 100 matching-head runs and waiting to 120 minutes. These
+limits fail closed; there is no new database, artifact, status API, or dispatcher.
+Native run-name binding must be verified across real title/body edits, base
+retargets, and reruns; an API run's `pull_requests` base/head association is mutable
+and is explicitly excluded from historical proof.
 
 Retain the direct `pull_request.edited` subscription and source concurrency key.
-Moving retarget proof into a reusable PR-state job would let a later metadata run
-overwrite failed retarget readiness and would replay source CI when issue events
-rerun PR-state. A dispatcher or stored proof lookup would introduce another owner
-without fixing the demonstrated skipped-name boundary.
+Moving retarget proof into PR-state would replay source CI when issue events rerun
+PR-state and complicate required-check ownership. Revalidate the native source
+run in the existing CI owner instead.
 
 ## Risks / Trade-offs
 
 - GitHub may still associate checks unexpectedly: require real title/body edits,
   exact-base retarget execution, and protected readiness before acceptance.
-- A misplaced step guard could execute or satisfy source proof on metadata:
-  existing workflow-contract tests must inspect both guards and actual job names.
+- A misplaced guard or stale lookup could execute source work or accept unrelated
+  proof on metadata: causal tests must cover routing, binding, latest-run choice,
+  failure, bounded waiting, API refusal, and changing live comparisons.
 - Metadata overlapping failed or running retarget work must not replace `verify`:
   exercise this negative case at the native hosted check boundary.
-- Scheduling the metadata result incurs a small hosted job startup cost; it
-  performs no checkout, planner, build, or test work.
+- A metadata edit during source CI waits for that existing run; it incurs a small
+  helper fetch and read-only API work, without replaying builds or tests.
 
 ## Migration Plan
 
@@ -49,9 +62,9 @@ the prior event behavior; do not compensate with bypass statuses or relaxed gate
 
 ## Architecture
 
-N/A: Existing CI planner, selected proof jobs, aggregate, PR-state validation, and
-native protection owners are unchanged. Only job-versus-step condition placement
-changes within the existing aggregate.
+N/A: Existing CI, PR-state, and native protection retain their ownership. The
+required CI job gains a read-only path to its own native source-run history; no
+new workflow, persistent store, or product architecture is introduced.
 
 ## Dependencies / Cross-Issue Impact
 

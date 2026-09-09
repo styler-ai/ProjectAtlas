@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1091,6 +1092,213 @@ def aggregate(
             raise RuntimeError(f"omitted {name} job concluded {result}")
 
 
+def github_json(endpoint: str) -> dict[str, object]:
+    result = subprocess.run(
+        ["gh", "api", endpoint], capture_output=True, text=True, check=True, timeout=30
+    )
+    payload = json.loads(result.stdout)
+    if not isinstance(payload, dict):
+        raise RuntimeError("GitHub returned an invalid proof response")
+    return payload
+
+
+def native_run_name(kind: str, pull_request: int, base: str, head: str) -> str:
+    return f"{kind}-pr-{pull_request}-base-{base}-head-{head}"
+
+
+def latest_source_run(
+    payload: dict[str, object], workflow: int, pull_request: int, base: str, head: str
+) -> dict[str, object]:
+    runs = payload.get("workflow_runs")
+    # ponytail: one bounded page; paginate only if a real head exceeds 100 runs.
+    if not isinstance(runs, list) or payload.get("total_count") != len(runs) or len(runs) > 100:
+        raise RuntimeError("native source-run discovery is incomplete or exceeds 100 runs")
+    source = []
+    pattern = re.compile(r"(source|metadata)-pr-([1-9][0-9]*)-base-([0-9a-f]{40}|[0-9a-f]{64})-head-([0-9a-f]{40}|[0-9a-f]{64})")
+    for run in runs:
+        if (
+            not isinstance(run, dict)
+            or run.get("workflow_id") != workflow
+            or run.get("head_sha") != head
+            or run.get("event") != "pull_request"
+            or type(run.get("run_number")) is not int
+            or type(run.get("id")) is not int
+            or type(run.get("run_attempt")) is not int
+        ):
+            raise RuntimeError("native source-run identity is invalid")
+        title = run.get("display_title")
+        match = pattern.fullmatch(title) if isinstance(title, str) else None
+        if match is None or match[4] != head:
+            raise RuntimeError("native source-run event binding is malformed")
+        if match[1] == "source" and int(match[2]) == pull_request:
+            source.append(run)
+    if not source:
+        raise RuntimeError("no native source run exists for this PR and head")
+    source.sort(key=lambda run: run["run_number"], reverse=True)
+    if len(source) > 1 and source[0]["run_number"] == source[1]["run_number"]:
+        raise RuntimeError("latest native source run is ambiguous")
+    latest = source[0]
+    if latest["display_title"] != native_run_name("source", pull_request, base, head):
+        raise RuntimeError("latest native source run belongs to another base comparison")
+    return latest
+
+
+def require_live_comparison(payload: dict[str, object], base: str, head: str) -> None:
+    if (
+        payload.get("state") != "open"
+        or not isinstance(payload.get("base"), dict)
+        or not isinstance(payload.get("head"), dict)
+        or payload.get("base", {}).get("sha") != base
+        or payload.get("head", {}).get("sha") != head
+    ):
+        raise RuntimeError("live pull-request comparison changed during metadata verification")
+
+
+def require_source_jobs(payload: dict[str, object]) -> None:
+    jobs = payload.get("jobs")
+    if (
+        not isinstance(jobs, list)
+        or payload.get("total_count") != len(jobs)
+        or len(jobs) > 100
+        or any(not isinstance(job, dict) for job in jobs)
+    ):
+        raise RuntimeError("native source-job proof is incomplete")
+    for name in ("plan", "verify"):
+        matches = [job for job in jobs if job.get("name") == name]
+        if (
+            len(matches) != 1
+            or matches[0].get("status") != "completed"
+            or matches[0].get("conclusion") != "success"
+        ):
+            raise RuntimeError(f"native source {name} job did not succeed")
+
+
+def verify_metadata(repo: str, pull_request: int, run_id: int, base: str, head: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or pull_request < 1 or run_id < 1:
+        raise RuntimeError("invalid native metadata identity")
+    for revision in (base, head):
+        if len(revision) not in (40, 64):
+            raise RuntimeError("invalid native metadata revision")
+        validate_object_id(revision, len(revision))
+    deadline = time.monotonic() + 120 * 60
+    prefix = f"repos/{repo}"
+    current = github_json(f"{prefix}/actions/runs/{run_id}")
+    workflow = current.get("workflow_id")
+    if (
+        type(workflow) is not int
+        or current.get("id") != run_id
+        or current.get("event") != "pull_request"
+        or current.get("head_sha") != head
+        or current.get("display_title") != native_run_name("metadata", pull_request, base, head)
+    ):
+        raise RuntimeError("metadata run does not match its captured event")
+    runs_url = f"{prefix}/actions/workflows/{workflow}/runs?head_sha={head}&event=pull_request&per_page=100"
+    pr_url = f"{prefix}/pulls/{pull_request}"
+    while time.monotonic() < deadline:
+        require_live_comparison(github_json(pr_url), base, head)
+        source = latest_source_run(github_json(runs_url), workflow, pull_request, base, head)
+        if source.get("status") == "completed":
+            if source.get("conclusion") != "success":
+                raise RuntimeError(f"latest native source run concluded {source.get('conclusion')}")
+            require_source_jobs(github_json(
+                f"{prefix}/actions/runs/{source['id']}/attempts/{source['run_attempt']}/jobs?per_page=100"
+            ))
+            require_live_comparison(github_json(pr_url), base, head)
+            latest = latest_source_run(github_json(runs_url), workflow, pull_request, base, head)
+            if (
+                latest["id"] == source["id"]
+                and latest["run_attempt"] == source["run_attempt"]
+                and latest.get("status") == "completed"
+                and latest.get("conclusion") == "success"
+                and time.monotonic() < deadline
+            ):
+                print(f"metadata verified native source run {source['id']} for the current comparison")
+                return
+        elif source.get("status") not in {"queued", "in_progress", "pending", "waiting", "requested"}:
+            raise RuntimeError("native source run has an invalid pending state")
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            print(f"waiting for native source run {source['id']}", flush=True)
+            time.sleep(min(60, remaining))
+    raise RuntimeError("metadata source verification exceeded its 120-minute bound")
+
+
+def self_test_metadata() -> None:
+    from unittest.mock import patch
+
+    base, head = "a" * 40, "b" * 40
+    source = {
+        "id": 10, "run_number": 10, "run_attempt": 1, "workflow_id": 7,
+        "event": "pull_request", "head_sha": head, "status": "completed",
+        "conclusion": "success", "display_title": native_run_name("source", 560, base, head),
+    }
+    metadata = dict(source, id=11, run_number=11,
+                    display_title=native_run_name("metadata", 560, base, head))
+    live = {"state": "open", "base": {"sha": base}, "head": {"sha": head}}
+    jobs = {"total_count": 2, "jobs": [
+        {"name": name, "status": "completed", "conclusion": "success"}
+        for name in ("plan", "verify")
+    ]}
+
+    def runs(*rows: dict[str, object]) -> dict[str, object]:
+        return {"total_count": len(rows), "workflow_runs": list(rows)}
+
+    good = runs(metadata, source)
+    pending = runs(metadata, dict(source, status="in_progress", conclusion=None))
+
+    def exercise(responses: list[object], refusal: str = "", clock: list[int] | None = None) -> int:
+        with (
+            patch(__name__ + ".github_json", side_effect=responses) as read,
+            patch(__name__ + ".time.monotonic", side_effect=clock, return_value=0),
+            patch(__name__ + ".time.sleep") as sleep,
+        ):
+            try:
+                verify_metadata("owner/repo", 560, 11, base, head)
+            except (RuntimeError, subprocess.CalledProcessError) as error:
+                assert refusal and refusal in str(error), (refusal, str(error))
+            else:
+                assert not refusal, refusal
+            assert read.call_count == len(responses), read.call_args_list
+            return sleep.call_count
+
+    assert exercise([metadata, live, good, jobs, live, good]) == 0
+    assert exercise([metadata, live, pending, live, good, jobs, live, good]) == 1
+    for conclusion in ("failure", "cancelled", "skipped", "timed_out", "neutral", "action_required"):
+        exercise([metadata, live, runs(dict(source, conclusion=conclusion))], "concluded")
+    exercise([metadata, live, runs(metadata)], "no native source run")
+    exercise([metadata, live, dict(good, total_count=101)], "incomplete")
+    exercise([metadata, live, runs(source, source)], "ambiguous")
+    for changed in (
+        dict(source, display_title="unbound source proof"),
+        dict(source, display_title=native_run_name("source", 560, base, "c" * 40)),
+    ):
+        exercise([metadata, live, runs(changed)], "malformed")
+    for changed in (dict(source, head_sha="c" * 40), dict(source, workflow_id=8), dict(source, event="push")):
+        exercise([metadata, live, runs(changed)], "identity")
+    newer_base = dict(source, id=12, run_number=12, status="in_progress", conclusion=None,
+                      display_title=native_run_name("source", 560, "c" * 40, head))
+    exercise([metadata, live, runs(source, newer_base, metadata)], "another base")
+    exercise([metadata, live, good, jobs, live, runs(source, newer_base)], "another base")
+    for field in ("base", "head"):
+        changed = dict(live, **{field: {"sha": "c" * 40}})
+        exercise([metadata, changed], "comparison changed")
+        exercise([metadata, live, good, jobs, changed], "comparison changed")
+    for name in ("plan", "verify"):
+        skipped = {"total_count": 2, "jobs": [
+            dict(job, conclusion="skipped") if job["name"] == name else job for job in jobs["jobs"]
+        ]}
+        exercise([metadata, live, good, skipped], f"{name} job did not succeed")
+    exercise([metadata, live, good, {"total_count": 3, "jobs": jobs["jobs"]}], "incomplete")
+    exercise([dict(metadata, head_sha="c" * 40)], "captured event")
+    exercise([metadata, subprocess.CalledProcessError(1, ["gh", "api"])], "non-zero")
+    assert exercise([metadata, live, pending], "120-minute", [0, 0, 0, 7201]) == 1
+    exercise([metadata, live, good, jobs, live, good], "120-minute", [0, 0, 7201, 7201, 7201])
+    restarted = runs(metadata, dict(source, run_attempt=2, status="queued", conclusion=None))
+    completed = runs(metadata, dict(source, run_attempt=2))
+    assert exercise([metadata, live, good, jobs, live, restarted,
+                     live, completed, jobs, live, completed]) == 1
+
+
 def fake_graph() -> CargoGraph:
     return CargoGraph(
         roots={name: f"crates/{name}" for name in PACKAGE_NAMES},
@@ -1113,6 +1321,7 @@ def fake_graph() -> CargoGraph:
 
 
 def self_test() -> None:
+    self_test_metadata()
     changes = parse_name_status(b"M\0docs/readme.md\0R100\0old.md\0new.md\0")
     assert changes == [Change("M", ("docs/readme.md",)), Change("R100", ("old.md", "new.md"))]
     for invalid in (
@@ -1763,6 +1972,12 @@ def parser() -> argparse.ArgumentParser:
     aggregate_parser.add_argument("--repository-result", required=True)
     aggregate_parser.add_argument("--rust-result", required=True)
     aggregate_parser.add_argument("--platform-result", required=True)
+    metadata = subparsers.add_parser("verify-metadata")
+    metadata.add_argument("--repo", required=True)
+    metadata.add_argument("--pull-request", type=int, required=True)
+    metadata.add_argument("--run-id", type=int, required=True)
+    metadata.add_argument("--base", required=True)
+    metadata.add_argument("--head", required=True)
     return result
 
 
@@ -1770,6 +1985,9 @@ def main() -> int:
     args = parser().parse_args()
     if args.self_test:
         self_test()
+        return 0
+    if args.command == "verify-metadata":
+        verify_metadata(args.repo, args.pull_request, args.run_id, args.base, args.head)
         return 0
     if args.command == "aggregate":
         aggregate(
@@ -1786,7 +2004,7 @@ def main() -> int:
         print("affected CI proof aggregate passed")
         return 0
     if args.command != "plan":
-        raise RuntimeError("plan or aggregate command is required")
+        raise RuntimeError("plan, aggregate, or verify-metadata command is required")
     root = Path.cwd()
     object_id_length = repository_object_id_length(root)
     base = exact_commit(args.base, root, object_id_length)
@@ -1813,6 +2031,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         print(f"affected-ci-proof: {error}", file=sys.stderr)
         raise SystemExit(1) from error

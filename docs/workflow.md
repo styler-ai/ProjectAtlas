@@ -146,9 +146,16 @@ Commit identity is provenance, not a general test invalidation key. After a comm
   Unknown paths and shared workflow, planner, toolchain, lockfile, manifest,
   schema, or test-support authorities select complete normal-PR proof. A base
   retarget replans against the new base even when the head is unchanged; a title
-  or body edit runs no source job, emits no `verify` context, and cannot cancel
-  in-flight source proof. The result job still schedules as `metadata-edit` so
-  GitHub evaluates its name; both checkout and source aggregation steps skip.
+  or body edit runs no source job and cannot cancel or rerun source proof. Its required `verify` job
+  reads the existing source run instead: the latest source run for this PR/head
+  must match the event's captured base and have successful native `plan` and
+  `verify` jobs. Source run names capture PR/base/head at event creation; an old
+  run's mutable PR association is not historical proof. Metadata fetches only
+  the verification helper at the exact head, without checkout, planning, builds,
+  tests, or source aggregation. It rechecks the live PR before passing and waits
+  up to 120 minutes for pending source work. Missing, failed, stale, inaccessible,
+  or incomplete proof fails closed, including discovery beyond 100 head-matching
+  runs. This keeps native protected readiness truthful after metadata edits.
 - The lightweight required `pr-state` workflow owns exactly-one-open-issue
   reference validation and requires the PR milestone to match that issue's
   milestone. GitHub native required conversation resolution owns all

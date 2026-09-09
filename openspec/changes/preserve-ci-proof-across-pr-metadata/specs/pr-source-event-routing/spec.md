@@ -3,14 +3,27 @@
 ### Requirement: Metadata events preserve source verification
 
 Title, body, issue, and milestone activity SHALL validate current PR state without
-creating, replacing, satisfying, or cancelling source proof or its required
-`verify` context. Native conversation resolution SHALL remain authoritative for
-review threads.
+executing or cancelling source proof. On title/body events, the required `verify`
+job SHALL accept only an actual successful source run for the exact current PR,
+base, head, and workflow. Native conversation resolution SHALL remain authoritative
+for review threads.
 
 #### Scenario: Title or body changes after passing source proof
 - **WHEN** an open pull request changes only its title or body
-- **THEN** current issue and milestone validation runs without executing source steps
-  or emitting a source aggregate, and valid protected merge eligibility is retained
+- **THEN** current issue and milestone validation runs, `verify` revalidates existing
+  source proof without planning, building, testing, or rerunning its aggregate,
+  and valid protected merge eligibility is retained
+
+#### Scenario: Historical run association changes
+- **WHEN** the live PR is retargeted or receives another head commit
+- **THEN** historical source identity comes from the source event's captured native
+  run name and immutable run fields, never its mutable PR association
+
+#### Scenario: Newer or unreadable source proof exists
+- **WHEN** the latest source run is pending, failed, cancelled, skipped, missing,
+  stale, malformed, inaccessible, or outside bounded discovery or waiting
+- **THEN** metadata cannot borrow an older success or become merge-ready without
+  successful proof for the current comparison
 
 #### Scenario: Metadata changes during incomplete retarget proof
 - **WHEN** metadata changes after a base retarget whose exact comparison proof is
