@@ -3,9 +3,10 @@
 The existing source workflow already distinguishes base retargets from title/body
 edits. However, skipping its dynamically named result job prevents GitHub from
 evaluating that name: the hosted check exposes the literal expression instead of
-`metadata-edit`. An unchanged verified PR has then remained blocked by required
-`verify` association. The exact internal association is not established; hosted
-protection must prove the repair.
+`metadata-edit`. Earlier blocked merge readiness was observed alongside that
+defect; the check-name defect has not been established as its cause. Hosted
+acceptance must independently inspect source-check identity and native protection
+instead of treating any blocked merge state as a source-check failure.
 
 ## Goals / Non-Goals
 

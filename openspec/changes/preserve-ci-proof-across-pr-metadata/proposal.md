@@ -1,9 +1,10 @@
 ## Why
 
-An ordinary pull-request title or body edit can leave an unchanged verified head
-blocked by required-check association after source CI emits a skipped aggregate.
-Release work needs metadata validation without disturbing source proof, while a
-base retarget must still verify the new exact comparison.
+An ordinary pull-request title or body edit skips the dynamically named CI result
+job before GitHub resolves its name, exposing the expression as the check name.
+Earlier blocked merge readiness was observed alongside that defect, but its
+causal connection is unproven. Release work needs an explicit metadata result
+without disturbing source proof; a base retarget must verify the new comparison.
 
 ## What Changes
 
