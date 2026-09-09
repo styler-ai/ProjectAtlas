@@ -38,6 +38,11 @@ Their harness inputs remain frozen at source revision
 `--small-variant` or `--caller-files` with `--only all` does not change these
 focused measurement paths. Full publication runs must include every small
 fixture variant and the preregistered medium cardinality.
+Publication identity also requires a nonempty preregistered candidate version;
+both the requested compatibility version and the reported runtime version must
+match it. An omitted version uses that lock, while an explicit empty version
+is rejected. These admission checks do not change the frozen resource profile
+or the separate graph digest recomputation below.
 
 The frozen harness omitted relation canonical identities and the resolution-key
 associations of exports and dependencies from graph digests.

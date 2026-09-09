@@ -458,7 +458,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
-    def test_all_route_preflight_threads_effective_version_into_mcp_identity(
+    def test_all_route_preflight_binds_locked_version_to_cli_and_mcp(
         self,
     ) -> None:
         effective_version = "0.4.5"
@@ -475,7 +475,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
             preregistration = {
                 "status": "locked_for_final_measurement",
                 "candidate": {
-                    "required_version": "0.4.0",
+                    "required_version": effective_version,
                     "runtime_sha256": runtime_digest,
                     "mcp_tools_sha256": tool_digest,
                     "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
@@ -513,7 +513,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 mock.patch.object(
                     system_scale.subprocess,
                     "check_output",
-                    side_effect=["", "head\n"],
+                    side_effect=lambda command, **_: "head\n" if command[1] == "rev-parse" else "",
                 ),
                 mock.patch.object(
                     system_scale,
@@ -532,6 +532,21 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     Path(system_scale.ROOT) / "preregistration.json",
                     required_version=effective_version,
                 )
+                with self.assertRaisesRegex(RuntimeError, "requested compatibility version"):
+                    system_scale.validate_publication_identity(
+                        runtime, preregistration,
+                        Path(system_scale.ROOT) / "preregistration.json",
+                        required_version="0.4.0",
+                    )
+                for locked_version in ("0.4.0", "", None, 5):
+                    with self.subTest(locked_version=locked_version):
+                        preregistration["candidate"]["required_version"] = locked_version
+                        with self.assertRaisesRegex(RuntimeError, "preregistered candidate version"):
+                            system_scale.validate_publication_identity(
+                                runtime, preregistration,
+                                Path(system_scale.ROOT) / "preregistration.json",
+                                required_version=effective_version,
+                            )
 
             self.assertEqual(
                 run.call_args.args[0][1:3], ["--require-version", effective_version]
@@ -549,7 +564,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
             runtime.touch()
             preregistration = root / "preregistration.json"
             preregistration.write_text(
-                '{"corpora":{"medium":{"caller_files":1024}}}\n', encoding="utf-8"
+                '{"candidate":{"required_version":"0.4.5"},"corpora":{"medium":{"caller_files":1024}}}\n', encoding="utf-8"
             )
             args = argparse.Namespace(
                 runtime=runtime,
@@ -557,7 +572,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 work_root=root / "target/benchmarks/system-scale/issue-358-preflight-test",
                 output=root / "target/benchmarks/system-scale/issue-358-preflight-test.json",
                 corpus_cache=root / "target/benchmarks/system-scale/corpus-cache",
-                required_version="0.4.5",
+                required_version=None,
                 caller_files=None,
                 small_variant=None,
                 only="all",
@@ -608,6 +623,12 @@ class SystemScaleHarnessTests(unittest.TestCase):
                         args.caller_files = caller_files
                         with self.assertRaisesRegex(ValueError, "must be positive"):
                             system_scale.run_benchmark(args)
+                args.only = "all"
+                args.preflight_only = True
+                args.caller_files = None
+                args.required_version = ""
+                with self.assertRaisesRegex(ValueError, "version is required"):
+                    system_scale.run_benchmark(args)
 
     def test_huge_failure_retains_preregistered_external_input(self) -> None:
         corpus = {

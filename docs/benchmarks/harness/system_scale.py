@@ -3753,9 +3753,14 @@ def publication_identity_errors(
         errors.append("packaged skill size does not match the candidate")
     if runtime_info.get("project") != "ProjectAtlas":
         errors.append("runtime identity is not ProjectAtlas")
-    if runtime_info.get("version") != required_version:
+    locked_version = candidate.get("required_version")
+    if not isinstance(locked_version, str) or not locked_version or required_version != locked_version:
         errors.append(
-            "runtime version does not match the requested compatibility version"
+            "requested compatibility version does not match the preregistered candidate version"
+        )
+    if runtime_info.get("version") != locked_version:
+        errors.append(
+            "runtime version does not match the preregistered candidate version"
         )
     capabilities = set(runtime_info.get("capabilities", []))
     if not {"mcp", "sqlite", "toon"}.issubset(capabilities):
@@ -4093,7 +4098,7 @@ def run_benchmark(
     runtime = args.runtime.resolve(strict=True)
     preregistration_path = args.preregistration.resolve(strict=True)
     preregistration = json.loads(preregistration_path.read_text(encoding="utf-8"))
-    required_version = args.required_version or str(
+    required_version = args.required_version if args.required_version is not None else str(
         preregistration.get("candidate", {}).get(
             "required_version", ""
         )
